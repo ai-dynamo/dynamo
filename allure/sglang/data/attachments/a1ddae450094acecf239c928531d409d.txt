@@ -1,0 +1,115 @@
+[2m2026-04-09T02:12:44.900110Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4293 in /workspace
+[2m2026-04-09T02:12:44.901359Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4293
+[2m2026-04-09T02:12:45.002206Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4293
+[2m2026-04-09T02:12:45.002476Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-09T02:12:45.004616Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-09T02:12:45.005276Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2406 --advertise-client-urls http://0.0.0.0:2406 --listen-peer-urls http://0.0.0.0:2407 --initial-advertise-peer-urls http://localhost:2407 --initial-cluster default=http://localhost:2407 --data-dir /tmp/etcd_vmmnldi_ in /workspace
+[2m2026-04-09T02:12:45.006130Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2406
+[2m2026-04-09T02:12:45.106592Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2406
+[2m2026-04-09T02:12:45.110545Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting template_verification test_deployment
+[2m2026-04-09T02:12:45.110617Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-0.6B
+[2m2026-04-09T02:12:45.110667Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: template_verifier.sh
+[2m2026-04-09T02:12:45.110851Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/tests/serve/launch/template_verifier.sh in /workspace/tests/serve
+[2m2026-04-09T02:12:45.111974Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8038/v1/models
+[2m2026-04-09T02:12:51.119307Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8038/v1/models (attempt=4, elapsed=5.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775700770,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-09T02:12:51.119555Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8038/health
+[2m2026-04-09T02:12:52.122490Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8038/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://test.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "test",
+      "instance_id": 7703017317082947593,
+      "transport": {
+        "tcp": "10.1.56.221:37767/6ae69d7003696009/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-09T02:12:52.122911Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-09T02:12:52.123324Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8038/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-09T02:12:52.129753Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.01s
+[2m2026-04-09T02:12:52.129932Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['Successfully Applied Chat Template']
+[2m2026-04-09T02:12:52.130002Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+Successfully Applied Chat Template
+[2m2026-04-09T02:12:52.130111Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8038/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-09T02:12:52.132698Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.00s
+[2m2026-04-09T02:12:52.132927Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['Successfully Applied Chat Template']
+[2m2026-04-09T02:12:52.132998Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+Successfully Applied Chat Template
+[2m2026-04-09T02:12:52.133097Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8038/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-09T02:12:52.135067Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.00s
+[2m2026-04-09T02:12:52.135304Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['Successfully Applied Chat Template']
+[2m2026-04-09T02:12:52.135375Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+Successfully Applied Chat Template
+[2m2026-04-09T02:12:52.136054Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3735
+[2m2026-04-09T02:12:57.242042Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3737 name: tee
+[2m2026-04-09T02:12:57.242203Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3737 tee
+[2m2026-04-09T02:12:57.242619Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3736 name: sed
+[2m2026-04-09T02:12:57.242709Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3736 sed
+[2m2026-04-09T02:12:57.245138Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3721
+[2m2026-04-09T02:12:57.346323Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3722 name: sed
+[2m2026-04-09T02:12:57.346447Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3722 sed
+[2m2026-04-09T02:12:57.347223Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3709
+[2m2026-04-09T02:12:57.448115Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3710 name: sed
+[2m2026-04-09T02:12:57.448380Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3710 sed

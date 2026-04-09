@@ -1,0 +1,10 @@
+[2m2026-04-09T03:11:11.970610Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 2 models needed for collected tests
+Models: {'Qwen/Qwen3-0.6B', 'llava-hf/llava-v1.6-mistral-7b-hf'}
+[2m2026-04-09T03:11:11.970725Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-09T03:11:11.970777Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:02,  3.32it/s]Fetching 10 files:  70%|███████   | 7/10 [00:06<00:02,  1.02it/s]Fetching 10 files: 100%|██████████| 10/10 [00:06<00:00,  1.50it/s]
+[2m2026-04-09T03:11:18.763829Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
+[2m2026-04-09T03:11:18.763988Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: llava-hf/llava-v1.6-mistral-7b-hf
+Fetching 17 files:   0%|          | 0/17 [00:00<?, ?it/s]Fetching 17 files:   6%|▌         | 1/17 [00:00<00:01,  8.51it/s]Fetching 17 files:  12%|█▏        | 2/17 [00:01<00:08,  1.73it/s]Fetching 17 files:  41%|████      | 7/17 [00:07<00:11,  1.12s/it]Fetching 17 files: 100%|██████████| 17/17 [00:07<00:00,  2.31it/s]
+[2m2026-04-09T03:11:26.226038Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: llava-hf/llava-v1.6-mistral-7b-hf
+[2m2026-04-09T03:11:26.226663Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

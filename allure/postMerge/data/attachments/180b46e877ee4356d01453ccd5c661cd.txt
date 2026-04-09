@@ -1,0 +1,357 @@
+[BASH] ==========================================
+[BASH] Launching Disaggregated Multimodal P/D (1 GPU)
+[BASH] ==========================================
+[BASH] Model:       Qwen/Qwen3-VL-2B-Instruct
+[BASH] Frontend:    http://localhost:8042
+[BASH] ==========================================
+[BASH] 
+[BASH] Example test command:
+[BASH] 
+[BASH]   curl http://localhost:8042/v1/chat/completions \
+[BASH]     -H 'Content-Type: application/json' \
+[BASH]     -d '{
+[BASH]       "model": "Qwen/Qwen3-VL-2B-Instruct",
+[BASH]       "messages": [{"role": "user", "content": [
+[BASH]         {"type": "text", "text": "Describe this image"},
+[BASH]         {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/300px-PNG_transparency_demonstration_1.png"}}
+[BASH]       ]}],
+[BASH]       "max_tokens": 50
+[BASH]     }'
+[BASH] 
+[BASH] ==========================================
+[BASH] Starting frontend...
+[BASH] Starting prefill worker on GPU 0 (GPU mem: 0.45)...
+[BASH] Starting decode worker on GPU 0 (GPU mem: 0.45)...
+[BASH] ==================================================
+[BASH] All components started. Waiting for initialization...
+[BASH] ==================================================
+[BASH] [2m2026-04-08T21:39:06.514559Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
+[BASH] [2m2026-04-08T21:39:06.516461Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2384)
+[BASH] [2m2026-04-08T21:39:06.519950Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.86.111 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-08T21:39:06.522757Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8042"
+[BASH] [2m2026-04-08T21:39:06.768024Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:08.770216Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] dynamo.nixl_connect: Failed to load CuPy for GPU acceleration, utilizing numpy to provide CPU based operations.
+[BASH] dynamo.nixl_connect: Failed to load CuPy for GPU acceleration, utilizing numpy to provide CPU based operations.
+[BASH] [2m2026-04-08T21:39:10.772456Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:10.810681Z[0m [32m INFO[0m [2marg_utils.__post_init__[0m[2m:[0m HF_HUB_OFFLINE is True, replace model_id [Qwen/Qwen3-VL-2B-Instruct] to model_path [/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203]
+[BASH] [2m2026-04-08T21:39:10.811141Z[0m [32m INFO[0m [2margs.ensure_side_channel_host[0m[2m:[0m Using existing VLLM_NIXL_SIDE_CHANNEL_HOST=10.1.86.111
+[BASH] [2m2026-04-08T21:39:10.811196Z[0m [33m WARN[0m [2margs.create_kv_events_config[0m[2m:[0m User provided --kv_events_config which set enable_kv_cache_events to False (default). To publish events, explicitly set enable_kv_cache_events to True.
+[BASH] [2m2026-04-08T21:39:10.811225Z[0m [32m INFO[0m [2margs.create_kv_events_config[0m[2m:[0m Using user-provided kv_events_config KVEventsConfig(enable_kv_cache_events=False, publisher='zmq', endpoint='tcp://*:20081', replay_endpoint=None, buffer_steps=10000, hwm=100000, max_queue_size=100000, topic='kv-events')
+[BASH] [2m2026-04-08T21:39:10.811250Z[0m [32m INFO[0m [2margs.update_engine_config_with_dynamo[0m[2m:[0m Using kv_events_config for publishing vLLM kv events over zmq: KVEventsConfig(enable_kv_cache_events=False, publisher='zmq', endpoint='tcp://*:20081', replay_endpoint=None, buffer_steps=10000, hwm=100000, max_queue_size=100000, topic='kv-events') (use_kv_events=False)
+[BASH] [2m2026-04-08T21:39:10.837585Z[0m [32m INFO[0m [2marg_utils.__post_init__[0m[2m:[0m HF_HUB_OFFLINE is True, replace model_id [Qwen/Qwen3-VL-2B-Instruct] to model_path [/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203]
+[BASH] [2m2026-04-08T21:39:10.838039Z[0m [32m INFO[0m [2margs.ensure_side_channel_host[0m[2m:[0m Using existing VLLM_NIXL_SIDE_CHANNEL_HOST=10.1.86.111
+[BASH] [2m2026-04-08T21:39:10.838091Z[0m [32m INFO[0m [2margs.create_kv_events_config[0m[2m:[0m Decode worker detected (disaggregation_mode=decode): kv_events_config disabled (decode workers don't publish KV events)
+[BASH] [2m2026-04-08T21:39:10.838113Z[0m [32m INFO[0m [2margs.update_engine_config_with_dynamo[0m[2m:[0m Using kv_events_config for publishing vLLM kv events over zmq: None (use_kv_events=False)
+[BASH] [2m2026-04-08T21:39:11.155504Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-VL-2B-Instruct' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203", skipping download
+[BASH] [2m2026-04-08T21:39:11.155542Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-VL-2B-Instruct' without API validation
+[BASH] [2m2026-04-08T21:39:11.157418Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2384)
+[BASH] [2m2026-04-08T21:39:11.160666Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.86.111 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-08T21:39:11.161152Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:8167
+[BASH] [2m2026-04-08T21:39:11.161195Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:8167
+[BASH] [2m2026-04-08T21:39:11.161214Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:8167
+[BASH] [2m2026-04-08T21:39:11.161351Z[0m [32m INFO[0m [2mgraceful_shutdown.install_signal_handlers[0m[2m:[0m Signal handlers set up for graceful shutdown (discovery unregister + grace period)
+[BASH] [2m2026-04-08T21:39:11.161606Z[0m [33mWARNING[0m [2mprometheus.setup_multiprocess_prometheus[0m[2m:[0m Found PROMETHEUS_MULTIPROC_DIR was set by user. This directory must be wiped between vLLM runs or you will find inaccurate metrics. Unset the variable and vLLM will properly handle cleanup.
+[BASH] [2m2026-04-08T21:39:11.173403Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3VLForConditionalGeneration
+[BASH] [2m2026-04-08T21:39:11.173583Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 4096
+[BASH] [2m2026-04-08T21:39:11.175056Z[0m [33mWARNING[0m [2mmodel.get_diff_sampling_param[0m[2m:[0m Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.7, 'top_k': 20, 'top_p': 0.8}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+[BASH] [2m2026-04-08T21:39:11.183143Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3VLForConditionalGeneration
+[BASH] [2m2026-04-08T21:39:11.183241Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 4096
+[BASH] [2m2026-04-08T21:39:11.184159Z[0m [32m INFO[0m [2mvllm.__post_init__[0m[2m:[0m Asynchronous scheduling is enabled.
+[BASH] [2m2026-04-08T21:39:11.184219Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] [2m2026-04-08T21:39:11.184254Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] [2m2026-04-08T21:39:11.188853Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-VL-2B-Instruct' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203", skipping download
+[BASH] [2m2026-04-08T21:39:11.188882Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-VL-2B-Instruct' without API validation
+[BASH] [2m2026-04-08T21:39:11.190735Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2384)
+[BASH] [2m2026-04-08T21:39:11.193459Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.86.111 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-08T21:39:11.193834Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:8167
+[BASH] [2m2026-04-08T21:39:11.193872Z[0m [31mERROR[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m Failed to bind to address 0.0.0.0:8167: Address already in use (os error 98)
+[BASH] [2m2026-04-08T21:39:11.193889Z[0m [31mERROR[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server startup failed: Failed to bind to address: Address already in use (os error 98)
+[BASH] [2m2026-04-08T21:39:11.194001Z[0m [32m INFO[0m [2mgraceful_shutdown.install_signal_handlers[0m[2m:[0m Signal handlers set up for graceful shutdown (discovery unregister + grace period)
+[BASH] [2m2026-04-08T21:39:11.194240Z[0m [33mWARNING[0m [2mprometheus.setup_multiprocess_prometheus[0m[2m:[0m Found PROMETHEUS_MULTIPROC_DIR was set by user. This directory must be wiped between vLLM runs or you will find inaccurate metrics. Unset the variable and vLLM will properly handle cleanup.
+[BASH] [2m2026-04-08T21:39:11.206028Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3VLForConditionalGeneration
+[BASH] [2m2026-04-08T21:39:11.206202Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 4096
+[BASH] [2m2026-04-08T21:39:11.207641Z[0m [33mWARNING[0m [2mmodel.get_diff_sampling_param[0m[2m:[0m Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.7, 'top_k': 20, 'top_p': 0.8}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+[BASH] [2m2026-04-08T21:39:11.215669Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3VLForConditionalGeneration
+[BASH] [2m2026-04-08T21:39:11.215767Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 4096
+[BASH] [2m2026-04-08T21:39:11.216669Z[0m [32m INFO[0m [2mvllm.__post_init__[0m[2m:[0m Asynchronous scheduling is enabled.
+[BASH] [2m2026-04-08T21:39:11.216729Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] [2m2026-04-08T21:39:11.216764Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] [2m2026-04-08T21:39:12.462817Z[0m [32m INFO[0m [2mvllm.__post_init__[0m[2m:[0m Cudagraph is disabled under eager mode
+[BASH] [2m2026-04-08T21:39:12.462919Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m KV cache events are disabled, but the scheduler is configured to publish them. Modify KVEventsConfig.enable_kv_cache_events to True to enable.
+[BASH] [2m2026-04-08T21:39:12.463001Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Turning off hybrid kv cache manager because `--kv-transfer-config` is set. This will reduce the performance of vLLM on LLMs with sliding window attention or Mamba attention. If you are a developer of kv connector, please consider supporting hybrid kv cache manager for your connector by making sure your connector is a subclass of `SupportsHMA` defined in kv_connector/v1/base.py and use --no-disable-hybrid-kv-cache-manager to start vLLM.
+[BASH] [2m2026-04-08T21:39:12.463070Z[0m [32m INFO[0m [2mcompilation.log_enabled_passes[0m[2m:[0m Enabled custom fusions: norm_quant, act_quant
+[BASH] [2m2026-04-08T21:39:12.497229Z[0m [32m INFO[0m [2mvllm.__post_init__[0m[2m:[0m Cudagraph is disabled under eager mode
+[BASH] [2m2026-04-08T21:39:12.497380Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Turning off hybrid kv cache manager because `--kv-transfer-config` is set. This will reduce the performance of vLLM on LLMs with sliding window attention or Mamba attention. If you are a developer of kv connector, please consider supporting hybrid kv cache manager for your connector by making sure your connector is a subclass of `SupportsHMA` defined in kv_connector/v1/base.py and use --no-disable-hybrid-kv-cache-manager to start vLLM.
+[BASH] [2m2026-04-08T21:39:12.497459Z[0m [32m INFO[0m [2mcompilation.log_enabled_passes[0m[2m:[0m Enabled custom fusions: norm_quant, act_quant
+[BASH] [2m2026-04-08T21:39:12.774751Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:14.776899Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:16.089720Z[0m [32m INFO[0m [2mencoder_budget.__init__[0m[2m:[0m enable_mm_embeds is True; modalities handled as embedding-only: ('video',)
+[BASH] [2m2026-04-08T21:39:16.779172Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:18.781399Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:20.783503Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:22 [core.py:105] Initializing a V1 LLM engine (v0.19.0) with config: model='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203', speculative_config=None, tokenizer='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen3-VL-2B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_images_per_batch': 0, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:22 [core.py:105] Initializing a V1 LLM engine (v0.19.0) with config: model='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203', speculative_config=None, tokenizer='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen3-VL-2B-Instruct, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_images_per_batch': 0, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+[BASH] [2m2026-04-08T21:39:22.785535Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:24 [parallel_state.py:1400] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.1.86.111:44173 backend=nccl
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:24 [parallel_state.py:1400] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.1.86.111:52215 backend=nccl
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:24 [parallel_state.py:1716] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:24 [parallel_state.py:1716] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+[BASH] [2m2026-04-08T21:39:24.787578Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:25 [topk_topp_sampler.py:51] Using FlashInfer for top-p & top-k sampling.
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:25 [topk_topp_sampler.py:51] Using FlashInfer for top-p & top-k sampling.
+[BASH] [2m2026-04-08T21:39:26.789935Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:27 [gpu_model_runner.py:4735] Starting to load model /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203...
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:27 [encoder_budget.py:95] enable_mm_embeds is True; modalities handled as embedding-only: ('video',)
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:27 [gpu_model_runner.py:4735] Starting to load model /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203...
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:28 [cuda.py:390] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:28 [mm_encoder_attention.py:230] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:28 [vllm.py:790] Asynchronous scheduling is enabled.
+[BASH] (EngineCore pid=17342) WARNING 04-08 21:39:28 [vllm.py:848] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] (EngineCore pid=17342) WARNING 04-08 21:39:28 [vllm.py:859] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:28 [vllm.py:1025] Cudagraph is disabled under eager mode
+[BASH] (EngineCore pid=17342) WARNING 04-08 21:39:28 [vllm.py:1080] KV cache events are disabled, but the scheduler is configured to publish them. Modify KVEventsConfig.enable_kv_cache_events to True to enable.
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:28 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:28 [cuda.py:334] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:28 [flash_attn.py:596] Using FlashAttention version 2
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:28 [cuda.py:390] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:28 [mm_encoder_attention.py:230] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+[BASH] (EngineCore pid=17342) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:28 [vllm.py:790] Asynchronous scheduling is enabled.
+[BASH] (EngineCore pid=17349) WARNING 04-08 21:39:28 [vllm.py:848] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] (EngineCore pid=17349) WARNING 04-08 21:39:28 [vllm.py:859] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:28 [vllm.py:1025] Cudagraph is disabled under eager mode
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:28 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:28 [cuda.py:334] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:28 [flash_attn.py:596] Using FlashAttention version 2
+[BASH] (EngineCore pid=17349) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+[BASH] [2m2026-04-08T21:39:28.792265Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=17342) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  1.51it/s]
+[BASH] (EngineCore pid=17342) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  1.51it/s]
+[BASH] (EngineCore pid=17342) 
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:28 [default_loader.py:384] Loading weights took 0.69 seconds
+[BASH] (EngineCore pid=17349) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  1.52it/s]
+[BASH] (EngineCore pid=17349) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  1.52it/s]
+[BASH] (EngineCore pid=17349) 
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:28 [default_loader.py:384] Loading weights took 0.70 seconds
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:29 [gpu_model_runner.py:4820] Model loading took 4.24 GiB memory and 0.856604 seconds
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:29 [gpu_model_runner.py:5753] Encoder cache will be initialized with a budget of 16384 tokens, and profiled with 1 image items of the maximum feature size.
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:29 [gpu_model_runner.py:4820] Model loading took 4.24 GiB memory and 0.866577 seconds
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:29 [gpu_model_runner.py:5753] Encoder cache will be initialized with a budget of 16384 tokens, and profiled with 1 image items of the maximum feature size.
+[BASH] [2m2026-04-08T21:39:30.794461Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:32.796459Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:34.798465Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:36.800427Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:38.802530Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:40.804522Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:42.806590Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:44.808579Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:46.810766Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [gpu_worker.py:361] Initial free memory 21.83 GiB, reserved 0.5 GiB memory for KV Cache as specified by kv_cache_memory_bytes config and skipped memory profiling. This does not respect the gpu_memory_utilization config. Only use kv_cache_memory_bytes config when you want manual control of KV cache memory size. If OOM'ed, check the difference of initial free memory between the current run and the previous run where kv_cache_memory_bytes is suggested and update it correspondingly.
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [kv_cache_utils.py:1319] GPU KV cache size: 4,672 tokens
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [kv_cache_utils.py:1324] Maximum concurrency for 4,096 tokens per request: 1.14x
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:111] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:124] NIXL is available
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [factory.py:64] Creating v1 connector with name: NixlConnector and engine_id: 5da06248-a980-4cd4-9b32-11cfdb7691cf
+[BASH] (EngineCore pid=17342) WARNING 04-08 21:39:48 [base.py:189] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:1010] Initializing NIXL wrapper
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:1011] Initializing NIXL worker 5da06248-a980-4cd4-9b32-11cfdb7691cf
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [gpu_worker.py:361] Initial free memory 21.66 GiB, reserved 0.5 GiB memory for KV Cache as specified by kv_cache_memory_bytes config and skipped memory profiling. This does not respect the gpu_memory_utilization config. Only use kv_cache_memory_bytes config when you want manual control of KV cache memory size. If OOM'ed, check the difference of initial free memory between the current run and the previous run where kv_cache_memory_bytes is suggested and update it correspondingly.
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [kv_cache_utils.py:1319] GPU KV cache size: 4,672 tokens
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [kv_cache_utils.py:1324] Maximum concurrency for 4,096 tokens per request: 1.14x
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:111] Setting UCX_RCACHE_MAX_UNRELEASED to '1024' to avoid a rare memory leak in UCX when using NIXL.
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:124] NIXL is available
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [factory.py:64] Creating v1 connector with name: NixlConnector and engine_id: baed2785-dcb2-4f02-9fda-12fcecf16dfb
+[BASH] (EngineCore pid=17349) WARNING 04-08 21:39:48 [base.py:189] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:1010] Initializing NIXL wrapper
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:1011] Initializing NIXL worker baed2785-dcb2-4f02-9fda-12fcecf16dfb
+[BASH] (EngineCore pid=17342) 2026-04-08 21:39:48 NIXL INFO    _api.py:363 Backend UCX was instantiated
+[BASH] (EngineCore pid=17342) 2026-04-08 21:39:48 NIXL INFO    _api.py:253 Initialized NIXL agent: b5741796-1940-46c4-b97a-71bbe113df57
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:387] NixlConnector setting KV cache layout to HND for better xfer performance.
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:1216] Detected attention backend FLASH_ATTN
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:1217] Detected kv cache layout HND
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:1580] Registering KV_Caches. use_mla: False, kv_buffer_device: cuda, use_host_buffer: False
+[BASH] [2m2026-04-08T21:39:48.812762Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [core.py:283] init engine (profile, create kv cache, warmup model) took 19.26 seconds
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [factory.py:64] Creating v1 connector with name: NixlConnector and engine_id: 5da06248-a980-4cd4-9b32-11cfdb7691cf
+[BASH] (EngineCore pid=17342) WARNING 04-08 21:39:48 [base.py:189] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:581] Initializing NIXL Scheduler 5da06248-a980-4cd4-9b32-11cfdb7691cf
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:48 [nixl_connector.py:583] Hybrid Memory Allocator is enabled with NIXL
+[BASH] (EngineCore pid=17349) 2026-04-08 21:39:48 NIXL INFO    _api.py:363 Backend UCX was instantiated
+[BASH] (EngineCore pid=17349) 2026-04-08 21:39:48 NIXL INFO    _api.py:253 Initialized NIXL agent: 21540c68-4754-4a42-ab08-51dfb004b499
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:387] NixlConnector setting KV cache layout to HND for better xfer performance.
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:1216] Detected attention backend FLASH_ATTN
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:1217] Detected kv cache layout HND
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:1580] Registering KV_Caches. use_mla: False, kv_buffer_device: cuda, use_host_buffer: False
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [core.py:283] init engine (profile, create kv cache, warmup model) took 19.29 seconds
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [factory.py:64] Creating v1 connector with name: NixlConnector and engine_id: baed2785-dcb2-4f02-9fda-12fcecf16dfb
+[BASH] (EngineCore pid=17349) WARNING 04-08 21:39:48 [base.py:189] Initializing KVConnectorBase_V1. This API is experimental and subject to change in the future as we iterate the design.
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:581] Initializing NIXL Scheduler baed2785-dcb2-4f02-9fda-12fcecf16dfb
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:48 [nixl_connector.py:583] Hybrid Memory Allocator is enabled with NIXL
+[BASH] (EngineCore pid=17342) WARNING 04-08 21:39:49 [vllm.py:848] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] (EngineCore pid=17342) WARNING 04-08 21:39:49 [vllm.py:859] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:49 [vllm.py:1025] Cudagraph is disabled under eager mode
+[BASH] (EngineCore pid=17342) WARNING 04-08 21:39:49 [vllm.py:1080] KV cache events are disabled, but the scheduler is configured to publish them. Modify KVEventsConfig.enable_kv_cache_events to True to enable.
+[BASH] [2m2026-04-08T21:39:49.255084Z[0m [33mWARNING[0m [2mnixl_connector[0m[2m:[0m NIXL was already imported, we can't reset UCX_RCACHE_MAX_UNRELEASED. Please set it to '1024' manually.
+[BASH] [2m2026-04-08T21:39:49.255177Z[0m [32m INFO[0m [2mnixl_connector[0m[2m:[0m NIXL is available
+[BASH] [2m2026-04-08T21:39:49.258946Z[0m [32m INFO[0m [2mmain.setup_vllm_engine[0m[2m:[0m VllmWorker for Qwen/Qwen3-VL-2B-Instruct has been initialized
+[BASH] [2m2026-04-08T21:39:49.259007Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Cache config values: {'num_gpu_blocks': 292, 'block_size': 16}
+[BASH] [2m2026-04-08T21:39:49.259031Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048}
+[BASH] [2m2026-04-08T21:39:49.259083Z[0m [32m INFO[0m [2mengine_monitor.__init__[0m[2m:[0m VllmEngineMonitor initialized and health check task started.
+[BASH] [2m2026-04-08T21:39:49.259121Z[0m [33m WARN[0m [2mhandlers.get_dp_range_for_worker[0m[2m:[0m vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment, hybrid or external load balancing is recommended.
+[BASH] [2m2026-04-08T21:39:49.262220Z[0m [32m INFO[0m [2mmain.setup_kv_event_publisher[0m[2m:[0m KV event publishing skipped: enable_kv_cache_events=False in kv_events_config
+[BASH] [2m2026-04-08T21:39:49.262548Z[0m [32m INFO[0m [2mworker_factory._create_prefill_worker[0m[2m:[0m Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep
+[BASH] [2m2026-04-08T21:39:49.262631Z[0m [32m INFO[0m [2mmain.register_vllm_model[0m[2m:[0m Getting engine runtime configuration metadata from vLLM engine for prefill...
+[BASH] [2m2026-04-08T21:39:49.262656Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Cache config values: {'num_gpu_blocks': 292, 'block_size': 16}
+[BASH] [2m2026-04-08T21:39:49.262675Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048}
+[BASH] [2m2026-04-08T21:39:49.262700Z[0m [33m WARN[0m [2mhandlers.get_dp_range_for_worker[0m[2m:[0m vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment, hybrid or external load balancing is recommended.
+[BASH] [2m2026-04-08T21:39:49.263093Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-VL-2B-Instruct' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203", skipping download
+[BASH] [2m2026-04-08T21:39:49.263106Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-VL-2B-Instruct' without API validation
+[BASH] [2m2026-04-08T21:39:49.268126Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-VL-2B-Instruct' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203", skipping download
+[BASH] [2m2026-04-08T21:39:49.268147Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-VL-2B-Instruct' without API validation
+[BASH] [2m2026-04-08T21:39:49.268231Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Prefill model detected, registering and activating prefill router [3mmodel_name[0m[2m=[0m"Qwen/Qwen3-VL-2B-Instruct"
+[BASH] [2m2026-04-08T21:39:49.268247Z[0m [32m INFO[0m [2mdynamo_llm::discovery::model[0m[2m:[0m Adding worker set to model [3mmodel[0m[2m=[0mQwen/Qwen3-VL-2B-Instruct [3mnamespace[0m[2m=[0mdynamo:prefill
+[BASH] [2m2026-04-08T21:39:49.268257Z[0m [32m INFO[0m [2mdynamo_llm::discovery::model_manager[0m[2m:[0m Stored prefill endpoint for future decode WorkerSet registration [3mmodel_name[0m[2m=[0mQwen/Qwen3-VL-2B-Instruct [3mnamespace[0m[2m=[0mdynamo
+[BASH] [2m2026-04-08T21:39:49.268261Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Prefill model registered and router activated successfully [3mmodel_name[0m[2m=[0m"Qwen/Qwen3-VL-2B-Instruct"
+[BASH] [2m2026-04-08T21:39:49.268269Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m added model [3mmodel_name[0m[2m=[0m"Qwen/Qwen3-VL-2B-Instruct" [3mnamespace[0m[2m=[0m"dynamo"
+[BASH] [2m2026-04-08T21:39:49.268356Z[0m [32m INFO[0m [2m_core[0m[2m:[0m Registered base model 'Qwen/Qwen3-VL-2B-Instruct' MDC
+[BASH] [2m2026-04-08T21:39:49.269240Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Creating TCP request plane server [3mbind_addr[0m[2m=[0m10.1.86.111:0 [3mport_source[0m[2m=[0m"OS-assigned"
+[BASH] [2m2026-04-08T21:39:49.269264Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Initializing TCP server with dispatcher (concurrency=1500, queue=6000)
+[BASH] [2m2026-04-08T21:39:49.269274Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Started TCP worker dispatcher with concurrency limit 1500
+[BASH] [2m2026-04-08T21:39:49.269282Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Binding TCP server to 10.1.86.111:0
+[BASH] [2m2026-04-08T21:39:49.269330Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m TCP server bound successfully [3mrequested[0m[2m=[0m10.1.86.111:0 [3mactual[0m[2m=[0m10.1.86.111:34531
+[BASH] [2m2026-04-08T21:39:49.269342Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m TCP request plane server started [3mactual_addr[0m[2m=[0m10.1.86.111:34531 [3mactual_port[0m[2m=[0m34531
+[BASH] [2m2026-04-08T21:39:49.269373Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.prefill.get_perf_metrics' with shared TCP server on 10.1.86.111:34531
+[BASH] [2m2026-04-08T21:39:49.269663Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.prefill.generate' with shared TCP server on 10.1.86.111:34531
+[BASH] [2m2026-04-08T21:39:49.269683Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.prefill.clear_kv_blocks' with shared TCP server on 10.1.86.111:34531
+[BASH] (EngineCore pid=17349) WARNING 04-08 21:39:49 [vllm.py:848] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] (EngineCore pid=17349) WARNING 04-08 21:39:49 [vllm.py:859] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:49 [vllm.py:1025] Cudagraph is disabled under eager mode
+[BASH] [2m2026-04-08T21:39:49.277061Z[0m [33mWARNING[0m [2mnixl_connector[0m[2m:[0m NIXL was already imported, we can't reset UCX_RCACHE_MAX_UNRELEASED. Please set it to '1024' manually.
+[BASH] [2m2026-04-08T21:39:49.277148Z[0m [32m INFO[0m [2mnixl_connector[0m[2m:[0m NIXL is available
+[BASH] [2m2026-04-08T21:39:49.280820Z[0m [32m INFO[0m [2mmain.setup_vllm_engine[0m[2m:[0m VllmWorker for Qwen/Qwen3-VL-2B-Instruct has been initialized
+[BASH] [2m2026-04-08T21:39:49.280876Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Cache config values: {'num_gpu_blocks': 292, 'block_size': 16}
+[BASH] [2m2026-04-08T21:39:49.280901Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048}
+[BASH] [2m2026-04-08T21:39:49.281009Z[0m [32m INFO[0m [2mengine_monitor.__init__[0m[2m:[0m VllmEngineMonitor initialized and health check task started.
+[BASH] [2m2026-04-08T21:39:49.281057Z[0m [33m WARN[0m [2mhandlers.get_dp_range_for_worker[0m[2m:[0m vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment, hybrid or external load balancing is recommended.
+[BASH] [2m2026-04-08T21:39:49.281100Z[0m [32m INFO[0m [2mmain.setup_kv_event_publisher[0m[2m:[0m Skipping KV event publisher setup for decode worker
+[BASH] [2m2026-04-08T21:39:49.281423Z[0m [32m INFO[0m [2mworker_factory._create_decode_worker[0m[2m:[0m Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep
+[BASH] [2m2026-04-08T21:39:49.281457Z[0m [32m INFO[0m [2mworker_factory._create_decode_worker[0m[2m:[0m Registering model with endpoint types: chat,completions
+[BASH] [2m2026-04-08T21:39:49.281504Z[0m [32m INFO[0m [2mmain.register_vllm_model[0m[2m:[0m Getting engine runtime configuration metadata from vLLM engine for chat,completions...
+[BASH] [2m2026-04-08T21:39:49.281529Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Cache config values: {'num_gpu_blocks': 292, 'block_size': 16}
+[BASH] [2m2026-04-08T21:39:49.281547Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Scheduler config values: {'max_num_seqs': 256, 'max_num_batched_tokens': 2048}
+[BASH] [2m2026-04-08T21:39:49.281576Z[0m [33m WARN[0m [2mhandlers.get_dp_range_for_worker[0m[2m:[0m vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment, hybrid or external load balancing is recommended.
+[BASH] [2m2026-04-08T21:39:49.281994Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-VL-2B-Instruct' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203", skipping download
+[BASH] [2m2026-04-08T21:39:49.282007Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-VL-2B-Instruct' without API validation
+[BASH] [2m2026-04-08T21:39:49.282071Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=dynamo//kv_metrics/299b9d6f08d77a0b
+[BASH] [2m2026-04-08T21:39:49.283373Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mkv_metrics [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m2998163077160466955
+[BASH] [2m2026-04-08T21:39:49.286653Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-VL-2B-Instruct' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-2B-Instruct/snapshots/89644892e4d85e24eaac8bacfd4f463576704203", skipping download
+[BASH] [2m2026-04-08T21:39:49.286669Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-VL-2B-Instruct' without API validation
+[BASH] [2m2026-04-08T21:39:49.286963Z[0m [32m INFO[0m [2m_core[0m[2m:[0m Registered base model 'Qwen/Qwen3-VL-2B-Instruct' MDC
+[BASH] [2m2026-04-08T21:39:49.287969Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Creating TCP request plane server [3mbind_addr[0m[2m=[0m10.1.86.111:0 [3mport_source[0m[2m=[0m"OS-assigned"
+[BASH] [2m2026-04-08T21:39:49.287986Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Initializing TCP server with dispatcher (concurrency=1500, queue=6000)
+[BASH] [2m2026-04-08T21:39:49.287993Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Started TCP worker dispatcher with concurrency limit 1500
+[BASH] [2m2026-04-08T21:39:49.287997Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Binding TCP server to 10.1.86.111:0
+[BASH] [2m2026-04-08T21:39:49.288033Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m TCP server bound successfully [3mrequested[0m[2m=[0m10.1.86.111:0 [3mactual[0m[2m=[0m10.1.86.111:40075
+[BASH] [2m2026-04-08T21:39:49.288044Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m TCP request plane server started [3mactual_addr[0m[2m=[0m10.1.86.111:40075 [3mactual_port[0m[2m=[0m40075
+[BASH] [2m2026-04-08T21:39:49.288092Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.backend.clear_kv_blocks' with shared TCP server on 10.1.86.111:40075
+[BASH] [2m2026-04-08T21:39:49.288244Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.backend.generate' with shared TCP server on 10.1.86.111:40075
+[BASH] [2m2026-04-08T21:39:49.288282Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.backend.get_perf_metrics' with shared TCP server on 10.1.86.111:40075
+[BASH] [2m2026-04-08T21:39:49.472917Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m chat endpoints enabled
+[BASH] [2m2026-04-08T21:39:49.472943Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m responses endpoints enabled
+[BASH] [2m2026-04-08T21:39:49.472948Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m completion endpoints enabled
+[BASH] [2m2026-04-08T21:39:49.473816Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::prefill_router::activation[0m[2m:[0m Activating prefill router [3mrouter_mode[0m[2m=[0mRoundRobin
+[BASH] [2m2026-04-08T21:39:49.473852Z[0m [33m WARN[0m [2mdynamo_llm::discovery::worker_monitor[0m[2m:[0m KvWorkerMonitor: KV metrics subscriber not available (KV router's EventSubscriber requires NATS), skipping load metrics.
+[BASH] [2m2026-04-08T21:39:49.473870Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::prefill_router::activation[0m[2m:[0m Prefill router activated successfully [3mrouter_mode[0m[2m=[0mRoundRobin
+[BASH] [2m2026-04-08T21:39:49.474121Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Chat completions is ready
+[BASH] [2m2026-04-08T21:39:49.474220Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Completions is ready
+[BASH] [2m2026-04-08T21:39:49.474229Z[0m [32m INFO[0m [2mdynamo_llm::discovery::model[0m[2m:[0m Adding worker set to model [3mmodel[0m[2m=[0mQwen/Qwen3-VL-2B-Instruct [3mnamespace[0m[2m=[0mdynamo
+[BASH] [2m2026-04-08T21:39:49.474238Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m added model [3mmodel_name[0m[2m=[0m"Qwen/Qwen3-VL-2B-Instruct" [3mnamespace[0m[2m=[0m"dynamo"
+[BASH] [2m2026-04-08T21:39:50.814794Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:51.817497Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:39:52.820489Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m9d26c688-9cdd-4a70-ae6a-588c895354d0 [3mmodel[0m[2m=[0mqwen/qwen3-vl-2b-instruct [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0munary [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m86a4f95a-54d0-4933-8b8c-b9a4c3e7c66a [3mmodel[0m[2m=[0m"qwen/qwen3-vl-2b-instruct"[0m
+[BASH] [2m2026-04-08T21:39:52.821651Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m9d26c688-9cdd-4a70-ae6a-588c895354d0 [2m[3mrequest_id[0m[2m=[0m"9d26c688-9cdd-4a70-ae6a-588c895354d0" [3mcomponent[0m[2m=[0m"prefill" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m2998163077160466953[0m
+[BASH] [2m2026-04-08T21:39:52.858938Z[0m [32m INFO[0m [2mhttp_client.get_http_client[0m[2m:[0m Shared HTTP client initialized with timeout=30.0s
+[BASH] [2m2026-04-08T21:39:52.930639Z[0m [33mWARNING[0m [2minput_processor.process_inputs[0m[2m:[0m Passing raw prompts to InputProcessor is deprecated and will be removed in v0.18. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
+[BASH] [2m2026-04-08T21:39:55.101352Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m9d26c688-9cdd-4a70-ae6a-588c895354d0 [2m[3mrequest_id[0m[2m=[0m"9d26c688-9cdd-4a70-ae6a-588c895354d0" [3mcomponent[0m[2m=[0m"prefill" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m2998163077160466953[0m
+[BASH] [2m2026-04-08T21:39:55.102164Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m9d26c688-9cdd-4a70-ae6a-588c895354d0 [2m[3mrequest_id[0m[2m=[0m"9d26c688-9cdd-4a70-ae6a-588c895354d0" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m2998163077160466955[0m
+[BASH] [2m2026-04-08T21:39:55.125276Z[0m [33mWARNING[0m [2minput_processor.process_inputs[0m[2m:[0m Passing raw prompts to InputProcessor is deprecated and will be removed in v0.18. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:56 [nixl_connector.py:1339] NIXL compatibility check passed (hash: ca9c65783448322cec4a4b444727986fd1b0464aac7346c525d897c4f83bc52f)
+[BASH] [2m2026-04-08T21:39:57.640083Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m9d26c688-9cdd-4a70-ae6a-588c895354d0 [2m[3mrequest_id[0m[2m=[0m"9d26c688-9cdd-4a70-ae6a-588c895354d0" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m2998163077160466955[0m
+[BASH] [2m2026-04-08T21:39:57.640415Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m9d26c688-9cdd-4a70-ae6a-588c895354d0 [3mmodel[0m[2m=[0mqwen/qwen3-vl-2b-instruct [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0munary [3mstatus[0m[2m=[0msuccess [3melapsed_ms[0m[2m=[0m4819 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m86a4f95a-54d0-4933-8b8c-b9a4c3e7c66a [3mmodel[0m[2m=[0m"qwen/qwen3-vl-2b-instruct" [3minput_tokens[0m[2m=[0m25 [3moutput_tokens[0m[2m=[0m8 [3mttft_ms[0m[2m=[0m"4692.01" [3mavg_itl_ms[0m[2m=[0m"18.25"[0m
+[BASH] [2m2026-04-08T21:39:57.640462Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m4820 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m86a4f95a-54d0-4933-8b8c-b9a4c3e7c66a [3mmodel[0m[2m=[0m"qwen/qwen3-vl-2b-instruct" [3minput_tokens[0m[2m=[0m25 [3moutput_tokens[0m[2m=[0m8 [3mttft_ms[0m[2m=[0m"4692.01" [3mavg_itl_ms[0m[2m=[0m"18.25"[0m
+[BASH] Cleaning up...
+[BASH] [2m2026-04-08T21:39:57.642982Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T21:39:57.643048Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:57 [core.py:1210] Shutdown initiated (timeout=0)
+[BASH] [2m2026-04-08T21:39:57.643050Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T21:39:57.643080Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T21:39:57.643085Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T21:39:57.643089Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T21:39:57.643078Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Received shutdown signal; unregistering endpoints from discovery
+[BASH] [2m2026-04-08T21:39:57.643082Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T21:39:57.643103Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T21:39:57.643113Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T21:39:57.643117Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] (EngineCore pid=17349) INFO 04-08 21:39:57 [core.py:1233] Shutdown complete
+[BASH] [2m2026-04-08T21:39:57.643123Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:57 [core.py:1210] Shutdown initiated (timeout=0)
+[BASH] [2m2026-04-08T21:39:57.643146Z[0m [32m INFO[0m [2mdynamo_llm::discovery::worker_monitor[0m[2m:[0m Worker monitoring task exiting
+[BASH] (EngineCore pid=17342) INFO 04-08 21:39:57 [core.py:1233] Shutdown complete
+[BASH] [2m2026-04-08T21:39:57.643606Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Received shutdown signal; unregistering endpoints from discovery
+[BASH] [2m2026-04-08T21:39:57.647089Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m2998163077160466953
+[BASH] [2m2026-04-08T21:39:57.647106Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m2998163077160466953
+[BASH] [2m2026-04-08T21:39:57.647119Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m2998163077160466955
+[BASH] [2m2026-04-08T21:39:57.647130Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m2998163077160466955
+[BASH] [2m2026-04-08T21:39:57.647133Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m2998163077160466953
+[BASH] [2m2026-04-08T21:39:57.647165Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m2998163077160466955
+[BASH] [2m2026-04-08T21:39:57.647756Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Grace period 5.00s before stopping endpoints
+[BASH] [2m2026-04-08T21:39:57.726796Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Grace period 5.00s before stopping endpoints
+[BASH] [rank0]:[W408 21:39:57.790062779 ProcessGroupNCCL.cpp:1553] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[BASH] [2m2026-04-08T21:39:57.944186Z[0m [31mERROR[0m [2mcore_client.monitor_engine_cores[0m[2m:[0m Engine core proc EngineCore died unexpectedly, shutting down client.
+[BASH] [rank0]:[W408 21:39:58.004826851 ProcessGroupNCCL.cpp:1553] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[BASH] [2m2026-04-08T21:39:58.147180Z[0m [31mERROR[0m [2masync_llm.output_handler[0m[2m:[0m AsyncLLM output_handler failed.
+[BASH] Traceback (most recent call last):
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 663, in output_handler
+[BASH]     outputs = await engine_core.get_output_async()
+[BASH]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 985, in get_output_async
+[BASH]     raise self._format_exception(outputs) from None
+[BASH] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[BASH] [2m2026-04-08T21:39:58.163318Z[0m [31mERROR[0m [2mcore_client.monitor_engine_cores[0m[2m:[0m Engine core proc EngineCore died unexpectedly, shutting down client.
+[BASH] [2m2026-04-08T21:39:58.465543Z[0m [31mERROR[0m [2masync_llm.output_handler[0m[2m:[0m AsyncLLM output_handler failed.
+[BASH] Traceback (most recent call last):
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 663, in output_handler
+[BASH]     outputs = await engine_core.get_output_async()
+[BASH]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 985, in get_output_async
+[BASH]     raise self._format_exception(outputs) from None
+[BASH] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[BASH] [2m2026-04-08T21:39:58.668814Z[0m [31mERROR[0m [2mengine_monitor._check_engine_health[0m[2m:[0m Traceback: Traceback (most recent call last):
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/engine_monitor.py", line 92, in _check_engine_health
+[BASH]     await self.engine_client.check_health()
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 877, in check_health
+[BASH]     raise self.dead_error
+[BASH] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[BASH] 
+[BASH] [2m2026-04-08T21:39:58.668955Z[0m [31mERROR[0m [2mengine_monitor._check_engine_health[0m[2m:[0m vLLM AsyncLLM health check failed: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[BASH] [2m2026-04-08T21:39:58.669018Z[0m [33m WARN[0m [2mengine_monitor._check_engine_health[0m[2m:[0m Initiating Dynamo Runtime shutdown.
+[BASH] [2m2026-04-08T21:39:58.669097Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T21:39:58.669235Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T21:39:58.669272Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T21:39:58.669278Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 3
+[BASH] [2m2026-04-08T21:39:58.730295Z[0m [31mERROR[0m [2mengine_monitor._check_engine_health[0m[2m:[0m Traceback: Traceback (most recent call last):
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/engine_monitor.py", line 92, in _check_engine_health
+[BASH]     await self.engine_client.check_health()
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 877, in check_health
+[BASH]     raise self.dead_error
+[BASH] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[BASH] 
+[BASH] [2m2026-04-08T21:39:58.730355Z[0m [31mERROR[0m [2mengine_monitor._check_engine_health[0m[2m:[0m vLLM AsyncLLM health check failed: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[BASH] [2m2026-04-08T21:39:58.730379Z[0m [33m WARN[0m [2mengine_monitor._check_engine_health[0m[2m:[0m Initiating Dynamo Runtime shutdown.
+[BASH] [2m2026-04-08T21:39:58.730444Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T21:40:02.644607Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T21:40:02.644709Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T21:40:02.644734Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T21:40:02.644744Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T21:40:02.644750Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected

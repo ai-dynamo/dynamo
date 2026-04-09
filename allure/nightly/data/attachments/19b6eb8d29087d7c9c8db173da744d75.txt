@@ -1,0 +1,2 @@
+Expected prefill replicas: 1
+Calculated prefill replicas: 1

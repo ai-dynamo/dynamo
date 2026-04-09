@@ -1,0 +1,103 @@
+[2m2026-04-08T21:04:27.108884Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4319 in /workspace
+[2m2026-04-08T21:04:27.110319Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4319
+[2m2026-04-08T21:04:27.210929Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4319
+[2m2026-04-08T21:04:27.211142Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T21:04:27.214298Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T21:04:27.215146Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2394 --advertise-client-urls http://0.0.0.0:2394 --listen-peer-urls http://0.0.0.0:2395 --initial-advertise-peer-urls http://localhost:2395 --initial-cluster default=http://localhost:2395 --data-dir /tmp/etcd__4iaypp6 in /workspace
+[2m2026-04-08T21:04:27.216741Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2394
+[2m2026-04-08T21:04:27.317611Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2394
+[2m2026-04-08T21:04:27.321721Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting raw_embeddings_epd test_deployment
+[2m2026-04-08T21:04:27.321791Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: llava-hf/llava-v1.6-mistral-7b-hf
+[2m2026-04-08T21:04:27.321839Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_raw_embeddings_llava.sh
+[2m2026-04-08T21:04:27.322037Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/tests/serve/launch/agg_raw_embeddings_llava.sh in /workspace/tests/serve
+[2m2026-04-08T21:07:27.324657Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8002/v1/models
+[2m2026-04-08T21:07:28.327223Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8002/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "llava-hf/llava-v1.6-mistral-7b-hf",
+      "object": "model",
+      "created": 1775682447,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T21:07:28.327470Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8002/health
+[2m2026-04-08T21:07:29.330473Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8002/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.tensorrt_llm.generate",
+    "dyn://dynamo.tensorrt_llm_encode.generate"
+  ],
+  "instances": [
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6871821706120947721,
+      "transport": {
+        "tcp": "10.1.68.128:41349/5f5d9d6ee9286809/generate"
+      }
+    },
+    {
+      "component": "tensorrt_llm_encode",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6871821706120947725,
+      "transport": {
+        "tcp": "10.1.68.128:39465/5f5d9d6ee928680d/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-08T21:07:29.330924Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-08T21:07:29.331342Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8002/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe what this image shows."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "file:///tmp/llava_embeddings.pt"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 160,
+  "stream": false,
+  "logprobs": false,
+  "model": "llava-hf/llava-v1.6-mistral-7b-hf"
+}'
+[2m2026-04-08T21:07:39.611412Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=10.28s
+[2m2026-04-08T21:07:39.611672Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/4 expected keywords: ['image']
+[2m2026-04-08T21:07:39.611742Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+This image shows a scenic view of a mountainous landscape. In the foreground, there is a winding road that curves to the left, leading the viewer's eye towards the mountains. The road is flanked by tr...
+[2m2026-04-08T21:07:39.613101Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4707
+[2m2026-04-08T21:07:39.613177Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4260
+[2m2026-04-08T21:07:39.613288Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4250
+[2m2026-04-08T21:07:39.613366Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3578
+[2m2026-04-08T21:07:39.613422Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3580
+[2m2026-04-08T21:07:39.613487Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3230
+[2m2026-04-08T21:07:47.723963Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3232 name: tee
+[2m2026-04-08T21:07:47.726303Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3232 tee
+[2m2026-04-08T21:07:47.727383Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3231 name: sed
+[2m2026-04-08T21:07:47.727491Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3231 sed
+[2m2026-04-08T21:07:47.730672Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3213
+[2m2026-04-08T21:07:47.831773Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3214 name: sed
+[2m2026-04-08T21:07:47.831956Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3214 sed
+[2m2026-04-08T21:07:47.833239Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3202
+[2m2026-04-08T21:07:47.933890Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3203 name: sed
+[2m2026-04-08T21:07:47.934022Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3203 sed

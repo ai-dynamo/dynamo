@@ -1,0 +1,4 @@
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:188 Received generation request: dbcadc2d-61c6-440e-8307-dd37bf6e074d
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:209 Request dbcadc2d-61c6-440e-8307-dd37bf6e074d: prompt='a test video...', size=832x480, frames=81, steps=50
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:249 Request dbcadc2d-61c6-440e-8307-dd37bf6e074d: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:304 Request dbcadc2d-61c6-440e-8307-dd37bf6e074d completed in 0.01s

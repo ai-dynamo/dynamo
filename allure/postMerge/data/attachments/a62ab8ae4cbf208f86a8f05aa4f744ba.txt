@@ -1,0 +1,25 @@
+[2m2026-04-08T20:44:12.669404Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-08T20:44:12.669587Z[0m [32m INFO[0m [2maic.__init__[0m[2m:[0m AIC session initialized: backend=vllm, system=h200_sxm, model=Qwen/Qwen3-32B, tp=1
+[2m2026-04-08T20:44:12.669712Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-08T20:44:12.669829Z[0m [32m INFO[0m [2maic.__init__[0m[2m:[0m AIC session initialized: backend=vllm, system=h200_sxm, model=Qwen/Qwen3-32B, tp=2
+[2m2026-04-08T20:44:14.895158Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-08T20:44:14.895360Z[0m [32m INFO[0m [2maic.__init__[0m[2m:[0m AIC session initialized: backend=vllm, system=h200_sxm, model=Qwen/Qwen3-32B, tp=1
+[2m2026-04-08T20:44:14.895483Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-08T20:44:14.895594Z[0m [32m INFO[0m [2maic.__init__[0m[2m:[0m AIC session initialized: backend=vllm, system=h200_sxm, model=Qwen/Qwen3-32B, tp=2
+[2m2026-04-08T20:44:17.179158Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-08T20:44:17.179355Z[0m [32m INFO[0m [2maic.__init__[0m[2m:[0m AIC session initialized: backend=vllm, system=h200_sxm, model=Qwen/Qwen3-32B, tp=1
+[2m2026-04-08T20:44:17.179484Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-08T20:44:17.179597Z[0m [32m INFO[0m [2maic.__init__[0m[2m:[0m AIC session initialized: backend=vllm, system=h200_sxm, model=Qwen/Qwen3-32B, tp=2
+[118] 2026/04/08 20:44:18.585945 [INF] Trapped "terminated" signal
+{"level":"info","ts":"2026-04-08T20:44:18.585955Z","caller":"osutil/interrupt_unix.go:64","msg":"received signal; shutting down","signal":"terminated"}
+{"level":"info","ts":"2026-04-08T20:44:18.586006Z","caller":"embed/etcd.go:408","msg":"closing etcd server","name":"default","data-dir":"default.etcd","advertise-peer-urls":["http://localhost:2380"],"advertise-client-urls":["http://localhost:2379"]}
+[118] 2026/04/08 20:44:18.586066 [INF] Initiating Shutdown...
+[118] 2026/04/08 20:44:18.586082 [INF] Initiating JetStream Shutdown...
+[118] 2026/04/08 20:44:18.586089 [INF] JetStream Shutdown
+[118] 2026/04/08 20:44:18.586246 [INF] Server Exiting..
+{"level":"info","ts":"2026-04-08T20:44:18.586427Z","caller":"etcdserver/server.go:1546","msg":"skipped leadership transfer for single voting member cluster","local-member-id":"8e9e05c52164694d","current-leader-member-id":"8e9e05c52164694d"}
+{"level":"warn","ts":"2026-04-08T20:44:18.586513Z","caller":"embed/serve.go:179","msg":"stopping insecure grpc server due to error","error":"accept tcp 127.0.0.1:2379: use of closed network connection"}
+{"level":"warn","ts":"2026-04-08T20:44:18.586544Z","caller":"embed/serve.go:181","msg":"stopped insecure grpc server due to error","error":"accept tcp 127.0.0.1:2379: use of closed network connection"}
+{"level":"info","ts":"2026-04-08T20:44:18.588660Z","caller":"embed/etcd.go:613","msg":"stopping serving peer traffic","address":"127.0.0.1:2380"}
+{"level":"info","ts":"2026-04-08T20:44:18.588733Z","caller":"embed/etcd.go:618","msg":"stopped serving peer traffic","address":"127.0.0.1:2380"}
+{"level":"info","ts":"2026-04-08T20:44:18.588743Z","caller":"embed/etcd.go:410","msg":"closed etcd server","name":"default","data-dir":"default.etcd","advertise-peer-urls":["http://localhost:2380"],"advertise-client-urls":["http://localhost:2379"]}

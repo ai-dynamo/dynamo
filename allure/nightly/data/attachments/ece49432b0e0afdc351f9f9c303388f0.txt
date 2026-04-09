@@ -1,0 +1,171 @@
+[2m2026-04-08T21:22:45.868200Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4259 in /workspace
+[2m2026-04-08T21:22:45.869273Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4259
+[2m2026-04-08T21:22:45.969818Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4259
+[2m2026-04-08T21:22:45.969950Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T21:22:45.971771Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T21:22:45.972495Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2385 --advertise-client-urls http://0.0.0.0:2385 --listen-peer-urls http://0.0.0.0:2386 --initial-advertise-peer-urls http://localhost:2386 --initial-cluster default=http://localhost:2386 --data-dir /tmp/etcd_4wrspob2 in /workspace
+[2m2026-04-08T21:22:45.973398Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2385
+[2m2026-04-08T21:22:46.073835Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2385
+[2m2026-04-08T21:22:46.077926Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting aggregated_logprobs test_deployment
+[2m2026-04-08T21:22:46.078005Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-0.6B
+[2m2026-04-08T21:22:46.078057Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg.sh
+[2m2026-04-08T21:22:46.078250Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg.sh in /workspace/examples/backends/vllm
+[2m2026-04-08T21:22:46.079582Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8098/v1/models
+[2m2026-04-08T21:22:47.058967Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T21:22:47.059469Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2444"]
+[2m2026-04-08T21:22:52.060704Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T21:22:52.061210Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2444"]
+[2m2026-04-08T21:22:57.062374Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T21:22:57.062851Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2444"]
+[2m2026-04-08T21:23:02.063993Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T21:23:02.064496Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2444"]
+[2m2026-04-08T21:23:07.065659Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T21:23:07.066387Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2444"]
+[2m2026-04-08T21:23:08.104622Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8098/v1/models (attempt=13, elapsed=21.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775683387,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T21:23:08.104860Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8098/health
+[2m2026-04-08T21:23:09.107870Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8098/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2367377654101600009,
+      "transport": {
+        "tcp": "10.1.61.128:42411/20da9d6ef9ec6709/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2367377654101600009,
+      "transport": {
+        "tcp": "10.1.61.128:42411/20da9d6ef9ec6709/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2367377654101600009,
+      "transport": {
+        "tcp": "10.1.61.128:42411/20da9d6ef9ec6709/get_perf_metrics"
+      }
+    }
+  ]
+}
+[2m2026-04-08T21:23:09.108120Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayloadWithLogprobs
+[2m2026-04-08T21:23:09.108337Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8098/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 30,
+  "temperature": 0.0,
+  "logprobs": true,
+  "top_logprobs": 3,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-08T21:23:10.981539Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=1.87s
+[2m2026-04-08T21:23:10.983462Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 3/3 expected keywords: ['AI', 'knock', 'joke']
+[2m2026-04-08T21:23:10.983712Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m ✓ Logprobs validation passed: found 30 tokens with logprobs
+[2m2026-04-08T21:23:10.983783Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it
+[2m2026-04-08T21:23:10.983888Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8098/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 30,
+  "temperature": 0.0,
+  "logprobs": true,
+  "top_logprobs": 3,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-08T21:23:11.457993Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.47s
+[2m2026-04-08T21:23:11.459770Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 3/3 expected keywords: ['AI', 'knock', 'joke']
+[2m2026-04-08T21:23:11.460018Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m ✓ Logprobs validation passed: found 30 tokens with logprobs
+[2m2026-04-08T21:23:11.460087Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it
+[2m2026-04-08T21:23:11.460144Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: CompletionPayloadWithLogprobs
+[2m2026-04-08T21:23:11.460298Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8098/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 30,
+  "temperature": 0.0,
+  "logprobs": 5,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-08T21:23:11.939634Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.48s
+[2m2026-04-08T21:23:11.941720Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 3/3 expected keywords: ['AI', 'knock', 'joke']
+[2m2026-04-08T21:23:11.942043Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m ✓ Logprobs validation passed: found 30 tokens with logprobs
+[2m2026-04-08T21:23:11.942117Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks
+[2m2026-04-08T21:23:11.942206Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8098/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 30,
+  "temperature": 0.0,
+  "logprobs": 5,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-08T21:23:12.067550Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T21:23:12.067967Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2444"]
+[2m2026-04-08T21:23:12.419641Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.48s
+[2m2026-04-08T21:23:12.421595Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 3/3 expected keywords: ['AI', 'knock', 'joke']
+[2m2026-04-08T21:23:12.421912Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m ✓ Logprobs validation passed: found 30 tokens with logprobs
+[2m2026-04-08T21:23:12.421986Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks
+[2m2026-04-08T21:23:12.422917Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12978
+[2m2026-04-08T21:23:17.068158Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T21:23:17.068891Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2444"]
+[2m2026-04-08T21:23:17.929159Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12980 name: tee
+[2m2026-04-08T21:23:17.929323Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12980 tee
+[2m2026-04-08T21:23:17.929842Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12979 name: sed
+[2m2026-04-08T21:23:17.929939Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12979 sed
+[2m2026-04-08T21:23:17.933401Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12964
+[2m2026-04-08T21:23:18.034612Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12965 name: sed
+[2m2026-04-08T21:23:18.034920Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12965 sed
+[2m2026-04-08T21:23:18.035957Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12952
+[2m2026-04-08T21:23:18.136565Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12953 name: sed
+[2m2026-04-08T21:23:18.136684Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12953 sed

@@ -1,0 +1,113 @@
+[2m2026-04-08T19:57:29.322122Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4257 in /workspace
+[2m2026-04-08T19:57:29.323335Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4257
+[2m2026-04-08T19:57:29.423828Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4257
+[2m2026-04-08T19:57:29.423980Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T19:57:29.425772Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T19:57:29.426445Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2395 --advertise-client-urls http://0.0.0.0:2395 --listen-peer-urls http://0.0.0.0:2396 --initial-advertise-peer-urls http://localhost:2396 --initial-cluster default=http://localhost:2396 --data-dir /tmp/etcd_rsrbo12d in /workspace
+[2m2026-04-08T19:57:29.427427Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2395
+[2m2026-04-08T19:57:29.528203Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2395
+[2m2026-04-08T19:57:29.530152Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8002 --migration-limit 3 in /workspace
+[2m2026-04-08T19:57:29.531533Z[0m [32m INFO[0m [2mtest_trtllm.test_request_migration_trtllm_aggregated[0m[2m:[0m Frontend started successfully
+[2m2026-04-08T19:57:29.532447Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill_and_decode --max-seq-len 8192 --max-num-tokens 8192 --free-gpu-memory-fraction 0.15 in /workspace
+[2m2026-04-08T19:57:29.533819Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:9141/health
+[2m2026-04-08T19:57:49.564119Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:9141/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T19:58:09.598797Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:9141/health (status code 503) (attempt=41, elapsed=40.1s)
+[2m2026-04-08T19:58:13.605685Z[0m [32m INFO[0m [2mtest_trtllm.is_ready[0m[2m:[0m worker1 status is ready
+[2m2026-04-08T19:58:13.605848Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:9141/health (attempt=45, elapsed=44.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 29,
+    "nanos": 293988206
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T19:58:13.605912Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8002/v1/models
+[2m2026-04-08T19:58:14.607450Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8002/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775678293,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T19:58:14.607811Z[0m [32m INFO[0m [2mtest_trtllm.test_request_migration_trtllm_aggregated[0m[2m:[0m Worker 1 PID: 2499
+[2m2026-04-08T19:58:14.608690Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill_and_decode --max-seq-len 8192 --max-num-tokens 8192 --free-gpu-memory-fraction 0.15 in /workspace
+[2m2026-04-08T19:58:14.610125Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:9189/health
+[2m2026-04-08T19:58:34.639143Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:9189/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T19:58:54.674745Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:9189/health (status code 503) (attempt=41, elapsed=40.1s)
+[2m2026-04-08T19:58:57.680022Z[0m [32m INFO[0m [2mtest_trtllm.is_ready[0m[2m:[0m worker2 status is ready
+[2m2026-04-08T19:58:57.680181Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:9189/health (attempt=44, elapsed=43.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 28,
+    "nanos": 471234732
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T19:58:57.680249Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8002/v1/models
+[2m2026-04-08T19:58:58.681593Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8002/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775678337,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T19:58:58.681871Z[0m [32m INFO[0m [2mtest_trtllm.test_request_migration_trtllm_aggregated[0m[2m:[0m Worker 2 PID: 2813
+[2m2026-04-08T19:58:58.682102Z[0m [32m INFO[0m [2mutils.send_request[0m[2m:[0m Sending chat completion request (stream=True) with prompt: 'Tell me a long long long story about yourself?...'
+[2m2026-04-08T19:58:58.685854Z[0m [32m INFO[0m [2mutils.send_request[0m[2m:[0m Received response with status code: 200
+[2m2026-04-08T19:58:58.693825Z[0m [32m INFO[0m [2mutils.determine_request_receiving_worker[0m[2m:[0m Request was received by Worker 2
+[2m2026-04-08T19:58:58.693968Z[0m [32m INFO[0m [2mutils.run_migration_test[0m[2m:[0m Gracefully shutting down Worker 2 with PID 2813
+[2m2026-04-08T19:58:58.695112Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2813 name: python3
+[2m2026-04-08T19:58:58.695214Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2813 python3
+[2m2026-04-08T19:59:06.442556Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2831 name: orted
+[2m2026-04-08T19:59:06.442759Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2831 orted
+[2m2026-04-08T19:59:06.442947Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2949 name: python3
+[2m2026-04-08T19:59:06.443060Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2949 python3
+[2m2026-04-08T19:59:06.535715Z[0m [32m INFO[0m [2mutils.validate_response[0m[2m:[0m Received 854 response(s): <think>
+Okay, the user wants a long, long story about themselves. Hmm, I need to make sure it's enga...
+[2m2026-04-08T19:59:06.589757Z[0m [32m INFO[0m [2mutils.verify_migration_metrics[0m[2m:[0m Fetched metrics from http://localhost:8002/metrics
+[2m2026-04-08T19:59:06.589942Z[0m [32m INFO[0m [2mutils.verify_migration_metrics[0m[2m:[0m Migration metrics - ongoing_request: 1, new_request: 0
+[2m2026-04-08T19:59:06.590467Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2813
+[2m2026-04-08T19:59:06.591262Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2815 name: tee
+[2m2026-04-08T19:59:06.591358Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2815 tee
+[2m2026-04-08T19:59:06.591973Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2814 name: sed
+[2m2026-04-08T19:59:06.592065Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2814 sed
+[2m2026-04-08T19:59:06.592974Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2536
+[2m2026-04-08T19:59:06.593049Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2499
+[2m2026-04-08T19:59:06.593108Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2703
+[2m2026-04-08T19:59:14.702801Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2499 name: python3
+[2m2026-04-08T19:59:14.702989Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2499 python3
+[2m2026-04-08T19:59:14.876216Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2501 name: tee
+[2m2026-04-08T19:59:14.876380Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2501 tee
+[2m2026-04-08T19:59:14.876944Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2500 name: sed
+[2m2026-04-08T19:59:14.877039Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2500 sed
+[2m2026-04-08T19:59:14.877547Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2496
+[2m2026-04-08T19:59:20.284227Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2498 name: tee
+[2m2026-04-08T19:59:20.284403Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2498 tee
+[2m2026-04-08T19:59:20.284942Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2497 name: sed
+[2m2026-04-08T19:59:20.285051Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2497 sed
+[2m2026-04-08T19:59:20.288066Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2481
+[2m2026-04-08T19:59:20.388839Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2482 name: sed
+[2m2026-04-08T19:59:20.389004Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2482 sed
+[2m2026-04-08T19:59:20.389933Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2468
+[2m2026-04-08T19:59:20.490948Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2469 name: sed
+[2m2026-04-08T19:59:20.491153Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2469 sed

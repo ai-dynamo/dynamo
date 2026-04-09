@@ -1,0 +1,24 @@
+[2m2026-04-09T01:57:05.680794Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 3 models needed for collected tests
+Models: {'Qwen/Qwen3-0.6B', 'Qwen/Qwen3-VL-2B-Instruct', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers'}
+[2m2026-04-09T01:57:05.680906Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-09T01:57:05.680958Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+[2m2026-04-09T01:57:05.853594Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen3-0.6B: 401 Client Error. (Request ID: Root=1-69d70771-20a07ff558d8c47c0f9ebb4b;1e0a37ad-7a5d-46d2-934f-9287ada05db9)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+[2m2026-04-09T01:57:05.853723Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-09T01:57:05.952856Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen3-VL-2B-Instruct: 401 Client Error. (Request ID: Root=1-69d70771-06cbbf2b019997c66142de75;6efbf104-320e-4610-8520-d3d39b2222b4)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-VL-2B-Instruct/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+[2m2026-04-09T01:57:05.952954Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+[2m2026-04-09T01:57:06.049515Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Wan-AI/Wan2.1-T2V-1.3B-Diffusers: 401 Client Error. (Request ID: Root=1-69d70772-47a6b71516495b1169d71957;c4ea3b90-2407-4bd5-9215-bcb32714d908)
+
+Repository Not Found for url: https://huggingface.co/api/models/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired

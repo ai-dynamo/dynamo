@@ -1,0 +1,1 @@
+{"id":"bfe1f991fd66517942edbf1959e8a8f6","fullName":"tests.serve.test_trtllm#test_deployment","name":"test_deployment[disaggregated_logprobs-2]","status":"broken","testResultsByEnv":{"trtllm-amd64":"01f453fd032d8c9f89a4dff2ed591cc3","default":"f83d7952b17906611a855aef292ceac0"}}

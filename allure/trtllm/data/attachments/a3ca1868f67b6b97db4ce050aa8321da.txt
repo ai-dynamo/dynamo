@@ -1,0 +1,25 @@
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10005
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10005 "POST /v1/chat/completions HTTP/1.1" 200 484
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10005
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10005 "POST /v1/chat/completions HTTP/1.1" 200 552
+INFO     FrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 9399
+INFO     FrontendProcess:managed_process.py:31 Terminating PID: 9401 name: tee
+INFO     FrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 9401 tee
+INFO     FrontendProcess:managed_process.py:31 Terminating PID: 9400 name: sed
+INFO     FrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 9400 sed
+INFO     VLLMMMRouterWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 9272
+INFO     VLLMMMRouterWorkerProcess:managed_process.py:31 Terminating PID: 9274 name: tee
+INFO     VLLMMMRouterWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 9274 tee
+INFO     VLLMMMRouterWorkerProcess:managed_process.py:31 Terminating PID: 9273 name: sed
+INFO     VLLMMMRouterWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 9273 sed
+INFO     VLLMWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 8897
+INFO     VLLMWorkerProcess:managed_process.py:31 Terminating PID: 8899 name: tee
+INFO     VLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 8899 tee
+INFO     VLLMWorkerProcess:managed_process.py:31 Terminating PID: 8898 name: sed
+INFO     VLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 8898 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 8884
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 8885 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 8885 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 8871
+INFO     NatsServer:managed_process.py:31 Terminating PID: 8872 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 8872 sed

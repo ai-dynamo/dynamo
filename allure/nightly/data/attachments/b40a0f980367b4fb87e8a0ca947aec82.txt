@@ -1,0 +1,161 @@
+[2m2026-04-08T19:14:15.273262Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4313 in /workspace
+[2m2026-04-08T19:14:15.274289Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4313
+[2m2026-04-08T19:14:15.374897Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4313
+[2m2026-04-08T19:14:15.375176Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T19:14:15.377187Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T19:14:15.377913Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2475 --advertise-client-urls http://0.0.0.0:2475 --listen-peer-urls http://0.0.0.0:2476 --initial-advertise-peer-urls http://localhost:2476 --initial-cluster default=http://localhost:2476 --data-dir /tmp/etcd_a3jkhlqk in /workspace
+[2m2026-04-08T19:14:15.378766Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2475
+[2m2026-04-08T19:14:15.479617Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2475
+[2m2026-04-08T19:14:15.483854Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting guided_decoding test_deployment
+[2m2026-04-08T19:14:15.483928Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-0.6B
+[2m2026-04-08T19:14:15.483977Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg.sh
+[2m2026-04-08T19:14:15.484161Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg.sh in /workspace/examples/backends/vllm
+[2m2026-04-08T19:14:15.485697Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8035/v1/models
+[2m2026-04-08T19:14:37.510531Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8035/v1/models (attempt=13, elapsed=21.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775675676,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T19:14:37.510712Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8035/health
+[2m2026-04-08T19:14:38.513153Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8035/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 1823849472099410953,
+      "transport": {
+        "tcp": "10.1.73.255:35349/194f9d6e8444e409/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 1823849472099410953,
+      "transport": {
+        "tcp": "10.1.73.255:35349/194f9d6e8444e409/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 1823849472099410953,
+      "transport": {
+        "tcp": "10.1.73.255:35349/194f9d6e8444e409/get_perf_metrics"
+      }
+    }
+  ]
+}
+[2m2026-04-08T19:14:38.513472Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-08T19:14:38.513780Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8035/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Generate a person with name and age"
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "guided_json": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "age": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "name",
+      "age"
+    ]
+  },
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-08T19:14:39.715851Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=1.20s
+[2m2026-04-08T19:14:39.716178Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/2 expected keywords: ['"name"', '"age"']
+[2m2026-04-08T19:14:39.716231Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+{"name": "Lila", "age": 25}
+[2m2026-04-08T19:14:39.716283Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-08T19:14:39.716441Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8035/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Generate a color name (red, blue, or green)"
+    }
+  ],
+  "max_tokens": 20,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "guided_regex": "(red|blue|green)",
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-08T19:14:39.782731Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.07s
+[2m2026-04-08T19:14:39.783172Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/3 expected keywords: ['green']
+[2m2026-04-08T19:14:39.783233Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+green
+[2m2026-04-08T19:14:39.783286Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-08T19:14:39.783462Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8035/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Generate a color name (red, blue, or green)"
+    }
+  ],
+  "max_tokens": 20,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "guided_choice": [
+    "red",
+    "blue",
+    "green"
+  ],
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-08T19:14:39.850012Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.07s
+[2m2026-04-08T19:14:39.850395Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/3 expected keywords: ['green']
+[2m2026-04-08T19:14:39.850452Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+green
+[2m2026-04-08T19:14:39.851297Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 9687
+[2m2026-04-08T19:14:45.257391Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 9689 name: tee
+[2m2026-04-08T19:14:45.257543Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 9689 tee
+[2m2026-04-08T19:14:45.257986Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 9688 name: sed
+[2m2026-04-08T19:14:45.258076Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 9688 sed
+[2m2026-04-08T19:14:45.261264Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 9674
+[2m2026-04-08T19:14:45.362258Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 9675 name: sed
+[2m2026-04-08T19:14:45.362361Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 9675 sed
+[2m2026-04-08T19:14:45.363201Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 9662
+[2m2026-04-08T19:14:45.464091Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 9663 name: sed
+[2m2026-04-08T19:14:45.464247Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 9663 sed

@@ -1,0 +1,61 @@
+[2m2026-04-08T18:43:30.152744Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4286 in /workspace
+[2m2026-04-08T18:43:30.153759Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4286
+[2m2026-04-08T18:43:30.254465Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4286
+[2m2026-04-08T18:43:30.254740Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:43:30.256745Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:43:30.257403Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2425 --advertise-client-urls http://0.0.0.0:2425 --listen-peer-urls http://0.0.0.0:2426 --initial-advertise-peer-urls http://localhost:2426 --initial-cluster default=http://localhost:2426 --data-dir /tmp/etcd__xn69f39 in /workspace
+[2m2026-04-08T18:43:30.258263Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2425
+[2m2026-04-08T18:43:30.358993Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2425
+[2m2026-04-08T18:43:30.363182Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8067 --migration-limit 0 in /workspace
+[2m2026-04-08T18:43:30.364351Z[0m [32m INFO[0m [2mtest_vllm.start_services[0m[2m:[0m Frontend started for tests
+[2m2026-04-08T18:43:30.364652Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model openai/gpt-oss-20b --max-model-len 32768 --dyn-tool-call-parser harmony --dyn-reasoning-parser gpt_oss --max-model-len 32768 in /workspace
+[2m2026-04-08T18:43:30.365836Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8067/v1/models
+[2m2026-04-08T18:43:52.391817Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8067/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T18:44:12.412747Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8067/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+[2m2026-04-08T18:44:14.415605Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8067/v1/models (attempt=24, elapsed=43.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "openai/gpt-oss-20b",
+      "object": "model",
+      "created": 1775673853,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T18:44:14.415834Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8138/health
+[2m2026-04-08T18:44:14.417850Z[0m [32m INFO[0m [2mtest_vllm.is_ready[0m[2m:[0m vllm-worker status is ready
+[2m2026-04-08T18:44:14.417948Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8138/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 37,
+    "nanos": 43359048
+  },
+  "endpoints": {
+    "clear_kv_blocks": "ready",
+    "generate": "ready",
+    "get_perf_metrics": "ready"
+  }
+}
+[2m2026-04-08T18:44:14.418072Z[0m [32m INFO[0m [2mtest_vllm.start_services[0m[2m:[0m Vllm Worker started for tests
+[2m2026-04-08T18:44:16.890196Z[0m [32m INFO[0m [2mtest_vllm.test_tool_calling_second_round[0m[2m:[0m Tool call second round response: {'id': 'chatcmpl-11645647-c9b1-4db6-b34c-5f19dfb6c336', 'choices': [{'index': 0, 'message': {'content': 'It’s a mild day in San\u202fFrancisco—about 20\u202f°C (68\u202f°F).\u202fTypical foggy charm, with plenty of sunshine and comfortable breezes. Enjoy your day!', 'role': 'assistant', 'reasoning_content': 'We got a response: "\\"{\\\\\\"celsius\\\\\\":\\\\\\"20\\\\\\"}\\"". This is presumably a system bug: maybe the tool returned string. Let’s parse: It\'s a JSON string containing JSON. The final response seems to be JSON with celsius 20. The user asked: "What is the weather like in San Francisco today?" So answer: 20°C. Provide context: pleasant, mild. So reply in natural language.'}, 'finish_reason': 'stop'}], 'created': 1775673854, 'model': 'openai/gpt-oss-20b', 'object': 'chat.completion', 'usage': {'prompt_tokens': 234, 'completion_tokens': 142, 'total_tokens': 376}, 'nvext': {'timing': {'request_received_ms': 1775673854420, 'total_time_ms': 2469.0137769999997}}}
+[2m2026-04-08T18:44:16.891986Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 17512
+[2m2026-04-08T18:44:18.294733Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 17514 name: tee
+[2m2026-04-08T18:44:18.294897Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 17514 tee
+[2m2026-04-08T18:44:18.295417Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 17513 name: sed
+[2m2026-04-08T18:44:18.295509Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 17513 sed
+[2m2026-04-08T18:44:18.295977Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 17509
+[2m2026-04-08T18:44:23.802889Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 17511 name: tee
+[2m2026-04-08T18:44:23.803037Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 17511 tee
+[2m2026-04-08T18:44:23.803439Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 17510 name: sed
+[2m2026-04-08T18:44:23.803527Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 17510 sed
+[2m2026-04-08T18:44:23.805748Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 17495
+[2m2026-04-08T18:44:23.906700Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 17496 name: sed
+[2m2026-04-08T18:44:23.906802Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 17496 sed
+[2m2026-04-08T18:44:23.907567Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 17483
+[2m2026-04-08T18:44:24.008938Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 17484 name: sed
+[2m2026-04-08T18:44:24.009043Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 17484 sed

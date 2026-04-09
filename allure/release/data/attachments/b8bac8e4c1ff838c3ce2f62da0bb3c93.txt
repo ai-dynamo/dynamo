@@ -1,0 +1,729 @@
+[PYTHON] [2m2026-04-08T18:09:32.548726Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
+[PYTHON] [2m2026-04-08T18:09:32.550789Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2379)
+[PYTHON] [2m2026-04-08T18:09:32.557005Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.23.133 [3mport[0m[2m=[0mOS-assigned
+[PYTHON] [2m2026-04-08T18:09:32.561445Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8000"
+[PYTHON] [2m2026-04-08T18:09:33.287442Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+[PYTHON3]   Overriding a previously registered kernel for the same operator and the same dispatch key
+[PYTHON3]   operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+[PYTHON3]     registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922
+[PYTHON3]   dispatch key: ADInplaceOrView
+[PYTHON3]   previous kernel: no debug info
+[PYTHON3]        new kernel: registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+[PYTHON3]   self.m.impl(
+[PYTHON] [2m2026-04-08T18:09:35.289593Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:09:37.291495Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:36: UserWarning: transformers version 4.57.3 is incompatible with nvidia-modelopt and may cause issues. Please install recommended version with `pip install nvidia-modelopt[hf]` if working with HF models.
+[PYTHON3]   _warnings.warn(
+[PYTHON] [2m2026-04-08T18:09:39.293324Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:09:41.295175Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:09:43.297000Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] 🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[PYTHON3] 🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[PYTHON3] 🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[PYTHON3] [TensorRT-LLM] TensorRT LLM version: 1.3.0rc9
+[PYTHON3] [2m2026-04-08T18:09:44.943646Z[0m [33m WARN[0m [2mdynamo_runtime::config[0m[2m:[0m DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is deprecated and no longer used. System health is now determined by endpoints that register with health check payloads. Please update your configuration to register health check payloads directly on endpoints.
+[PYTHON3] [2m2026-04-08T18:09:44.945315Z[0m [34mDEBUG[0m [2mdynamo_runtime::runtime[0m[2m:[0m Initialized compute pool with 8 threads
+[PYTHON3] [2m2026-04-08T18:09:44.945326Z[0m [34mDEBUG[0m [2mdynamo_runtime::runtime[0m[2m:[0m Initialized block_in_place permits: 15 (from 16 worker threads)
+[PYTHON3] [2m2026-04-08T18:09:44.945347Z[0m [33m WARN[0m [2mdynamo_runtime::config[0m[2m:[0m DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS is deprecated and no longer used. System health is now determined by endpoints that register with health check payloads. Please update your configuration to register health check payloads directly on endpoints.
+[PYTHON3] [2m2026-04-08T18:09:44.945570Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2379)
+[PYTHON3] [2m2026-04-08T18:09:44.948442Z[0m [34mDEBUG[0m [2mdynamo_runtime::transports::etcd::lease[0m[2m:[0m Established keep-alive stream [3mlease_id[0m[2m=[0m7587894044185635593
+[PYTHON3] [2m2026-04-08T18:09:44.948586Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.23.133 [3mport[0m[2m=[0mOS-assigned
+[PYTHON3] [2m2026-04-08T18:09:44.949091Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:9345
+[PYTHON3] [2m2026-04-08T18:09:44.949180Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:9345
+[PYTHON3] [2m2026-04-08T18:09:44.949202Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:9345
+[PYTHON3] [2m2026-04-08T18:09:44.949339Z[0m [32m INFO[0m [2mgraceful_shutdown.install_signal_handlers[0m[2m:[0m Signal handlers set up for graceful shutdown (discovery unregister + grace period)
+[PYTHON3] [2m2026-04-08T18:09:44.949426Z[0m [32m INFO[0m [2mmain.worker[0m[2m:[0m Initializing the worker with config: Config(allowed_local_media_path='', attn_backend='VANILLA', component='tensorrt_llm', connector=[], custom_jinja_template=None, default_guidance_scale=5.0, default_height=480, default_num_frames=81, default_num_inference_steps=50, default_width=832, disable_request_abort=True, disable_torch_compile=False, disaggregation_mode=<DisaggregationMode.AGGREGATED: 'prefill_and_decode'>, discovery_backend='etcd', dit_cfg_size=1, dit_dp_size=1, dit_fsdp_size=1, dit_ring_size=1, dit_tp_size=1, dit_ulysses_size=1, dump_config_to=None, durable_kv_events=False, dyn_reasoning_parser=None, dyn_tool_call_parser=None, enable_async_cpu_offload=False, enable_attention_dp=False, enable_cuda_graph=False, enable_fullgraph=False, enable_layerwise_nvtx_marker=False, enable_local_indexer=True, enable_teacache=False, encode_endpoint='', endpoint='generate', endpoint_types='chat,completions', event_plane='nats', exclude_tools_when_tool_choice_none=True, expert_parallel_size=None, extra_engine_args='/workspace/tests/basic/autodeploy_engine_config.yaml', free_gpu_memory_fraction=0.9, fuse_qkv=True, gpus_per_node=None, guided_decoding_backend=None, kv_block_size=32, max_batch_size=2048, max_beam_width=1, max_file_size_mb=50, max_num_tokens=8192, max_seq_len=None, media_output_fs_url='file:///tmp/dynamo_media', media_output_http_url=None, modality=<Modality.TEXT: 'text'>, model='Qwen/Qwen3-0.6B', multimodal_embedding_cache_capacity_gb=0, namespace='dynamo', output_modalities=['text'], override_engine_args='', pipeline_parallel_size=1, publish_events_and_metrics=False, quant_algo=None, quant_dynamic=True, request_plane='tcp', revision=None, served_model_name='Qwen/Qwen3-0.6B', skip_components='', skip_warmup=False, teacache_thresh=0.2, teacache_use_ret_steps=True, tensor_parallel_size=1, torch_dtype='bfloat16', use_kv_events=False)
+[PYTHON3] [2m2026-04-08T18:09:44.949461Z[0m [32m INFO[0m [2m__init__.init_worker[0m[2m:[0m Initializing worker with modality=Modality.TEXT
+[PYTHON3] [2m2026-04-08T18:09:44.950537Z[0m [32m INFO[0m [2m__init__[0m[2m:[0m Loaded nixl API module: <module 'nixl_cu13._api' from '/opt/dynamo/venv/lib/python3.12/site-packages/nixl_cu13/_api.py'>
+[PYTHON3] [2m2026-04-08T18:09:44.953757Z[0m [33m WARN[0m [2mconsolidator_config.should_enable_consolidator[0m[2m:[0m KV Event Consolidator is not enabled: kv_connector_config is not a dict
+[PYTHON3] [2m2026-04-08T18:09:44.953875Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m TensorRT-LLM engine args: {'model': 'Qwen/Qwen3-0.6B', 'scheduler_config': SchedulerConfig(capacity_scheduler_policy=<CapacitySchedulerPolicy.GUARANTEED_NO_EVICT: 'GUARANTEED_NO_EVICT'>, context_chunking_policy=None, dynamic_batch_config=DynamicBatchConfig(enable_batch_size_tuning=True, enable_max_num_tokens_tuning=False, dynamic_batch_moving_average_window=128), waiting_queue_policy=<WaitingQueuePolicy.FCFS: 'fcfs'>, use_python_scheduler=False), 'tensor_parallel_size': 1, 'pipeline_parallel_size': 1, 'moe_expert_parallel_size': None, 'enable_attention_dp': False, 'backend': '_autodeploy', 'kv_cache_config': KvCacheConfig(enable_block_reuse=True, max_tokens=8192, max_attention_window=None, sink_token_length=None, free_gpu_memory_fraction=0.8, host_cache_size=None, onboard_blocks=True, cross_kv_cache_fraction=None, secondary_offload_min_priority=None, event_buffer_max_size=0, attention_dp_events_gather_period_ms=5, enable_partial_reuse=False, copy_on_partial_reuse=True, use_uvm=False, max_gpu_total_bytes=0, dtype='auto', mamba_ssm_cache_dtype='auto', mamba_ssm_stochastic_rounding=False, mamba_ssm_philox_rounds=10, tokens_per_block=32, use_kv_cache_manager_v2=False, max_util_for_resume=0.95), 'gpus_per_node': 1, 'max_num_tokens': 8192, 'max_seq_len': None, 'max_beam_width': 1, 'max_batch_size': 2048, 'return_perf_metrics': False, 'enable_iter_perf_stats': False, 'kv_connector_config': None, 'compile_backend': 'torch-cudagraph'}
+[PYTHON3] [2m2026-04-08T18:09:45.266388Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Registering model with endpoint types: chat,completions
+[PYTHON3] [2m2026-04-08T18:09:45.266450Z[0m [32m INFO[0m [2mllm_worker.init_llm_worker[0m[2m:[0m Initializing NIXL Connect.
+[PYTHON3] [2m2026-04-08T18:09:45.266526Z[0m [34mDEBUG[0m [2m__init__.__init__[0m[2m:[0m dynamo.nixl_connect.Connector: Created Connector(worker_id='736f1fe8938b427da35e14943f926238', hostname=prod-tester-amd-gpu-v1-phg7c-runner-nzng6).
+[PYTHON] [2m2026-04-08T18:09:45.299295Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [2m2026-04-08T18:09:45.538252Z[0m [34mDEBUG[0m [2mconfig_dumper._get_package_version[0m[2m:[0m sglang not installed
+[PYTHON3] [2m2026-04-08T18:09:45.539089Z[0m [34mDEBUG[0m [2mconfig_dumper._get_package_version[0m[2m:[0m vllm not installed
+[PYTHON3] [2m2026-04-08T18:09:45.539549Z[0m [34mDEBUG[0m [2mconfig_dumper.dump_config[0m[2m:[0m CONFIG_DUMP: {"config":{"dynamo_args":{"allowed_local_media_path":"","attn_backend":"VANILLA","component":"tensorrt_llm","connector":[],"custom_jinja_template":null,"default_guidance_scale":5.0,"default_height":480,"default_num_frames":81,"default_num_inference_steps":50,"default_width":832,"disable_request_abort":true,"disable_torch_compile":false,"disaggregation_mode":"DisaggregationMode.AGGREGATED","discovery_backend":"etcd","dit_cfg_size":1,"dit_dp_size":1,"dit_fsdp_size":1,"dit_ring_size":1,"dit_tp_size":1,"dit_ulysses_size":1,"dump_config_to":null,"durable_kv_events":false,"dyn_reasoning_parser":null,"dyn_tool_call_parser":null,"enable_async_cpu_offload":false,"enable_attention_dp":false,"enable_cuda_graph":false,"enable_fullgraph":false,"enable_layerwise_nvtx_marker":false,"enable_local_indexer":true,"enable_teacache":false,"encode_endpoint":"","endpoint":"generate","endpoint_types":"chat,completions","event_plane":"nats","exclude_tools_when_tool_choice_none":true,"expert_parallel_size":null,"extra_engine_args":"/workspace/tests/basic/autodeploy_engine_config.yaml","free_gpu_memory_fraction":0.9,"fuse_qkv":true,"gpus_per_node":null,"guided_decoding_backend":null,"kv_block_size":32,"max_batch_size":2048,"max_beam_width":1,"max_file_size_mb":50,"max_num_tokens":8192,"max_seq_len":null,"media_output_fs_url":"file:///tmp/dynamo_media","media_output_http_url":null,"modality":"Modality.TEXT","model":"Qwen/Qwen3-0.6B","multimodal_embedding_cache_capacity_gb":0,"namespace":"dynamo","output_modalities":["text"],"override_engine_args":"","pipeline_parallel_size":1,"publish_events_and_metrics":false,"quant_algo":null,"quant_dynamic":true,"request_plane":"tcp","revision":null,"served_model_name":"Qwen/Qwen3-0.6B","skip_components":"","skip_warmup":false,"teacache_thresh":0.2,"teacache_use_ret_steps":true,"tensor_parallel_size":1,"torch_dtype":"bfloat16","use_kv_events":false},"engine_args":{"backend":"_autodeploy","compile_backend":"torch-cudagraph","enable_attention_dp":false,"enable_iter_perf_stats":false,"gpus_per_node":1,"kv_cache_config":{"attention_dp_events_gather_period_ms":5,"copy_on_partial_reuse":true,"cross_kv_cache_fraction":null,"dtype":"auto","enable_block_reuse":true,"enable_partial_reuse":false,"event_buffer_max_size":0,"free_gpu_memory_fraction":0.8,"host_cache_size":null,"mamba_ssm_cache_dtype":"auto","mamba_ssm_philox_rounds":10,"mamba_ssm_stochastic_rounding":false,"max_attention_window":null,"max_gpu_total_bytes":0,"max_tokens":8192,"max_util_for_resume":0.95,"onboard_blocks":true,"secondary_offload_min_priority":null,"sink_token_length":null,"tokens_per_block":32,"use_kv_cache_manager_v2":false,"use_uvm":false},"kv_connector_config":null,"max_batch_size":2048,"max_beam_width":1,"max_num_tokens":8192,"max_seq_len":null,"model":"Qwen/Qwen3-0.6B","moe_expert_parallel_size":null,"pipeline_parallel_size":1,"return_perf_metrics":false,"scheduler_config":{"capacity_scheduler_policy":"GUARANTEED_NO_EVICT","context_chunking_policy":null,"dynamic_batch_config":{"dynamic_batch_moving_average_window":128,"enable_batch_size_tuning":true,"enable_max_num_tokens_tuning":false},"use_python_scheduler":false,"waiting_queue_policy":"fcfs"},"tensor_parallel_size":1}},"dynamo_version":"1.0.0","environment":{"CUDA_ARCH_LIST":"7.5 8.0 8.6 9.0 10.0 12.0","CUDA_COMPONENT_LIST":"cccl crt nvrtc driver-dev culibos-dev cudart cudart-dev nvcc","CUDA_DRIVER_VERSION":"590.44.01","CUDA_HOME":"/usr/local/cuda","CUDA_VERSION":"13.1.0.036","DYN_EVENT_PLANE":"nats","DYN_KVBM_CPU_CACHE_GB":"20","DYN_KVBM_DISK_CACHE_GB":"60","DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS":"1200","DYN_LOG":"debug","DYN_SYSTEM_PORT":"9345","DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS":"[\"generate\"]","HF_HUB_OFFLINE":"1","HF_TOKEN":"<REDACTED>","NCCL_NET_PLUGIN":"ofi","NCCL_TUNER_PLUGIN":"ofi","NCCL_VERSION":"2.28.9+cuda13.0","NIXL_LIB_DIR":"/opt/nvidia/nvda_nixl/lib64","NIXL_PLUGIN_DIR":"/opt/nvidia/nvda_nixl/lib64/plugins","NIXL_PREFIX":"/opt/nvidia/nvda_nixl","NVIDIA_CTK_LIBCUDA_DIR":"/usr/lib64","NVIDIA_DRIVER_CAPABILITIES":"video,compute,utility","NVIDIA_PRODUCT_NAME":"CUDA","NVIDIA_REQUIRE_CUDA":"cuda>=9.0","NVIDIA_REQUIRE_JETPACK_HOST_MOUNTS":"","NVIDIA_VISIBLE_DEVICES":"void","OMPI_MCA_coll_hcoll_enable":"0","OMPI_MCA_coll_ucc_enable":"0","SGLANG_LOGGING_CONFIG_PATH":"/tmp/tmpfwcn83pd.json","VLLM_CONFIGURE_LOGGING":"1"},"gpu_info":{"count":1,"gpus":[{"board_part_number":"900-2G193-A800-001","driver_version":"580.105.08","gpu_part_number":"27B8-895-A1","memory_total":"23034 MiB","name":"NVIDIA L4"}]},"installed_packages":{"DataProperty":"1.1.0","Flask":"3.1.3","ImageIO":"2.37.3","Jinja2":"3.1.6","Mako":"1.3.10","Markdown":"3.10.2","MarkupSafe":"3.0.3","PuLP":"3.3.0","PyYAML":"6.0.3","Pygments":"2.20.0","SQLAlchemy":"2.0.49","StrEnum":"0.4.15","Werkzeug":"3.1.8","absl-py":"2.4.0","accelerate":"1.13.0","aenum":"3.1.17","ai-dynamo":"1.0.0","ai-dynamo-runtime":"1.0.0","aiconfigurator":"0.8.0","aiofiles":"24.1.0","aiohappyeyeballs":"2.6.1","aiohttp":"3.13.5","aiosignal":"1.4.0","aiperf":"0.6.0","alembic":"1.18.4","allure-pytest":"2.15.3","allure-python-commons":"2.15.3","annotated-doc":"0.0.4","annotated-types":"0.7.0","antlr4-python3-runtime":"4.9.3","anyio":"4.13.0","apache-tvm-ffi":"0.1.6","attrs":"26.1.0","autocommand":"2.2.2","backoff":"2.2.1","backports.tarfile":"1.2.0","blake3":"1.0.8","blinker":"1.9.0","blobfile":"3.2.0","bokeh":"3.9.0","boto3":"1.42.4","boto3-stubs":"1.42.9","botocore":"1.42.85","botocore-stubs":"1.42.41","brotli":"1.2.0","build":"1.4.2","cachetools":"7.0.5","certifi":"2026.2.25","cffi":"2.0.0","chardet":"5.2.0","charset-normalizer":"3.4.7","choreographer":"1.2.1","click":"8.3.2","click-option-group":"0.5.9","colored":"2.3.2","colorlog":"6.10.1","contourpy":"1.3.3","coverage":"7.13.1","cramjam":"2.11.0","cryptography":"46.0.7","cuda-bindings":"13.0.3","cuda-core":"0.6.0","cuda-pathfinder":"1.5.2","cuda-python":"13.0.2","cuda-tile":"1.2.0","cuda-toolkit":"13.2.0","cupy-cuda13x":"14.0.1","cycler":"0.12.1","cyclopts":"4.10.1","dash":"3.1.1","dash-bootstrap-components":"2.0.4","data-generator":"0.1.0","datasets":"4.4.1","diffusers":"0.37.1","dill":"0.3.8","distro":"1.9.0","docstring_parser":"0.17.0","docutils":"0.22.4","durationpy":"0.10","einops":"0.8.2","etcd-sdk-python":"0.0.7","evaluate":"0.4.6","execnet":"2.1.2","fastapi":"0.120.1","fastparquet":"2026.3.0","ffmpeg-python":"0.2.0","ffmpy":"1.0.0","filelock":"3.25.1","flash_attn":"2.7.4.post1+25.12","flashinfer-python":"0.6.6","fonttools":"4.62.1","frozenlist":"1.8.0","fsspec":"2024.9.0","future":"1.0.0","genai-perf":"0.0.15","google-auth":"2.49.1","googleapis-common-protos":"1.74.0","gradio":"6.8.0","gradio_client":"2.2.0","graphviz":"0.21","greenlet":"3.4.0","groovy":"0.1.2","grpcio":"1.80.0","grpcio-tools":"1.76.0","h11":"0.16.0","h5py":"3.12.1","hf-xet":"1.4.3","httpcore":"1.0.9","httpx":"0.28.1","httpx-ws":"0.9.0","huggingface_hub":"0.36.2","idna":"3.11","imageio-ffmpeg":"0.6.0","importlib_metadata":"8.0.0","inflect":"7.3.1","iniconfig":"2.3.0","itsdangerous":"2.2.0","jaraco.collections":"5.1.0","jaraco.context":"5.3.0","jaraco.functools":"4.0.1","jaraco.text":"3.12.1","jiter":"0.13.0","jmespath":"1.0.1","jsonschema":"4.26.0","jsonschema-specifications":"2025.9.1","kaleido":"1.2.0","kiwisolver":"1.5.0","kr8s":"0.20.13","kubernetes":"32.0.1","kubernetes_asyncio":"32.0.0","kvbm":"1.0.0","lark":"1.3.1","linkify-it-py":"2.1.0","llguidance":"0.7.29","llist":"0.7.1","logistro":"2.0.1","lxml":"6.0.2","markdown-it-py":"4.0.0","matplotlib":"3.10.7","matplotlib-stubs":"0.3.11","mbstrdecoder":"1.1.4","mdit-py-plugins":"0.5.0","mdurl":"0.1.2","meson":"1.10.2","mistral_common":"1.11.0","ml_dtypes":"0.5.4","more-itertools":"10.3.0","mpi4py":"4.1.1","mpmath":"1.3.0","msgpack":"1.1.2","msgspec":"0.19.0","multidict":"6.7.1","multiprocess":"0.70.16","munch":"4.0.0","mypy":"1.18.2","mypy-boto3-s3":"1.42.85","mypy_extensions":"1.1.0","narwhals":"2.19.0","nats-py":"2.12.0","nest-asyncio":"1.6.0","networkx":"3.6.1","ninja":"1.13.0","nixl":"0.10.1","nixl-cu12":"0.10.1","nixl-cu13":"0.10.1","numexpr":"2.14.1","numpy":"2.3.5","nvidia-cuda-nvrtc":"13.2.51","nvidia-cuda-runtime":"13.2.51","nvidia-cuda-tileiras":"13.1.80","nvidia-cudnn-frontend":"1.22.0","nvidia-cutlass-dsl":"4.3.4","nvidia-cutlass-dsl-libs-base":"4.4.2","nvidia-ml-py":"13.580.65","nvidia-modelopt":"0.37.0","nvidia-nccl-cu13":"2.28.9","nvtx":"0.2.15","oauthlib":"3.3.1","omegaconf":"2.3.0","onnx":"1.19.1","onnx-ir":"0.2.0","onnx_graphsurgeon":"0.5.8","onnxscript":"0.5.4","openai":"2.30.0","openai-harmony":"0.0.4","opencv-python-headless":"4.13.0.92","opentelemetry-api":"1.38.0","opentelemetry-exporter-otlp":"1.38.0","opentelemetry-exporter-otlp-proto-common":"1.38.0","opentelemetry-exporter-otlp-proto-grpc":"1.38.0","opentelemetry-exporter-otlp-proto-http":"1.38.0","opentelemetry-proto":"1.38.0","opentelemetry-sdk":"1.38.0","opentelemetry-semantic-conventions":"0.59b0","optimum":"2.1.0","optuna":"3.6.1","ordered-set":"4.1.0","orjson":"3.10.18","packaging":"24.2","pandas":"2.3.3","partial-json-parser":"0.2.1.1.post7","patchelf":"0.17.2.4","pathspec":"1.0.4","pathvalidate":"3.3.1","patsy":"1.0.2","peft":"0.18.1","perf-analyzer":"2.59.1","pillow":"12.1.1","platformdirs":"4.2.2","plotext":"5.3.2","plotly":"6.4.0","pluggy":"1.6.0","polygraphy":"0.49.26","prettytable":"3.17.0","prometheus-fastapi-instrumentator":"7.1.0","prometheus_client":"0.23.1","propcache":"0.4.1","protobuf":"6.33.6","psutil":"7.0.0","py":"1.11.0","py-cpuinfo":"9.0.0","pyarrow":"23.0.1","pyasn1":"0.6.3","pyasn1_modules":"0.4.2","pycountry":"26.2.16","pycparser":"3.0","pycryptodomex":"3.23.0","pydantic":"2.12.5","pydantic-extra-types":"2.11.2","pydantic-settings":"2.12.0","pydantic_core":"2.41.5","pydub":"0.25.1","pyparsing":"3.3.2","pyproject_hooks":"1.2.0","pytablewriter":"1.2.1","pytest":"8.4.2","pytest-asyncio":"1.3.0","pytest-benchmark":"5.2.3","pytest-cov":"7.0.0","pytest-forked":"1.6.0","pytest-md-report":"0.7.0","pytest-mock":"3.15.1","pytest-order":"1.3.0","pytest-timeout":"2.4.0","pytest-xdist":"3.8.0","pytest_codeblocks":"0.17.0","pytest_httpserver":"1.1.3","python-box":"7.4.1","python-dateutil":"2.9.0.post0","python-dotenv":"1.2.2","python-jsonpath":"2.0.2","python-multipart":"0.0.24","pytorch-triton":"3.5.1+gitbfeb0668.nv25.12","pytz":"2026.1.post1","pyzmq":"26.4.0","referencing":"0.37.0","regex":"2026.4.4","requests":"2.32.5","requests-oauthlib":"2.0.0","responses":"0.26.0","retrying":"1.4.2","rich":"14.1.0","rich-rst":"1.3.2","rpds-py":"0.30.0","ruamel.yaml":"0.18.17","ruamel.yaml.clib":"0.2.15","s3transfer":"0.16.0","safehttpx":"0.1.7","safetensors":"0.7.0","scipy":"1.17.1","seaborn":"0.13.2","semantic-version":"2.10.0","sentencepiece":"0.2.1","setproctitle":"1.3.7","setuptools":"79.0.1","shellingham":"1.5.4","simplejson":"3.20.2","six":"1.17.0","smg-grpc-proto":"0.4.5","sniffio":"1.3.1","soundfile":"0.13.1","starlette":"0.49.3","statsmodels":"0.14.6","sympy":"1.14.0","tabledata":"1.3.4","tabulate":"0.9.0","tcolorpy":"0.1.7","tensorboard":"2.20.0","tensorboard-data-server":"0.7.2","tensorboardX":"2.6.2.2","tensorrt":"10.14.1.48","tensorrt_cu13":"10.14.1.48.post1","tensorrt_cu13_bindings":"10.14.1.48.post1","tensorrt_cu13_libs":"10.14.1.48.post1","tensorrt_llm":"1.3.0rc9","textual":"5.3.0","tiktoken":"0.12.0","tokenizers":"0.22.2","tomli":"2.0.1","tomlkit":"0.13.3","torch":"2.10.0a0+b4e4ee81d3.nv25.12","torch_c_dlpack_ext":"0.1.3","torch_tensorrt":"2.10.0a0","torchao":"0.15.0+git01374eb5","torchdata":"0.11.0","torchprofile":"0.1.0","torchtitan":"0.2.0","torchvision":"0.25.0a0+ca221243","tornado":"6.5.5","tqdm":"4.67.3","transformers":"4.57.3","triton":"3.5.1","typeguard":"4.3.0","typepy":"1.3.4","typer":"0.24.1","types-PyYAML":"6.0.12.20250915","types-aiofiles":"25.1.0.20260408","types-awscrt":"0.31.3","types-requests":"2.32.4.20250913","types-s3transfer":"0.16.0","types-tabulate":"0.10.0.20260408","typing-inspection":"0.4.2","typing_extensions":"4.12.2","tzdata":"2026.1","uc-micro-py":"2.0.0","urllib3":"2.6.3","uvicorn":"0.38.0","uvloop":"0.21.0","wcwidth":"0.6.0","websocket-client":"1.9.0","wheel":"0.45.1","wsproto":"1.3.2","xgrammar":"0.1.32","xxhash":"3.6.0","xyzservices":"2026.3.0","yarl":"1.23.0","zipp":"3.19.2"},"runtime_info":{"command_line_args":["/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/__main__.py","--model","Qwen/Qwen3-0.6B","--served-model-name","Qwen/Qwen3-0.6B","--extra-engine-args","/workspace/tests/basic/autodeploy_engine_config.yaml"],"python_executable":"/opt/dynamo/venv/bin/python3","python_version":"3.12.3 (main, Mar  3 2026, 12:15:18) [GCC 13.3.0]","python_version_info":{"major":3,"micro":3,"minor":12}},"system_info":{"architecture":["64bit",""],"hostname":"prod-tester-amd-gpu-v1-phg7c-runner-nzng6","os_name":"Linux","os_release":"6.12.58-82.121.amzn2023.x86_64","os_version":"#1 SMP PREEMPT_DYNAMIC Thu Nov 27 09:07:41 UTC 2025","platform":"Linux-6.12.58-82.121.amzn2023.x86_64-x86_64-with-glibc2.39","processor":"x86_64"},"trtllm_version":"1.3.0rc9"}
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/serve/openai_protocol.py:108: UserWarning: Field name "schema" in "ResponseFormat" shadows an attribute in parent "OpenAIBaseModel"
+[PYTHON3]   class ResponseFormat(OpenAIBaseModel):
+[PYTHON3] [2m2026-04-08T18:09:46.628227Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.backend.piping.pipe(['renderer', 'formatter', 'neato_no_op', 'quiet'])
+[PYTHON3] [2m2026-04-08T18:09:46.628652Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.backend.rendering.render(['renderer', 'formatter', 'neato_no_op', 'quiet'])
+[PYTHON3] [2m2026-04-08T18:09:46.629033Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.backend.unflattening.unflatten(['stagger', 'fanout', 'chain', 'encoding'])
+[PYTHON3] [2m2026-04-08T18:09:46.629270Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.backend.viewing.view(['quiet'])
+[PYTHON3] [2m2026-04-08T18:09:46.634057Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.quoting.quote(['is_html_string', 'is_valid_id', 'dot_keywords', 'endswith_odd_number_of_backslashes', 'escape_unescaped_quotes'])
+[PYTHON3] [2m2026-04-08T18:09:46.634195Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.quoting.a_list(['kwargs', 'attributes'])
+[PYTHON3] [2m2026-04-08T18:09:46.634309Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.quoting.attr_list(['kwargs', 'attributes'])
+[PYTHON3] [2m2026-04-08T18:09:46.634453Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.clear(['self', 'keep_attrs'])
+[PYTHON3] [2m2026-04-08T18:09:46.634503Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.__iter__(['self', 'subgraph'])
+[PYTHON3] [2m2026-04-08T18:09:46.634552Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.node(['label', '_attributes'])
+[PYTHON3] [2m2026-04-08T18:09:46.634607Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.edge(['label', '_attributes'])
+[PYTHON3] [2m2026-04-08T18:09:46.634656Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.attr(['kw', '_attributes'])
+[PYTHON3] [2m2026-04-08T18:09:46.634707Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.subgraph(['graph', 'name', 'comment', 'graph_attr', 'node_attr', 'edge_attr', 'body'])
+[PYTHON3] [2m2026-04-08T18:09:46.635374Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.piping.Pipe._pipe_legacy(['format', 'renderer', 'formatter', 'neato_no_op', 'quiet'])
+[PYTHON3] [2m2026-04-08T18:09:46.636027Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.saving.Save.save(['filename', 'directory'])
+[PYTHON3] [2m2026-04-08T18:09:46.636169Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.rendering.Render.render(['filename', 'directory', 'view', 'cleanup', 'format', 'renderer', 'formatter', 'neato_no_op', 'quiet', 'quiet_view'])
+[PYTHON3] [2m2026-04-08T18:09:46.636227Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.rendering.Render.view(['filename', 'directory', 'cleanup', 'quiet', 'quiet_view'])
+[PYTHON3] [2m2026-04-08T18:09:46.636484Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.unflattening.Unflatten.unflatten(['self', 'stagger', 'fanout', 'chain'])
+[PYTHON3] [2m2026-04-08T18:09:46.636593Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.graphs.BaseGraph.__init__(['name', 'comment', 'filename', 'directory', 'format', 'engine', 'encoding', 'graph_attr', 'node_attr', 'edge_attr', 'body', 'strict'])
+[PYTHON3] [2m2026-04-08T18:09:46.636977Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.sources.Source.from_file(['filename', 'directory', 'format', 'engine', 'encoding', 'renderer', 'formatter'])
+[PYTHON3] [2m2026-04-08T18:09:46.637087Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.sources.Source.__init__(['source', 'filename', 'directory', 'format', 'engine', 'encoding'])
+[PYTHON3] [2m2026-04-08T18:09:46.637143Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.sources.Source.save(['filename', 'directory'])
+[PYTHON3] [2m2026-04-08T18:09:46.872426Z[0m [33m WARN[0m [2mengine._warn_about_unsupported_field[0m[2m:[0m `scheduler_config` cannot be used with the `_autodeploy` backend. Ignoring.
+[PYTHON3] [2m2026-04-08T18:09:46.872478Z[0m [33m WARN[0m [2mengine._warn_about_unsupported_field[0m[2m:[0m `tensor_parallel_size` cannot be used with the `_autodeploy` backend. Ignoring.
+[PYTHON3] [2m2026-04-08T18:09:46.872499Z[0m [33m WARN[0m [2mengine._warn_about_unsupported_field[0m[2m:[0m `pipeline_parallel_size` cannot be used with the `_autodeploy` backend. Ignoring.
+[PYTHON3] [2m2026-04-08T18:09:46.872518Z[0m [33m WARN[0m [2mengine._warn_about_unsupported_field[0m[2m:[0m `enable_attention_dp` cannot be used with the `_autodeploy` backend. Ignoring.
+[PYTHON3] [04/08/2026-18:09:46] [TRT-LLM] [I] Using LLM with AutoDeploy backend
+[PYTHON3] [04/08/2026-18:09:46] [TRT-LLM] [I] neither checkpoint_format nor checkpoint_loader were provided, checkpoint_format will be set to HF.
+[PYTHON3] [04/08/2026-18:09:46] [TRT-LLM AUTO-DEPLOY] [I] Using cuda_graph_batch_sizes: [2048, 1920, 1792, 1664, 1536, 1408, 1280, 1152, 1024, 896, 768, 640, 512, 384, 256, 128, 113, 97, 81, 65, 49, 33, 17, 1]
+[PYTHON3] [04/08/2026-18:09:46] [TRT-LLM AUTO-DEPLOY] [I] Pre-fetching checkpoint directory from HF repo.
+[PYTHON3] The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is ignored.
+[PYTHON3] You are using a model of type qwen3 to instantiate a model of type . This is not supported for all configurations of models and can yield errors.
+[PYTHON3] [2m2026-04-08T18:09:47.193189Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Attempting to acquire lock 140387709613888 on /home/dynamo/.cache/huggingface/modules/_remote_code.lock
+[PYTHON3] [2m2026-04-08T18:09:47.193387Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Lock 140387709613888 acquired on /home/dynamo/.cache/huggingface/modules/_remote_code.lock
+[PYTHON3] [2m2026-04-08T18:09:47.193498Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Attempting to release lock 140387709613888 on /home/dynamo/.cache/huggingface/modules/_remote_code.lock
+[PYTHON3] [2m2026-04-08T18:09:47.193629Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Lock 140387709613888 released on /home/dynamo/.cache/huggingface/modules/_remote_code.lock
+[PYTHON3] [33;20mrank 0 using MpiPoolSession to spawn MPI processes
+[PYTHON] [2m2026-04-08T18:09:47.301080Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:09:49.302955Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [0m/opt/dynamo/venv/lib/python3.12/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+[PYTHON3]   Overriding a previously registered kernel for the same operator and the same dispatch key
+[PYTHON3]   operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+[PYTHON3]     registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922
+[PYTHON3]   dispatch key: ADInplaceOrView
+[PYTHON3]   previous kernel: no debug info
+[PYTHON3]        new kernel: registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+[PYTHON3]   self.m.impl(
+[PYTHON] [2m2026-04-08T18:09:51.304841Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:09:53.306882Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:09:55.308745Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] Multiple distributions found for package optimum. Picked distribution: optimum
+[PYTHON3] Multiple distributions found for package modelopt. Picked distribution: nvidia-modelopt
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/modelopt/torch/__init__.py:36: UserWarning: transformers version 4.57.3 is incompatible with nvidia-modelopt and may cause issues. Please install recommended version with `pip install nvidia-modelopt[hf]` if working with HF models.
+[PYTHON3]   _warnings.warn(
+[PYTHON] [2m2026-04-08T18:09:57.310575Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:09:59.312563Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:01.314438Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] 🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[PYTHON3] 🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[PYTHON3] 🚨 Config not found for parakeet. You can manually add it to HARDCODED_CONFIG_FOR_MODELS in utils/auto_docstring.py
+[PYTHON] [2m2026-04-08T18:10:03.316279Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [TensorRT-LLM] TensorRT LLM version: 1.3.0rc9
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/serve/openai_protocol.py:108: UserWarning: Field name "schema" in "ResponseFormat" shadows an attribute in parent "OpenAIBaseModel"
+[PYTHON3]   class ResponseFormat(OpenAIBaseModel):
+[PYTHON3] [2m2026-04-08T18:10:05.059425Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.backend.piping.pipe(['renderer', 'formatter', 'neato_no_op', 'quiet'])
+[PYTHON3] [2m2026-04-08T18:10:05.059928Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.backend.rendering.render(['renderer', 'formatter', 'neato_no_op', 'quiet'])
+[PYTHON3] [2m2026-04-08T18:10:05.060453Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.backend.unflattening.unflatten(['stagger', 'fanout', 'chain', 'encoding'])
+[PYTHON3] [2m2026-04-08T18:10:05.060755Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.backend.viewing.view(['quiet'])
+[PYTHON3] [2m2026-04-08T18:10:05.062886Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.quoting.quote(['is_html_string', 'is_valid_id', 'dot_keywords', 'endswith_odd_number_of_backslashes', 'escape_unescaped_quotes'])
+[PYTHON3] [2m2026-04-08T18:10:05.063030Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.quoting.a_list(['kwargs', 'attributes'])
+[PYTHON3] [2m2026-04-08T18:10:05.063165Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.quoting.attr_list(['kwargs', 'attributes'])
+[PYTHON3] [2m2026-04-08T18:10:05.063315Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.clear(['self', 'keep_attrs'])
+[PYTHON3] [2m2026-04-08T18:10:05.063379Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.__iter__(['self', 'subgraph'])
+[PYTHON3] [2m2026-04-08T18:10:05.063447Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.node(['label', '_attributes'])
+[PYTHON3] [2m2026-04-08T18:10:05.063505Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.edge(['label', '_attributes'])
+[PYTHON3] [2m2026-04-08T18:10:05.063559Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.attr(['kw', '_attributes'])
+[PYTHON3] [2m2026-04-08T18:10:05.063618Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.dot.Dot.subgraph(['graph', 'name', 'comment', 'graph_attr', 'node_attr', 'edge_attr', 'body'])
+[PYTHON3] [2m2026-04-08T18:10:05.064263Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.piping.Pipe._pipe_legacy(['format', 'renderer', 'formatter', 'neato_no_op', 'quiet'])
+[PYTHON3] [2m2026-04-08T18:10:05.064913Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.saving.Save.save(['filename', 'directory'])
+[PYTHON3] [2m2026-04-08T18:10:05.065061Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.rendering.Render.render(['filename', 'directory', 'view', 'cleanup', 'format', 'renderer', 'formatter', 'neato_no_op', 'quiet', 'quiet_view'])
+[PYTHON3] [2m2026-04-08T18:10:05.065129Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.rendering.Render.view(['filename', 'directory', 'cleanup', 'quiet', 'quiet_view'])
+[PYTHON3] [2m2026-04-08T18:10:05.065394Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.unflattening.Unflatten.unflatten(['self', 'stagger', 'fanout', 'chain'])
+[PYTHON3] [2m2026-04-08T18:10:05.065512Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.graphs.BaseGraph.__init__(['name', 'comment', 'filename', 'directory', 'format', 'engine', 'encoding', 'graph_attr', 'node_attr', 'edge_attr', 'body', 'strict'])
+[PYTHON3] [2m2026-04-08T18:10:05.065897Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.sources.Source.from_file(['filename', 'directory', 'format', 'engine', 'encoding', 'renderer', 'formatter'])
+[PYTHON3] [2m2026-04-08T18:10:05.066005Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.sources.Source.__init__(['source', 'filename', 'directory', 'format', 'engine', 'encoding'])
+[PYTHON3] [2m2026-04-08T18:10:05.066070Z[0m [34mDEBUG[0m [2m_tools.decorator[0m[2m:[0m deprecate positional args: graphviz.sources.Source.save(['filename', 'directory'])
+[PYTHON3] [TensorRT-LLM][INFO] Refreshed the MPI local session
+[PYTHON] [2m2026-04-08T18:10:05.318153Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] Initializing for: lib='OMPI', local_rank=0, world_size=1, port=57855
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] dist_mapping=<tensorrt_llm.mapping.MpiTopology object at 0x7f499fd5f740>, dist=<tensorrt_llm._torch.distributed.communicator.MPIDist object at 0x7f499fbf8800>, port=57855
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] Pre-fetching checkpoint directory from HF repo.
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [SequenceInfo:] self.max_seq_len=512, self.max_batch_size=2048, self.max_num_tokens=8192, self.max_blocks_per_seq=16, self.tokens_per_block=32
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=factory, transform=build_model] [PRE-CLEANUP] skipped (disabled)
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=factory, transform=build_model] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=factory, transform=build_model] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=factory, transform=build_model] [SUMMARY] matches=1 | time: 0.114s (pre=0.000s, apply=0.112s, post=0.002s)
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=export, transform=export_to_gm] [PRE-CLEANUP] skipped (disabled)
+[PYTHON3] [04/08/2026-18:10:05] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=export, transform=export_to_gm] [APPLY] applying transform...
+[PYTHON] [2m2026-04-08T18:10:07.320148Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:09.321949Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:11.323866Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=export, transform=export_to_gm] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=export, transform=export_to_gm] [SUMMARY] matches=1 | time: 6.402s (pre=0.000s, apply=6.402s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_noop_slice] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_noop_slice] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_noop_slice] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_noop_slice] [SUMMARY] matches=4 | time: 0.072s (pre=0.000s, apply=0.003s, post=0.070s)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_noop_add] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_noop_add] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_noop_add] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_noop_add] [SUMMARY] matches=0 | time: 0.005s (pre=0.000s, apply=0.004s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_input_constraints] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_input_constraints] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_input_constraints] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_export, transform=cleanup_input_constraints] [SUMMARY] matches=2 | time: 0.070s (pre=0.000s, apply=0.001s, post=0.069s)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_moe_pattern] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_moe_pattern] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_moe_pattern] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_moe_pattern] [SUMMARY] matches=0 | time: 0.018s (pre=0.000s, apply=0.018s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_dense_moe_pattern] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_dense_moe_pattern] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_dense_moe_pattern] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_dense_moe_pattern] [SUMMARY] matches=0 | time: 0.077s (pre=0.000s, apply=0.077s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_bmm_moe_pattern] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_bmm_moe_pattern] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_bmm_moe_pattern] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_bmm_moe_pattern] [SUMMARY] matches=0 | time: 0.088s (pre=0.000s, apply=0.018s, post=0.070s)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=split_moe_fused_for_sharding] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=split_moe_fused_for_sharding] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=split_moe_fused_for_sharding] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=split_moe_fused_for_sharding] [SUMMARY] skipped | time: 0.002s (pre=0.000s, apply=0.002s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_repeat_kv] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_repeat_kv] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:12] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_repeat_kv] [POST-CLEANUP] graph canonicalization + shape_prop
+[PYTHON] [2m2026-04-08T18:10:13.325912Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [04/08/2026-18:10:14] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_repeat_kv] [SUMMARY] matches=0 | time: 1.792s (pre=0.000s, apply=0.037s, post=1.754s)
+[PYTHON3] [04/08/2026-18:10:14] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_eager_attention] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:14] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_eager_attention] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:14] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_eager_attention] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:14] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_eager_attention] [SUMMARY] matches=0 | time: 0.249s (pre=0.000s, apply=0.249s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:14] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_sdpa_to_torch_attention] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:14] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_sdpa_to_torch_attention] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_sdpa_to_torch_attention] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_sdpa_to_torch_attention] [SUMMARY] matches=0 | time: 0.617s (pre=0.000s, apply=0.617s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_grouped_attention] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_grouped_attention] [APPLY] applying transform...
+[PYTHON] [2m2026-04-08T18:10:15.327747Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_grouped_attention] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_grouped_attention] [SUMMARY] matches=0 | time: 0.363s (pre=0.000s, apply=0.363s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_attention_layout] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_attention_layout] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_attention_layout] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_attention_layout] [SUMMARY] matches=0 | time: 0.308s (pre=0.000s, apply=0.308s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rope_pattern] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:15] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rope_pattern] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:16] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rope_pattern] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:16] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rope_pattern] [SUMMARY] matches=28 | time: 0.934s (pre=0.000s, apply=0.870s, post=0.064s)
+[PYTHON3] [04/08/2026-18:10:16] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rope_layout] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:16] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rope_layout] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:16] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rope_layout] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:17] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rope_layout] [SUMMARY] matches=28 | time: 0.141s (pre=0.000s, apply=0.074s, post=0.067s)
+[PYTHON3] [04/08/2026-18:10:17] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rmsnorm_pattern] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:17] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rmsnorm_pattern] [APPLY] applying transform...
+[PYTHON] [2m2026-04-08T18:10:17.329480Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:19.331290Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [04/08/2026-18:10:19] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rmsnorm_pattern] [POST-CLEANUP] graph canonicalization + shape_prop
+[PYTHON3] [04/08/2026-18:10:20] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_rmsnorm_pattern] [SUMMARY] matches=113 | time: 3.815s (pre=0.000s, apply=2.782s, post=1.032s)
+[PYTHON3] [04/08/2026-18:10:20] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_l2norm_pattern] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:20] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_l2norm_pattern] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_l2norm_pattern] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_l2norm_pattern] [SUMMARY] matches=0 | time: 0.158s (pre=0.000s, apply=0.158s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_moe_routing_pattern] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_moe_routing_pattern] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_moe_routing_pattern] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_moe_routing_pattern] [SUMMARY] matches=0 | time: 0.002s (pre=0.000s, apply=0.002s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=eliminate_redundant_transposes] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=eliminate_redundant_transposes] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=eliminate_redundant_transposes] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=eliminate_redundant_transposes] [SUMMARY] matches=140 | time: 0.045s (pre=0.000s, apply=0.006s, post=0.039s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=optimize_rope] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=optimize_rope] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=optimize_rope] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=optimize_rope] [SUMMARY] matches=28 | time: 0.039s (pre=0.000s, apply=0.005s, post=0.034s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_int4_linear_from_config] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_int4_linear_from_config] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_int4_linear_from_config] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_int4_linear_from_config] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_int4_gptq_linear_from_config] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_int4_gptq_linear_from_config] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_int4_gptq_linear_from_config] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_int4_gptq_linear_from_config] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_linear_from_config] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_linear_from_config] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_linear_from_config] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_linear_from_config] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_linear_from_config] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_linear_from_config] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_linear_from_config] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_linear_from_config] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_finegrained_fp8_linear_from_config] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_finegrained_fp8_linear_from_config] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_finegrained_fp8_linear_from_config] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_finegrained_fp8_linear_from_config] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_finegrained_fp8_moe] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_finegrained_fp8_moe] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_finegrained_fp8_moe] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_finegrained_fp8_moe] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_bmm_from_config] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_bmm_from_config] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_bmm_from_config] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_bmm_from_config] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_from_graph] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_from_graph] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_from_graph] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_from_graph] [SUMMARY] skipped | time: 0.004s (pre=0.000s, apply=0.004s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_from_graph] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_from_graph] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_from_graph] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_from_graph] [SUMMARY] skipped | time: 0.004s (pre=0.000s, apply=0.004s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_swiglu_pattern] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_swiglu_pattern] [APPLY] applying transform...
+[PYTHON] [2m2026-04-08T18:10:21.333172Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_swiglu_pattern] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_swiglu_pattern] [SUMMARY] matches=28 | time: 0.706s (pre=0.000s, apply=0.675s, post=0.031s)
+[PYTHON3] [04/08/2026-18:10:21] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_nvfp4_swiglu_pattern] [PRE-CLEANUP] graph canonicalization + shape_prop
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_nvfp4_swiglu_pattern] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_nvfp4_swiglu_pattern] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_nvfp4_swiglu_pattern] [SUMMARY] matches=0 | time: 0.711s (pre=0.664s, apply=0.047s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_finegrained_fp8_swiglu_pattern] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_finegrained_fp8_swiglu_pattern] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_finegrained_fp8_swiglu_pattern] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=match_finegrained_fp8_swiglu_pattern] [SUMMARY] matches=0 | time: 0.033s (pre=0.000s, apply=0.033s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_moe] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_moe] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_moe] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_fp8_moe] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_moe] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_moe] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_moe] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_nvfp4_moe] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_mxfp4_moe] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_mxfp4_moe] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_mxfp4_moe] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=quantize_mxfp4_moe] [SUMMARY] skipped | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=pattern_matcher, transform=detect_hidden_states_for_capture] [SUMMARY] disabled
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=detect_sharding] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=detect_sharding] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=detect_sharding] [APPLY] Using allreduce strategy: NCCL, dist backend: DistBackend.AUTO
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=detect_sharding] [APPLY] Skipping sharding for a single device setup
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=detect_sharding] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=detect_sharding] [SUMMARY] skipped | time: 0.001s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=sharding_transform_executor] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=sharding_transform_executor] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=sharding_transform_executor] [APPLY] sharding_transform_executor: gm=GraphModule, is_draft=False, TP=0, EP=0, BMM=0, RMSNorm=0
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=sharding_transform_executor] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=sharding, transform=sharding_transform_executor] [SUMMARY] matches=0 | time: 0.001s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [APPLY] Estimated parameters memory: 1.11 GB
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [APPLY] Pre-fetching checkpoint directory from HF repo.
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [APPLY] Preloading checkpoint files to CPU
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [APPLY] Loading weight file: /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca/model.safetensors
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [APPLY] Loading weights into model (device: cuda:0)...
+[PYTHON3] [04/08/2026-18:10:22] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [APPLY] Checkpoint loading completed
+[PYTHON] [2m2026-04-08T18:10:23.334886Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [CUDA MEM DIFF (EXPECTED)] free:  19.84GB (-1.13GB) | resv:   1.13GB (+1.13GB) | alloc:   1.11GB (+1.11GB) | frag:   0.02GB (+0.02GB)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=load_weights] [SUMMARY] matches=0 | time: 0.877s (pre=0.000s, apply=0.877s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=move_inputs_to_device] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=move_inputs_to_device] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=move_inputs_to_device] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=weight_load, transform=move_inputs_to_device] [SUMMARY] matches=0 | time: 0.000s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_gemms_mixed_children] [SUMMARY] disabled
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_gemms] [SUMMARY] disabled
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp4_gemms] [SUMMARY] disabled
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp8_gemms] [SUMMARY] disabled
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp8_linear] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp8_linear] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp8_linear] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp8_linear] [SUMMARY] skipped | time: 0.049s (pre=0.000s, apply=0.049s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_trtllm_attn_quant_fp8] [SUMMARY] disabled
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_linear] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_linear] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_linear] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_linear] [SUMMARY] skipped | time: 0.050s (pre=0.000s, apply=0.050s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_relu2_quant_nvfp4] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_relu2_quant_nvfp4] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_relu2_quant_nvfp4] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_relu2_quant_nvfp4] [SUMMARY] skipped | time: 0.001s (pre=0.000s, apply=0.000s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_swiglu] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_swiglu] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_swiglu] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_swiglu] [SUMMARY] matches=0 | time: 0.001s (pre=0.000s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_swiglu] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_swiglu] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_swiglu] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_swiglu] [SUMMARY] matches=0 | time: 0.001s (pre=0.000s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_linear] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_linear] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_linear] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_linear] [SUMMARY] skipped | time: 0.038s (pre=0.000s, apply=0.038s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_moe] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:23] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_moe] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_moe] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_moe] [SUMMARY] matches=0 | time: 0.442s (pre=0.000s, apply=0.442s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp8_moe] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp8_moe] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp8_moe] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_fp8_moe] [SUMMARY] skipped | time: 0.423s (pre=0.000s, apply=0.423s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_moe] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_moe] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_moe] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_finegrained_fp8_moe] [SUMMARY] skipped | time: 0.440s (pre=0.000s, apply=0.440s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_moe] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_moe] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:24] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_moe] [APPLY] FuseNVFP4Moe: backend=cutlass
+[PYTHON] [2m2026-04-08T18:10:25.336700Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_moe] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_nvfp4_moe] [SUMMARY] skipped | time: 0.437s (pre=0.000s, apply=0.437s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_allreduce_residual_rmsnorm] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_allreduce_residual_rmsnorm] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_allreduce_residual_rmsnorm] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_allreduce_residual_rmsnorm] [SUMMARY] matches=0 | time: 0.056s (pre=0.000s, apply=0.056s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_rmsnorm] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_rmsnorm] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_rmsnorm] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_rmsnorm] [SUMMARY] matches=113 | time: 0.060s (pre=0.000s, apply=0.029s, post=0.031s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_gdn_gating] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_gdn_gating] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_gdn_gating] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_gdn_gating] [SUMMARY] matches=0 | time: 0.001s (pre=0.000s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_l2norm] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_l2norm] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_l2norm] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_l2norm] [SUMMARY] matches=0 | time: 0.001s (pre=0.000s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_swiglu] [SUMMARY] disabled
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_add_rms_norm] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_add_rms_norm] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_add_rms_norm] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_add_rms_norm] [SUMMARY] matches=56 | time: 0.039s (pre=0.000s, apply=0.007s, post=0.032s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=fuse_rmsnorm_quant_fp8] [SUMMARY] disabled
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=post_load_fusion, transform=gather_logits_before_lm_head] [SUMMARY] disabled
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_attention] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_attention] [APPLY] applying transform...
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/utils/_graph.py:461: FutureWarning: `treespec.children_specs` is deprecated. Use `treespec.child(index)` to access a single child, or `treespec.children()` to get all children.
+[PYTHON3]   in_spec_for_args = in_spec.children_specs[1 if add_kwargs else 0]
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/utils/_graph.py:471: FutureWarning: `treespec.children_specs` is deprecated. Use `treespec.child(index)` to access a single child, or `treespec.children()` to get all children.
+[PYTHON3]   in_spec_for_args.children_specs.append(_LEAF_SPEC)
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/utils/_graph.py:126: FutureWarning: `treespec.children_specs` is deprecated. Use `treespec.child(index)` to access a single child, or `treespec.children()` to get all children.
+[PYTHON3]   if hasattr(spec, "children_specs"):
+[PYTHON3] /opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/utils/_graph.py:127: FutureWarning: `treespec.children_specs` is deprecated. Use `treespec.child(index)` to access a single child, or `treespec.children()` to get all children.
+[PYTHON3]   for child_spec in spec.children_specs:
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_attention] [POST-CLEANUP] graph canonicalization
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_attention] [SUMMARY] matches=28 | time: 0.050s (pre=0.000s, apply=0.018s, post=0.033s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_mla_attention] [PRE-CLEANUP] graph canonicalization + shape_prop
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [W] [stage=cache_init, transform=insert_cached_mla_attention] No fake tensors and no args available for shape propagation
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_mla_attention] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_mla_attention] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_mla_attention] [SUMMARY] skipped | time: 0.037s (pre=0.036s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_ssm_attention] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_ssm_attention] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_ssm_attention] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_ssm_attention] [SUMMARY] skipped | time: 0.001s (pre=0.000s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_causal_conv] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_causal_conv] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_causal_conv] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_causal_conv] [SUMMARY] skipped | time: 0.001s (pre=0.000s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_delta_rule] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_delta_rule] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_delta_rule] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_delta_rule] [SUMMARY] skipped | time: 0.001s (pre=0.000s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_gated_delta_rule] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_gated_delta_rule] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_gated_delta_rule] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_gated_delta_rule] [SUMMARY] skipped | time: 0.001s (pre=0.000s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_residual_add] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_residual_add] [APPLY] applying transform...
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_residual_add] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=insert_cached_residual_add] [SUMMARY] skipped | time: 0.001s (pre=0.000s, apply=0.001s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=initialize_cache] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=initialize_cache] [APPLY] applying transform...
+[PYTHON3] [TensorRT-LLM][INFO] Max KV cache blocks per sequence: 16 [window size=512], tokens per block=32, primary blocks=256, secondary blocks=0, max sequence length=512
+[PYTHON3] [TensorRT-LLM][INFO] Number of tokens per block: 32.
+[PYTHON3] [TensorRT-LLM][INFO] [MemUsageChange] Allocated 0.88 GiB for max tokens in paged KV cache (8192).
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=initialize_cache] [APPLY] Cache stats (total/managed): total=28/28, kv=28/28, paged_other=0, ssm=0/0, conv=0/0, state_other=0, other=0, max_tokens=8192
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=initialize_cache] [POST-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=initialize_cache] [CUDA MEM DIFF (EXPECTED)] free:  18.97GB (-0.88GB) | resv:   1.13GB | alloc:   1.11GB | frag:   0.02GB
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=initialize_cache] [SUMMARY] matches=28 | time: 0.022s (pre=0.000s, apply=0.022s, post=0.000s)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=resize_kv_cache] [PRE-CLEANUP] skipped (graph already clean)
+[PYTHON3] [04/08/2026-18:10:25] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] [stage=cache_init, transform=resize_kv_cache] [APPLY] applying transform...
+[PYTHON3] [2m2026-04-08T18:10:26.763619Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Attempting to acquire lock 139953268883776 on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/norm.lock
+[PYTHON3] [2m2026-04-08T18:10:26.763862Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Lock 139953268883776 acquired on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/norm.lock
+[PYTHON] [2m2026-04-08T18:10:27.338578Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:29.340519Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:31.342813Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:33.345054Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:35.346941Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:37.348792Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:39.350682Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:41.352680Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [2m2026-04-08T18:10:42.699465Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Attempting to release lock 139953268883776 on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/norm.lock
+[PYTHON3] [2m2026-04-08T18:10:42.699766Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Lock 139953268883776 released on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/norm.lock
+[PYTHON3] [2m2026-04-08T18:10:42.865423Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Attempting to acquire lock 139953269130544 on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/rope.lock
+[PYTHON3] [2m2026-04-08T18:10:42.865662Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Lock 139953269130544 acquired on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/rope.lock
+[PYTHON] [2m2026-04-08T18:10:43.354576Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:45.356420Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:47.358336Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:49.360276Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:51.362496Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:53.364689Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:55.366554Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:57.368433Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:10:59.370346Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:01.372268Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:03.374089Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:05.375933Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:07.377841Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [2m2026-04-08T18:11:08.659387Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Attempting to release lock 139953269130544 on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/rope.lock
+[PYTHON3] [2m2026-04-08T18:11:08.659649Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Lock 139953269130544 released on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/rope.lock
+[PYTHON3] [2m2026-04-08T18:11:08.664634Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Attempting to acquire lock 139953258247808 on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/page.lock
+[PYTHON3] [2m2026-04-08T18:11:08.664790Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Lock 139953258247808 acquired on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/page.lock
+[PYTHON] [2m2026-04-08T18:11:09.379761Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:11.381983Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:13.384270Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [2m2026-04-08T18:11:15.122369Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Attempting to release lock 139953258247808 on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/page.lock
+[PYTHON3] [2m2026-04-08T18:11:15.122600Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Lock 139953258247808 released on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/page.lock
+[PYTHON3] [2m2026-04-08T18:11:15.143078Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Attempting to acquire lock 139953270761680 on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/batch_prefill_with_kv_cache_dtype_q_bf16_dtype_kv_bf16_dtype_o_bf16_dtype_idx_i32_head_dim_qk_128_head_dim_vo_128_posenc_0_use_swa_False_use_logits_cap_False_f16qk_False.lock
+[PYTHON3] [2m2026-04-08T18:11:15.143213Z[0m [34mDEBUG[0m [2m_api.acquire[0m[2m:[0m Lock 139953270761680 acquired on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/batch_prefill_with_kv_cache_dtype_q_bf16_dtype_kv_bf16_dtype_o_bf16_dtype_idx_i32_head_dim_qk_128_head_dim_vo_128_posenc_0_use_swa_False_use_logits_cap_False_f16qk_False.lock
+[PYTHON] [2m2026-04-08T18:11:15.386466Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:17.389018Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:19.391523Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:21.393967Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:23.396452Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:25.398837Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:27.401096Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:29.403407Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:31.405402Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:33.407510Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:35.409460Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [2m2026-04-08T18:11:35.949491Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Attempting to release lock 139953270761680 on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/batch_prefill_with_kv_cache_dtype_q_bf16_dtype_kv_bf16_dtype_o_bf16_dtype_idx_i32_head_dim_qk_128_head_dim_vo_128_posenc_0_use_swa_False_use_logits_cap_False_f16qk_False.lock
+[PYTHON3] [2m2026-04-08T18:11:35.949714Z[0m [34mDEBUG[0m [2m_api.release[0m[2m:[0m Lock 139953270761680 released on /home/dynamo/.cache/flashinfer/0.6.6/89/cached_ops/tmp/batch_prefill_with_kv_cache_dtype_q_bf16_dtype_kv_bf16_dtype_o_bf16_dtype_idx_i32_head_dim_qk_128_head_dim_vo_128_posenc_0_use_swa_False_use_logits_cap_False_f16qk_False.lock
+[PYTHON] [2m2026-04-08T18:11:37.411356Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM] [E] Failed to initialize executor on rank 0: Check failed: (status == cudaSuccess) is false: Failed to plan prefill with error: an illegal memory access was encountered
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM] [E] Traceback (most recent call last):
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/executor/worker.py", line 281, in worker_main
+[PYTHON3]     worker: GenerationExecutorWorker = worker_cls(
+[PYTHON3]                                        ^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/executor/worker.py", line 62, in __init__
+[PYTHON3]     self.setup_engine()
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/executor/base_worker.py", line 257, in setup_engine
+[PYTHON3]     self.engine = _create_py_executor(
+[PYTHON3]                   ^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/executor/base_worker.py", line 228, in _create_py_executor
+[PYTHON3]     _executor = create_executor(**args)
+[PYTHON3]                 ^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py", line 1018, in create_autodeploy_executor
+[PYTHON3]     engine = ADEngine.build_from_config(ad_config=ad_config, mapping=dist_mapping, dist=dist)
+[PYTHON3]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py", line 464, in build_from_config
+[PYTHON3]     return cls(
+[PYTHON3]            ^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+[PYTHON3]     return func(*args, **kwargs)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/shim/ad_executor.py", line 535, in __init__
+[PYTHON3]     self.model = get_inference_model(self.cache_seq_interface)
+[PYTHON3]                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/transform/optimizer.py", line 76, in __call__
+[PYTHON3]     mod = transform(mod, cm, self.factory, self.shared_config, idx)
+[PYTHON3]           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/transform/interface.py", line 284, in _wrapper
+[PYTHON3]     return call_fn(self, gm, cm, factory, shared_config, idx)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/transform/interface.py", line 439, in __call__
+[PYTHON3]     mod, info_apply = self._apply_per_gm_or_whole_model(
+[PYTHON3]                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/transform/interface.py", line 530, in _apply_per_gm_or_whole_model
+[PYTHON3]     return self._apply_to_full_model(mod, cm, factory, shared_config)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/transform/library/kvcache.py", line 281, in _apply_to_full_model
+[PYTHON3]     mod(**cm.named_args)
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 924, in call_wrapped
+[PYTHON3]     return self._wrapped_call(self, *args, **kwargs)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 454, in __call__
+[PYTHON3]     raise e
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 441, in __call__
+[PYTHON3]     return super(self.cls, obj).__call__(*args, **kwargs)  # type: ignore[misc]
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1783, in _wrapped_call_impl
+[PYTHON3]     return self._call_impl(*args, **kwargs)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1889, in _call_impl
+[PYTHON3]     return inner()
+[PYTHON3]            ^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1837, in inner
+[PYTHON3]     result = forward_call(*args, **kwargs)
+[PYTHON3]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "<eval_with_key>.3585", line 367, in forward
+[PYTHON3]     flashinfer_attention_mha_with_cache_default = torch.ops.auto_deploy.flashinfer_attention_mha_with_cache.default(getitem_57, getitem_56, model_layers_0_self_attn_view_2, batch_info_host, cu_seqlen_host, cu_num_pages, cu_num_pages_host, cache_loc, last_page_len, last_page_len_host, seq_len_with_cache_host, getitem_224, getitem_225, r0_kv_cache, 0.08838834764831845, 1.0, 1.0);  getitem_57 = getitem_56 = model_layers_0_self_attn_view_2 = r0_kv_cache = None
+[PYTHON3]                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/_ops.py", line 836, in __call__
+[PYTHON3]     return self._op(*args, **kwargs)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py", line 657, in adinplaceorview_impl
+[PYTHON3]     return original_kernel.call_boxed(keyset, *args, **kwargs)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py", line 345, in backend_impl
+[PYTHON3]     result = self._backend_fns[device_type](*args, **kwargs)
+[PYTHON3]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/_compile.py", line 54, in inner
+[PYTHON3]     return disable_fn(*args, **kwargs)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 1136, in _fn
+[PYTHON3]     return fn(*args, **kwargs)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py", line 380, in wrapped_fn
+[PYTHON3]     return fn(*args, **kwargs)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/custom_ops/attention/flashinfer_attention.py", line 408, in flashinfer_mha_with_cache
+[PYTHON3]     wrapper_prefill = _GlobalFlashInferPlanner.plan_prefill(
+[PYTHON3]                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/custom_ops/attention/flashinfer_attention.py", line 176, in plan_prefill
+[PYTHON3]     self.prefill_wrapper.plan(
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/flashinfer/prefill.py", line 1992, in plan
+[PYTHON3]     self._plan_info = self._cached_module.plan(
+[PYTHON3]                       ^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "python/tvm_ffi/cython/function.pxi", line 923, in tvm_ffi.core.Function.__call__
+[PYTHON3]   File "<unknown>", line 0, in __tvm_ffi_plan
+[PYTHON3]   File "/home/dynamo/.cache/flashinfer/0.6.6/89/generated/batch_prefill_with_kv_cache_dtype_q_bf16_dtype_kv_bf16_dtype_o_bf16_dtype_idx_i32_head_dim_qk_128_head_dim_vo_128_posenc_0_use_swa_False_use_logits_cap_False_f16qk_False/batch_prefill.cu", line 72, in tvm::ffi::Array<long int> BatchPrefillWithKVCachePlan(tvm::ffi::TensorView, tvm::ffi::TensorView, tvm::ffi::TensorView, tvm::ffi::TensorView, tvm::ffi::TensorView, tvm::ffi::TensorView, int64_t, int64_t, int64_t, int64_t, int64_t, bool, int64_t, int64_t, bool, int64_t, int64_t, bool, int64_t)
+[PYTHON3]     TVM_FFI_ICHECK(status == cudaSuccess)
+[PYTHON3]     
+[PYTHON3] RuntimeError: Check failed: (status == cudaSuccess) is false: Failed to plan prefill with error: an illegal memory access was encountered
+[PYTHON3] 
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM] [E] Failed to notify with retry: Type metadata is not set for type `ffi.Error`, so ToJSONGraph is not supported for this type
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM] [E] Failed to notify with retry: Type metadata is not set for type `ffi.Error`, so ToJSONGraph is not supported for this type
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM] [E] Failed to notify with retry: Type metadata is not set for type `ffi.Error`, so ToJSONGraph is not supported for this type
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM] [E] Failed to notify with retry: Type metadata is not set for type `ffi.Error`, so ToJSONGraph is not supported for this type
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM] [E] Failed to notify with retry: Type metadata is not set for type `ffi.Error`, so ToJSONGraph is not supported for this type
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM] [E] Failed to deliver error message to proxy
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM] [E] Executor worker died during initialization.
+[PYTHON3] [2m2026-04-08T18:11:39.400693Z[0m [31mERROR[0m [2mengine.get_llm_engine[0m[2m:[0m Error in engine context: Executor worker died during initialization
+[PYTHON3] Traceback (most recent call last):
+[PYTHON3]   File "<frozen runpy>", line 198, in _run_module_as_main
+[PYTHON3]   File "<frozen runpy>", line 88, in _run_code
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/__main__.py", line 12, in <module>
+[PYTHON3]     main()
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/main.py", line 37, in main
+[PYTHON3]     uvloop.run(worker())
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/uvloop/__init__.py", line 109, in run
+[PYTHON3]     return __asyncio.run(
+[PYTHON3]            ^^^^^^^^^^^^^^
+[PYTHON3]   File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+[PYTHON3]     return runner.run(main)
+[PYTHON3]            ^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+[PYTHON3]     return self._loop.run_until_complete(task)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/uvloop/__init__.py", line 61, in wrapper
+[PYTHON3]     return await main
+[PYTHON3]            ^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/main.py", line 33, in worker
+[PYTHON3]     await init_worker(runtime, config, shutdown_event, shutdown_endpoints)
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/workers/__init__.py", line 64, in init_worker
+[PYTHON3]     await init_llm_worker(runtime, config, shutdown_event, shutdown_endpoints)
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/workers/llm_worker.py", line 361, in init_llm_worker
+[PYTHON3]     async with get_llm_engine(
+[PYTHON3]   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+[PYTHON3]     return await anext(self.gen)
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/engine.py", line 186, in get_llm_engine
+[PYTHON3]     await engine.initialize()
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/engine.py", line 95, in initialize
+[PYTHON3]     self._llm = self._llm_cls(**self.engine_args)
+[PYTHON3]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/llm.py", line 117, in __init__
+[PYTHON3]     super().__init__(*args, **kwargs)
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/llmapi/llm.py", line 1171, in __init__
+[PYTHON3]     super().__init__(model,
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/llmapi/llm.py", line 251, in __init__
+[PYTHON3]     self._build_model()
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/_torch/auto_deploy/llm.py", line 147, in _build_model
+[PYTHON3]     super()._build_model()
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/llmapi/llm.py", line 1241, in _build_model
+[PYTHON3]     self._executor = self._executor_cls.create(
+[PYTHON3]                      ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/executor/executor.py", line 553, in create
+[PYTHON3]     return GenerationExecutor._create_ipc_executor(
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/executor/executor.py", line 424, in _create_ipc_executor
+[PYTHON3]     return GenerationExecutorProxy(
+[PYTHON3]            ^^^^^^^^^^^^^^^^^^^^^^^^
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/executor/proxy.py", line 111, in __init__
+[PYTHON3]     self._start_executor_workers(worker_kwargs)
+[PYTHON3]   File "/opt/dynamo/venv/lib/python3.12/site-packages/tensorrt_llm/executor/proxy.py", line 273, in _start_executor_workers
+[PYTHON3]     raise RuntimeError("Executor worker died during initialization")
+[PYTHON3] RuntimeError: Executor worker died during initialization
+[PYTHON3] [04/08/2026-18:11:39] [TRT-LLM AUTO-DEPLOY] [RANK 0] [I] Destroying process group
+[PYTHON] [2m2026-04-08T18:11:39.413153Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] terminate called after throwing an instance of 'c10::AcceleratorError'
+[PYTHON3]   what():  CUDA error: an illegal memory access was encountered
+[PYTHON3] Search for `cudaErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.
+[PYTHON3] CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+[PYTHON3] For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+[PYTHON3] Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+[PYTHON3] 
+[PYTHON3] Exception raised from createEvent at /opt/pytorch/pytorch/aten/src/ATen/cuda/CUDAEvent.h:232 (most recent call first):
+[PYTHON3] frame #0: c10::Error::Error(c10::SourceLocation, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >) + 0x98 (0x7f4d63cb9548 in /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libc10.so)
+[PYTHON3] frame #1: <unknown function> + 0x4553a (0x7f4da4b9053a in /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libc10_cuda.so)
+[PYTHON3] frame #2: c10::cuda::c10_cuda_check_implementation(int, char const*, char const*, unsigned int, bool) + 0x1fd (0x7f4da4b9009d in /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libc10_cuda.so)
+[PYTHON3] frame #3: <unknown function> + 0xdead48 (0x7f4d64b1bd48 in /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so)
+[PYTHON3] frame #4: <unknown function> + 0x52a4c2 (0x7f4d912d64c2 in /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_python.so)
+[PYTHON3] frame #5: c10::TensorImpl::~TensorImpl() + 0x9 (0x7f4d63c93a29 in /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libc10.so)
+[PYTHON3] frame #6: <unknown function> + 0x905470 (0x7f4d916b1470 in /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_python.so)
+[PYTHON3] frame #7: <unknown function> + 0x90579f (0x7f4d916b179f in /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_python.so)
+[PYTHON3] frame #8: /opt/dynamo/venv/bin/python3() [0x575eae]
+[PYTHON3] frame #9: /opt/dynamo/venv/bin/python3() [0x575bfc]
+[PYTHON3] frame #10: /opt/dynamo/venv/bin/python3() [0x5799e2]
+[PYTHON3] frame #11: /opt/dynamo/venv/bin/python3() [0x59edf9]
+[PYTHON3] frame #12: /opt/dynamo/venv/bin/python3() [0x5799e2]
+[PYTHON3] frame #13: /opt/dynamo/venv/bin/python3() [0x59edf9]
+[PYTHON3] frame #14: _PyObject_ClearManagedDict + 0x1c2 (0x57b842 in /opt/dynamo/venv/bin/python3)
+[PYTHON3] frame #15: /opt/dynamo/venv/bin/python3() [0x5a17a2]
+[PYTHON3] frame #16: /opt/dynamo/venv/bin/python3() [0x61d10d]
+[PYTHON3] frame #17: /opt/dynamo/venv/bin/python3() [0x61c69c]
+[PYTHON3] frame #18: PyGC_Collect + 0x58 (0x6bcd88 in /opt/dynamo/venv/bin/python3)
+[PYTHON3] frame #19: Py_FinalizeEx + 0x9c (0x6b0e0c in /opt/dynamo/venv/bin/python3)
+[PYTHON3] frame #20: Py_RunMain + 0x281 (0x6bc7d1 in /opt/dynamo/venv/bin/python3)
+[PYTHON3] frame #21: Py_BytesMain + 0x2d (0x6bc3ed in /opt/dynamo/venv/bin/python3)
+[PYTHON3] frame #22: <unknown function> + 0x2a1ca (0x7f4db3c481ca in /lib/x86_64-linux-gnu/libc.so.6)
+[PYTHON3] frame #23: __libc_start_main + 0x8b (0x7f4db3c4828b in /lib/x86_64-linux-gnu/libc.so.6)
+[PYTHON3] frame #24: _start + 0x25 (0x6576c5 in /opt/dynamo/venv/bin/python3)
+[PYTHON3] 
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] *** Process received signal ***
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] Signal: Aborted (6)
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] Signal code:  (-6)
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 0] /lib/x86_64-linux-gnu/libc.so.6(+0x45330)[0x7f4db3c63330]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 1] /lib/x86_64-linux-gnu/libc.so.6(pthread_kill+0x11c)[0x7f4db3cbcb2c]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 2] /lib/x86_64-linux-gnu/libc.so.6(gsignal+0x1e)[0x7f4db3c6327e]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 3] /lib/x86_64-linux-gnu/libc.so.6(abort+0xdf)[0x7f4db3c468ff]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 4] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xa5ff5)[0x7f4dafaa2ff5]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 5] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xbb0da)[0x7f4dafab80da]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 6] /lib/x86_64-linux-gnu/libstdc++.so.6(__cxa_call_terminate+0x33)[0x7f4dafaa28e6]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 7] /lib/x86_64-linux-gnu/libstdc++.so.6(__gxx_personality_v0+0x31a)[0x7f4dafab78ba]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 8] /lib/x86_64-linux-gnu/libgcc_s.so.1(+0x22b06)[0x7f4daf9f1b06]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [ 9] /lib/x86_64-linux-gnu/libgcc_s.so.1(_Unwind_Resume+0x12d)[0x7f4daf9f25cd]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [10] /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so(+0xdeb591)[0x7f4d64b1c591]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [11] /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_python.so(+0x52a4c2)[0x7f4d912d64c2]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [12] /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libc10.so(_ZN3c1010TensorImplD0Ev+0x9)[0x7f4d63c93a29]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [13] /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_python.so(+0x905470)[0x7f4d916b1470]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [14] /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_python.so(+0x90579f)[0x7f4d916b179f]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [15] /opt/dynamo/venv/bin/python3[0x575eae]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [16] /opt/dynamo/venv/bin/python3[0x575bfc]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [17] /opt/dynamo/venv/bin/python3[0x5799e2]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [18] /opt/dynamo/venv/bin/python3[0x59edf9]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [19] /opt/dynamo/venv/bin/python3[0x5799e2]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [20] /opt/dynamo/venv/bin/python3[0x59edf9]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [21] /opt/dynamo/venv/bin/python3(_PyObject_ClearManagedDict+0x1c2)[0x57b842]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [22] /opt/dynamo/venv/bin/python3[0x5a17a2]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [23] /opt/dynamo/venv/bin/python3[0x61d10d]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [24] /opt/dynamo/venv/bin/python3[0x61c69c]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [25] /opt/dynamo/venv/bin/python3(PyGC_Collect+0x58)[0x6bcd88]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [26] /opt/dynamo/venv/bin/python3(Py_FinalizeEx+0x9c)[0x6b0e0c]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [27] /opt/dynamo/venv/bin/python3(Py_RunMain+0x281)[0x6bc7d1]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [28] /opt/dynamo/venv/bin/python3(Py_BytesMain+0x2d)[0x6bc3ed]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [29] /lib/x86_64-linux-gnu/libc.so.6(+0x2a1ca)[0x7f4db3c481ca]
+[PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] *** End of error message ***
+[PYTHON] [2m2026-04-08T18:11:41.415523Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-08T18:11:43.421731Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[PYTHON] [2m2026-04-08T18:11:43.421833Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[PYTHON] [2m2026-04-08T18:11:43.421855Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[PYTHON] [2m2026-04-08T18:11:43.421861Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[PYTHON] [2m2026-04-08T18:11:43.421865Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[PYTHON] [2m2026-04-08T18:11:43.421924Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+[PYTHON] [2m2026-04-08T18:11:48.423229Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[PYTHON] [2m2026-04-08T18:11:48.423292Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[PYTHON] [2m2026-04-08T18:11:48.423304Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[PYTHON] [2m2026-04-08T18:11:48.423309Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[PYTHON] [2m2026-04-08T18:11:48.423313Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected

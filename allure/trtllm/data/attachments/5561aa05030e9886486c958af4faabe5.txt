@@ -1,0 +1,47 @@
+[2m2026-04-08T18:24:09.919711Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4272 in /workspace
+[2m2026-04-08T18:24:09.921599Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4272
+[2m2026-04-08T18:24:10.022588Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4272
+[2m2026-04-08T18:24:10.022877Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:24:10.026564Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:24:10.027632Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2417 --advertise-client-urls http://0.0.0.0:2417 --listen-peer-urls http://0.0.0.0:2418 --initial-advertise-peer-urls http://localhost:2418 --initial-cluster default=http://localhost:2418 --data-dir /tmp/etcd_98k_vkf5 in /workspace
+[2m2026-04-08T18:24:10.029401Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2417
+[2m2026-04-08T18:24:10.130298Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2417
+[2m2026-04-08T18:24:10.137977Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting test_multimodal_b64 test_deployment
+[2m2026-04-08T18:24:10.138055Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-04-08T18:24:10.138108Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_multimodal.sh
+[2m2026-04-08T18:24:10.138307Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg_multimodal.sh --model Qwen/Qwen2.5-VL-7B-Instruct in /workspace/examples/backends/vllm
+[2m2026-04-08T18:24:10.139939Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8000/v1/models
+[2m2026-04-08T18:24:19.149413Z[0m [31mERROR[0m [2mmanaged_process._check_process_alive[0m[2m:[0m Main server process died with exit code -15 while waiting for health check
+[2m2026-04-08T18:24:19.149855Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === Last 20 lines from /tmp/dynamo_tests/test_multimodal_b64/bash.log.txt ===
+[2m2026-04-08T18:24:19.150021Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/engine/arg_utils.py", line 663, in __post_init__
+[2m2026-04-08T18:24:19.150100Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     self.model = get_model_path(self.model, self.revision)
+[2m2026-04-08T18:24:19.150146Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:24:19.150189Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/transformers_utils/repo_utils.py", line 220, in get_model_path
+[2m2026-04-08T18:24:19.150233Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     return snapshot_download(repo_id=model, **common_kwargs)
+[2m2026-04-08T18:24:19.150276Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:24:19.150318Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+[2m2026-04-08T18:24:19.150360Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     return fn(*args, **kwargs)
+[2m2026-04-08T18:24:19.150401Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]            ^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:24:19.150442Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/huggingface_hub/_snapshot_download.py", line 230, in snapshot_download
+[2m2026-04-08T18:24:19.150486Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     raise LocalEntryNotFoundError(
+[2m2026-04-08T18:24:19.150528Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] huggingface_hub.errors.LocalEntryNotFoundError: Cannot find an appropriate cached snapshot folder for the specified revision on the local disk and outgoing traffic has been disabled. To enable repo look-ups and downloads online, pass 'local_files_only=False' as input.
+[2m2026-04-08T18:24:19.150570Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:24:17.148651Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_llm::http::service::service_v2\x1b[0m\x1b[2m:\x1b[0m http response sent \x1b[3mstatus\x1b[0m\x1b[2m=\x1b[0m200 \x1b[3mlatency_ms\x1b[0m\x1b[2m=\x1b[0m0
+[2m2026-04-08T18:24:19.150614Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] Cleaning up...
+[2m2026-04-08T18:24:19.150655Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:24:18.152001Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Runtime shutdown initiated
+[2m2026-04-08T18:24:19.150707Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:24:18.152097Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 1: Cancelling endpoint shutdown token
+[2m2026-04-08T18:24:19.150756Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:24:18.152122Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 2: Waiting for graceful endpoints to complete
+[2m2026-04-08T18:24:19.150801Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:24:18.152126Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Active graceful endpoints: 0
+[2m2026-04-08T18:24:19.150842Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:24:18.152130Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[2m2026-04-08T18:24:19.150881Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:24:18.152173Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_llm::http::service::service_v2\x1b[0m\x1b[2m:\x1b[0m HTTP server shutdown requested
+[2m2026-04-08T18:24:19.150921Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === End of log tail ===
+[2m2026-04-08T18:24:19.150988Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 15347
+[2m2026-04-08T18:24:23.656509Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15349 name: tee
+[2m2026-04-08T18:24:23.656675Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15349 tee
+[2m2026-04-08T18:24:23.657126Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15348 name: sed
+[2m2026-04-08T18:24:23.657221Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15348 sed
+[2m2026-04-08T18:24:23.700712Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 15332
+[2m2026-04-08T18:24:23.801977Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15333 name: sed
+[2m2026-04-08T18:24:23.802247Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15333 sed
+[2m2026-04-08T18:24:23.803074Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 15321
+[2m2026-04-08T18:24:23.904124Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15322 name: sed
+[2m2026-04-08T18:24:23.904313Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15322 sed

@@ -1,0 +1,7 @@
+INFO     dynamo.profiler.profile_sla:profile_sla.py:101 Profiler config: model=Qwen/Qwen3-32B, backend=trtllm, system=h200_sxm, total_gpus=8, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=thorough, picking=autoscale
+INFO     dynamo.profiler.profile_sla:profile_sla.py:150 Dry run mode — skipping deployment and benchmarking.
+INFO     dynamo.profiler.profile_sla:profile_sla.py:213 Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1)
+WARNING  dynamo.profiler.profile_sla:profile_sla.py:245 Dry run mode — no DGD config produced (expected).
+INFO     dynamo.profiler.profile_sla:profile_sla.py:472 Performing final cleanup of any remaining deployments...
+INFO     deploy.utils.dynamo_deployment:dynamo_deployment.py:510 No deployments to clean up
+INFO     dynamo.profiler.profile_sla:profile_sla.py:474 Final cleanup completed.

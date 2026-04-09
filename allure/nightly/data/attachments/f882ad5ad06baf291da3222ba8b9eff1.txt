@@ -1,0 +1,1 @@
+INFO     dynamo.planner.connectors.kubernetes_api:kubernetes_api.py:116 Scaled DGDSA test-deployment-frontend to 3 replicas

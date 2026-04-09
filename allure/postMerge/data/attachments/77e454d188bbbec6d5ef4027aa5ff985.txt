@@ -1,0 +1,1 @@
+INFO     dynamo.profiler.utils.config_modifiers.protocol:protocol.py:784 Ignoring metadata identity field(s) ['name', 'namespace', 'uid'] from overrides.dgd — use the DGD template to set these.

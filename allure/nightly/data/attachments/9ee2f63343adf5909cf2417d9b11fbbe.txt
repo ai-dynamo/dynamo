@@ -1,0 +1,128 @@
+[2m2026-04-08T18:30:25.866091Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4229 in /workspace
+[2m2026-04-08T18:30:25.867291Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4229
+[2m2026-04-08T18:30:25.967992Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4229
+[2m2026-04-08T18:30:25.968173Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:30:25.970067Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:30:25.971028Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2399 --advertise-client-urls http://0.0.0.0:2399 --listen-peer-urls http://0.0.0.0:2400 --initial-advertise-peer-urls http://localhost:2400 --initial-cluster default=http://localhost:2400 --data-dir /tmp/etcd_frc2h2me in /workspace
+[2m2026-04-08T18:30:25.972009Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2399
+[2m2026-04-08T18:30:26.072716Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2399
+[2m2026-04-08T18:30:26.076297Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting aggregated_multimodal_router test_deployment
+[2m2026-04-08T18:30:26.076385Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-08T18:30:26.076435Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_multimodal_router.sh
+[2m2026-04-08T18:30:26.076633Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/trtllm/launch/agg_multimodal_router.sh in /workspace/examples/backends/trtllm
+[2m2026-04-08T18:31:26.078167Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8099/v1/models
+[2m2026-04-08T18:31:29.082621Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8099/v1/models (attempt=2, elapsed=2.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct",
+      "object": "model",
+      "created": 1775673088,
+      "owned_by": "nvidia"
+    },
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct__internal",
+      "object": "model",
+      "created": 1775673088,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T18:31:29.082884Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8099/health
+[2m2026-04-08T18:31:30.085043Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8099/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.mm_router.generate",
+    "dyn://dynamo.tensorrt_llm.generate",
+    "dyn://dynamo.tensorrt_llm.router-discovery",
+    "dyn://dynamo.tensorrt_llm.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "mm_router",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8842428015706490379,
+      "transport": {
+        "tcp": "10.1.36.7:39659/7ab69d6e5c25c60b/generate"
+      }
+    },
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8842428015706490377,
+      "transport": {
+        "tcp": "10.1.36.7:36055/7ab69d6e5c25c609/generate"
+      }
+    },
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "router-discovery",
+      "namespace": "dynamo",
+      "instance_id": 8842428015706490379,
+      "transport": {
+        "tcp": "10.1.36.7:39659/7ab69d6e5c25c60b/router-discovery"
+      }
+    },
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 8842428015706490377,
+      "transport": {
+        "tcp": "10.1.36.7:36055/7ab69d6e5c25c609/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+[2m2026-04-08T18:31:30.085284Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-08T18:31:30.085647Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8099/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe what you see in this image."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 160,
+  "stream": false,
+  "logprobs": false,
+  "model": "Qwen/Qwen3-VL-2B-Instruct"
+}'
+[2m2026-04-08T18:31:33.584094Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=3.50s
+[2m2026-04-08T18:31:33.584341Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/4 expected keywords: ['mountain', 'rock', 'trees', 'road']
+[2m2026-04-08T18:31:33.584407Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+This image captures a breathtaking, natural landscape dominated by a massive, iconic mountain. The central feature is a large, sheer rock formation, which is the famous Half Dome, a prominent landmark...
+[2m2026-04-08T18:31:33.585788Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14501
+[2m2026-04-08T18:31:33.585870Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14417
+[2m2026-04-08T18:31:33.585941Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14777
+[2m2026-04-08T18:31:33.586164Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14491
+[2m2026-04-08T18:31:33.586268Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 15038
+[2m2026-04-08T18:31:41.695598Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14419 name: tee
+[2m2026-04-08T18:31:41.695801Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14419 tee
+[2m2026-04-08T18:31:41.696559Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14418 name: sed
+[2m2026-04-08T18:31:41.696655Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14418 sed
+[2m2026-04-08T18:31:41.699554Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14405
+[2m2026-04-08T18:31:41.800559Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14406 name: sed
+[2m2026-04-08T18:31:41.800729Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14406 sed
+[2m2026-04-08T18:31:41.801815Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14393
+[2m2026-04-08T18:31:41.902794Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14394 name: sed
+[2m2026-04-08T18:31:41.902909Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14394 sed

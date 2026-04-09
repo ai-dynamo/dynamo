@@ -1,0 +1,12 @@
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Received generation request: a2bdb816-3708-4e9d-9b32-95036f4ec9b8
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request a2bdb816-3708-4e9d-9b32-95036f4ec9b8: prompt='a test video...', size=832x480, frames=81, steps=50
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Received generation request: 82dbfeb1-a9d2-40bf-88bb-d534d5d77efb
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request 82dbfeb1-a9d2-40bf-88bb-d534d5d77efb: prompt='a test video...', size=832x480, frames=81, steps=50
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Received generation request: 8a7ac602-4c54-457d-be2b-08bb8af64813
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request 8a7ac602-4c54-457d-be2b-08bb8af64813: prompt='a test video...', size=832x480, frames=81, steps=50
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request a2bdb816-3708-4e9d-9b32-95036f4ec9b8: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request a2bdb816-3708-4e9d-9b32-95036f4ec9b8 completed in 0.10s
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request 82dbfeb1-a9d2-40bf-88bb-d534d5d77efb: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request 82dbfeb1-a9d2-40bf-88bb-d534d5d77efb completed in 0.20s
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request 8a7ac602-4c54-457d-be2b-08bb8af64813: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[TEST] 2026-04-09T03:07:33 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request 8a7ac602-4c54-457d-be2b-08bb8af64813 completed in 0.31s

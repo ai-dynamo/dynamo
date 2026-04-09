@@ -1,0 +1,3 @@
+[TEST] 2026-04-09T10:00:57 INFO gpu_memory_service.integrations.sglang.memory_saver: [GMS] Initialized weights=READ mode, kv_cache=RW (device=0)
+[TEST] 2026-04-09T10:00:57 INFO gpu_memory_service.integrations.sglang.memory_saver: [GMS] Unmapping weights (VA-stable)
+[TEST] 2026-04-09T10:00:57 INFO gpu_memory_service.integrations.sglang.memory_saver: [GMS] Remapping weights (VA-stable)

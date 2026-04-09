@@ -1,0 +1,136 @@
+INFO     tests.deploy.test_deploy:test_deploy.py:268 Frontend image: dynamoci.azurecr.io/ai-dynamo/dynamo:8409e41281f545ba3fe8290a0b53b5a44f1add3f-frontend
+INFO     tests.deploy.test_deploy:test_deploy.py:269 Worker image: dynamoci.azurecr.io/ai-dynamo/dynamo:8409e41281f545ba3fe8290a0b53b5a44f1add3f-vllm-runtime-cuda12
+INFO     tests.deploy.test_deploy:test_deploy.py:277 HTTPRoute hostname: default.example.com
+INFO     tests.deploy.test_deploy:test_deploy.py:284 Applying GAIE HTTPRoute...
+INFO     tests.deploy.test_deploy:test_deploy.py:291 HTTPRoute apply stdout: httproute.gateway.networking.k8s.io/qwen-route created
+
+INFO     tests.deploy.test_deploy:test_deploy.py:297 Namespace: default
+INFO     tests.deploy.test_deploy:test_deploy.py:303 Namespace check: NAME      STATUS   AGE
+default   Active   89m
+INFO     tests.deploy.test_deploy:test_deploy.py:313 CRD check: NAME                                CREATED AT
+dynamographdeployments.nvidia.com   2026-04-08T20:26:10Z
+INFO     tests.deploy.test_deploy:test_deploy.py:331 Operator pods: NAME                                                              READY   STATUS    RESTARTS   AGE
+dynamo-platform-dynamo-operator-controller-manager-57bccc5jgwcc   1/1     Running   0          88m
+INFO     tests.deploy.test_deploy:test_deploy.py:334 DGD name: qwen
+INFO     tests.deploy.test_deploy:test_deploy.py:335 DGD namespace: default
+INFO     tests.deploy.test_deploy:test_deploy.py:336 DGD services: ['Epp', 'VllmPrefillWorker', 'VllmDecodeWorker']
+INFO     ManagedDeployment:managed_deployment.py:540 Loading kubeconfig from KUBECONFIG: /home/runner/_work/dynamo/dynamo/.kubeconfig
+INFO     ManagedDeployment:managed_deployment.py:543 Successfully loaded kubeconfig from KUBECONFIG
+INFO     ManagedDeployment:managed_deployment.py:846 Starting Deployment qwen with spec <tests.utils.managed_deployment.DeploymentSpec object at 0xffff8eb96ea0>
+INFO     ManagedDeployment:managed_deployment.py:859 {'apiVersion': 'nvidia.com/v1alpha1', 'kind': 'DynamoGraphDeployment', 'metadata': {'name': 'qwen', 'namespace': 'default'}, 'spec': {'backendFramework': 'vllm', 'services': {'Epp': {'envFromSecret': 'hf-token-secret', 'componentType': 'epp', 'replicas': 1, 'extraPodSpec': {'mainContainer': {'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:8409e41281f545ba3fe8290a0b53b5a44f1add3f-frontend', 'imagePullPolicy': 'IfNotPresent', 'env': [{'name': 'DYN_KV_CACHE_BLOCK_SIZE', 'value': '16'}, {'name': 'DYN_MODEL_NAME', 'value': 'Qwen/Qwen3-0.6B'}, {'name': 'DYN_ENFORCE_DISAGG', 'value': 'true'}]}}, 'eppConfig': {'config': {'plugins': [{'type': 'disagg-profile-handler'}, {'name': 'prefill-filter', 'type': 'label-filter', 'parameters': {'label': 'nvidia.com/dynamo-sub-component-type', 'validValues': ['prefill'], 'allowsNoLabel': False}}, {'name': 'decode-filter', 'type': 'label-filter', 'parameters': {'label': 'nvidia.com/dynamo-sub-component-type', 'validValues': ['decode'], 'allowsNoLabel': False}}, {'name': 'picker', 'type': 'max-score-picker'}, {'name': 'dyn-prefill', 'type': 'dyn-prefill-scorer'}, {'name': 'dyn-decode', 'type': 'dyn-decode-scorer'}], 'schedulingProfiles': [{'name': 'prefill', 'plugins': [{'pluginRef': 'prefill-filter', 'weight': 1}, {'pluginRef': 'dyn-prefill', 'weight': 1}, {'pluginRef': 'picker', 'weight': 1}]}, {'name': 'decode', 'plugins': [{'pluginRef': 'decode-filter', 'weight': 1}, {'pluginRef': 'dyn-decode', 'weight': 1}, {'pluginRef': 'picker', 'weight': 1}]}]}}}, 'VllmPrefillWorker': {'componentType': 'worker', 'subComponentType': 'prefill', 'envFromSecret': 'hf-token-secret', 'sharedMemory': {'size': '2Gi'}, 'frontendSidecar': {'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:8409e41281f545ba3fe8290a0b53b5a44f1add3f-frontend', 'args': ['-m', 'dynamo.frontend', '--router-mode', 'direct'], 'envFromSecret': 'hf-token-secret'}, 'extraPodSpec': {'affinity': {'podAffinity': {'preferredDuringSchedulingIgnoredDuringExecution': [{'weight': 100, 'podAffinityTerm': {'labelSelector': {'matchExpressions': [{'key': 'nvidia.com/dynamo-component-type', 'operator': 'In', 'values': ['worker']}]}, 'topologyKey': 'kubernetes.io/hostname'}}]}}, 'mainContainer': {'env': [{'name': 'SERVED_MODEL_NAME', 'value': 'Qwen/Qwen3-0.6B'}, {'name': 'MODEL_PATH', 'value': 'Qwen/Qwen3-0.6B'}], 'args': ['python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config \'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config \'{"enable_kv_cache_events":true}\''], 'command': ['/bin/sh', '-c'], 'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:8409e41281f545ba3fe8290a0b53b5a44f1add3f-vllm-runtime-cuda12', 'imagePullPolicy': 'IfNotPresent', 'workingDir': '/workspace/examples/backends/vllm'}}, 'replicas': 1, 'resources': {'limits': {'gpu': '1'}, 'requests': {'gpu': '1'}}}, 'VllmDecodeWorker': {'componentType': 'worker', 'subComponentType': 'decode', 'envFromSecret': 'hf-token-secret', 'sharedMemory': {'size': '2Gi'}, 'frontendSidecar': {'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:8409e41281f545ba3fe8290a0b53b5a44f1add3f-frontend', 'args': ['-m', 'dynamo.frontend', '--router-mode', 'direct'], 'envFromSecret': 'hf-token-secret'}, 'extraPodSpec': {'affinity': {'podAffinity': {'preferredDuringSchedulingIgnoredDuringExecution': [{'weight': 100, 'podAffinityTerm': {'labelSelector': {'matchExpressions': [{'key': 'nvidia.com/dynamo-component-type', 'operator': 'In', 'values': ['worker']}]}, 'topologyKey': 'kubernetes.io/hostname'}}]}}, 'mainContainer': {'env': [{'name': 'SERVED_MODEL_NAME', 'value': 'Qwen/Qwen3-0.6B'}, {'name': 'MODEL_PATH', 'value': 'Qwen/Qwen3-0.6B'}], 'args': ['python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --kv-transfer-config \'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config \'{"enable_kv_cache_events":true}\''], 'command': ['/bin/sh', '-c'], 'image': 'dynamoci.azurecr.io/ai-dynamo/dynamo:8409e41281f545ba3fe8290a0b53b5a44f1add3f-vllm-runtime-cuda12', 'imagePullPolicy': 'IfNotPresent', 'workingDir': '/workspace/examples/backends/vllm'}}, 'replicas': 1, 'resources': {'limits': {'gpu': '1'}, 'requests': {'gpu': '1'}}}}}}
+INFO     ManagedDeployment:managed_deployment.py:860 Deployment Started qwen
+INFO     ManagedDeployment:managed_deployment.py:642 Waiting for Deployment qwen to have Ready condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:693 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:694 Current conditions: [{'lastTransitionTime': '2026-04-08T21:55:16Z', 'message': 'Resources not ready: qwen: podclique/qwen-0-epp: desired=1, ready=0; podclique/qwen-0-vllmdecodeworker: desired=1, ready=0; podclique/qwen-0-vllmprefillworker: desired=1, ready=0', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:695 Elapsed time: 63.3s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:698 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-epp-z5l9j/main: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmdecodeworker-hw4x8/main: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmdecodeworker-hw4x8/sidecar-frontend: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmprefillworker-6pl2g/main: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmprefillworker-6pl2g/sidecar-frontend: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:707   Pod warning events:
+INFO     ManagedDeployment:managed_deployment.py:709     inference-gateway-7674bc45bb-qptk2: Unhealthy - Startup probe failed: Get "http://10.244.2.213:8082/ready": dial tcp 10.244.2.213:8082: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-0-decode-pdnqt: Unhealthy - Startup probe failed: Get "http://10.244.8.83:9090/live": dial tcp 10.244.8.83:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-0-decode-pdnqt: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: SyncError - Error syncing: patch host object: update object status: Pod "sglang-agg-router-0-decode-tcvbr-x-default-x-ci-24156727933" is invalid: status.qosClass: Invalid value: "BestEffort": field is immutable
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: Unhealthy - Startup probe failed: Get "http://10.244.3.34:9090/live": dial tcp 10.244.3.34:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-router-0-vllmdecodeworker-htl5j: SyncError - Error syncing: patch host object: update object status: Pod "vllm-agg-router-0-vllmdecodeworker-htl5j-x-default-x-5cd1ba9087" is invalid: status.qosClass: Invalid value: "BestEffort": field is immutable
+INFO     ManagedDeployment:managed_deployment.py:693 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:694 Current conditions: [{'lastTransitionTime': '2026-04-08T21:55:16Z', 'message': 'Resources not ready: qwen: podclique/qwen-0-epp: desired=1, ready=0; podclique/qwen-0-vllmdecodeworker: desired=1, ready=0; podclique/qwen-0-vllmprefillworker: desired=1, ready=0', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:695 Elapsed time: 127.8s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:698 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-epp-z5l9j/main: Running
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmdecodeworker-hw4x8/main: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmdecodeworker-hw4x8/sidecar-frontend: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmprefillworker-6pl2g/main: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmprefillworker-6pl2g/sidecar-frontend: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:707   Pod warning events:
+INFO     ManagedDeployment:managed_deployment.py:709     inference-gateway-7674bc45bb-qptk2: Unhealthy - Startup probe failed: Get "http://10.244.2.213:8082/ready": dial tcp 10.244.2.213:8082: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     qwen-0-epp-z5l9j: Unhealthy - Startup probe failed: timeout: failed to connect service "10.244.2.138:9003" within 1s: context deadline exceeded
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-0-decode-pdnqt: Unhealthy - Startup probe failed: Get "http://10.244.8.83:9090/live": dial tcp 10.244.8.83:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-0-decode-pdnqt: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: SyncError - Error syncing: patch host object: update object status: Pod "sglang-agg-router-0-decode-tcvbr-x-default-x-ci-24156727933" is invalid: status.qosClass: Invalid value: "BestEffort": field is immutable
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: Unhealthy - Startup probe failed: Get "http://10.244.3.34:9090/live": dial tcp 10.244.3.34:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-router-0-vllmdecodeworker-htl5j: SyncError - Error syncing: patch host object: update object status: Pod "vllm-agg-router-0-vllmdecodeworker-htl5j-x-default-x-5cd1ba9087" is invalid: status.qosClass: Invalid value: "BestEffort": field is immutable
+INFO     ManagedDeployment:managed_deployment.py:693 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:694 Current conditions: [{'lastTransitionTime': '2026-04-08T21:55:16Z', 'message': 'Resources not ready: qwen: podclique/qwen-0-epp: desired=1, ready=0; podclique/qwen-0-vllmdecodeworker: desired=1, ready=0; podclique/qwen-0-vllmprefillworker: desired=1, ready=0', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:695 Elapsed time: 192.3s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:698 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-epp-z5l9j/main: Running
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmdecodeworker-hw4x8/main: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmdecodeworker-hw4x8/sidecar-frontend: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmprefillworker-6pl2g/main: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmprefillworker-6pl2g/sidecar-frontend: Waiting: PodInitializing
+INFO     ManagedDeployment:managed_deployment.py:707   Pod warning events:
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-0-decode-pdnqt: Unhealthy - Startup probe failed: Get "http://10.244.8.83:9090/live": dial tcp 10.244.8.83:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-0-decode-pdnqt: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: SyncError - Error syncing: patch host object: update object status: Pod "sglang-agg-router-0-decode-tcvbr-x-default-x-ci-24156727933" is invalid: status.qosClass: Invalid value: "BestEffort": field is immutable
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: Unhealthy - Startup probe failed: Get "http://10.244.3.34:9090/live": dial tcp 10.244.3.34:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-0-vllmdecodeworker-hsdsg: Unhealthy - Startup probe failed: Get "http://10.244.3.104:9090/live": dial tcp 10.244.3.104:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-0-vllmdecodeworker-hsdsg: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-router-0-vllmdecodeworker-htl5j: SyncError - Error syncing: patch host object: update object status: Pod "vllm-agg-router-0-vllmdecodeworker-htl5j-x-default-x-5cd1ba9087" is invalid: status.qosClass: Invalid value: "BestEffort": field is immutable
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-router-0-vllmdecodeworker-htl5j: Unhealthy - Startup probe failed: Get "http://10.244.3.165:9090/live": dial tcp 10.244.3.165:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-router-0-vllmdecodeworker-htl5j: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:693 Current deployment state: pending
+INFO     ManagedDeployment:managed_deployment.py:694 Current conditions: [{'lastTransitionTime': '2026-04-08T21:59:28Z', 'message': 'Resources not ready: qwen: podclique/qwen-0-epp: desired=1, ready=0', 'reason': 'some_resources_are_not_ready', 'status': 'False', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:695 Elapsed time: 256.9s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:698 Deployment has Ready condition False and state pending, desired condition True and state successful
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-epp-z5l9j/main: Running
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmdecodeworker-hw4x8/main: Running
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmdecodeworker-hw4x8/sidecar-frontend: Running
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmprefillworker-6pl2g/main: Running
+INFO     ManagedDeployment:managed_deployment.py:704   Pod status: qwen-0-vllmprefillworker-6pl2g/sidecar-frontend: Running
+INFO     ManagedDeployment:managed_deployment.py:707   Pod warning events:
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-0-decode-pdnqt: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: SyncError - Error syncing: patch host object: update object status: Pod "sglang-agg-router-0-decode-tcvbr-x-default-x-ci-24156727933" is invalid: status.qosClass: Invalid value: "BestEffort": field is immutable
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: Unhealthy - Startup probe failed: Get "http://10.244.3.34:9090/live": dial tcp 10.244.3.34:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     sglang-agg-router-0-decode-tcvbr: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-0-vllmdecodeworker-hsdsg: Unhealthy - Startup probe failed: Get "http://10.244.3.104:9090/live": dial tcp 10.244.3.104:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-0-vllmdecodeworker-hsdsg: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-router-0-vllmdecodeworker-5nrfz: Unhealthy - Startup probe failed: Get "http://10.244.7.241:9090/live": dial tcp 10.244.7.241:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-router-0-vllmdecodeworker-htl5j: SyncError - Error syncing: patch host object: update object status: Pod "vllm-agg-router-0-vllmdecodeworker-htl5j-x-default-x-5cd1ba9087" is invalid: status.qosClass: Invalid value: "BestEffort": field is immutable
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-router-0-vllmdecodeworker-htl5j: Unhealthy - Startup probe failed: Get "http://10.244.3.165:9090/live": dial tcp 10.244.3.165:9090: connect: connection refused
+INFO     ManagedDeployment:managed_deployment.py:709     vllm-agg-router-0-vllmdecodeworker-htl5j: Unhealthy - Startup probe failed: HTTP probe failed with statuscode: 503
+INFO     ManagedDeployment:managed_deployment.py:681 Current deployment state: successful
+INFO     ManagedDeployment:managed_deployment.py:682 Current conditions: [{'lastTransitionTime': '2026-04-08T21:59:37Z', 'message': 'All resources are ready', 'reason': 'all_resources_are_ready', 'status': 'True', 'type': 'Ready'}]
+INFO     ManagedDeployment:managed_deployment.py:683 Elapsed time: 262.6s / 1800s
+INFO     ManagedDeployment:managed_deployment.py:687 Deployment qwen has Ready condition True and state successful
+INFO     tests.deploy.test_deploy:test_deploy.py:351 DGDs after creation: NAME              READY   BACKEND   AGE
+qwen              True    vllm      4m23s
+vllm-agg          True              3m55s
+vllm-agg-router   False             4m44s
+INFO     tests.deploy.test_deploy:test_deploy.py:358 Pods after creation: NAME                                                              READY   STATUS    RESTARTS      AGE     IP              NODE                            NOMINATED NODE   READINESS GATES
+dynamo-platform-dynamo-operator-controller-manager-57bccc5jgwcc   1/1     Running   0             93m     10.244.12.180   aks-default-lhn44               <none>           <none>
+dynamo-platform-nats-0                                            2/2     Running   0             93m     10.244.12.253   aks-default-lhn44               <none>           <none>
+grove-operator-6b558f5c66-l5gjw                                   1/1     Running   1 (93m ago)   93m     10.244.2.94     aks-default-nmkmw               <none>           <none>
+inference-gateway-7674bc45bb-qptk2                                1/1     Running   0             5m41s   10.244.2.213    aks-default-nmkmw               <none>           <none>
+qwen-0-epp-z5l9j                                                  1/1     Running   0             4m22s   10.244.2.138    aks-default-nmkmw               <none>           <none>
+qwen-0-vllmdecodeworker-hw4x8                                     2/2     Running   0             4m22s   10.244.3.36     aks-a100b-21135548-vmss000001   <none>           <none>
+qwen-0-vllmprefillworker-6pl2g                                    2/2     Running   0             4m22s   10.244.3.237    aks-a100b-21135548-vmss000001   <none>           <none>
+vllm-agg-0-frontend-p228b                                         1/1     Running   0             3m55s   10.244.2.249    aks-default-nmkmw               <none>           <none>
+vllm-agg-0-vllmdecodeworker-hsdsg                                 1/1     Running   0             3m55s   10.244.3.104    aks-a100b-21135548-vmss000001   <none>           <none>
+vllm-agg-router-0-frontend-hqbf4                                  1/1     Running   0             4m44s   10.244.2.145    aks-default-nmkmw               <none>           <none>
+vllm-agg-router-0-vllmdecodeworker-5nrfz                          0/1     Running   0             4m44s   10.244.7.241    aks-a100a-56471985-vmss000002   <none>           <none>
+vllm-agg-router-0-vllmdecodeworker-htl5j                          1/1     Running   0             4m44s   10.244.3.165    aks-a100b-21135548-vmss000001   <none>           <none>
+INFO     tests.deploy.test_deploy:test_deploy.py:362 Found EPP pod: qwen-0-epp-z5l9j
+INFO     tests.deploy.test_deploy:test_deploy.py:376 Gateway port-forward established: http://localhost:38061
+INFO     tests.deploy.test_deploy:test_deploy.py:380 Using Host header: default.example.com
+INFO     tests.deploy.test_deploy:client.py:206 Model 'Qwen/Qwen3-0.6B' is available and responding
+INFO     tests.deploy.test_deploy:client.py:208 Model ready, waiting 5s for stabilization...
+INFO     tests.deploy.test_deploy:test_deploy.py:403 Sending inference request to http://localhost:38061/v1/chat/completions
+INFO     tests.deploy.test_deploy:test_deploy.py:105 Response validation passed: model=Qwen/Qwen3-0.6B, content_length=122
+INFO     tests.deploy.test_deploy:test_deploy.py:419 GAIE deployment test PASSED | model=Qwen/Qwen3-0.6B, status=200, response_length=122 chars
+Model response: <think>
+Okay, the user wants me to describe my first steps into the ruins of Aeloria. Let me start by setting the scene. I
+WARNING  ManagedDeployment:managed_deployment.py:1099 Connection test failed for pod qwen-0-epp-z5l9j (attempt 1/3): ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+WARNING  ManagedDeployment:managed_deployment.py:1099 Connection test failed for pod qwen-0-epp-z5l9j (attempt 2/3): ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+WARNING  ManagedDeployment:managed_deployment.py:1099 Connection test failed for pod qwen-0-epp-z5l9j (attempt 3/3): ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+WARNING  ManagedDeployment:managed_deployment.py:1116 Port forward failed after 3 attempts for pod qwen-0-epp-z5l9j
+ERROR    ManagedDeployment:managed_deployment.py:1015 Unable to get metrics for Epp
+ERROR    ManagedDeployment:managed_deployment.py:980 a container name must be specified for pod qwen-0-vllmprefillworker-6pl2g-x-default-x-ci-24156727933, choose one of: [vcluster-rewrite-hosts main sidecar-frontend]
+ERROR    ManagedDeployment:managed_deployment.py:980 a container name must be specified for pod qwen-0-vllmdecodeworker-hw4x8-x-default-x-ci-24156727933, choose one of: [vcluster-rewrite-hosts main sidecar-frontend]
+INFO     ManagedDeployment:managed_deployment.py:1135 Cleaning up 2 active port forwards

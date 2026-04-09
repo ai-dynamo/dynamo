@@ -1,0 +1,47 @@
+[2m2026-04-08T09:53:11.204313Z[0m [32m INFO[0m [2mconftest.file_storage_backend[0m[2m:[0m Set up file storage backend in: /tmp/tmp5o3e4qfh
+[2m2026-04-08T09:53:11.207350Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8086 --migration-limit 0 --discovery-backend file --request-plane tcp in /workspace
+[2m2026-04-08T09:53:11.208539Z[0m [32m INFO[0m [2mtest_prompt_embeds.start_services[0m[2m:[0m Frontend started for prompt embeds tests
+[2m2026-04-08T09:53:11.208783Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --max-model-len 4096 --discovery-backend file --request-plane tcp --enable-prompt-embeds --kv-events-config {"enable_kv_cache_events": false} in /workspace
+[2m2026-04-08T09:53:11.209919Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8086/v1/models
+[2m2026-04-08T09:53:33.235073Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8086/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T09:53:53.255682Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8086/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+[2m2026-04-08T09:54:01.264241Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8086/v1/models (attempt=27, elapsed=49.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775642040,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T09:54:01.264559Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8128/health
+[2m2026-04-08T09:54:01.266220Z[0m [32m INFO[0m [2mtest_prompt_embeds.is_ready[0m[2m:[0m vllm-prompt-embeds-worker status is ready
+[2m2026-04-08T09:54:01.266315Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8128/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 43,
+    "nanos": 44678853
+  },
+  "endpoints": {
+    "clear_kv_blocks": "ready",
+    "get_perf_metrics": "ready",
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T09:54:01.266440Z[0m [32m INFO[0m [2mtest_prompt_embeds.start_services[0m[2m:[0m Vllm Worker with prompt embeds started for tests
+[2m2026-04-08T09:54:02.604550Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14670
+[2m2026-04-08T09:54:04.707545Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14672 name: tee
+[2m2026-04-08T09:54:04.707703Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14672 tee
+[2m2026-04-08T09:54:04.708102Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14671 name: sed
+[2m2026-04-08T09:54:04.708192Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14671 sed
+[2m2026-04-08T09:54:04.708592Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14667
+[2m2026-04-08T09:54:10.115080Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14669 name: tee
+[2m2026-04-08T09:54:10.115234Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14669 tee
+[2m2026-04-08T09:54:10.115568Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14668 name: sed
+[2m2026-04-08T09:54:10.115655Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14668 sed

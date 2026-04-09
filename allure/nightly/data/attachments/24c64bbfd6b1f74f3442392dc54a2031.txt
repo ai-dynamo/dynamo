@@ -1,0 +1,102 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4306 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4306
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4306
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2458 --advertise-client-urls http://0.0.0.0:2458 --listen-peer-urls http://0.0.0.0:2459 --initial-advertise-peer-urls http://localhost:2459 --initial-cluster default=http://localhost:2459 --data-dir /tmp/etcd_29h4_tpb in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2458
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2458
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:300 Created vLLM worker 0 on GPU 0 (gpu_mem=0.4, system_port=8147) with endpoint: dyn://test-namespace-nrrhkqsilc.prefill.generate
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:300 Created vLLM worker 1 on GPU 0 (gpu_mem=0.4, system_port=8148) with endpoint: dyn://test-namespace-nrrhkqsilc.prefill.generate
+INFO     tests.router.e2e_harness:e2e_harness.py:57 [VLLMProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.e2e_harness:e2e_harness.py:64 [VLLMProcess] Starting vLLM worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:79 [VLLMProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --disaggregation-mode prefill --kv-transfer-config {"kv_connector":"NixlConnector","kv_role":"kv_both"} --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8176", "enable_kv_cache_events": true} in /workspace
+INFO     tests.router.e2e_harness:e2e_harness.py:85 [VLLMProcess] Worker 0 launched with PID: 7584
+INFO     tests.router.e2e_harness:e2e_harness.py:94 [VLLMProcess] Waiting 5s for worker 0 to initialize NIXL before starting next worker...
+INFO     tests.router.e2e_harness:e2e_harness.py:64 [VLLMProcess] Starting vLLM worker 1...
+INFO     tests.router.e2e_harness:e2e_harness.py:79 [VLLMProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --disaggregation-mode prefill --kv-transfer-config {"kv_connector":"NixlConnector","kv_role":"kv_both"} --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8177", "enable_kv_cache_events": true} in /workspace
+INFO     tests.router.e2e_harness:e2e_harness.py:85 [VLLMProcess] Worker 1 launched with PID: 7732
+INFO     tests.router.e2e_harness:e2e_harness.py:117 [VLLMProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.e2e_harness:e2e_harness.py:122 [VLLMProcess] Waiting for health checks to complete...
+INFO     tests.router.e2e_harness:e2e_harness.py:127 [VLLMProcess] Checking health for worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:134 [VLLMProcess] Worker 0 health checks passed
+INFO     tests.router.e2e_harness:e2e_harness.py:127 [VLLMProcess] Checking health for worker 1...
+INFO     tests.router.e2e_harness:e2e_harness.py:134 [VLLMProcess] Worker 1 health checks passed
+INFO     tests.router.e2e_harness:e2e_harness.py:144 [VLLMProcess] All workers started successfully and passed health checks!
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:300 Created vLLM worker 0 on GPU 1 (gpu_mem=0.4, system_port=8178) with endpoint: dyn://test-namespace-nrrhkqsilc.backend.generate
+INFO     tests.router.e2e_harness:e2e_harness.py:57 [VLLMProcess] Starting 1 worker processes sequentially...
+INFO     tests.router.e2e_harness:e2e_harness.py:64 [VLLMProcess] Starting vLLM worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:79 [VLLMProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --disaggregation-mode decode --kv-transfer-config {"kv_connector":"NixlConnector","kv_role":"kv_both"} --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8150", "enable_kv_cache_events": true} in /workspace
+INFO     tests.router.e2e_harness:e2e_harness.py:85 [VLLMProcess] Worker 0 launched with PID: 7735
+INFO     tests.router.e2e_harness:e2e_harness.py:117 [VLLMProcess] All 1 workers launched with sequential initialization.
+INFO     tests.router.e2e_harness:e2e_harness.py:122 [VLLMProcess] Waiting for health checks to complete...
+INFO     tests.router.e2e_harness:e2e_harness.py:127 [VLLMProcess] Checking health for worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:134 [VLLMProcess] Worker 0 health checks passed
+INFO     tests.router.e2e_harness:e2e_harness.py:144 [VLLMProcess] All workers started successfully and passed health checks!
+INFO     FrontendRouterProcess:managed_process.py:437 Running command: python3 -m dynamo.frontend --router-mode kv --http-port 8091 --discovery-backend etcd --namespace test-namespace-nrrhkqsilc --kv-cache-block-size 16 --enforce-disagg in /workspace
+INFO     FrontendRouterProcess:managed_process.py:662 Checking Port: 8091
+INFO     FrontendRouterProcess:managed_process.py:670 SUCCESS: Check Port: 8091
+INFO     FrontendRouterProcess:managed_process.py:690 Checking URL http://localhost:8091/v1/models
+INFO     FrontendRouterProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8091/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": []
+}
+INFO     tests.router.common:common.py:1614 Starting KV router frontend on port 8091 for disagg test
+INFO     tests.router.common:common.py:1622 Waiting for prefill and decode workers to register with frontend...
+INFO     tests.router.helper:helper.py:169 Waiting for 1 workers to register on HTTP frontend (timeout=120s)...
+INFO     tests.router.helper:helper.py:191 Workers registered. Found 1 model(s): ['TinyLlama/TinyLlama-1.1B-Chat-v1.0']
+INFO     tests.router.helper:helper.py:206 Waiting for chat completions pipeline to be built...
+INFO     tests.router.helper:helper.py:226 Chat completions pipeline ready!
+INFO     tests.router.common:common.py:1660 Sending request 1/4 with progressive prefix (~550 chars)
+INFO     tests.router.common:common.py:1709 Request 1: prefill_worker_id=409719188332001285, decode_worker_id=409719188332001293, timing={'request_received_ms': 1775672664045, 'prefill_wait_time_ms': 0.660702, 'prefill_time_ms': 18.851572, 'ttft_ms': 19.512273999999998, 'total_time_ms': 145.447177, 'kv_hit_rate': 0.0, 'router_queue_depth': 0}
+INFO     tests.router.helper:helper.py:133 ✓ Verified timing: ttft_ms=19.51, total_time_ms=145.45
+INFO     tests.router.common:common.py:1660 Sending request 2/4 with progressive prefix (~1101 chars)
+INFO     tests.router.common:common.py:1709 Request 2: prefill_worker_id=409719188332001285, decode_worker_id=409719188332001293, timing={'request_received_ms': 1775672665193, 'prefill_wait_time_ms': 0.652931, 'prefill_time_ms': 17.245072, 'ttft_ms': 17.898003, 'total_time_ms': 143.163015, 'kv_hit_rate': 0.45, 'router_queue_depth': 0}
+INFO     tests.router.helper:helper.py:133 ✓ Verified timing: ttft_ms=17.90, total_time_ms=143.16
+INFO     tests.router.common:common.py:1660 Sending request 3/4 with progressive prefix (~1652 chars)
+INFO     tests.router.common:common.py:1709 Request 3: prefill_worker_id=409719188332001285, decode_worker_id=409719188332001293, timing={'request_received_ms': 1775672666338, 'prefill_wait_time_ms': 0.9423170000000001, 'prefill_time_ms': 17.304736000000002, 'ttft_ms': 18.247052999999998, 'total_time_ms': 144.551776, 'kv_hit_rate': 0.6206896551724138, 'router_queue_depth': 0}
+INFO     tests.router.helper:helper.py:133 ✓ Verified timing: ttft_ms=18.25, total_time_ms=144.55
+INFO     tests.router.common:common.py:1660 Sending request 4/4 with progressive prefix (~2203 chars)
+INFO     tests.router.common:common.py:1709 Request 4: prefill_worker_id=409719188332001285, decode_worker_id=409719188332001293, timing={'request_received_ms': 1775672667485, 'prefill_wait_time_ms': 0.847344, 'prefill_time_ms': 17.362987, 'ttft_ms': 18.210331, 'total_time_ms': 143.014178, 'kv_hit_rate': 0.7105263157894737, 'router_queue_depth': 0}
+INFO     tests.router.helper:helper.py:133 ✓ Verified timing: ttft_ms=18.21, total_time_ms=143.01
+INFO     tests.router.common:common.py:1733 Collected prefill_worker_ids: [409719188332001285, 409719188332001285, 409719188332001285, 409719188332001285]
+INFO     tests.router.common:common.py:1734 Collected decode_worker_ids: [409719188332001293, 409719188332001293, 409719188332001293, 409719188332001293]
+INFO     tests.router.common:common.py:1775 Successfully verified disaggregated routing:
+  - All 4 requests routed to same prefill_worker_id=409719188332001285 (prefix reuse)
+  - Prefill worker is NOT in decode worker set {409719188332001293} (true disagg)
+INFO     FrontendRouterProcess:managed_process.py:558 Sending SIGTERM to process group: 7738
+INFO     FrontendRouterProcess:managed_process.py:31 Terminating PID: 7740 name: tee
+INFO     FrontendRouterProcess:managed_process.py:36 Sending SIGTERM (kill): 7740 tee
+INFO     FrontendRouterProcess:managed_process.py:31 Terminating PID: 7739 name: sed
+INFO     FrontendRouterProcess:managed_process.py:36 Sending SIGTERM (kill): 7739 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:152 Stopping vLLM worker 0
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 7735
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 7737 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 7737 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 7736 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 7736 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:155 Waiting for vLLM worker resources to fully clean up...
+INFO     tests.router.e2e_harness:e2e_harness.py:152 Stopping vLLM worker 0
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 7584
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 7586 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 7586 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 7585 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 7585 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:152 Stopping vLLM worker 1
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 7732
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 7734 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 7734 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 7733 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 7733 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:155 Waiting for vLLM worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 7570
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 7571 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 7571 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 7558
+INFO     NatsServer:managed_process.py:31 Terminating PID: 7559 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 7559 sed

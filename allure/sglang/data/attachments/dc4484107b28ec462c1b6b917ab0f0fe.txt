@@ -1,0 +1,65 @@
+[2m2026-04-08T21:07:38.986873Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4257 in /workspace
+[2m2026-04-08T21:07:38.987862Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4257
+[2m2026-04-08T21:07:39.088569Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4257
+[2m2026-04-08T21:07:39.088849Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T21:07:39.091042Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T21:07:39.091708Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2453 --advertise-client-urls http://0.0.0.0:2453 --listen-peer-urls http://0.0.0.0:2454 --initial-advertise-peer-urls http://localhost:2454 --initial-cluster default=http://localhost:2454 --data-dir /tmp/etcd_n6zon10t in /workspace
+[2m2026-04-08T21:07:39.092564Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2453
+[2m2026-04-08T21:07:39.193227Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2453
+[2m2026-04-08T21:07:39.197254Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8050 --migration-limit 0 in /workspace
+[2m2026-04-08T21:07:39.198484Z[0m [32m INFO[0m [2mtest_vllm.start_services[0m[2m:[0m Frontend started for tests
+[2m2026-04-08T21:07:39.198739Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model openai/gpt-oss-20b --max-model-len 32768 --dyn-tool-call-parser harmony --dyn-reasoning-parser gpt_oss --max-model-len 32768 in /workspace
+[2m2026-04-08T21:07:39.199868Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8050/v1/models
+[2m2026-04-08T21:08:01.225249Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8050/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T21:08:21.248927Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8050/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+[2m2026-04-08T21:08:41.271621Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8050/v1/models (custom check failed) (attempt=33, elapsed=61.1s)
+[2m2026-04-08T21:09:01.292564Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8050/v1/models (custom check failed) (attempt=43, elapsed=81.1s)
+[2m2026-04-08T21:09:21.313294Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8050/v1/models (custom check failed) (attempt=53, elapsed=101.1s)
+[2m2026-04-08T21:09:23.316149Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8050/v1/models (attempt=54, elapsed=103.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "openai/gpt-oss-20b",
+      "object": "model",
+      "created": 1775682562,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T21:09:23.316593Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8139/health
+[2m2026-04-08T21:09:23.318353Z[0m [32m INFO[0m [2mtest_vllm.is_ready[0m[2m:[0m vllm-worker status is ready
+[2m2026-04-08T21:09:23.318463Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8139/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 97,
+    "nanos": 76306702
+  },
+  "endpoints": {
+    "get_perf_metrics": "ready",
+    "generate": "ready",
+    "clear_kv_blocks": "ready"
+  }
+}
+[2m2026-04-08T21:09:23.318588Z[0m [32m INFO[0m [2mtest_vllm.start_services[0m[2m:[0m Vllm Worker started for tests
+[2m2026-04-08T21:09:23.319447Z[0m [32m INFO[0m [2mtest_vllm.test_reasoning_effort[0m[2m:[0m Start to test reasoning effort
+[2m2026-04-08T21:10:32.085514Z[0m [32m INFO[0m [2mtest_vllm.test_reasoning_effort[0m[2m:[0m Low effort reasoning tokens: None, High effort reasoning tokens: None
+[2m2026-04-08T21:10:32.087332Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6352
+[2m2026-04-08T21:10:33.690446Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6354 name: tee
+[2m2026-04-08T21:10:33.690605Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6354 tee
+[2m2026-04-08T21:10:33.691145Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6353 name: sed
+[2m2026-04-08T21:10:33.691240Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6353 sed
+[2m2026-04-08T21:10:33.691711Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6349
+[2m2026-04-08T21:10:39.198627Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6351 name: tee
+[2m2026-04-08T21:10:39.198778Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6351 tee
+[2m2026-04-08T21:10:39.199221Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6350 name: sed
+[2m2026-04-08T21:10:39.199315Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6350 sed
+[2m2026-04-08T21:10:39.201574Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6336
+[2m2026-04-08T21:10:39.302559Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6337 name: sed
+[2m2026-04-08T21:10:39.302670Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6337 sed
+[2m2026-04-08T21:10:39.303543Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6324
+[2m2026-04-08T21:10:39.404464Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6325 name: sed
+[2m2026-04-08T21:10:39.404567Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6325 sed

@@ -1,0 +1,152 @@
+[2m2026-04-08T18:23:35.053207Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4277 in /workspace
+[2m2026-04-08T18:23:35.054219Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4277
+[2m2026-04-08T18:23:35.154707Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4277
+[2m2026-04-08T18:23:35.154853Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:23:35.156756Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:23:35.157430Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2435 --advertise-client-urls http://0.0.0.0:2435 --listen-peer-urls http://0.0.0.0:2436 --initial-advertise-peer-urls http://localhost:2436 --initial-cluster default=http://localhost:2436 --data-dir /tmp/etcd_ai2xblra in /workspace
+[2m2026-04-08T18:23:35.158333Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2435
+[2m2026-04-08T18:23:35.258799Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2435
+[2m2026-04-08T18:23:35.260052Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8023 --migration-limit 0 in /workspace
+[2m2026-04-08T18:23:35.261359Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Frontend started successfully
+[2m2026-04-08T18:23:35.262204Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --gpu-memory-utilization 0.45 --max-model-len 16384 in /workspace
+[2m2026-04-08T18:23:35.263453Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:9132/health
+[2m2026-04-08T18:23:55.310710Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:9132/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T18:23:56.313365Z[0m [32m INFO[0m [2mtest_vllm.is_ready[0m[2m:[0m Worker status is ready
+[2m2026-04-08T18:23:56.313617Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:9132/health (attempt=22, elapsed=21.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 13,
+    "nanos": 968315663
+  },
+  "endpoints": {
+    "generate": "ready",
+    "get_perf_metrics": "ready",
+    "clear_kv_blocks": "ready"
+  }
+}
+[2m2026-04-08T18:23:56.313718Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8023/v1/models
+[2m2026-04-08T18:23:57.315482Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8023/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775672636,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T18:23:57.315810Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8023/health
+[2m2026-04-08T18:23:58.318385Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8023/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 6767675962267076873,
+      "transport": {
+        "tcp": "10.1.10.41:39309/5deb9d6e55e10909/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6767675962267076873,
+      "transport": {
+        "tcp": "10.1.10.41:39309/5deb9d6e55e10909/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 6767675962267076873,
+      "transport": {
+        "tcp": "10.1.10.41:39309/5deb9d6e55e10909/get_perf_metrics"
+      }
+    }
+  ]
+}
+[2m2026-04-08T18:23:58.318776Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Worker PID: 980
+[2m2026-04-08T18:23:58.318845Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Testing completion request cancellation...
+[2m2026-04-08T18:23:58.318903Z[0m [32m INFO[0m [2mutils.send_completion_request[0m[2m:[0m Sending completion request with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+[2m2026-04-08T18:23:58.319188Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Decode Request ID: ' pattern (max 100 iterations)...
+[2m2026-04-08T18:23:58.325749Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'Decode Request ID: ' at iteration 1
+[2m2026-04-08T18:23:58.325820Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Content after pattern: 'da3dd3e8-f73c-4a18-889f-b9459c46172c'
+[2m2026-04-08T18:23:58.325898Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:23:58.325957Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to shutdown socket: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:23:58.326056Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Cancelled request ID: da3dd3e8-f73c-4a18-889f-b9459c46172c
+[2m2026-04-08T18:23:58.326120Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Aborted Request ID: da3dd3e8-f73c-4a18-889f-b9459c46172c' pattern (max 100 iterations)...
+[2m2026-04-08T18:23:58.347289Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'Aborted Request ID: da3dd3e8-f73c-4a18-889f-b9459c46172c' at iteration 4
+[2m2026-04-08T18:23:58.347383Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'issued control message Kill to sender' pattern (max 100 iterations)...
+[2m2026-04-08T18:23:58.347978Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'issued control message Kill to sender' at iteration 0
+[2m2026-04-08T18:23:58.348077Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Completion request cancellation detected successfully
+[2m2026-04-08T18:23:58.350453Z[0m [32m INFO[0m [2mutils.verify_frontend_cancellation_metrics[0m[2m:[0m Frontend cancellation metrics - endpoint=completions, request_type=unary: 1
+[2m2026-04-08T18:23:58.360547Z[0m [32m INFO[0m [2mutils.verify_runtime_cancellation_metrics[0m[2m:[0m Runtime cancellation metrics (component=backend): 1
+[2m2026-04-08T18:23:58.360723Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Testing chat completion request cancellation...
+[2m2026-04-08T18:23:58.360805Z[0m [32m INFO[0m [2mutils.send_chat_completion_request[0m[2m:[0m Sending chat completion request (stream=False) with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+[2m2026-04-08T18:23:58.361113Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Decode Request ID: ' pattern (max 100 iterations)...
+[2m2026-04-08T18:23:58.367315Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'Decode Request ID: ' at iteration 1
+[2m2026-04-08T18:23:58.367399Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Content after pattern: 'ac58b372-1927-43fc-833f-844a34080792'
+[2m2026-04-08T18:23:58.367483Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:23:58.367562Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to shutdown socket: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:23:58.367682Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Cancelled request ID: ac58b372-1927-43fc-833f-844a34080792
+[2m2026-04-08T18:23:58.367797Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Aborted Request ID: ac58b372-1927-43fc-833f-844a34080792' pattern (max 100 iterations)...
+[2m2026-04-08T18:23:58.373483Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'Aborted Request ID: ac58b372-1927-43fc-833f-844a34080792' at iteration 1
+[2m2026-04-08T18:23:58.373567Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'issued control message Kill to sender' pattern (max 100 iterations)...
+[2m2026-04-08T18:23:58.373821Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'issued control message Kill to sender' at iteration 0
+[2m2026-04-08T18:23:58.373901Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Chat completion request cancellation detected successfully
+[2m2026-04-08T18:23:58.376323Z[0m [32m INFO[0m [2mutils.verify_frontend_cancellation_metrics[0m[2m:[0m Frontend cancellation metrics - endpoint=chat_completions, request_type=unary: 1
+[2m2026-04-08T18:23:58.385224Z[0m [32m INFO[0m [2mutils.verify_runtime_cancellation_metrics[0m[2m:[0m Runtime cancellation metrics (component=backend): 2
+[2m2026-04-08T18:23:58.385389Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Testing chat completion stream request cancellation...
+[2m2026-04-08T18:23:58.385474Z[0m [32m INFO[0m [2mutils.send_chat_completion_request[0m[2m:[0m Sending chat completion request (stream=True) with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+[2m2026-04-08T18:23:58.385751Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Decode Request ID: ' pattern (max 100 iterations)...
+[2m2026-04-08T18:23:58.391754Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'Decode Request ID: ' at iteration 1
+[2m2026-04-08T18:23:58.391826Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Content after pattern: '67d647eb-70c9-4a44-9f12-52c850aecd90'
+[2m2026-04-08T18:23:58.784577Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 1: data: {"id":"chatcmpl-67d647eb-70c9-4a44-9f12-52c850aecd90","choices":[{"index":0,"delta":{"content"
+[2m2026-04-08T18:23:58.784737Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 2: 
+[2m2026-04-08T18:23:58.799309Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 3: data: {"id":"chatcmpl-67d647eb-70c9-4a44-9f12-52c850aecd90","choices":[{"index":0,"delta":{"content"
+[2m2026-04-08T18:23:58.799414Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 4: 
+[2m2026-04-08T18:23:58.814093Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 5: data: {"id":"chatcmpl-67d647eb-70c9-4a44-9f12-52c850aecd90","choices":[{"index":0,"delta":{"content"
+[2m2026-04-08T18:23:58.814195Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Successfully read 5 responses
+[2m2026-04-08T18:23:58.814409Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:23:58.814507Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to shutdown socket: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:23:58.814601Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:23:58.814685Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to shutdown socket: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:23:58.814813Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Cancelled request ID: 67d647eb-70c9-4a44-9f12-52c850aecd90
+[2m2026-04-08T18:23:58.814904Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Aborted Request ID: 67d647eb-70c9-4a44-9f12-52c850aecd90' pattern (max 100 iterations)...
+[2m2026-04-08T18:23:58.815244Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'Aborted Request ID: 67d647eb-70c9-4a44-9f12-52c850aecd90' at iteration 0
+[2m2026-04-08T18:23:58.815334Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'issued control message Kill to sender' pattern (max 100 iterations)...
+[2m2026-04-08T18:23:58.815627Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'issued control message Kill to sender' at iteration 0
+[2m2026-04-08T18:23:58.815717Z[0m [32m INFO[0m [2mtest_vllm.test_request_cancellation_vllm_aggregated[0m[2m:[0m Chat completion stream request cancellation detected successfully
+[2m2026-04-08T18:23:58.818451Z[0m [32m INFO[0m [2mutils.verify_frontend_cancellation_metrics[0m[2m:[0m Frontend cancellation metrics - endpoint=chat_completions, request_type=stream: 1
+[2m2026-04-08T18:23:58.827552Z[0m [32m INFO[0m [2mutils.verify_runtime_cancellation_metrics[0m[2m:[0m Runtime cancellation metrics (component=backend): 3
+[2m2026-04-08T18:23:58.829363Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 980
+[2m2026-04-08T18:23:59.831402Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 982 name: tee
+[2m2026-04-08T18:23:59.831599Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 982 tee
+[2m2026-04-08T18:23:59.832105Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 981 name: sed
+[2m2026-04-08T18:23:59.832195Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 981 sed
+[2m2026-04-08T18:23:59.832672Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 977
+[2m2026-04-08T18:24:05.338565Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 979 name: tee
+[2m2026-04-08T18:24:05.338737Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 979 tee
+[2m2026-04-08T18:24:05.339189Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 978 name: sed
+[2m2026-04-08T18:24:05.339279Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 978 sed
+[2m2026-04-08T18:24:05.341105Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 964
+[2m2026-04-08T18:24:05.441904Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 965 name: sed
+[2m2026-04-08T18:24:05.442028Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 965 sed
+[2m2026-04-08T18:24:05.442824Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 952
+[2m2026-04-08T18:24:05.543704Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 953 name: sed
+[2m2026-04-08T18:24:05.543954Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 953 sed

@@ -1,0 +1,24 @@
+[2m2026-04-08T18:34:47.322067Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4228 in /workspace
+[2m2026-04-08T18:34:47.323106Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4228
+[2m2026-04-08T18:34:47.423610Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4228
+[2m2026-04-08T18:34:47.423757Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:34:47.425623Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:34:47.426325Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2413 --advertise-client-urls http://0.0.0.0:2413 --listen-peer-urls http://0.0.0.0:2414 --initial-advertise-peer-urls http://localhost:2414 --initial-cluster default=http://localhost:2414 --data-dir /tmp/etcd_2k8zk9ar in /workspace
+[2m2026-04-08T18:34:47.427203Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2413
+[2m2026-04-08T18:34:47.527920Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2413
+[2m2026-04-08T18:34:47.533716Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: vllm serve --block-size 16 --port 8042 --kv-transfer-config {"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"} Qwen/Qwen3-0.6B --max-model-len 8000 --num-gpu-blocks-override 20 in /workspace
+[2m2026-04-08T18:34:47.534919Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 8042
+[2m2026-04-08T18:35:21.337739Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 8042
+[2m2026-04-08T18:35:21.337929Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 6906
+[2m2026-04-08T18:35:21.338207Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 6906
+[2m2026-04-08T18:35:26.990976Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 8185
+[2m2026-04-08T18:35:27.993065Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 8187 name: tee
+[2m2026-04-08T18:35:27.993213Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 8187 tee
+[2m2026-04-08T18:35:27.993634Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 8186 name: sed
+[2m2026-04-08T18:35:27.993724Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 8186 sed
+[2m2026-04-08T18:35:27.998122Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 8172
+[2m2026-04-08T18:35:28.098874Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 8173 name: sed
+[2m2026-04-08T18:35:28.098984Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 8173 sed
+[2m2026-04-08T18:35:28.099805Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 8160
+[2m2026-04-08T18:35:28.200471Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 8161 name: sed
+[2m2026-04-08T18:35:28.200621Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 8161 sed

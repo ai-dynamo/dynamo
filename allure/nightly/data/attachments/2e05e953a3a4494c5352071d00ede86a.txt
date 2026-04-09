@@ -1,0 +1,243 @@
+[BASH] ==========================================
+[BASH] Launching Aggregated Serving (1 GPU)
+[BASH] ==========================================
+[BASH] Model:       Qwen/Qwen3-0.6B
+[BASH] Frontend:    http://localhost:8009
+[BASH] Max seq len: 4096
+[BASH] ==========================================
+[BASH] 
+[BASH] Example test command:
+[BASH] 
+[BASH]   curl http://localhost:8009/v1/chat/completions \
+[BASH]     -H 'Content-Type: application/json' \
+[BASH]     -d '{
+[BASH]       "model": "Qwen/Qwen3-0.6B",
+[BASH]       "messages": [{"role": "user", "content": "Hello!"}],
+[BASH]       "max_tokens": 32
+[BASH]     }'
+[BASH] 
+[BASH] ==========================================
+[BASH] [2m2026-04-09T04:10:58.942424Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
+[BASH] [2m2026-04-09T04:10:58.944276Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2424)
+[BASH] [2m2026-04-09T04:10:58.948276Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.0.137 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-09T04:10:58.951393Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8009"
+[BASH] [2m2026-04-09T04:10:59.306084Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-09T04:11:01.308098Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] dynamo.nixl_connect: Failed to load CuPy for GPU acceleration, utilizing numpy to provide CPU based operations.
+[BASH] [2m2026-04-09T04:11:03.099376Z[0m [32m INFO[0m [2marg_utils.__post_init__[0m[2m:[0m HF_HUB_OFFLINE is True, replace model_id [Qwen/Qwen3-0.6B] to model_path [/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca]
+[BASH] [2m2026-04-09T04:11:03.099601Z[0m [32m INFO[0m [2margs.update_engine_config_with_dynamo[0m[2m:[0m Using kv_events_config for publishing vLLM kv events over zmq: None (use_kv_events=False)
+[BASH] [2m2026-04-09T04:11:03.310094Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-09T04:11:03.439701Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-0.6B' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca", skipping download
+[BASH] [2m2026-04-09T04:11:03.439733Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-0.6B' without API validation
+[BASH] [2m2026-04-09T04:11:03.441444Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2424)
+[BASH] [2m2026-04-09T04:11:03.444416Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.0.137 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-09T04:11:03.444853Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:8106
+[BASH] [2m2026-04-09T04:11:03.444889Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:8106
+[BASH] [2m2026-04-09T04:11:03.444902Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:8106
+[BASH] [2m2026-04-09T04:11:03.445015Z[0m [32m INFO[0m [2mgraceful_shutdown.install_signal_handlers[0m[2m:[0m Signal handlers set up for graceful shutdown (discovery unregister + grace period)
+[BASH] [2m2026-04-09T04:11:03.445265Z[0m [33mWARNING[0m [2mprometheus.setup_multiprocess_prometheus[0m[2m:[0m Found PROMETHEUS_MULTIPROC_DIR was set by user. This directory must be wiped between vLLM runs or you will find inaccurate metrics. Unset the variable and vLLM will properly handle cleanup.
+[BASH] [2m2026-04-09T04:11:03.452489Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3ForCausalLM
+[BASH] [2m2026-04-09T04:11:03.452824Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 4096
+[BASH] [2m2026-04-09T04:11:03.454110Z[0m [33mWARNING[0m [2mmodel.get_diff_sampling_param[0m[2m:[0m Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.6, 'top_k': 20, 'top_p': 0.95}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+[BASH] [2m2026-04-09T04:11:03.458293Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3ForCausalLM
+[BASH] [2m2026-04-09T04:11:03.458380Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 4096
+[BASH] [2m2026-04-09T04:11:03.459246Z[0m [32m INFO[0m [2mvllm.__post_init__[0m[2m:[0m Asynchronous scheduling is enabled.
+[BASH] [2m2026-04-09T04:11:03.459306Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] [2m2026-04-09T04:11:03.459344Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] [2m2026-04-09T04:11:04.706773Z[0m [32m INFO[0m [2mvllm.__post_init__[0m[2m:[0m Cudagraph is disabled under eager mode
+[BASH] [2m2026-04-09T04:11:04.706937Z[0m [32m INFO[0m [2mcompilation.log_enabled_passes[0m[2m:[0m Enabled custom fusions: norm_quant, act_quant
+[BASH] [2m2026-04-09T04:11:05.312120Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-09T04:11:07.314403Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-09T04:11:09.316515Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-09T04:11:11.318668Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:11 [core.py:105] Initializing a V1 LLM engine (v0.19.0) with config: model='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca', speculative_config=None, tokenizer='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen3-0.6B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_images_per_batch': 0, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:12 [parallel_state.py:1400] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.1.0.137:39331 backend=nccl
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:12 [parallel_state.py:1716] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+[BASH] [2m2026-04-09T04:11:13.320680Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:13 [topk_topp_sampler.py:51] Using FlashInfer for top-p & top-k sampling.
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:13 [gpu_model_runner.py:4735] Starting to load model /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca...
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:13 [cuda.py:334] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:13 [flash_attn.py:596] Using FlashAttention version 2
+[BASH] (EngineCore pid=11405) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+[BASH] (EngineCore pid=11405) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  6.89it/s]
+[BASH] (EngineCore pid=11405) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  6.88it/s]
+[BASH] (EngineCore pid=11405) 
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:14 [default_loader.py:384] Loading weights took 0.15 seconds
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:14 [gpu_model_runner.py:4820] Model loading took 1.12 GiB memory and 0.293713 seconds
+[BASH] [2m2026-04-09T04:11:15.322850Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:15 [gpu_worker.py:436] Available KV cache memory: 18.59 GiB
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:15 [kv_cache_utils.py:1319] GPU KV cache size: 174,016 tokens
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:15 [kv_cache_utils.py:1324] Maximum concurrency for 4,096 tokens per request: 42.48x
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:15 [core.py:283] init engine (profile, create kv cache, warmup model) took 1.16 seconds
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:16 [vllm.py:790] Asynchronous scheduling is enabled.
+[BASH] (EngineCore pid=11405) WARNING 04-09 04:11:16 [vllm.py:848] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] (EngineCore pid=11405) WARNING 04-09 04:11:16 [vllm.py:859] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:16 [vllm.py:1025] Cudagraph is disabled under eager mode
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:16 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+[BASH] [2m2026-04-09T04:11:16.450909Z[0m [32m INFO[0m [2mmain.setup_vllm_engine[0m[2m:[0m VllmWorker for Qwen/Qwen3-0.6B has been initialized
+[BASH] [2m2026-04-09T04:11:16.450975Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Cache config values: {'num_gpu_blocks': 10876, 'block_size': 16}
+[BASH] [2m2026-04-09T04:11:16.451001Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Scheduler config values: {'max_num_seqs': 2, 'max_num_batched_tokens': 2048}
+[BASH] [2m2026-04-09T04:11:16.451108Z[0m [32m INFO[0m [2mengine_monitor.__init__[0m[2m:[0m VllmEngineMonitor initialized and health check task started.
+[BASH] [2m2026-04-09T04:11:16.451164Z[0m [33m WARN[0m [2mhandlers.get_dp_range_for_worker[0m[2m:[0m vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment, hybrid or external load balancing is recommended.
+[BASH] [2m2026-04-09T04:11:16.451537Z[0m [32m INFO[0m [2mworker_factory._create_decode_worker[0m[2m:[0m Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep
+[BASH] [2m2026-04-09T04:11:16.451574Z[0m [32m INFO[0m [2mworker_factory._create_decode_worker[0m[2m:[0m Registering model with endpoint types: chat,completions
+[BASH] [2m2026-04-09T04:11:16.451627Z[0m [32m INFO[0m [2mmain.register_vllm_model[0m[2m:[0m Getting engine runtime configuration metadata from vLLM engine for chat,completions...
+[BASH] [2m2026-04-09T04:11:16.451653Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Cache config values: {'num_gpu_blocks': 10876, 'block_size': 16}
+[BASH] [2m2026-04-09T04:11:16.451674Z[0m [32m INFO[0m [2mmain.get_engine_cache_info[0m[2m:[0m Scheduler config values: {'max_num_seqs': 2, 'max_num_batched_tokens': 2048}
+[BASH] [2m2026-04-09T04:11:16.451704Z[0m [33m WARN[0m [2mhandlers.get_dp_range_for_worker[0m[2m:[0m vLLM selects internal DP load balancing. If you are launching multiple workers for DP deployment, hybrid or external load balancing is recommended.
+[BASH] [2m2026-04-09T04:11:16.452168Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-0.6B' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca", skipping download
+[BASH] [2m2026-04-09T04:11:16.452182Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-0.6B' without API validation
+[BASH] [2m2026-04-09T04:11:16.452221Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=dynamo//kv_metrics/4c289d706f9d5409
+[BASH] [2m2026-04-09T04:11:16.454109Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mkv_metrics [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m5487809252185429001
+[BASH] [2m2026-04-09T04:11:16.456922Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-0.6B' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca", skipping download
+[BASH] [2m2026-04-09T04:11:16.456939Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-0.6B' without API validation
+[BASH] [2m2026-04-09T04:11:16.457058Z[0m [32m INFO[0m [2m_core[0m[2m:[0m Registered base model 'Qwen/Qwen3-0.6B' MDC
+[BASH] [2m2026-04-09T04:11:16.457999Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Creating TCP request plane server [3mbind_addr[0m[2m=[0m10.1.0.137:0 [3mport_source[0m[2m=[0m"OS-assigned"
+[BASH] [2m2026-04-09T04:11:16.458015Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Initializing TCP server with dispatcher (concurrency=1500, queue=6000)
+[BASH] [2m2026-04-09T04:11:16.458026Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Started TCP worker dispatcher with concurrency limit 1500
+[BASH] [2m2026-04-09T04:11:16.458035Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Binding TCP server to 10.1.0.137:0
+[BASH] [2m2026-04-09T04:11:16.458071Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m TCP server bound successfully [3mrequested[0m[2m=[0m10.1.0.137:0 [3mactual[0m[2m=[0m10.1.0.137:43461
+[BASH] [2m2026-04-09T04:11:16.458083Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m TCP request plane server started [3mactual_addr[0m[2m=[0m10.1.0.137:43461 [3mactual_port[0m[2m=[0m43461
+[BASH] [2m2026-04-09T04:11:16.458093Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.backend.get_perf_metrics' with shared TCP server on 10.1.0.137:43461
+[BASH] [2m2026-04-09T04:11:16.458123Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.backend.clear_kv_blocks' with shared TCP server on 10.1.0.137:43461
+[BASH] [2m2026-04-09T04:11:16.458458Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.backend.generate' with shared TCP server on 10.1.0.137:43461
+[BASH] [2m2026-04-09T04:11:16.762105Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m chat endpoints enabled
+[BASH] [2m2026-04-09T04:11:16.762132Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m responses endpoints enabled
+[BASH] [2m2026-04-09T04:11:16.762136Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m completion endpoints enabled
+[BASH] [2m2026-04-09T04:11:16.762997Z[0m [33m WARN[0m [2mdynamo_llm::discovery::worker_monitor[0m[2m:[0m KvWorkerMonitor: KV metrics subscriber not available (KV router's EventSubscriber requires NATS), skipping load metrics.
+[BASH] [2m2026-04-09T04:11:16.763230Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Chat completions is ready
+[BASH] [2m2026-04-09T04:11:16.763321Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Completions is ready
+[BASH] [2m2026-04-09T04:11:16.763331Z[0m [32m INFO[0m [2mdynamo_llm::discovery::model[0m[2m:[0m Adding worker set to model [3mmodel[0m[2m=[0mQwen/Qwen3-0.6B [3mnamespace[0m[2m=[0mdynamo
+[BASH] [2m2026-04-09T04:11:16.763339Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m added model [3mmodel_name[0m[2m=[0m"Qwen/Qwen3-0.6B" [3mnamespace[0m[2m=[0m"dynamo"
+[BASH] [2m2026-04-09T04:11:17.324765Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-09T04:11:18.327685Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-09T04:11:19.330752Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m10435c22-2cbd-402e-b0a4-7aceddab98d8 [3mmodel[0m[2m=[0mqwen/qwen3-0.6b [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0munary [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m2ffeb255-7695-4713-944b-43df5ccd8a71 [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b"[0m
+[BASH] [2m2026-04-09T04:11:19.331788Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m10435c22-2cbd-402e-b0a4-7aceddab98d8 [2m[3mrequest_id[0m[2m=[0m"10435c22-2cbd-402e-b0a4-7aceddab98d8" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m5487809252185429001[0m
+[BASH] [2m2026-04-09T04:11:19.425158Z[0m [33mWARNING[0m [2minput_processor.process_inputs[0m[2m:[0m Passing raw prompts to InputProcessor is deprecated and will be removed in v0.18. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
+[BASH] [2m2026-04-09T04:11:20.534452Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m10435c22-2cbd-402e-b0a4-7aceddab98d8 [2m[3mrequest_id[0m[2m=[0m"10435c22-2cbd-402e-b0a4-7aceddab98d8" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m5487809252185429001[0m
+[BASH] [2m2026-04-09T04:11:20.534788Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m10435c22-2cbd-402e-b0a4-7aceddab98d8 [3mmodel[0m[2m=[0mqwen/qwen3-0.6b [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0munary [3mstatus[0m[2m=[0msuccess [3melapsed_ms[0m[2m=[0m1204 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m2ffeb255-7695-4713-944b-43df5ccd8a71 [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b" [3minput_tokens[0m[2m=[0m15 [3moutput_tokens[0m[2m=[0m15 [3mttft_ms[0m[2m=[0m"998.40" [3mavg_itl_ms[0m[2m=[0m"14.68"[0m
+[BASH] [2m2026-04-09T04:11:20.534850Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m1204 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m2ffeb255-7695-4713-944b-43df5ccd8a71 [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b" [3minput_tokens[0m[2m=[0m15 [3moutput_tokens[0m[2m=[0m15 [3mttft_ms[0m[2m=[0m"998.40" [3mavg_itl_ms[0m[2m=[0m"14.68"[0m
+[BASH] [2m2026-04-09T04:11:20.537718Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m5c0dae8f-9716-416e-9cf9-7099976928b4 [3mmodel[0m[2m=[0mqwen/qwen3-0.6b [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0munary [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0mfb177297-8f3d-45d0-bf50-a2ffe89fa231 [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b"[0m
+[BASH] [2m2026-04-09T04:11:20.538348Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m5c0dae8f-9716-416e-9cf9-7099976928b4 [2m[3mrequest_id[0m[2m=[0m"5c0dae8f-9716-416e-9cf9-7099976928b4" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m5487809252185429001[0m
+[BASH] [2m2026-04-09T04:11:20.600851Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m5c0dae8f-9716-416e-9cf9-7099976928b4 [2m[3mrequest_id[0m[2m=[0m"5c0dae8f-9716-416e-9cf9-7099976928b4" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m5487809252185429001[0m
+[BASH] [2m2026-04-09T04:11:20.600983Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m5c0dae8f-9716-416e-9cf9-7099976928b4 [3mmodel[0m[2m=[0mqwen/qwen3-0.6b [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0munary [3mstatus[0m[2m=[0msuccess [3melapsed_ms[0m[2m=[0m63 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0mfb177297-8f3d-45d0-bf50-a2ffe89fa231 [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b" [3minput_tokens[0m[2m=[0m20 [3moutput_tokens[0m[2m=[0m3 [3mttft_ms[0m[2m=[0m"33.68" [3mavg_itl_ms[0m[2m=[0m"14.75"[0m
+[BASH] [2m2026-04-09T04:11:20.601007Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m63 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0mfb177297-8f3d-45d0-bf50-a2ffe89fa231 [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b" [3minput_tokens[0m[2m=[0m20 [3moutput_tokens[0m[2m=[0m3 [3mttft_ms[0m[2m=[0m"33.68" [3mavg_itl_ms[0m[2m=[0m"14.75"[0m
+[BASH] [2m2026-04-09T04:11:20.603271Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m58c35b7d-dc5c-4fea-8dab-6738330ef10b [3mmodel[0m[2m=[0mqwen/qwen3-0.6b [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0munary [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m41c7a6d1-ab85-45cc-805a-8ac87378839e [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b"[0m
+[BASH] [2m2026-04-09T04:11:20.603728Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m58c35b7d-dc5c-4fea-8dab-6738330ef10b [2m[3mrequest_id[0m[2m=[0m"58c35b7d-dc5c-4fea-8dab-6738330ef10b" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m5487809252185429001[0m
+[BASH] [2m2026-04-09T04:11:20.666806Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m58c35b7d-dc5c-4fea-8dab-6738330ef10b [2m[3mrequest_id[0m[2m=[0m"58c35b7d-dc5c-4fea-8dab-6738330ef10b" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m5487809252185429001[0m
+[BASH] [2m2026-04-09T04:11:20.667027Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m58c35b7d-dc5c-4fea-8dab-6738330ef10b [3mmodel[0m[2m=[0mqwen/qwen3-0.6b [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0munary [3mstatus[0m[2m=[0msuccess [3melapsed_ms[0m[2m=[0m63 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m41c7a6d1-ab85-45cc-805a-8ac87378839e [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b" [3minput_tokens[0m[2m=[0m20 [3moutput_tokens[0m[2m=[0m3 [3mttft_ms[0m[2m=[0m"33.04" [3mavg_itl_ms[0m[2m=[0m"15.31"[0m
+[BASH] [2m2026-04-09T04:11:20.667065Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m63 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m41c7a6d1-ab85-45cc-805a-8ac87378839e [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b" [3minput_tokens[0m[2m=[0m20 [3moutput_tokens[0m[2m=[0m3 [3mttft_ms[0m[2m=[0m"33.04" [3mavg_itl_ms[0m[2m=[0m"15.31"[0m
+[BASH] Cleaning up...
+[BASH] [2m2026-04-09T04:11:20.669439Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-09T04:11:20.669462Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Received shutdown signal; unregistering endpoints from discovery
+[BASH] [2m2026-04-09T04:11:20.669509Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-09T04:11:20.669512Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:20 [core.py:1210] Shutdown initiated (timeout=0)
+[BASH] [2m2026-04-09T04:11:20.669545Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-09T04:11:20.669551Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-09T04:11:20.669556Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-09T04:11:20.669550Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-09T04:11:20.669573Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-09T04:11:20.669578Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-09T04:11:20.669582Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-09T04:11:20.669590Z[0m [32m INFO[0m [2mdynamo_llm::discovery::worker_monitor[0m[2m:[0m Worker monitoring task exiting
+[BASH] [2m2026-04-09T04:11:20.669604Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+[BASH] (EngineCore pid=11405) INFO 04-09 04:11:20 [core.py:1233] Shutdown complete
+[BASH] [2m2026-04-09T04:11:20.673354Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m5487809252185429001
+[BASH] [2m2026-04-09T04:11:20.673382Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m5487809252185429001
+[BASH] [2m2026-04-09T04:11:20.673444Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m5487809252185429001
+[BASH] [2m2026-04-09T04:11:20.673871Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Grace period 5.00s before stopping endpoints
+[BASH] [rank0]:[W409 04:11:20.715315339 ProcessGroupNCCL.cpp:1553] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[BASH] nanobind: leaked 2 instances!
+[BASH]  - leaked instance 0x7f33846e1938 of type "xgrammar.xgrammar_bindings.CompiledGrammar"
+[BASH]  - leaked instance 0x7f332e1a33a8 of type "xgrammar.xgrammar_bindings.GrammarMatcher"
+[BASH] nanobind: leaked 6 types!
+[BASH]  - leaked type "xgrammar.xgrammar_bindings.CompiledGrammar"
+[BASH]  - leaked type "xgrammar.xgrammar_bindings.TokenizerInfo"
+[BASH]  - leaked type "xgrammar.xgrammar_bindings.Grammar"
+[BASH]  - leaked type "xgrammar.xgrammar_bindings.GrammarMatcher"
+[BASH]  - leaked type "xgrammar.xgrammar_bindings.BatchGrammarMatcher"
+[BASH]  - leaked type "xgrammar.xgrammar_bindings.GrammarCompiler"
+[BASH] nanobind: leaked 54 functions!
+[BASH]  - leaked function "_detect_metadata_from_hf"
+[BASH]  - leaked function ""
+[BASH]  - leaked function "__init__"
+[BASH]  - leaked function ""
+[BASH]  - leaked function "deserialize_json"
+[BASH]  - leaked function "is_completed"
+[BASH]  - leaked function "batch_fill_next_token_bitmask"
+[BASH]  - leaked function ""
+[BASH]  - leaked function "to_string"
+[BASH]  - leaked function ""
+[BASH]  - leaked function "accept_string"
+[BASH]  - leaked function "fork"
+[BASH]  - leaked function "compile_structural_tag"
+[BASH]  - leaked function ""
+[BASH]  - leaked function "find_jump_forward_string"
+[BASH]  - leaked function ""
+[BASH]  - leaked function "__init__"
+[BASH]  - leaked function "_debug_print_internal_state"
+[BASH]  - leaked function ""
+[BASH]  - leaked function "batch_accept_token"
+[BASH]  - leaked function "union"
+[BASH]  - leaked function "accept_token"
+[BASH]  - leaked function "batch_accept_string"
+[BASH]  - leaked function "get_cache_size_bytes"
+[BASH]  - leaked function "fill_next_token_bitmask"
+[BASH]  - leaked function "dump_metadata"
+[BASH]  - leaked function "from_ebnf"
+[BASH]  - leaked function ""
+[BASH]  - leaked function ""
+[BASH]  - leaked function "__init__"
+[BASH]  - leaked function "compile_builtin_json_grammar"
+[BASH]  - leaked function ""
+[BASH]  - leaked function "from_vocab_and_metadata"
+[BASH]  - leaked function "builtin_json_grammar"
+[BASH]  - leaked function "rollback"
+[BASH]  - leaked function "reset"
+[BASH]  - leaked function "clear_cache"
+[BASH]  - leaked function "from_structural_tag"
+[BASH]  - leaked function "deserialize_json"
+[BASH]  - leaked function "batch_rollback"
+[BASH]  - leaked function ""
+[BASH]  - leaked function ""
+[BASH]  - leaked function "from_regex"
+[BASH]  - leaked function "is_terminated"
+[BASH]  - leaked function "compile_regex"
+[BASH]  - leaked function "deserialize_json"
+[BASH]  - leaked function "compile_grammar"
+[BASH]  - leaked function "compile_json_schema"
+[BASH]  - leaked function "from_json_schema"
+[BASH]  - leaked function "concat"
+[BASH]  - leaked function "serialize_json"
+[BASH]  - leaked function "__init__"
+[BASH]  - leaked function "serialize_json"
+[BASH]  - leaked function "serialize_json"
+[BASH] nanobind: this is likely caused by a reference counting issue in the binding code.
+[BASH] [2m2026-04-09T04:11:20.851741Z[0m [31mERROR[0m [2mcore_client.monitor_engine_cores[0m[2m:[0m Engine core proc EngineCore died unexpectedly, shutting down client.
+[BASH] [2m2026-04-09T04:11:21.149461Z[0m [31mERROR[0m [2masync_llm.output_handler[0m[2m:[0m AsyncLLM output_handler failed.
+[BASH] Traceback (most recent call last):
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 663, in output_handler
+[BASH]     outputs = await engine_core.get_output_async()
+[BASH]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 985, in get_output_async
+[BASH]     raise self._format_exception(outputs) from None
+[BASH] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[BASH] [2m2026-04-09T04:11:22.457472Z[0m [31mERROR[0m [2mengine_monitor._check_engine_health[0m[2m:[0m Traceback: Traceback (most recent call last):
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/engine_monitor.py", line 92, in _check_engine_health
+[BASH]     await self.engine_client.check_health()
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 877, in check_health
+[BASH]     raise self.dead_error
+[BASH] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[BASH] 
+[BASH] [2m2026-04-09T04:11:22.457525Z[0m [31mERROR[0m [2mengine_monitor._check_engine_health[0m[2m:[0m vLLM AsyncLLM health check failed: EngineCore encountered an issue. See stack trace (above) for the root cause.
+[BASH] [2m2026-04-09T04:11:22.457548Z[0m [33m WARN[0m [2mengine_monitor._check_engine_health[0m[2m:[0m Initiating Dynamo Runtime shutdown.
+[BASH] [2m2026-04-09T04:11:22.457607Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-09T04:11:22.457749Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-09T04:11:22.457786Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-09T04:11:22.457792Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 3
+[BASH] [2m2026-04-09T04:11:25.670484Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-09T04:11:25.670567Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-09T04:11:25.670580Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-09T04:11:25.670584Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-09T04:11:25.670587Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected

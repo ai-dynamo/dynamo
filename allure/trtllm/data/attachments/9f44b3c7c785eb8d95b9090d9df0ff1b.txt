@@ -1,0 +1,156 @@
+[2m2026-04-08T18:00:56.597152Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4222 -js --store_dir /tmp/nats_u7kptwhh in /workspace
+[2m2026-04-08T18:00:56.598834Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4222
+[2m2026-04-08T18:00:56.699751Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4222
+[2m2026-04-08T18:00:56.700034Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:00:56.704435Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:00:56.704586Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m NATS server started successfully
+[2m2026-04-08T18:00:56.704801Z[0m [32m INFO[0m [2mutils.start[0m[2m:[0m Starting 3-node ETCD cluster
+[2m2026-04-08T18:00:56.705044Z[0m [32m INFO[0m [2mutils._start_replica[0m[2m:[0m Starting etcd-0 on client port 2379, peer port 2380
+[2m2026-04-08T18:00:56.705344Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --name etcd-0 --data-dir /tmp/etcd_0_hx3ygmf4 --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://0.0.0.0:2380 --initial-advertise-peer-urls http://127.0.0.1:2380 --initial-cluster etcd-0=http://127.0.0.1:2380,etcd-1=http://127.0.0.1:2382,etcd-2=http://127.0.0.1:2384 --initial-cluster-state new --initial-cluster-token etcd-cluster in /workspace
+[2m2026-04-08T18:00:56.707087Z[0m [32m INFO[0m [2mutils._start_replica[0m[2m:[0m Starting etcd-1 on client port 2381, peer port 2382
+[2m2026-04-08T18:00:56.707326Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --name etcd-1 --data-dir /tmp/etcd_1_j0vm4ox3 --listen-client-urls http://0.0.0.0:2381 --advertise-client-urls http://127.0.0.1:2381 --listen-peer-urls http://0.0.0.0:2382 --initial-advertise-peer-urls http://127.0.0.1:2382 --initial-cluster etcd-0=http://127.0.0.1:2380,etcd-1=http://127.0.0.1:2382,etcd-2=http://127.0.0.1:2384 --initial-cluster-state new --initial-cluster-token etcd-cluster in /workspace
+[2m2026-04-08T18:00:56.708343Z[0m [32m INFO[0m [2mutils._start_replica[0m[2m:[0m Starting etcd-2 on client port 2383, peer port 2384
+[2m2026-04-08T18:00:56.708547Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --name etcd-2 --data-dir /tmp/etcd_2_u0v7ytth --listen-client-urls http://0.0.0.0:2383 --advertise-client-urls http://127.0.0.1:2383 --listen-peer-urls http://0.0.0.0:2384 --initial-advertise-peer-urls http://127.0.0.1:2384 --initial-cluster etcd-0=http://127.0.0.1:2380,etcd-1=http://127.0.0.1:2382,etcd-2=http://127.0.0.1:2384 --initial-cluster-state new --initial-cluster-token etcd-cluster in /workspace
+[2m2026-04-08T18:00:56.709547Z[0m [32m INFO[0m [2mutils.start[0m[2m:[0m All 3 ETCD replicas started successfully
+[2m2026-04-08T18:00:56.709631Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:00:56.710626Z[0m [33m WARN[0m [2mutils.get_status[0m[2m:[0m Failed to get status for etcd-0: HTTPConnectionPool(host='127.0.0.1', port=2379): Max retries exceeded with url: /v3/maintenance/status (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=2379): Failed to establish a new connection: [Errno 111] Connection refused"))
+[2m2026-04-08T18:00:59.048263Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-0
+[2m2026-04-08T18:00:59.048377Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m 3-node ETCD cluster started successfully
+[2m2026-04-08T18:00:59.048440Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m ETCD endpoints: ['http://127.0.0.1:2379', 'http://127.0.0.1:2381', 'http://127.0.0.1:2383']
+[2m2026-04-08T18:00:59.050431Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --migration-limit 0 in /workspace
+[2m2026-04-08T18:00:59.052195Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Frontend started successfully
+[2m2026-04-08T18:00:59.052450Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --disaggregation-mode decode --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl in /workspace
+[2m2026-04-08T18:00:59.053741Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8081/health
+[2m2026-04-08T18:01:19.087535Z[0m [32m INFO[0m [2mtest_sglang.is_ready[0m[2m:[0m Decode worker status is ready
+[2m2026-04-08T18:01:19.087702Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8081/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 543228113
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T18:01:19.087829Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Decode worker started successfully
+[2m2026-04-08T18:01:19.088137Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --disaggregation-mode prefill --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl in /workspace
+[2m2026-04-08T18:01:19.089592Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8082/health
+[2m2026-04-08T18:01:39.116399Z[0m [32m INFO[0m [2mtest_sglang.is_ready[0m[2m:[0m Prefill worker status is ready
+[2m2026-04-08T18:01:39.116542Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8082/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 610559666
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T18:01:39.116606Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Prefill worker started successfully
+[2m2026-04-08T18:01:41.116817Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Sending initial inference request
+[2m2026-04-08T18:01:41.116953Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Sending inference request: 'What is 2+2? The answer is'
+[2m2026-04-08T18:01:42.196497Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Inference generated text: '4. But what if the question is "What is 2+2+2+2+2+2+2+2+2+2+2+2+2+2+2++2+2+2'
+[2m2026-04-08T18:01:42.196710Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Iteration 0: Terminating replica etcd-0
+[2m2026-04-08T18:01:42.199322Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3449
+[2m2026-04-08T18:01:50.308443Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3449 name: etcd
+[2m2026-04-08T18:01:50.308600Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3449 etcd
+[2m2026-04-08T18:01:50.310672Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3450 name: sed
+[2m2026-04-08T18:01:50.310768Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3450 sed
+[2m2026-04-08T18:01:50.311181Z[0m [32m INFO[0m [2mutils.terminate_replica[0m[2m:[0m Terminated replica etcd-0
+[2m2026-04-08T18:01:50.311289Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Iteration 0: Sending inference request after termination
+[2m2026-04-08T18:01:50.311350Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Sending inference request: 'The capital of France is'
+[2m2026-04-08T18:01:50.449326Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Inference generated text: 'Paris. The capital of France is also the capital of the Republic of France. The capital of France'
+[2m2026-04-08T18:01:50.449505Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Iteration 0: Restarting replica etcd-0
+[2m2026-04-08T18:01:50.449586Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:01:50.452777Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-1
+[2m2026-04-08T18:01:50.452968Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Getting member list to find etcd-0
+[2m2026-04-08T18:01:50.469997Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Removing member with ID 13195394291058371180 (hex: b71f75320dc06a6c)
+[2m2026-04-08T18:01:50.489865Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Successfully removed old member etcd-0
+[2m2026-04-08T18:01:50.489950Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Adding new member etcd-0 to cluster with peer URL http://127.0.0.1:2380
+[2m2026-04-08T18:01:50.506873Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Successfully added new member etcd-0
+[2m2026-04-08T18:01:50.507197Z[0m [32m INFO[0m [2mutils._start_replica[0m[2m:[0m Starting etcd-0 on client port 2379, peer port 2380
+[2m2026-04-08T18:01:50.507504Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --name etcd-0 --data-dir /tmp/etcd_0__54eiogd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://0.0.0.0:2380 --initial-advertise-peer-urls http://127.0.0.1:2380 --initial-cluster etcd-0=http://127.0.0.1:2380,etcd-1=http://127.0.0.1:2382,etcd-2=http://127.0.0.1:2384 --initial-cluster-state existing --initial-cluster-token etcd-cluster in /workspace
+[2m2026-04-08T18:01:50.508557Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:01:50.509403Z[0m [33m WARN[0m [2mutils.get_status[0m[2m:[0m Failed to get status for etcd-0: HTTPConnectionPool(host='127.0.0.1', port=2379): Max retries exceeded with url: /v3/maintenance/status (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=2379): Failed to establish a new connection: [Errno 111] Connection refused"))
+[2m2026-04-08T18:01:51.515682Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-1
+[2m2026-04-08T18:01:51.515799Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Iteration 1: Terminating replica etcd-1
+[2m2026-04-08T18:01:51.518361Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3455
+[2m2026-04-08T18:01:59.627583Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3455 name: etcd
+[2m2026-04-08T18:01:59.627726Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3455 etcd
+[2m2026-04-08T18:01:59.630688Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3456 name: sed
+[2m2026-04-08T18:01:59.630783Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3456 sed
+[2m2026-04-08T18:01:59.631202Z[0m [32m INFO[0m [2mutils.terminate_replica[0m[2m:[0m Terminated replica etcd-1
+[2m2026-04-08T18:01:59.631317Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Iteration 1: Sending inference request after termination
+[2m2026-04-08T18:01:59.631390Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Sending inference request: 'The capital of France is'
+[2m2026-04-08T18:01:59.767874Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Inference generated text: 'Paris. The capital of France is also the capital of the Republic of France. The capital of France'
+[2m2026-04-08T18:01:59.768070Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Iteration 1: Restarting replica etcd-1
+[2m2026-04-08T18:01:59.768133Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:01:59.771054Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-2
+[2m2026-04-08T18:01:59.771181Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Getting member list to find etcd-1
+[2m2026-04-08T18:01:59.787709Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Removing member with ID 11422760369413494203 (hex: 9e85cc091d4d15bb)
+[2m2026-04-08T18:01:59.806440Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Successfully removed old member etcd-1
+[2m2026-04-08T18:01:59.806550Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Adding new member etcd-1 to cluster with peer URL http://127.0.0.1:2382
+[2m2026-04-08T18:01:59.823132Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Successfully added new member etcd-1
+[2m2026-04-08T18:01:59.823430Z[0m [32m INFO[0m [2mutils._start_replica[0m[2m:[0m Starting etcd-1 on client port 2381, peer port 2382
+[2m2026-04-08T18:01:59.823795Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --name etcd-1 --data-dir /tmp/etcd_1_w8e90su1 --listen-client-urls http://0.0.0.0:2381 --advertise-client-urls http://127.0.0.1:2381 --listen-peer-urls http://0.0.0.0:2382 --initial-advertise-peer-urls http://127.0.0.1:2382 --initial-cluster etcd-0=http://127.0.0.1:2380,etcd-1=http://127.0.0.1:2382,etcd-2=http://127.0.0.1:2384 --initial-cluster-state existing --initial-cluster-token etcd-cluster in /workspace
+[2m2026-04-08T18:01:59.824741Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:01:59.826934Z[0m [33m WARN[0m [2mutils.get_status[0m[2m:[0m Failed to get status for etcd-1: HTTPConnectionPool(host='127.0.0.1', port=2381): Max retries exceeded with url: /v3/maintenance/status (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=2381): Failed to establish a new connection: [Errno 111] Connection refused"))
+[2m2026-04-08T18:02:00.832800Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-2
+[2m2026-04-08T18:02:00.832943Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Iteration 2: Terminating replica etcd-2
+[2m2026-04-08T18:02:00.836404Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3457
+[2m2026-04-08T18:02:08.945872Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3457 name: etcd
+[2m2026-04-08T18:02:08.946015Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3457 etcd
+[2m2026-04-08T18:02:08.948069Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3460 name: sed
+[2m2026-04-08T18:02:08.948162Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3460 sed
+[2m2026-04-08T18:02:08.948563Z[0m [32m INFO[0m [2mutils.terminate_replica[0m[2m:[0m Terminated replica etcd-2
+[2m2026-04-08T18:02:08.948628Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Iteration 2: Sending inference request after termination
+[2m2026-04-08T18:02:08.948684Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Sending inference request: 'The capital of France is'
+[2m2026-04-08T18:02:09.084601Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Inference generated text: 'Paris. The capital of France is also the capital of the Republic of France. The capital of France'
+[2m2026-04-08T18:02:09.084781Z[0m [32m INFO[0m [2mtest_sglang.test_etcd_ha_failover_sglang_disaggregated[0m[2m:[0m Iteration 2: Restarting replica etcd-2
+[2m2026-04-08T18:02:09.084853Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:02:09.087645Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-0
+[2m2026-04-08T18:02:09.087784Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Getting member list to find etcd-2
+[2m2026-04-08T18:02:09.104989Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Removing member with ID 4806688106672498272 (hex: 42b4c95db84f2660)
+[2m2026-04-08T18:02:09.125634Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Successfully removed old member etcd-2
+[2m2026-04-08T18:02:09.125736Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Adding new member etcd-2 to cluster with peer URL http://127.0.0.1:2384
+[2m2026-04-08T18:02:09.145582Z[0m [32m INFO[0m [2mutils._replace_member[0m[2m:[0m Successfully added new member etcd-2
+[2m2026-04-08T18:02:09.145833Z[0m [32m INFO[0m [2mutils._start_replica[0m[2m:[0m Starting etcd-2 on client port 2383, peer port 2384
+[2m2026-04-08T18:02:09.146087Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --name etcd-2 --data-dir /tmp/etcd_2_7clt4f5y --listen-client-urls http://0.0.0.0:2383 --advertise-client-urls http://127.0.0.1:2383 --listen-peer-urls http://0.0.0.0:2384 --initial-advertise-peer-urls http://127.0.0.1:2384 --initial-cluster etcd-0=http://127.0.0.1:2380,etcd-1=http://127.0.0.1:2382,etcd-2=http://127.0.0.1:2384 --initial-cluster-state existing --initial-cluster-token etcd-cluster in /workspace
+[2m2026-04-08T18:02:09.147117Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:02:09.150718Z[0m [33m WARN[0m [2mutils.get_status[0m[2m:[0m Failed to get status for etcd-2: HTTPConnectionPool(host='127.0.0.1', port=2383): Max retries exceeded with url: /v3/maintenance/status (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=2383): Failed to establish a new connection: [Errno 111] Connection refused"))
+[2m2026-04-08T18:02:10.156464Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-0
+[2m2026-04-08T18:02:10.160087Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4155
+[2m2026-04-08T18:02:16.669918Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4157 name: tee
+[2m2026-04-08T18:02:16.670077Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4157 tee
+[2m2026-04-08T18:02:16.671393Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4156 name: sed
+[2m2026-04-08T18:02:16.671492Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4156 sed
+[2m2026-04-08T18:02:16.673701Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3513
+[2m2026-04-08T18:02:23.082416Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3515 name: tee
+[2m2026-04-08T18:02:23.082569Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3515 tee
+[2m2026-04-08T18:02:23.083129Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3514 name: sed
+[2m2026-04-08T18:02:23.083222Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3514 sed
+[2m2026-04-08T18:02:23.083760Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3510
+[2m2026-04-08T18:02:28.190306Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3512 name: tee
+[2m2026-04-08T18:02:28.190460Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3512 tee
+[2m2026-04-08T18:02:28.190954Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3511 name: sed
+[2m2026-04-08T18:02:28.191046Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3511 sed
+[2m2026-04-08T18:02:28.192736Z[0m [32m INFO[0m [2mutils.stop[0m[2m:[0m Cleaning up ETCD cluster
+[2m2026-04-08T18:02:28.193151Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4986
+[2m2026-04-08T18:02:29.395320Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4987 name: sed
+[2m2026-04-08T18:02:29.395548Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4987 sed
+[2m2026-04-08T18:02:29.396603Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5053
+[2m2026-04-08T18:02:30.598897Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5054 name: sed
+[2m2026-04-08T18:02:30.599023Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5054 sed
+[2m2026-04-08T18:02:30.599676Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5119
+[2m2026-04-08T18:02:30.700734Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5120 name: sed
+[2m2026-04-08T18:02:30.701030Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5120 sed
+[2m2026-04-08T18:02:30.701622Z[0m [33m WARN[0m [2mutils.stop[0m[2m:[0m Error removing data directory /tmp/etcd_0__54eiogd: [Errno 2] No such file or directory: '/tmp/etcd_0__54eiogd'
+[2m2026-04-08T18:02:30.701711Z[0m [33m WARN[0m [2mutils.stop[0m[2m:[0m Error removing data directory /tmp/etcd_1_w8e90su1: [Errno 2] No such file or directory: '/tmp/etcd_1_w8e90su1'
+[2m2026-04-08T18:02:30.701780Z[0m [33m WARN[0m [2mutils.stop[0m[2m:[0m Error removing data directory /tmp/etcd_2_7clt4f5y: [Errno 2] No such file or directory: '/tmp/etcd_2_7clt4f5y'
+[2m2026-04-08T18:02:30.702054Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3436
+[2m2026-04-08T18:02:30.803023Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3437 name: sed
+[2m2026-04-08T18:02:30.803281Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3437 sed

@@ -1,0 +1,102 @@
+[2m2026-04-08T18:23:55.443927Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4306 in /workspace
+[2m2026-04-08T18:23:55.445489Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4306
+[2m2026-04-08T18:23:55.546146Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4306
+[2m2026-04-08T18:23:55.546426Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:23:55.549428Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:23:55.550511Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2458 --advertise-client-urls http://0.0.0.0:2458 --listen-peer-urls http://0.0.0.0:2459 --initial-advertise-peer-urls http://localhost:2459 --initial-cluster default=http://localhost:2459 --data-dir /tmp/etcd_29h4_tpb in /workspace
+[2m2026-04-08T18:23:55.552034Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2458
+[2m2026-04-08T18:23:55.653026Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2458
+[2m2026-04-08T18:23:55.658432Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__init__[0m[2m:[0m Created vLLM worker 0 on GPU 0 (gpu_mem=0.4, system_port=8147) with endpoint: dyn://test-namespace-nrrhkqsilc.prefill.generate
+[2m2026-04-08T18:23:55.658579Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__init__[0m[2m:[0m Created vLLM worker 1 on GPU 0 (gpu_mem=0.4, system_port=8148) with endpoint: dyn://test-namespace-nrrhkqsilc.prefill.generate
+[2m2026-04-08T18:23:55.658637Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Starting 2 worker processes sequentially...
+[2m2026-04-08T18:23:55.658687Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Starting vLLM worker 0...
+[2m2026-04-08T18:23:55.658772Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Launching process 0 (pid will be assigned)...
+[2m2026-04-08T18:23:55.658829Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --disaggregation-mode prefill --kv-transfer-config {"kv_connector":"NixlConnector","kv_role":"kv_both"} --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8176", "enable_kv_cache_events": true} in /workspace
+[2m2026-04-08T18:23:55.661049Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Worker 0 launched with PID: 7584
+[2m2026-04-08T18:23:55.661321Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Waiting 5s for worker 0 to initialize NIXL before starting next worker...
+[2m2026-04-08T18:24:00.661660Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Starting vLLM worker 1...
+[2m2026-04-08T18:24:00.662021Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Launching process 1 (pid will be assigned)...
+[2m2026-04-08T18:24:00.662164Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --disaggregation-mode prefill --kv-transfer-config {"kv_connector":"NixlConnector","kv_role":"kv_both"} --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8177", "enable_kv_cache_events": true} in /workspace
+[2m2026-04-08T18:24:00.664361Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Worker 1 launched with PID: 7732
+[2m2026-04-08T18:24:00.664503Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] All 2 workers launched with sequential initialization.
+[2m2026-04-08T18:24:00.664564Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Waiting for health checks to complete...
+[2m2026-04-08T18:24:00.664615Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Checking health for worker 0...
+[2m2026-04-08T18:24:00.664676Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Worker 0 health checks passed
+[2m2026-04-08T18:24:00.664724Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Checking health for worker 1...
+[2m2026-04-08T18:24:00.664770Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Worker 1 health checks passed
+[2m2026-04-08T18:24:00.664815Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] All workers started successfully and passed health checks!
+[2m2026-04-08T18:24:00.668304Z[0m [32m INFO[0m [2mtest_router_e2e_with_vllm.__init__[0m[2m:[0m Created vLLM worker 0 on GPU 1 (gpu_mem=0.4, system_port=8178) with endpoint: dyn://test-namespace-nrrhkqsilc.backend.generate
+[2m2026-04-08T18:24:00.668476Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Starting 1 worker processes sequentially...
+[2m2026-04-08T18:24:00.668596Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Starting vLLM worker 0...
+[2m2026-04-08T18:24:00.668718Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Launching process 0 (pid will be assigned)...
+[2m2026-04-08T18:24:00.668771Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --disaggregation-mode decode --kv-transfer-config {"kv_connector":"NixlConnector","kv_role":"kv_both"} --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8150", "enable_kv_cache_events": true} in /workspace
+[2m2026-04-08T18:24:00.670019Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Worker 0 launched with PID: 7735
+[2m2026-04-08T18:24:00.670165Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] All 1 workers launched with sequential initialization.
+[2m2026-04-08T18:24:00.670222Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Waiting for health checks to complete...
+[2m2026-04-08T18:24:00.670267Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Checking health for worker 0...
+[2m2026-04-08T18:24:00.670313Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] Worker 0 health checks passed
+[2m2026-04-08T18:24:00.670356Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [VLLMProcess] All workers started successfully and passed health checks!
+[2m2026-04-08T18:24:00.670511Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.frontend --router-mode kv --http-port 8091 --discovery-backend etcd --namespace test-namespace-nrrhkqsilc --kv-cache-block-size 16 --enforce-disagg in /workspace
+[2m2026-04-08T18:24:00.671727Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 8091
+[2m2026-04-08T18:24:03.780980Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 8091
+[2m2026-04-08T18:24:03.781163Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8091/v1/models
+[2m2026-04-08T18:24:03.782752Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8091/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": []
+}
+[2m2026-04-08T18:24:03.782903Z[0m [32m INFO[0m [2mcommon._test_router_decisions_disagg[0m[2m:[0m Starting KV router frontend on port 8091 for disagg test
+[2m2026-04-08T18:24:03.782965Z[0m [32m INFO[0m [2mcommon._test_router_decisions_disagg[0m[2m:[0m Waiting for prefill and decode workers to register with frontend...
+[2m2026-04-08T18:24:03.783178Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Waiting for 1 workers to register on HTTP frontend (timeout=120s)...
+[2m2026-04-08T18:24:17.826830Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Workers registered. Found 1 model(s): ['TinyLlama/TinyLlama-1.1B-Chat-v1.0']
+[2m2026-04-08T18:24:17.827106Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Waiting for chat completions pipeline to be built...
+[2m2026-04-08T18:24:24.042196Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Chat completions pipeline ready!
+[2m2026-04-08T18:24:24.043463Z[0m [32m INFO[0m [2mcommon.send_progressive_requests[0m[2m:[0m Sending request 1/4 with progressive prefix (~550 chars)
+[2m2026-04-08T18:24:24.191120Z[0m [32m INFO[0m [2mcommon.send_progressive_requests[0m[2m:[0m Request 1: prefill_worker_id=409719188332001285, decode_worker_id=409719188332001293, timing={'request_received_ms': 1775672664045, 'prefill_wait_time_ms': 0.660702, 'prefill_time_ms': 18.851572, 'ttft_ms': 19.512273999999998, 'total_time_ms': 145.447177, 'kv_hit_rate': 0.0, 'router_queue_depth': 0}
+[2m2026-04-08T18:24:24.191267Z[0m [32m INFO[0m [2mhelper.verify_response_timing[0m[2m:[0m ✓ Verified timing: ttft_ms=19.51, total_time_ms=145.45
+[2m2026-04-08T18:24:25.192483Z[0m [32m INFO[0m [2mcommon.send_progressive_requests[0m[2m:[0m Sending request 2/4 with progressive prefix (~1101 chars)
+[2m2026-04-08T18:24:25.336609Z[0m [32m INFO[0m [2mcommon.send_progressive_requests[0m[2m:[0m Request 2: prefill_worker_id=409719188332001285, decode_worker_id=409719188332001293, timing={'request_received_ms': 1775672665193, 'prefill_wait_time_ms': 0.652931, 'prefill_time_ms': 17.245072, 'ttft_ms': 17.898003, 'total_time_ms': 143.163015, 'kv_hit_rate': 0.45, 'router_queue_depth': 0}
+[2m2026-04-08T18:24:25.336733Z[0m [32m INFO[0m [2mhelper.verify_response_timing[0m[2m:[0m ✓ Verified timing: ttft_ms=17.90, total_time_ms=143.16
+[2m2026-04-08T18:24:26.337919Z[0m [32m INFO[0m [2mcommon.send_progressive_requests[0m[2m:[0m Sending request 3/4 with progressive prefix (~1652 chars)
+[2m2026-04-08T18:24:26.483367Z[0m [32m INFO[0m [2mcommon.send_progressive_requests[0m[2m:[0m Request 3: prefill_worker_id=409719188332001285, decode_worker_id=409719188332001293, timing={'request_received_ms': 1775672666338, 'prefill_wait_time_ms': 0.9423170000000001, 'prefill_time_ms': 17.304736000000002, 'ttft_ms': 18.247052999999998, 'total_time_ms': 144.551776, 'kv_hit_rate': 0.6206896551724138, 'router_queue_depth': 0}
+[2m2026-04-08T18:24:26.483500Z[0m [32m INFO[0m [2mhelper.verify_response_timing[0m[2m:[0m ✓ Verified timing: ttft_ms=18.25, total_time_ms=144.55
+[2m2026-04-08T18:24:27.484712Z[0m [32m INFO[0m [2mcommon.send_progressive_requests[0m[2m:[0m Sending request 4/4 with progressive prefix (~2203 chars)
+[2m2026-04-08T18:24:27.628528Z[0m [32m INFO[0m [2mcommon.send_progressive_requests[0m[2m:[0m Request 4: prefill_worker_id=409719188332001285, decode_worker_id=409719188332001293, timing={'request_received_ms': 1775672667485, 'prefill_wait_time_ms': 0.847344, 'prefill_time_ms': 17.362987, 'ttft_ms': 18.210331, 'total_time_ms': 143.014178, 'kv_hit_rate': 0.7105263157894737, 'router_queue_depth': 0}
+[2m2026-04-08T18:24:27.628624Z[0m [32m INFO[0m [2mhelper.verify_response_timing[0m[2m:[0m ✓ Verified timing: ttft_ms=18.21, total_time_ms=143.01
+[2m2026-04-08T18:24:28.630786Z[0m [32m INFO[0m [2mcommon._test_router_decisions_disagg[0m[2m:[0m Collected prefill_worker_ids: [409719188332001285, 409719188332001285, 409719188332001285, 409719188332001285]
+[2m2026-04-08T18:24:28.630920Z[0m [32m INFO[0m [2mcommon._test_router_decisions_disagg[0m[2m:[0m Collected decode_worker_ids: [409719188332001293, 409719188332001293, 409719188332001293, 409719188332001293]
+[2m2026-04-08T18:24:28.630991Z[0m [32m INFO[0m [2mcommon._test_router_decisions_disagg[0m[2m:[0m Successfully verified disaggregated routing:
+  - All 4 requests routed to same prefill_worker_id=409719188332001285 (prefix reuse)
+  - Prefill worker is NOT in decode worker set {409719188332001293} (true disagg)
+[2m2026-04-08T18:24:28.632660Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7738
+[2m2026-04-08T18:24:34.038703Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7740 name: tee
+[2m2026-04-08T18:24:34.038865Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7740 tee
+[2m2026-04-08T18:24:34.040046Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7739 name: sed
+[2m2026-04-08T18:24:34.040152Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7739 sed
+[2m2026-04-08T18:24:34.040308Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping vLLM worker 0
+[2m2026-04-08T18:24:34.041313Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7735
+[2m2026-04-08T18:24:36.544692Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7737 name: tee
+[2m2026-04-08T18:24:36.544844Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7737 tee
+[2m2026-04-08T18:24:36.545691Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7736 name: sed
+[2m2026-04-08T18:24:36.545788Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7736 sed
+[2m2026-04-08T18:24:36.545939Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Waiting for vLLM worker resources to fully clean up...
+[2m2026-04-08T18:24:38.546145Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping vLLM worker 0
+[2m2026-04-08T18:24:38.547321Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7584
+[2m2026-04-08T18:24:41.550941Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7586 name: tee
+[2m2026-04-08T18:24:41.551088Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7586 tee
+[2m2026-04-08T18:24:41.551689Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7585 name: sed
+[2m2026-04-08T18:24:41.551782Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7585 sed
+[2m2026-04-08T18:24:41.551920Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping vLLM worker 1
+[2m2026-04-08T18:24:41.552482Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7732
+[2m2026-04-08T18:24:44.556993Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7734 name: tee
+[2m2026-04-08T18:24:44.557347Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7734 tee
+[2m2026-04-08T18:24:44.557821Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7733 name: sed
+[2m2026-04-08T18:24:44.557915Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7733 sed
+[2m2026-04-08T18:24:44.558058Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Waiting for vLLM worker resources to fully clean up...
+[2m2026-04-08T18:24:46.564151Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7570
+[2m2026-04-08T18:24:46.665373Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7571 name: sed
+[2m2026-04-08T18:24:46.665492Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7571 sed
+[2m2026-04-08T18:24:46.666347Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7558
+[2m2026-04-08T18:24:46.767386Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7559 name: sed
+[2m2026-04-08T18:24:46.767498Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7559 sed

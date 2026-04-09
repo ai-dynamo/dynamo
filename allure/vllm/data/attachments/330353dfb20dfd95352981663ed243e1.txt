@@ -1,0 +1,77 @@
+[2m2026-04-08T23:53:33.120161Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4315 in /workspace
+[2m2026-04-08T23:53:33.121436Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4315
+[2m2026-04-08T23:53:33.222006Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4315
+[2m2026-04-08T23:53:33.222161Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T23:53:33.224502Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T23:53:33.225283Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2416 --advertise-client-urls http://0.0.0.0:2416 --listen-peer-urls http://0.0.0.0:2417 --initial-advertise-peer-urls http://localhost:2417 --initial-cluster default=http://localhost:2417 --data-dir /tmp/etcd_646st5m9 in /workspace
+[2m2026-04-08T23:53:33.226320Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2416
+[2m2026-04-08T23:53:33.326995Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2416
+[2m2026-04-08T23:53:33.330455Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting video_diffusion test_deployment
+[2m2026-04-08T23:53:33.330527Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+[2m2026-04-08T23:53:33.330577Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_video_diffusion.sh
+[2m2026-04-08T23:53:33.330856Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/trtllm/launch/agg_video_diffusion.sh --skip-warmup --disable-torch-compile --default-height 272 --default-width 480 --default-num-frames 17 in /workspace/examples/backends/trtllm
+[2m2026-04-08T23:53:38.332405Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8024/v1/models
+[2m2026-04-08T23:53:55.352169Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8024/v1/models (attempt=9, elapsed=16.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+      "object": "model",
+      "created": 1775692434,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T23:53:55.352517Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8024/health
+[2m2026-04-08T23:53:56.354840Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8024/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.diffusion.generate"
+  ],
+  "instances": [
+    {
+      "component": "diffusion",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2923009260444531721,
+      "transport": {
+        "tcp": "10.1.95.91:41221/28909d6f83f93c09/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-08T23:53:56.355215Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: VideoGenerationPayload
+[2m2026-04-08T23:53:56.355538Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8024/v1/videos" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "A golden retriever running on a beach",
+  "size": "480x272",
+  "response_format": "url",
+  "nvext": {
+    "num_inference_steps": 10,
+    "num_frames": 17,
+    "guidance_scale": 5.0,
+    "seed": 42
+  },
+  "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+}'
+[2m2026-04-08T23:54:09.488801Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=13.13s
+[2m2026-04-08T23:54:09.489044Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+file:///tmp/dynamo_media/videos/f3fd7c01-913b-4d8d-a867-765b08a97466.mp4
+[2m2026-04-08T23:54:09.490718Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4264
+[2m2026-04-08T23:54:09.490929Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4324
+[2m2026-04-08T23:54:17.499813Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4266 name: tee
+[2m2026-04-08T23:54:17.499986Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4266 tee
+[2m2026-04-08T23:54:17.500441Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4265 name: sed
+[2m2026-04-08T23:54:17.500532Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4265 sed
+[2m2026-04-08T23:54:17.503350Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4251
+[2m2026-04-08T23:54:17.604104Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4252 name: sed
+[2m2026-04-08T23:54:17.604252Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4252 sed
+[2m2026-04-08T23:54:17.605194Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 4239
+[2m2026-04-08T23:54:17.706192Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 4240 name: sed
+[2m2026-04-08T23:54:17.706446Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 4240 sed

@@ -1,0 +1,51 @@
+[2m2026-04-08T18:33:53.884846Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4280 in /workspace
+[2m2026-04-08T18:33:53.885856Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4280
+[2m2026-04-08T18:33:53.986576Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4280
+[2m2026-04-08T18:33:53.986844Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:33:53.988641Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:33:53.989268Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2394 --advertise-client-urls http://0.0.0.0:2394 --listen-peer-urls http://0.0.0.0:2395 --initial-advertise-peer-urls http://localhost:2395 --initial-cluster default=http://localhost:2395 --data-dir /tmp/etcd_yocjhmuc in /workspace
+[2m2026-04-08T18:33:53.990079Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2394
+[2m2026-04-08T18:33:54.090781Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2394
+[2m2026-04-08T18:33:54.092825Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8080 --migration-limit 0 in /workspace
+[2m2026-04-08T18:33:54.094029Z[0m [32m INFO[0m [2mtest_vllm.test_request_migration_vllm_decode[0m[2m:[0m Frontend started successfully
+[2m2026-04-08T18:33:54.094758Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --max-model-len 8192 --max-num-seqs 1 --num-gpu-blocks-override 512 --gpu-memory-utilization 0.15 --disaggregation-mode prefill --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:20080", "enable_kv_cache_events": true} in /workspace
+[2m2026-04-08T18:33:54.095906Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:9108/health
+[2m2026-04-08T18:34:02.106770Z[0m [31mERROR[0m [2mmanaged_process._check_process_alive[0m[2m:[0m Main server process died with exit code 1 while waiting for health check
+[2m2026-04-08T18:34:02.107150Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === Last 20 lines from /tmp/dynamo_tests/test_request_migration_vllm_decode[migration_disabled-worker_failure-chat-stream-nats]_worker0/worker0.log.txt ===
+[2m2026-04-08T18:34:02.107215Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]            ^^^^^^^^^^^^^^
+[2m2026-04-08T18:34:02.107258Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]   File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+[2m2026-04-08T18:34:02.107298Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]     return runner.run(main)
+[2m2026-04-08T18:34:02.107335Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]            ^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:34:02.107373Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+[2m2026-04-08T18:34:02.107411Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]     return self._loop.run_until_complete(task)
+[2m2026-04-08T18:34:02.107448Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:34:02.107486Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+[2m2026-04-08T18:34:02.107524Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]   File "/opt/dynamo/venv/lib/python3.12/site-packages/uvloop/__init__.py", line 61, in wrapper
+[2m2026-04-08T18:34:02.107562Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]     return await main
+[2m2026-04-08T18:34:02.107600Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]            ^^^^^^^^^^
+[2m2026-04-08T18:34:02.107649Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py", line 115, in worker
+[2m2026-04-08T18:34:02.107690Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]     config = parse_args()
+[2m2026-04-08T18:34:02.107727Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]              ^^^^^^^^^^^^
+[2m2026-04-08T18:34:02.107763Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/args.py", line 113, in parse_args
+[2m2026-04-08T18:34:02.107799Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]     update_dynamo_config_with_engine(dynamo_config, engine_config)
+[2m2026-04-08T18:34:02.107834Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/args.py", line 198, in update_dynamo_config_with_engine
+[2m2026-04-08T18:34:02.107881Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]     raise ValueError(
+[2m2026-04-08T18:34:02.107918Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0] ValueError: --connector is deprecated and the default is no longer nixl. When using --disaggregation-mode prefill, you must explicitly provide --kv-transfer-config. Example:
+[2m2026-04-08T18:34:02.107956Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [WORKER0]   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+[2m2026-04-08T18:34:02.107993Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === End of log tail ===
+[2m2026-04-08T18:34:02.108388Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13912
+[2m2026-04-08T18:34:02.109069Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13914 name: tee
+[2m2026-04-08T18:34:02.109170Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13914 tee
+[2m2026-04-08T18:34:02.109625Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13913 name: sed
+[2m2026-04-08T18:34:02.109711Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13913 sed
+[2m2026-04-08T18:34:02.110156Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13909
+[2m2026-04-08T18:34:07.516981Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13911 name: tee
+[2m2026-04-08T18:34:07.517187Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13911 tee
+[2m2026-04-08T18:34:07.517780Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13910 name: sed
+[2m2026-04-08T18:34:07.517867Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13910 sed
+[2m2026-04-08T18:34:07.541963Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13897
+[2m2026-04-08T18:34:07.643042Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13898 name: sed
+[2m2026-04-08T18:34:07.643287Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13898 sed
+[2m2026-04-08T18:34:07.644079Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13886
+[2m2026-04-08T18:34:07.744895Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13887 name: sed
+[2m2026-04-08T18:34:07.745033Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13887 sed

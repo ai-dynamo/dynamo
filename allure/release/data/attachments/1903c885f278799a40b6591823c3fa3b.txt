@@ -1,0 +1,48 @@
+[2m2026-04-08T18:36:36.218403Z[0m [32m INFO[0m [2mconftest.file_storage_backend[0m[2m:[0m Set up file storage backend in: /tmp/tmpviwa6upf
+[2m2026-04-08T18:36:36.221320Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8084 --migration-limit 0 --discovery-backend file --request-plane tcp in /workspace
+[2m2026-04-08T18:36:36.222592Z[0m [32m INFO[0m [2mtest_prompt_embeds.start_services[0m[2m:[0m Frontend started for prompt embeds tests
+[2m2026-04-08T18:36:36.222849Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --max-model-len 4096 --discovery-backend file --request-plane tcp --enable-prompt-embeds --kv-events-config {"enable_kv_cache_events": false} in /workspace
+[2m2026-04-08T18:36:36.223970Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8084/v1/models
+[2m2026-04-08T18:36:58.248857Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8084/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T18:37:12.264063Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8084/v1/models (attempt=20, elapsed=35.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775673431,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T18:37:12.264287Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8113/health
+[2m2026-04-08T18:37:12.265942Z[0m [32m INFO[0m [2mtest_prompt_embeds.is_ready[0m[2m:[0m vllm-prompt-embeds-worker status is ready
+[2m2026-04-08T18:37:12.266036Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8113/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 29,
+    "nanos": 22886086
+  },
+  "endpoints": {
+    "generate": "ready",
+    "clear_kv_blocks": "ready",
+    "get_perf_metrics": "ready"
+  }
+}
+[2m2026-04-08T18:37:12.266157Z[0m [32m INFO[0m [2mtest_prompt_embeds.start_services[0m[2m:[0m Vllm Worker with prompt embeds started for tests
+[2m2026-04-08T18:37:12.293430Z[0m [32m INFO[0m [2m_base_client._sleep_for_retry[0m[2m:[0m Retrying request to /completions in 0.402160 seconds
+[2m2026-04-08T18:37:12.700154Z[0m [32m INFO[0m [2m_base_client._sleep_for_retry[0m[2m:[0m Retrying request to /completions in 0.845808 seconds
+[2m2026-04-08T18:37:13.552570Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 15234
+[2m2026-04-08T18:37:16.056539Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15236 name: tee
+[2m2026-04-08T18:37:16.056697Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15236 tee
+[2m2026-04-08T18:37:16.057112Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15235 name: sed
+[2m2026-04-08T18:37:16.057204Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15235 sed
+[2m2026-04-08T18:37:16.057570Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 15231
+[2m2026-04-08T18:37:21.564259Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15233 name: tee
+[2m2026-04-08T18:37:21.564413Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15233 tee
+[2m2026-04-08T18:37:21.564762Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15232 name: sed
+[2m2026-04-08T18:37:21.564852Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15232 sed

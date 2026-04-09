@@ -1,0 +1,65 @@
+[2m2026-04-09T02:02:12.856148Z[0m [32m INFO[0m [2mprofile_sla._extract_profiler_params[0m[2m:[0m Profiler config: model=deepseek-ai/DeepSeek-R1, backend=sglang, system=h200_sxm, total_gpus=16, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=thorough, picking=default
+[2m2026-04-09T02:02:12.981245Z[0m [33m WARN[0m [2mthorough.run_thorough[0m[2m:[0m THOROUGH mode: only disagg configurations are supported.
+[2m2026-04-09T02:02:13.103556Z[0m [31mERROR[0m [2mprofile_sla.run_profile[0m[2m:[0m Profile job failed with error
+Traceback (most recent call last):
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/aiconfigurator/sdk/utils.py", line 348, in _download_hf_json
+    with urllib.request.urlopen(req, timeout=30) as response:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 401: Unauthorized
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/workspace/components/src/dynamo/profiler/profile_sla.py", line 341, in run_profile
+    ) = await _execute_strategy(
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/components/src/dynamo/profiler/profile_sla.py", line 171, in _execute_strategy
+    pick_result = await run_thorough(
+                  ^^^^^^^^^^^^^^^^^^^
+  File "/workspace/components/src/dynamo/profiler/thorough.py", line 351, in run_thorough
+    prefill_candidates, decode_candidates = enumerate_profiling_configs(
+                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/aiconfigurator/generator/enumerate.py", line 411, in enumerate_profiling_configs
+    is_moe = check_is_moe(model_path)
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/aiconfigurator/sdk/models.py", line 449, in check_is_moe
+    family = get_model_family(model_path)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/aiconfigurator/sdk/models.py", line 438, in get_model_family
+    architecture = _get_model_info(model_path)["architecture"]
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/aiconfigurator/sdk/models.py", line 29, in _get_model_info
+    return get_model_config_from_model_path(model_path)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/aiconfigurator/sdk/utils.py", line 866, in get_model_config_from_model_path
+    raw_config = _load_model_config_from_model_path(model_path)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/aiconfigurator/sdk/utils.py", line 846, in _load_model_config_from_model_path
+    config = _download_hf_config(model_path)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/aiconfigurator/sdk/utils.py", line 379, in _download_hf_config
+    return _download_hf_json(hf_id, "config.json", raise_on_404=True) or {}
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/aiconfigurator/sdk/utils.py", line 354, in _download_hf_json
+    raise HuggingFaceDownloadError(
+aiconfigurator.sdk.utils.HuggingFaceDownloadError: Failed to download deepseek-ai/DeepSeek-R1's config.json from HuggingFace: HuggingFace returned HTTP error 401: Unauthorized. URL: https://huggingface.co/deepseek-ai/DeepSeek-R1/raw/main/config.json. If using a gated model, authenticate via one of the following (in priority order): (1) set the HF_TOKEN environment variable, (2) set the HUGGING_FACE_HUB_TOKEN environment variable, or (3) run `huggingface-cli login` (token stored at /home/dynamo/.cache/huggingface/token).
+[2m2026-04-09T02:02:13.105003Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
+[2m2026-04-09T02:02:13.105081Z[0m [32m INFO[0m [2mdynamo_deployment.cleanup_remaining_deployments[0m[2m:[0m No deployments to clean up
+[2m2026-04-09T02:02:13.105139Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

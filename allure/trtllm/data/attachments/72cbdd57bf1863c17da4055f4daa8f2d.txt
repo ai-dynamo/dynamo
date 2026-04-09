@@ -1,0 +1,47 @@
+[2m2026-04-08T10:17:53.896747Z[0m [32m INFO[0m [2mconftest.file_storage_backend[0m[2m:[0m Set up file storage backend in: /tmp/tmpcsstqtjn
+[2m2026-04-08T10:17:53.903895Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8003 --migration-limit 0 --discovery-backend file --request-plane tcp in /workspace
+[2m2026-04-08T10:17:53.905315Z[0m [32m INFO[0m [2mtest_prompt_embeds.start_services[0m[2m:[0m Frontend started for prompt embeds tests
+[2m2026-04-08T10:17:53.905548Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --max-model-len 4096 --discovery-backend file --request-plane tcp --enable-prompt-embeds --kv-events-config {"enable_kv_cache_events": false} in /workspace
+[2m2026-04-08T10:17:53.906670Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8003/v1/models
+[2m2026-04-08T10:18:15.930514Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8003/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T10:18:29.945255Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8003/v1/models (attempt=20, elapsed=35.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775643508,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T10:18:29.945664Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8137/health
+[2m2026-04-08T10:18:29.948106Z[0m [32m INFO[0m [2mtest_prompt_embeds.is_ready[0m[2m:[0m vllm-prompt-embeds-worker status is ready
+[2m2026-04-08T10:18:29.948328Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8137/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 28,
+    "nanos": 898111778
+  },
+  "endpoints": {
+    "generate": "ready",
+    "clear_kv_blocks": "ready",
+    "get_perf_metrics": "ready"
+  }
+}
+[2m2026-04-08T10:18:29.948462Z[0m [32m INFO[0m [2mtest_prompt_embeds.start_services[0m[2m:[0m Vllm Worker with prompt embeds started for tests
+[2m2026-04-08T10:18:29.984577Z[0m [32m INFO[0m [2mtest_prompt_embeds.test_large_embeddings_through_nats[0m[2m:[0m Testing large embeddings: 6.64MB decoded
+[2m2026-04-08T10:18:30.410775Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 15750
+[2m2026-04-08T10:18:32.113694Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15752 name: tee
+[2m2026-04-08T10:18:32.113842Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15752 tee
+[2m2026-04-08T10:18:32.114259Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15751 name: sed
+[2m2026-04-08T10:18:32.114350Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15751 sed
+[2m2026-04-08T10:18:32.114721Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 15747
+[2m2026-04-08T10:18:37.621613Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15749 name: tee
+[2m2026-04-08T10:18:37.621847Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15749 tee
+[2m2026-04-08T10:18:37.622174Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 15748 name: sed
+[2m2026-04-08T10:18:37.622266Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 15748 sed

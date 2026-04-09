@@ -1,0 +1,15 @@
+[2m2026-04-08T16:51:21.728375Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 6 models needed for collected tests
+Models: {'Qwen/Qwen3-VL-2B-Instruct', 'Qwen/Qwen2-VL-7B-Instruct', 'silence09/DeepSeek-R1-Small-2layers', 'Qwen/Qwen2.5-VL-7B-Instruct', 'Qwen/Qwen3-Embedding-4B', 'Qwen/Qwen3-0.6B'}
+[2m2026-04-08T16:51:21.728467Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-08T16:51:21.728518Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-08T16:51:26.127224Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-08T16:51:26.127305Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2-VL-7B-Instruct
+[2m2026-04-08T16:51:46.372989Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2-VL-7B-Instruct
+[2m2026-04-08T16:51:46.373074Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: silence09/DeepSeek-R1-Small-2layers
+[2m2026-04-08T16:51:51.128150Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: silence09/DeepSeek-R1-Small-2layers
+[2m2026-04-08T16:51:51.128228Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-04-08T16:52:12.916704Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-04-08T16:52:12.916788Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-Embedding-4B
+[2m2026-04-08T16:52:22.110423Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-Embedding-4B
+[2m2026-04-08T16:52:22.113022Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+[2m2026-04-08T16:52:24.806628Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B

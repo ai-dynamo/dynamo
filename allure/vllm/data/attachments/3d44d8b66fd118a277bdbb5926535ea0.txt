@@ -1,0 +1,105 @@
+[2m2026-04-08T09:30:26.508052Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4311 in /workspace
+[2m2026-04-08T09:30:26.509051Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4311
+[2m2026-04-08T09:30:26.609588Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4311
+[2m2026-04-08T09:30:26.609737Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T09:30:26.611625Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T09:30:26.612337Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2397 --advertise-client-urls http://0.0.0.0:2397 --listen-peer-urls http://0.0.0.0:2398 --initial-advertise-peer-urls http://localhost:2398 --initial-cluster default=http://localhost:2398 --data-dir /tmp/etcd_5o6fkxhm in /workspace
+[2m2026-04-08T09:30:26.613219Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2397
+[2m2026-04-08T09:30:26.713893Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2397
+[2m2026-04-08T09:30:26.729284Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m gpu_memory_service --device 0 --tag weights in /workspace
+[2m2026-04-08T09:30:26.730510Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_runtime_state_ready'
+[2m2026-04-08T09:30:28.040506Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_runtime_state_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T09:30:28.041045Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m gpu_memory_service --device 0 --tag kv_cache in /workspace
+[2m2026-04-08T09:30:28.042854Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_runtime_state_ready'
+[2m2026-04-08T09:30:29.344983Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_runtime_state_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T09:30:29.345693Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8271 --migration-limit 0 in /workspace
+[2m2026-04-08T09:30:29.347417Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --load-format gms --enable-memory-saver --mem-fraction-static 0.9 --port 30063 --model-loader-extra-config {"gms_read_only": true} in /workspace
+[2m2026-04-08T09:30:29.348646Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8153/health
+<frozen importlib._bootstrap_external>:1297: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+<frozen importlib._bootstrap_external>:1297: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+WARNING:sglang.srt.models.registry:Ignore import error when loading sglang.srt.models.glm_ocr: No module named 'transformers.models.glm_ocr'
+WARNING:sglang.srt.models.registry:Ignore import error when loading sglang.srt.models.glm_ocr_nextn: No module named 'transformers.models.glm_ocr'
+WARNING:sglang.srt.models.registry:Ignore import error when loading sglang.srt.models.glmasr: cannot import name 'GlmAsrConfig' from 'transformers' (/usr/local/lib/python3.12/dist-packages/transformers/__init__.py)
+[2m2026-04-08T09:30:49.459532Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8153/health (attempt=21, elapsed=20.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 675973133
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T09:30:49.459673Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8271/v1/models
+[2m2026-04-08T09:30:52.463014Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8271/v1/models (attempt=2, elapsed=2.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775640651,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T09:30:52.463268Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8271/health
+[2m2026-04-08T09:30:53.465264Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8271/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6585843119122925577,
+      "transport": {
+        "tcp": "10.1.94.89:41811/5b659d6c6dc5c809/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-08T09:30:53.466307Z[0m [32m INFO[0m [2msession._initialize_from_handshake[0m[2m:[0m Connected with ro lock (granted=ro), committed=True
+[2m2026-04-08T09:30:53.466824Z[0m [32m INFO[0m [2msession.close[0m[2m:[0m Closed ro connection
+[2m2026-04-08T09:30:54.608545Z[0m [32m INFO[0m [2msglang.sleep[0m[2m:[0m engine release_memory_occupation: {'status': 'ok', 'message': "Memory released for tags: ['weights', 'kv_cache']"}
+<frozen importlib._bootstrap_external>:1297: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+<frozen importlib._bootstrap_external>:1297: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+WARNING:sglang.srt.models.registry:Ignore import error when loading sglang.srt.models.glm_ocr: No module named 'transformers.models.glm_ocr'
+WARNING:sglang.srt.models.registry:Ignore import error when loading sglang.srt.models.glm_ocr_nextn: No module named 'transformers.models.glm_ocr'
+WARNING:sglang.srt.models.registry:Ignore import error when loading sglang.srt.models.glmasr: cannot import name 'GlmAsrConfig' from 'transformers' (/usr/local/lib/python3.12/dist-packages/transformers/__init__.py)
+[2m2026-04-08T09:31:04.950763Z[0m [32m INFO[0m [2msession._initialize_from_handshake[0m[2m:[0m Connected with ro lock (granted=ro), committed=True
+[2m2026-04-08T09:31:04.951090Z[0m [32m INFO[0m [2msession.close[0m[2m:[0m Closed ro connection
+[2m2026-04-08T09:31:05.295586Z[0m [32m INFO[0m [2msglang.wake[0m[2m:[0m engine resume_memory_occupation: {'status': 'ok', 'message': "Memory resumed for tags: ['weights', 'kv_cache']"}
+[2m2026-04-08T09:31:05.963315Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12684
+[2m2026-04-08T09:31:12.372198Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12686 name: tee
+[2m2026-04-08T09:31:12.372354Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12686 tee
+[2m2026-04-08T09:31:12.372962Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12685 name: sed
+[2m2026-04-08T09:31:12.373066Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12685 sed
+[2m2026-04-08T09:31:12.373624Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12680
+[2m2026-04-08T09:31:17.480316Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12682 name: tee
+[2m2026-04-08T09:31:17.480461Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12682 tee
+[2m2026-04-08T09:31:17.481012Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12681 name: sed
+[2m2026-04-08T09:31:17.481108Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12681 sed
+[2m2026-04-08T09:31:17.481621Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12661
+[2m2026-04-08T09:31:17.582532Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12663 name: tee
+[2m2026-04-08T09:31:17.582646Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12663 tee
+[2m2026-04-08T09:31:17.583111Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12662 name: sed
+[2m2026-04-08T09:31:17.583204Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12662 sed
+[2m2026-04-08T09:31:17.583771Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12641
+[2m2026-04-08T09:31:17.685029Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12643 name: tee
+[2m2026-04-08T09:31:17.685230Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12643 tee
+[2m2026-04-08T09:31:17.685639Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12642 name: sed
+[2m2026-04-08T09:31:17.685733Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12642 sed
+[2m2026-04-08T09:31:17.688535Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12628
+[2m2026-04-08T09:31:17.789389Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12629 name: sed
+[2m2026-04-08T09:31:17.789498Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12629 sed
+[2m2026-04-08T09:31:17.790289Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12616
+[2m2026-04-08T09:31:17.891254Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12617 name: sed
+[2m2026-04-08T09:31:17.891377Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12617 sed

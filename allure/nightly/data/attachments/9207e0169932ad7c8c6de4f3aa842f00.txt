@@ -1,0 +1,4 @@
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/main/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/main/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].

@@ -1,0 +1,76 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4235 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4235
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4235
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2476 --advertise-client-urls http://0.0.0.0:2476 --listen-peer-urls http://0.0.0.0:2477 --initial-advertise-peer-urls http://localhost:2477 --initial-cluster default=http://localhost:2477 --data-dir /tmp/etcd_6qxqa1c0 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2476
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2476
+INFO     DynamoFrontendProcess:managed_process.py:437 Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8040 --migration-limit 0 --dyn-chat-processor vllm --discovery-backend etcd --request-plane tcp --enable-auto-tool-choice --tool-call-parser hermes --reasoning-parser qwen3 in /workspace
+INFO     tests.frontend.test_vllm_prepost_integration:test_vllm_prepost_integration.py:206 Frontend started on port 8040
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:437 Running command: python3 -m tests.frontend.vllm_prepost_worker in /workspace
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:690 Checking URL http://localhost:8040/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "GET /v1/models HTTP/1.1" 200 109
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8040/v1/models (attempt=20, elapsed=19.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775666747,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     tests.frontend.test_vllm_prepost_integration:test_vllm_prepost_integration.py:212 vLLM pre/post test worker registered model Qwen/Qwen3-0.6B
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8040
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8040 "POST /v1/chat/completions HTTP/1.1" 200 None
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 300
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:31 Terminating PID: 302 name: tee
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 302 tee
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:31 Terminating PID: 301 name: sed
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 301 sed
+INFO     DynamoFrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 297
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 299 name: tee
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 299 tee
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 298 name: sed
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 298 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 281
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 282 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 282 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 269
+INFO     NatsServer:managed_process.py:31 Terminating PID: 270 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 270 sed

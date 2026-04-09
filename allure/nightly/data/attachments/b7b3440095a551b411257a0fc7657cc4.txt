@@ -1,0 +1,151 @@
+[2m2026-04-08T18:38:23.082983Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4284 in /workspace
+[2m2026-04-08T18:38:23.084071Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4284
+[2m2026-04-08T18:38:23.184632Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4284
+[2m2026-04-08T18:38:23.184797Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:38:23.186585Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:38:23.187372Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2478 --advertise-client-urls http://0.0.0.0:2478 --listen-peer-urls http://0.0.0.0:2479 --initial-advertise-peer-urls http://localhost:2479 --initial-cluster default=http://localhost:2479 --data-dir /tmp/etcd_gs9h7ij2 in /workspace
+[2m2026-04-08T18:38:23.188271Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2478
+[2m2026-04-08T18:38:23.288999Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2478
+[2m2026-04-08T18:38:23.293596Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting completions_only test_deployment
+[2m2026-04-08T18:38:23.293675Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: deepseek-ai/deepseek-llm-7b-base
+[2m2026-04-08T18:38:23.293727Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg.sh
+[2m2026-04-08T18:38:23.293931Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/sglang/launch/agg.sh --model-path deepseek-ai/deepseek-llm-7b-base --dyn-endpoint-types completions in /workspace/examples/backends/sglang
+[2m2026-04-08T18:38:23.295127Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8001/v1/models
+[2m2026-04-08T18:38:45.338005Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8001/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+[2m2026-04-08T18:39:05.359134Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8001/v1/models (custom check failed) (attempt=22, elapsed=41.1s)
+[2m2026-04-08T18:39:25.380330Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8001/v1/models (custom check failed) (attempt=32, elapsed=61.1s)
+[2m2026-04-08T18:39:39.394665Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8001/v1/models (attempt=39, elapsed=75.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "deepseek-ai/deepseek-llm-7b-base",
+      "object": "model",
+      "created": 1775673578,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T18:39:39.394811Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8001/health
+[2m2026-04-08T18:39:40.396939Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8001/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6998203968420439305,
+      "transport": {
+        "tcp": "10.1.48.123:45295/611e9d6e636de509/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-08T18:39:40.397199Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: CompletionPayload
+[2m2026-04-08T18:39:40.397403Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8001/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/deepseek-llm-7b-base"
+}'
+[2m2026-04-08T18:40:33.011237Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=52.61s
+[2m2026-04-08T18:40:33.011587Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+[2m2026-04-08T18:40:33.011661Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?...
+[2m2026-04-08T18:40:33.011760Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8001/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/deepseek-llm-7b-base"
+}'
+[2m2026-04-08T18:41:24.983661Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=51.97s
+[2m2026-04-08T18:41:24.984231Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+[2m2026-04-08T18:41:24.984329Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?...
+[2m2026-04-08T18:41:24.984449Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8001/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/deepseek-llm-7b-base"
+}'
+[2m2026-04-08T18:42:16.973675Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=51.99s
+[2m2026-04-08T18:42:16.974223Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+[2m2026-04-08T18:42:16.974303Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?...
+[2m2026-04-08T18:42:16.976472Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 10966
+[2m2026-04-08T18:42:23.395085Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 10968 name: tee
+[2m2026-04-08T18:42:23.395247Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 10968 tee
+[2m2026-04-08T18:42:23.395703Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 10967 name: sed
+[2m2026-04-08T18:42:23.395796Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 10967 sed
+[2m2026-04-08T18:42:23.399070Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 10952
+[2m2026-04-08T18:42:23.500140Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 10953 name: sed
+[2m2026-04-08T18:42:23.500248Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 10953 sed
+[2m2026-04-08T18:42:23.501058Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 10940
+[2m2026-04-08T18:42:23.602002Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 10941 name: sed
+[2m2026-04-08T18:42:23.602162Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 10941 sed

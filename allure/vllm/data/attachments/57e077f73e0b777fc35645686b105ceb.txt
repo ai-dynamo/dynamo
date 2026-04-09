@@ -1,0 +1,167 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4223 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4223
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4223
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2437 --advertise-client-urls http://0.0.0.0:2437 --listen-peer-urls http://0.0.0.0:2438 --initial-advertise-peer-urls http://localhost:2438 --initial-cluster default=http://localhost:2438 --data-dir /tmp/etcd_fx7ov078 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2437
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2437
+INFO     DynamoFrontendProcess:managed_process.py:437 Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8037 --migration-limit 0 in /workspace
+INFO     tests.fault_tolerance.cancellation.test_vllm:test_vllm.py:320 Frontend started successfully
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --gpu-memory-utilization 0.45 --max-model-len 16384 --disaggregation-mode prefill --kv-transfer-config {"kv_connector":"NixlConnector","kv_role":"kv_both"} --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:20082", "enable_kv_cache_events": true} in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9181/health
+INFO     DynamoWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:9181/health (status code 503) (attempt=21, elapsed=20.0s)
+INFO     tests.fault_tolerance.cancellation.test_vllm:test_vllm.py:195 Prefill worker status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9181/health (attempt=32, elapsed=31.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 23,
+    "nanos": 441668792
+  },
+  "endpoints": {
+    "get_perf_metrics": "ready",
+    "worker_kv_indexer_query_dp0": "ready",
+    "clear_kv_blocks": "ready",
+    "generate": "ready"
+  }
+}
+INFO     tests.fault_tolerance.cancellation.test_vllm:test_vllm.py:326 Prefill Worker PID: 380
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --gpu-memory-utilization 0.45 --max-model-len 16384 --disaggregation-mode decode --kv-transfer-config {"kv_connector":"NixlConnector","kv_role":"kv_both"} in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9196/health
+INFO     DynamoWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:9196/health (status code 503) (attempt=21, elapsed=20.0s)
+INFO     tests.fault_tolerance.cancellation.test_vllm:test_vllm.py:195 Worker status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9196/health (attempt=22, elapsed=21.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 13,
+    "nanos": 549286872
+  },
+  "endpoints": {
+    "get_perf_metrics": "ready",
+    "clear_kv_blocks": "ready",
+    "generate": "ready"
+  }
+}
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:8037/v1/models
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8037/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775640304,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:8037/health
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8037/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.prefill.clear_kv_blocks",
+    "dyn://dynamo.prefill.generate",
+    "dyn://dynamo.prefill.get_perf_metrics",
+    "dyn://dynamo.prefill.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 7551302289144682005,
+      "transport": {
+        "nats_tcp": "dynamo_backend.clear_kv_blocks-68cb9d6c68101615"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7551302289144682005,
+      "transport": {
+        "nats_tcp": "dynamo_backend.generate-68cb9d6c68101615"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 7551302289144682005,
+      "transport": {
+        "nats_tcp": "dynamo_backend.get_perf_metrics-68cb9d6c68101615"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 7551302289144681993,
+      "transport": {
+        "nats_tcp": "dynamo_prefill.clear_kv_blocks-68cb9d6c68101609"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7551302289144681993,
+      "transport": {
+        "nats_tcp": "dynamo_prefill.generate-68cb9d6c68101609"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 7551302289144681993,
+      "transport": {
+        "nats_tcp": "dynamo_prefill.get_perf_metrics-68cb9d6c68101609"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 7551302289144681993,
+      "transport": {
+        "nats_tcp": "dynamo_prefill.worker_kv_indexer_query_dp0-68cb9d6c68101609"
+      }
+    }
+  ]
+}
+INFO     tests.fault_tolerance.cancellation.test_vllm:test_vllm.py:332 Decode Worker PID: 1311
+INFO     tests.fault_tolerance.cancellation.test_vllm:test_vllm.py:335 Testing chat completion stream request cancellation in decode worker (decode phase)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:219 Sending chat completion request (stream=True) with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:511 Starting to poll for 'Decode Request ID: ' pattern (max 100 iterations)...
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 1311
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 1313 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 1313 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 1312 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 1312 sed
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 380
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 382 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 382 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 381 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 381 sed
+INFO     DynamoFrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 377
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 379 name: tee
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 379 tee
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 378 name: sed
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 378 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 360
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 361 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 361 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 347
+INFO     NatsServer:managed_process.py:31 Terminating PID: 348 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 348 sed

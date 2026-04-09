@@ -1,0 +1,633 @@
+[2m2026-04-09T00:22:05.440293Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 10 models needed for collected tests
+Models: {'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice', 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'Qwen/Qwen3-0.6B', 'Qwen/Qwen2.5-VL-7B-Instruct', 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', 'openai/gpt-oss-20b', 'Qwen/Qwen2-VL-2B-Instruct', 'deepseek-ai/deepseek-llm-7b-base', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers', 'Qwen/Qwen3-VL-2B-Instruct'}
+[2m2026-04-09T00:22:05.440407Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-09T00:22:05.440456Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+[2m2026-04-09T00:22:05.863647Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:05.863724Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/.gitattributes
+[2m2026-04-09T00:22:05.878921Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/.gitattributes
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:05.879036Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/model.safetensors
+[2m2026-04-09T00:22:05.885940Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/model.safetensors
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:05.886017Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+[2m2026-04-09T00:22:05.889516Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:05.889586Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+[2m2026-04-09T00:22:06.007869Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:06.008009Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/model.safetensors
+[2m2026-04-09T00:22:06.012134Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/model.safetensors
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:06.012201Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+[2m2026-04-09T00:22:06.017125Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:06.017197Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/vocab.json
+[2m2026-04-09T00:22:06.129731Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/vocab.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:06.129805Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+[2m2026-04-09T00:22:06.958456Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:06.958579Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/model.safetensors
+[2m2026-04-09T00:22:06.981169Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/model.safetensors
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:06.981226Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/.gitattributes
+[2m2026-04-09T00:22:06.984625Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/.gitattributes
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:06.984765Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+[2m2026-04-09T00:22:07.001330Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:07.001387Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+[2m2026-04-09T00:22:07.113254Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:07.113311Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+[2m2026-04-09T00:22:07.115347Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:07.115416Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/vocab.json
+[2m2026-04-09T00:22:07.234879Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/vocab.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:07.235020Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+[2m2026-04-09T00:22:09.052198Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:09.052282Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+[2m2026-04-09T00:22:09.101552Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:09.101624Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+Fetching 13 files:   8%|▊         | 1/13 [00:03<00:42,  3.50s/it]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+[2m2026-04-09T00:22:09.216284Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:09.216343Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+[2m2026-04-09T00:22:13.151068Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:22:13.151208Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+[2m2026-04-09T00:22:13.197318Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:22:13.197379Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+[2m2026-04-09T00:22:21.249882Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:22:21.249976Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+[2m2026-04-09T00:22:21.291771Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:22:21.291884Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+[2m2026-04-09T00:22:29.347556Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+Fetching 13 files:   8%|▊         | 1/13 [00:23<04:44, 23.74s/it]
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+[2m2026-04-09T00:22:29.388544Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+[2m2026-04-09T00:22:29.388852Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+[2m2026-04-09T00:22:29.388957Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  8.76it/s]Fetching 10 files:  60%|██████    | 6/10 [00:03<00:02,  1.79it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  3.11it/s]
+[2m2026-04-09T00:22:32.734070Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+[2m2026-04-09T00:22:32.734145Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  4.78it/s]Fetching 10 files:  70%|███████   | 7/10 [00:02<00:01,  2.73it/s]Fetching 10 files: 100%|██████████| 10/10 [00:02<00:00,  3.98it/s]
+[2m2026-04-09T00:22:35.362620Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
+[2m2026-04-09T00:22:35.362696Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2.5-VL-7B-Instruct
+Fetching 16 files:   0%|          | 0/16 [00:00<?, ?it/s]Fetching 16 files:   6%|▋         | 1/16 [00:00<00:01,  7.90it/s]Fetching 16 files:  44%|████▍     | 7/16 [00:17<00:23,  2.62s/it]Fetching 16 files:  62%|██████▎   | 10/16 [00:18<00:10,  1.72s/it]Fetching 16 files: 100%|██████████| 16/16 [00:18<00:00,  1.16s/it]
+[2m2026-04-09T00:22:54.002990Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-04-09T00:22:54.003076Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+Fetching 29 files:   0%|          | 0/29 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+[2m2026-04-09T00:22:54.201508Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:54.201586Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/.gitattributes
+[2m2026-04-09T00:22:54.202006Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/.gitattributes
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:54.202085Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/comp_effic.png
+[2m2026-04-09T00:22:54.202463Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/comp_effic.png
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:54.202518Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+[2m2026-04-09T00:22:54.206251Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:54.206387Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+[2m2026-04-09T00:22:54.210295Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:54.210417Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+[2m2026-04-09T00:22:54.212425Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:54.212481Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+[2m2026-04-09T00:22:54.213806Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:54.213880Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+[2m2026-04-09T00:22:54.214404Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:54.214457Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+[2m2026-04-09T00:22:55.304043Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:55.304147Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/comp_effic.png
+[2m2026-04-09T00:22:55.307224Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/comp_effic.png
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:55.307294Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+[2m2026-04-09T00:22:55.307988Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:55.308104Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+[2m2026-04-09T00:22:55.313356Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:55.313416Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+[2m2026-04-09T00:22:55.315578Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:55.315634Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+[2m2026-04-09T00:22:55.319182Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:55.319257Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+[2m2026-04-09T00:22:55.325034Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:55.325090Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+Fetching 29 files:   3%|▎         | 1/29 [00:01<00:34,  1.22s/it]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+[2m2026-04-09T00:22:55.429020Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:55.429151Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+[2m2026-04-09T00:22:56.528726Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:56.528800Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+[2m2026-04-09T00:22:57.402056Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:57.402203Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+[2m2026-04-09T00:22:57.410814Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:57.410917Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+[2m2026-04-09T00:22:57.411407Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:57.411475Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+[2m2026-04-09T00:22:57.419097Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:57.419224Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+[2m2026-04-09T00:22:57.449577Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:57.449640Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+[2m2026-04-09T00:22:57.452302Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:57.452367Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/model_index.json
+[2m2026-04-09T00:22:58.020297Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/model_index.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:22:58.020389Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+[2m2026-04-09T00:22:58.616437Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:22:58.616514Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/model_index.json
+[2m2026-04-09T00:22:59.139662Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/model_index.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:22:59.139724Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/model_index.json
+[2m2026-04-09T00:23:01.239543Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/model_index.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:23:01.239622Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+[2m2026-04-09T00:23:01.503744Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:23:01.503825Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+[2m2026-04-09T00:23:01.504266Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:23:01.504380Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+[2m2026-04-09T00:23:01.511483Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:23:01.511602Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+[2m2026-04-09T00:23:01.518250Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:23:01.518316Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+[2m2026-04-09T00:23:01.552023Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:23:01.552164Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+[2m2026-04-09T00:23:01.552754Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:23:01.552808Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+[2m2026-04-09T00:23:02.715008Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:23:02.715081Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+[2m2026-04-09T00:23:05.549746Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:23:05.549825Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+[2m2026-04-09T00:23:06.651744Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:23:06.651835Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+[2m2026-04-09T00:23:08.754629Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:23:08.754796Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+[2m2026-04-09T00:23:09.602078Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:23:09.602152Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+[2m2026-04-09T00:23:09.624459Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:23:09.624596Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+[2m2026-04-09T00:23:09.747408Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:23:09.747538Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+[2m2026-04-09T00:23:09.784692Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:23:09.784793Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+[2m2026-04-09T00:23:09.806966Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:23:09.807065Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+[2m2026-04-09T00:23:10.234495Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:23:10.234656Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+[2m2026-04-09T00:23:10.814988Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:23:10.815046Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+[2m2026-04-09T00:23:11.328738Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:23:11.328874Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+[2m2026-04-09T00:23:12.853289Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:23:12.853370Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+[2m2026-04-09T00:23:13.432210Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:23:13.432287Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+[2m2026-04-09T00:23:17.530310Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:23:17.530388Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+Fetching 29 files:   7%|▋         | 2/29 [00:23<06:09, 13.67s/it]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+[2m2026-04-09T00:23:17.727580Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/model-00002-of-00003.safetensors
+[2m2026-04-09T00:23:17.826132Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/model-00002-of-00003.safetensors
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:23:17.826190Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+Fetching 29 files:  14%|█▍        | 4/29 [00:23<02:08,  5.15s/it]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/model.safetensors.index.json
+[2m2026-04-09T00:23:18.325320Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/model.safetensors.index.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:23:18.325403Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+Fetching 29 files:  17%|█▋        | 5/29 [00:24<01:29,  3.72s/it]Fetching 29 files:  17%|█▋        | 5/29 [00:24<01:56,  4.86s/it]
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+[2m2026-04-09T00:23:25.631308Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:23:25.631440Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:23:33.765333Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Wan-AI/Wan2.2-TI2V-5B-Diffusers: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+[2m2026-04-09T00:23:33.765500Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: openai/gpt-oss-20b
+Fetching 18 files:   0%|          | 0/18 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/LICENSE
+[2m2026-04-09T00:23:33.981830Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/LICENSE
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:23:33.981900Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+Fetching 18 files:   6%|▌         | 1/18 [00:00<00:01,  8.80it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/model-00000-of-00002.safetensors
+[2m2026-04-09T00:23:34.101094Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/model-00000-of-00002.safetensors
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:23:34.101174Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/special_tokens_map.json
+[2m2026-04-09T00:23:34.229862Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/special_tokens_map.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:23:34.229987Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+Fetching 18 files:  11%|█         | 2/18 [00:01<00:11,  1.42it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/model-00000-of-00002.safetensors
+[2m2026-04-09T00:23:35.201422Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/model-00000-of-00002.safetensors
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:23:35.201551Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+Fetching 18 files:  44%|████▍     | 8/18 [00:49<01:07,  6.79s/it]Fetching 18 files: 100%|██████████| 18/18 [00:49<00:00,  2.73s/it]
+[2m2026-04-09T00:24:23.087424Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: openai/gpt-oss-20b
+[2m2026-04-09T00:24:23.087513Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2-VL-2B-Instruct
+Fetching 14 files:   0%|          | 0/14 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/.gitattributes
+[2m2026-04-09T00:24:23.457555Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/.gitattributes
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:23.457656Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+Fetching 14 files:   7%|▋         | 1/14 [00:01<00:15,  1.22s/it]Fetching 14 files:  57%|█████▋    | 8/14 [00:05<00:03,  1.66it/s]Fetching 14 files: 100%|██████████| 14/14 [00:05<00:00,  2.79it/s]
+[2m2026-04-09T00:24:28.384194Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2-VL-2B-Instruct
+[2m2026-04-09T00:24:28.384274Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: deepseek-ai/deepseek-llm-7b-base
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+[2m2026-04-09T00:24:28.589284Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:28.589351Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+[2m2026-04-09T00:24:28.592170Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:28.592232Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+[2m2026-04-09T00:24:28.592663Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:28.592731Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+[2m2026-04-09T00:24:28.593297Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:28.593373Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+[2m2026-04-09T00:24:28.593813Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:28.593882Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+[2m2026-04-09T00:24:28.594922Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:28.594991Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+[2m2026-04-09T00:24:28.595597Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:28.595674Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+[2m2026-04-09T00:24:28.596094Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:28.596151Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+[2m2026-04-09T00:24:29.693252Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:24:29.693325Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+[2m2026-04-09T00:24:29.695865Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:24:29.695930Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+[2m2026-04-09T00:24:29.778921Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:24:29.779053Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+[2m2026-04-09T00:24:29.781898Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:24:29.782030Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+[2m2026-04-09T00:24:29.800033Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:24:29.800110Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+[2m2026-04-09T00:24:30.293881Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:24:30.294053Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+[2m2026-04-09T00:24:30.478206Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:24:30.478361Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+[2m2026-04-09T00:24:30.489246Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:24:30.489303Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+[2m2026-04-09T00:24:31.791250Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:24:31.791419Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+[2m2026-04-09T00:24:31.793965Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:24:31.794093Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+[2m2026-04-09T00:24:31.878014Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:24:31.878171Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+[2m2026-04-09T00:24:31.881418Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:24:31.881575Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+[2m2026-04-09T00:24:31.896223Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:24:31.896378Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+[2m2026-04-09T00:24:32.396132Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:24:32.396265Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+[2m2026-04-09T00:24:32.579191Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:24:32.579296Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+[2m2026-04-09T00:24:32.588542Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:24:32.588609Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+[2m2026-04-09T00:24:35.885411Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:24:35.885488Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+[2m2026-04-09T00:24:35.892849Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:24:35.892927Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+[2m2026-04-09T00:24:35.976554Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:24:35.976631Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+[2m2026-04-09T00:24:35.977042Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:24:35.977109Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+[2m2026-04-09T00:24:35.996763Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:24:35.996829Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+[2m2026-04-09T00:24:36.507566Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:24:36.507641Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+[2m2026-04-09T00:24:36.681140Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:24:36.681273Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+[2m2026-04-09T00:24:36.687454Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:24:36.687510Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+[2m2026-04-09T00:24:43.983729Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:24:43.983812Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+[2m2026-04-09T00:24:43.995182Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:24:43.995249Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+[2m2026-04-09T00:24:44.078015Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:24:44.078148Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+[2m2026-04-09T00:24:44.078927Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:24:44.079035Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+[2m2026-04-09T00:24:44.094549Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:24:44.094611Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+[2m2026-04-09T00:24:44.608373Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:24:44.608520Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+[2m2026-04-09T00:24:44.778665Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:24:44.778723Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+[2m2026-04-09T00:24:44.788584Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:24:44.788649Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+[2m2026-04-09T00:24:52.081901Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+[2m2026-04-09T00:24:52.096483Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+Fetching 9 files:   0%|          | 0/9 [00:23<?, ?it/s]
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+[2m2026-04-09T00:24:52.177120Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:24:52.177194Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+[2m2026-04-09T00:24:52.177616Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+[2m2026-04-09T00:24:52.180859Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+[2m2026-04-09T00:24:52.197516Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+[2m2026-04-09T00:24:52.712644Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+[2m2026-04-09T00:24:52.886212Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+[2m2026-04-09T00:24:52.890359Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+[2m2026-04-09T00:24:53.281022Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:24:53.281096Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+[2m2026-04-09T00:24:55.396136Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:24:55.396211Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+[2m2026-04-09T00:24:59.499947Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:24:59.500067Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+[2m2026-04-09T00:25:07.604794Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:25:07.604872Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+[2m2026-04-09T00:25:15.702556Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+[2m2026-04-09T00:25:15.702879Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download deepseek-ai/deepseek-llm-7b-base: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+[2m2026-04-09T00:25:15.702998Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+Fetching 31 files:   0%|          | 0/31 [00:00<?, ?it/s]Fetching 31 files:   3%|▎         | 1/31 [00:00<00:03,  8.57it/s]Fetching 31 files:  10%|▉         | 3/31 [00:00<00:05,  4.70it/s]Fetching 31 files:  35%|███▌      | 11/31 [00:00<00:01, 16.16it/s]'(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: 8c8c8aa8-7159-4d82-86f6-b436944c45e0)')' thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+[2m2026-04-09T00:25:26.720369Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: 8c8c8aa8-7159-4d82-86f6-b436944c45e0)')' thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:25:26.720577Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+Fetching 31 files:  35%|███▌      | 11/31 [00:19<00:01, 16.16it/s]'(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: e394f5d6-a288-4265-ac3e-415e1aba68a5)')' thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+[2m2026-04-09T00:25:37.778282Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: e394f5d6-a288-4265-ac3e-415e1aba68a5)')' thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:25:37.778390Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+[2m2026-04-09T00:25:39.922875Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:25:39.923029Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+Fetching 31 files:  52%|█████▏    | 16/31 [00:24<00:30,  2.03s/it]Fetching 31 files:  55%|█████▍    | 17/31 [00:27<00:29,  2.12s/it]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+[2m2026-04-09T00:25:44.023324Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:25:44.023410Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+[2m2026-04-09T00:25:52.124282Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:25:52.124524Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+Fetching 31 files:  55%|█████▍    | 17/31 [00:39<00:29,  2.12s/it]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+[2m2026-04-09T00:26:00.231794Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+Fetching 31 files:  77%|███████▋  | 24/31 [00:44<00:12,  1.85s/it]
+[2m2026-04-09T00:26:00.232994Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Wan-AI/Wan2.1-T2V-1.3B-Diffusers: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+[2m2026-04-09T00:26:00.233095Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+[2m2026-04-09T00:26:00.427897Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:26:00.427959Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+[2m2026-04-09T00:26:00.435806Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:26:00.435860Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/model.safetensors
+[2m2026-04-09T00:26:00.442584Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/model.safetensors
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:26:00.442727Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/.gitattributes
+[2m2026-04-09T00:26:00.446358Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/.gitattributes
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:26:00.446426Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json
+[2m2026-04-09T00:26:00.558196Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:26:00.558335Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/vocab.json
+[2m2026-04-09T00:26:00.562654Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/vocab.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:26:00.562715Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+[2m2026-04-09T00:26:01.531617Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:26:01.531783Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+[2m2026-04-09T00:26:01.536670Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:26:01.536800Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/model.safetensors
+[2m2026-04-09T00:26:01.544880Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/model.safetensors
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:26:01.544940Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+Fetching 12 files:   8%|▊         | 1/12 [00:01<00:13,  1.23s/it]HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+[2m2026-04-09T00:26:03.636506Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+[2m2026-04-09T00:26:03.636622Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:26:03.636703Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+Retrying in 4s [Retry 3/5].
+[2m2026-04-09T00:26:03.636755Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 4s [Retry 3/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+[2m2026-04-09T00:26:07.736002Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:26:07.736087Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+[2m2026-04-09T00:26:07.743144Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+Retrying in 8s [Retry 4/5].
+[2m2026-04-09T00:26:07.743202Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 4/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+[2m2026-04-09T00:26:15.835481Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:26:15.835560Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+[2m2026-04-09T00:26:15.845218Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+Retrying in 8s [Retry 5/5].
+[2m2026-04-09T00:26:15.845282Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 8s [Retry 5/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+[2m2026-04-09T00:26:23.952429Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+Fetching 12 files:   8%|▊         | 1/12 [00:23<04:19, 23.61s/it]
+[2m2026-04-09T00:26:23.962386Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen3-VL-2B-Instruct: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.

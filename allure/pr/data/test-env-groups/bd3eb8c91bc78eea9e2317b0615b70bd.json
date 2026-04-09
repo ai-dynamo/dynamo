@@ -1,0 +1,1 @@
+{"id":"bd3eb8c91bc78eea9e2317b0615b70bd","fullName":"components.src.dynamo.planner.tests.unit.test_prometheus.TestPrometheusAPIClientRouterSource#test_get_avg_request_count_uses_router_requests_total","name":"test_get_avg_request_count_uses_router_requests_total","status":"passed","testResultsByEnv":{"default":"c6ec7eee8bf851cc5aa3b3913dae2f55"}}

@@ -1,0 +1,103 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4289 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4289
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4289
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2470 --advertise-client-urls http://0.0.0.0:2470 --listen-peer-urls http://0.0.0.0:2471 --initial-advertise-peer-urls http://localhost:2471 --initial-cluster default=http://localhost:2471 --data-dir /tmp/etcd_b7b5_nq4 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2470
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2470
+INFO     test_deployment[disaggregated_multimodal-2]:common.py:43 Starting disaggregated_multimodal test_deployment
+INFO     test_deployment[disaggregated_multimodal-2]:common.py:49 Using model: Qwen/Qwen2-VL-7B-Instruct
+INFO     test_deployment[disaggregated_multimodal-2]:common.py:50 Script: disagg_multimodal.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/trtllm/launch/disagg_multimodal.sh in /workspace/examples/backends/trtllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8093/v1/models
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8093/v1/models (attempt=10, elapsed=18.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen2-VL-7B-Instruct",
+      "object": "model",
+      "created": 1775641158,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8093/health
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8093/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.prefill.generate",
+    "dyn://dynamo.tensorrt_llm.generate"
+  ],
+  "instances": [
+    {
+      "component": "prefill",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6295079468296932873,
+      "transport": {
+        "tcp": "10.1.67.111:41995/575c9d6c74b18e09/generate"
+      }
+    },
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6295079468296932875,
+      "transport": {
+        "tcp": "10.1.67.111:33245/575c9d6c74b18e0b/generate"
+      }
+    }
+  ]
+}
+INFO     test_deployment[disaggregated_multimodal-2]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8093/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe the image"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 160,
+  "stream": false,
+  "logprobs": false,
+  "model": "Qwen/Qwen2-VL-7B-Instruct"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=6.29s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['image']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+The image depicts a scenic mountainous landscape with a winding road in the foreground. The road curves gently to the right and is flanked by tall evergreen trees on both sides. In the background, a p...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 7788
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 8367
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 7791
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 6994
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 7164
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 7165
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 6996 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 6996 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 6995 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 6995 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 6978
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 6979 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 6979 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 6966
+INFO     NatsServer:managed_process.py:31 Terminating PID: 6967 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 6967 sed

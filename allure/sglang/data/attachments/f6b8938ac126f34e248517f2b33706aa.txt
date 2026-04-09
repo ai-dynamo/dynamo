@@ -1,0 +1,12 @@
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:188 Received generation request: f386c171-2944-4e7f-afcf-e15cd7d48c6d
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:209 Request f386c171-2944-4e7f-afcf-e15cd7d48c6d: prompt='a test video...', size=832x480, frames=81, steps=50
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:188 Received generation request: 5442a6b4-6e08-45ff-8f7e-844abd5c27fa
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:209 Request 5442a6b4-6e08-45ff-8f7e-844abd5c27fa: prompt='a test video...', size=832x480, frames=81, steps=50
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:188 Received generation request: 1a6ecc1a-3a9b-47cd-acf3-803c501e33b4
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:209 Request 1a6ecc1a-3a9b-47cd-acf3-803c501e33b4: prompt='a test video...', size=832x480, frames=81, steps=50
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:249 Request f386c171-2944-4e7f-afcf-e15cd7d48c6d: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:304 Request f386c171-2944-4e7f-afcf-e15cd7d48c6d completed in 0.10s
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:249 Request 5442a6b4-6e08-45ff-8f7e-844abd5c27fa: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:304 Request 5442a6b4-6e08-45ff-8f7e-844abd5c27fa completed in 0.20s
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:249 Request 1a6ecc1a-3a9b-47cd-acf3-803c501e33b4: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:304 Request 1a6ecc1a-3a9b-47cd-acf3-803c501e33b4 completed in 0.30s

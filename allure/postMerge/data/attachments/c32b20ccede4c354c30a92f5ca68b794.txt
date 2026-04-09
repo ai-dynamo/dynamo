@@ -1,0 +1,90 @@
+[2m2026-04-08T17:16:47.069232Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4289 in /workspace
+[2m2026-04-08T17:16:47.070239Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4289
+[2m2026-04-08T17:16:47.171065Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4289
+[2m2026-04-08T17:16:47.171282Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T17:16:47.172996Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T17:16:47.173678Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2417 --advertise-client-urls http://0.0.0.0:2417 --listen-peer-urls http://0.0.0.0:2418 --initial-advertise-peer-urls http://localhost:2418 --initial-cluster default=http://localhost:2418 --data-dir /tmp/etcd_3pk01fc6 in /workspace
+[2m2026-04-08T17:16:47.174509Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2417
+[2m2026-04-08T17:16:47.274958Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2417
+[2m2026-04-08T17:16:47.278588Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting video_agg_qwen test_deployment
+[2m2026-04-08T17:16:47.278660Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen2-VL-7B-Instruct
+[2m2026-04-08T17:16:47.278707Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_vision.sh
+[2m2026-04-08T17:16:47.278885Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/sglang/launch/agg_vision.sh --model-path Qwen/Qwen2-VL-7B-Instruct --mem-fraction-static 0.8 in /workspace/examples/backends/sglang
+[2m2026-04-08T17:16:47.280034Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8029/v1/models
+[2m2026-04-08T17:17:09.302101Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8029/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+[2m2026-04-08T17:17:19.311203Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8029/v1/models (attempt=17, elapsed=31.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen2-VL-7B-Instruct",
+      "object": "model",
+      "created": 1775668638,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T17:17:19.311365Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8029/health
+[2m2026-04-08T17:17:20.313622Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8029/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2942712502719928841,
+      "transport": {
+        "tcp": "10.1.66.209:36127/28d69d6e18b8da09/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-08T17:17:20.313850Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-08T17:17:20.314094Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8029/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe the video in detail"
+        },
+        {
+          "type": "video_url",
+          "video_url": {
+            "url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen2-VL-7B-Instruct"
+}'
+[2m2026-04-08T17:17:37.907331Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=17.59s
+[2m2026-04-08T17:17:37.907618Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 3/3 expected keywords: ['guitar', 'tablet', 'draw']
+[2m2026-04-08T17:17:37.907697Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+The video shows a close-up of a person's hands using a digital tablet to draw a picture of a guitar. The person is holding a stylus pen and is seen tracing the outline of the guitar on the tablet scre...
+[2m2026-04-08T17:17:37.909428Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5824
+[2m2026-04-08T17:17:44.719061Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5826 name: tee
+[2m2026-04-08T17:17:44.719214Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5826 tee
+[2m2026-04-08T17:17:44.719660Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5825 name: sed
+[2m2026-04-08T17:17:44.719751Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5825 sed
+[2m2026-04-08T17:17:44.722991Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5811
+[2m2026-04-08T17:17:44.824130Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5812 name: sed
+[2m2026-04-08T17:17:44.824236Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5812 sed
+[2m2026-04-08T17:17:44.825030Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5798
+[2m2026-04-08T17:17:44.925942Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5799 name: sed
+[2m2026-04-08T17:17:44.926221Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5799 sed

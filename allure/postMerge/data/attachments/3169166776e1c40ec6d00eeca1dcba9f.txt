@@ -1,0 +1,12 @@
+[2m2026-04-08T18:23:46.656242Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Received generation request: 696b5f9e-4ecf-4fee-a8a6-d9f93b9fe88c
+[2m2026-04-08T18:23:46.656350Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 696b5f9e-4ecf-4fee-a8a6-d9f93b9fe88c: prompt='a test video...', size=832x480, frames=81, steps=50
+[2m2026-04-08T18:23:46.656910Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Received generation request: a0deca66-bc11-40b5-a5a4-1f8009b7c2e9
+[2m2026-04-08T18:23:46.656974Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request a0deca66-bc11-40b5-a5a4-1f8009b7c2e9: prompt='a test video...', size=832x480, frames=81, steps=50
+[2m2026-04-08T18:23:46.657239Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Received generation request: b619c60c-3a34-4165-b300-0e90d1fdaa47
+[2m2026-04-08T18:23:46.657299Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request b619c60c-3a34-4165-b300-0e90d1fdaa47: prompt='a test video...', size=832x480, frames=81, steps=50
+[2m2026-04-08T18:23:46.758139Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 696b5f9e-4ecf-4fee-a8a6-d9f93b9fe88c: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[2m2026-04-08T18:23:46.758774Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 696b5f9e-4ecf-4fee-a8a6-d9f93b9fe88c completed in 0.10s
+[2m2026-04-08T18:23:46.859257Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request a0deca66-bc11-40b5-a5a4-1f8009b7c2e9: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[2m2026-04-08T18:23:46.859715Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request a0deca66-bc11-40b5-a5a4-1f8009b7c2e9 completed in 0.20s
+[2m2026-04-08T18:23:46.960660Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request b619c60c-3a34-4165-b300-0e90d1fdaa47: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[2m2026-04-08T18:23:46.961048Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request b619c60c-3a34-4165-b300-0e90d1fdaa47 completed in 0.30s

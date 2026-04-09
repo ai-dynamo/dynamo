@@ -1,0 +1,358 @@
+[BASH] ==========================================
+[BASH] Launching vLLM-Omni Audio/TTS (1 GPU)
+[BASH] ==========================================
+[BASH] Model:       Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+[BASH] Frontend:    http://localhost:8015
+[BASH] ==========================================
+[BASH] 
+[BASH] Example test command:
+[BASH] 
+[BASH]   curl -X POST http://localhost:8015/v1/audio/speech \
+[BASH]     -H 'Content-Type: application/json' \
+[BASH]     -d '{
+[BASH]       "input": "Hey, this is generated using Dynamo!",
+[BASH]       "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+[BASH]       "voice": "vivian",
+[BASH]       "language": "English"
+[BASH]     }' \
+[BASH]     -o dynamo-audio.wav
+[BASH] 
+[BASH] ==========================================
+[BASH] Starting Omni Audio worker...
+[BASH] [2m2026-04-08T21:52:15.898763Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
+[BASH] [2m2026-04-08T21:52:15.900633Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2417)
+[BASH] [2m2026-04-08T21:52:15.906473Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.86.111 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-08T21:52:15.912392Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8015"
+[BASH] [2m2026-04-08T21:52:16.610192Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:18.622289Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:20.624772Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:22.626750Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:24.628915Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] dynamo.nixl_connect: Failed to load CuPy for GPU acceleration, utilizing numpy to provide CPU based operations.
+[BASH] [2m2026-04-08T21:52:26.583071Z[0m [32m INFO[0m [2marg_utils.__post_init__[0m[2m:[0m HF_HUB_OFFLINE is True, replace model_id [Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice] to model_path [/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe]
+[BASH] [2m2026-04-08T21:52:26.631063Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:26.913312Z[0m [33m WARN[0m [2mconfig_dumper._preprocess_for_encode[0m[2m:[0m Unknown type <class 'dynamo.vllm.omni.args.OmniConfig'>, using __dict__ or str(obj)
+[BASH] [2m2026-04-08T21:52:26.916823Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe", skipping download
+[BASH] [2m2026-04-08T21:52:26.916885Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' without API validation
+[BASH] [2m2026-04-08T21:52:26.919038Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2417)
+[BASH] [2m2026-04-08T21:52:26.921914Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.86.111 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-08T21:52:26.922338Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:8082
+[BASH] [2m2026-04-08T21:52:26.922376Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:8082
+[BASH] [2m2026-04-08T21:52:26.922392Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:8082
+[BASH] [2m2026-04-08T21:52:26.922503Z[0m [32m INFO[0m [2mgraceful_shutdown.install_signal_handlers[0m[2m:[0m Signal handlers set up for graceful shutdown (discovery unregister + grace period)
+[BASH] [2m2026-04-08T21:52:26.923453Z[0m [32m INFO[0m [2mbase_handler.__init__[0m[2m:[0m Initializing OmniHandler for multi-stage pipelines with model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+[BASH] [2m2026-04-08T21:52:26.923555Z[0m [32m INFO[0m [2mweight_utils.download_weights_from_hf_specific[0m[2m:[0m Using model weights format ['*']
+[BASH] [2m2026-04-08T21:52:26.924450Z[0m [32m INFO[0m [2momni_base.__init__[0m[2m:[0m [AsyncOmni] Initializing with model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+[BASH] [2m2026-04-08T21:52:26.924505Z[0m [32m INFO[0m [2masync_omni_engine.__init__[0m[2m:[0m [AsyncOmniEngine] Initializing with model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+[BASH] [2m2026-04-08T21:52:26.959275Z[0m [32m INFO[0m [2masync_omni_engine.__init__[0m[2m:[0m [AsyncOmniEngine] Launching Orchestrator thread with 2 stages
+[BASH] [2m2026-04-08T21:52:26.959810Z[0m [32m INFO[0m [2mstage_init_utils.prepare_engine_environment[0m[2m:[0m [stage_init] Set VLLM_WORKER_MULTIPROC_METHOD=spawn
+[BASH] [2m2026-04-08T21:52:26.965078Z[0m [32m INFO[0m [2minitialization.load_omni_transfer_config[0m[2m:[0m Loaded OmniTransferConfig with 1 connector configurations
+[BASH] [2m2026-04-08T21:52:26.965163Z[0m [32m INFO[0m [2masync_omni_engine._initialize_stages[0m[2m:[0m [AsyncOmniEngine] Initializing stage 0
+[BASH] [2m2026-04-08T21:52:26.966186Z[0m [32m INFO[0m [2mstage_init_utils.setup_stage_devices[0m[2m:[0m [stage_init] Stage-0 set runtime devices: 0
+[BASH] [2m2026-04-08T21:52:26.966264Z[0m [32m INFO[0m [2masync_omni_engine._initialize_stages[0m[2m:[0m [AsyncOmniEngine] Initializing stage 1
+[BASH] [2m2026-04-08T21:52:26.967881Z[0m [32m INFO[0m [2marg_utils.__post_init__[0m[2m:[0m HF_HUB_OFFLINE is True, replace model_id [Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice] to model_path [/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe]
+[BASH] [2m2026-04-08T21:52:26.981809Z[0m [33mWARNING[0m [2mconfig._wrapper[0m[2m:[0m Config format `mistral` is already registered, and will be overwritten by the new parser class `<class 'vllm_omni.model_executor.models.voxtral_tts.configuration_voxtral_tts.VoxtralTTSConfigParser'>`.
+[BASH] [2m2026-04-08T21:52:26.981880Z[0m [32m INFO[0m [2mconfig._wrapper[0m[2m:[0m Registered config parser `<class 'vllm_omni.model_executor.models.voxtral_tts.configuration_voxtral_tts.VoxtralTTSConfigParser'>` with config format `mistral`
+[BASH] [2m2026-04-08T21:52:26.983708Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m speaker_encoder_config is None. Initializing talker model with default values
+[BASH] [2m2026-04-08T21:52:26.984827Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m talker_config is None. Initializing talker model with default values
+[BASH] [2m2026-04-08T21:52:26.984872Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m speaker_encoder_config is None. Initializing talker model with default values
+[BASH] [2m2026-04-08T21:52:26.985011Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] [2m2026-04-08T21:52:26.985785Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] [2m2026-04-08T21:52:28.633217Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:30.642118Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:32.644644Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:34.646877Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:36.649216Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:36.928036Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3TTSTalkerForConditionalGeneration
+[BASH] [2m2026-04-08T21:52:36.930830Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 4096
+[BASH] [2m2026-04-08T21:52:36.934013Z[0m [32m INFO[0m [2mscheduler.__post_init__[0m[2m:[0m Chunked prefill is enabled with max_num_batched_tokens=512.
+[BASH] [2m2026-04-08T21:52:36.938860Z[0m [32m INFO[0m [2mvllm.__post_init__[0m[2m:[0m Asynchronous scheduling is enabled.
+[BASH] [2m2026-04-08T21:52:36.945030Z[0m [32m INFO[0m [2masync_omni_engine._launch_llm_stage[0m[2m:[0m [AsyncOmniEngine] Stage 0 engine launch started
+[BASH] [2m2026-04-08T21:52:36.945288Z[0m [32m INFO[0m [2mstage_init_utils.setup_stage_devices[0m[2m:[0m [stage_init] Stage-1 set runtime devices: 0
+[BASH] [2m2026-04-08T21:52:36.946674Z[0m [32m INFO[0m [2marg_utils.__post_init__[0m[2m:[0m HF_HUB_OFFLINE is True, replace model_id [Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice] to model_path [/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe]
+[BASH] [2m2026-04-08T21:52:36.947576Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m speaker_encoder_config is None. Initializing talker model with default values
+[BASH] [2m2026-04-08T21:52:36.948678Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m talker_config is None. Initializing talker model with default values
+[BASH] [2m2026-04-08T21:52:36.948726Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m speaker_encoder_config is None. Initializing talker model with default values
+[BASH] [2m2026-04-08T21:52:36.948856Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] [2m2026-04-08T21:52:36.949620Z[0m [32m INFO[0m [2mconfiguration_qwen3_tts.__init__[0m[2m:[0m code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] [2m2026-04-08T21:52:38.651401Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:40.653479Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:42.655551Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:44.657525Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (StageEngineCoreProc pid=21625) INFO 04-08 21:52:44 [core.py:105] Initializing a V1 LLM engine (v0.19.0) with config: model='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe', speculative_config=None, tokenizer='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_images_per_batch': 0, 'compile_sizes': [], 'compile_ranges_endpoints': [512], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 16, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+[BASH] (StageEngineCoreProc pid=21625) WARNING 04-08 21:52:44 [multiproc_executor.py:1014] Reducing Torch parallelism from 8 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+[BASH] (StageEngineCoreProc pid=21625) INFO 04-08 21:52:44 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.1.86.111 (local), world_size=1, local_world_size=1
+[BASH] [2m2026-04-08T21:52:46.506294Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3TTSCode2Wav
+[BASH] [2m2026-04-08T21:52:46.507431Z[0m [33mWARNING[0m [2mmodel._get_and_verify_max_len[0m[2m:[0m User-specified max_model_len (65536) is greater than the derived max_model_len (max_position_embeddings=32768.0 or model_max_length=None in model's config.json). VLLM_ALLOW_LONG_MAX_MODEL_LEN must be used with extreme caution. If the model uses relative position encoding (RoPE), positions exceeding derived_max_model_len lead to nan. If the model uses absolute position encoding, positions exceeding derived_max_model_len will cause a CUDA array out-of-bounds error.
+[BASH] [2m2026-04-08T21:52:46.507481Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 65536
+[BASH] [2m2026-04-08T21:52:46.508891Z[0m [32m INFO[0m [2mscheduler.__post_init__[0m[2m:[0m Chunked prefill is enabled with max_num_batched_tokens=65536.
+[BASH] [2m2026-04-08T21:52:46.509227Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] [2m2026-04-08T21:52:46.509275Z[0m [33mWARNING[0m [2mvllm.__post_init__[0m[2m:[0m Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] [2m2026-04-08T21:52:46.509359Z[0m [32m INFO[0m [2mvllm.__post_init__[0m[2m:[0m Cudagraph is disabled under eager mode
+[BASH] [2m2026-04-08T21:52:46.509444Z[0m [32m INFO[0m [2mcompilation.log_enabled_passes[0m[2m:[0m Enabled custom fusions: norm_quant, act_quant
+[BASH] [2m2026-04-08T21:52:46.659460Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:48.661628Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:50.663642Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:52:52 [parallel_state.py:1400] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://127.0.0.1:50421 backend=nccl
+[BASH] (Worker pid=21749) INFO 04-08 21:52:52 [parallel_state.py:1716] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+[BASH] [2m2026-04-08T21:52:52.665936Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:52:53 [topk_topp_sampler.py:51] Using FlashInfer for top-p & top-k sampling.
+[BASH] [0;93m2026-04-08 21:52:53.811860550 [W:onnxruntime:Default, device_discovery.cc:325 DiscoverDevicesForPlatform] GPU device discovery failed: device_discovery.cc:92 ReadFileContents Failed to open file: "/sys/class/drm/card0/device/vendor"[m
+[BASH] /bin/sh: 1: sox: not found
+[BASH] (Worker pid=21749) SoX could not be found!
+[BASH] (Worker pid=21749) 
+[BASH] (Worker pid=21749)     If you do not have SoX, proceed here:
+[BASH] (Worker pid=21749)      - - - http://sox.sourceforge.net/ - - -
+[BASH] (Worker pid=21749) 
+[BASH] (Worker pid=21749)     If you do (or think that you should) have SoX, double-check your
+[BASH] (Worker pid=21749)     path variables.
+[BASH] (Worker pid=21749)     
+[BASH] (Worker pid=21749) INFO 04-08 21:52:53 [gpu_model_runner.py:4735] Starting to load model /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe...
+[BASH] (Worker pid=21749) INFO 04-08 21:52:54 [cuda.py:334] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+[BASH] (Worker pid=21749) INFO 04-08 21:52:54 [flash_attn.py:596] Using FlashAttention version 2
+[BASH] (Worker pid=21749) <frozen importlib._bootstrap_external>:1297: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+[BASH] (Worker pid=21749) <frozen importlib._bootstrap_external>:1297: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+[BASH] (Worker pid=21749) INFO 04-08 21:52:54 [vllm.py:790] Asynchronous scheduling is enabled.
+[BASH] (Worker pid=21749) INFO 04-08 21:52:54 [voice_cache.py:43] Voice embedding cache initialized (max_entries=128)
+[BASH] (Worker pid=21749) Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+[BASH] [2m2026-04-08T21:52:54.668209Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:56.670347Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:52:58.672966Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:00.675232Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:02.677389Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:04.680011Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:11<00:00, 11.68s/it]
+[BASH] (Worker pid=21749) Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:11<00:00, 11.68s/it]
+[BASH] (Worker pid=21749) 
+[BASH] (Worker pid=21749) INFO 04-08 21:53:06 [qwen3_tts_talker.py:1614] Loaded 320 weights for Qwen3TTSTalkerForConditionalGeneration
+[BASH] (Worker pid=21749) INFO 04-08 21:53:06 [default_loader.py:384] Loading weights took 11.72 seconds
+[BASH] [2m2026-04-08T21:53:06.682160Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:53:06 [gpu_model_runner.py:4820] Model loading took 3.6 GiB memory and 12.054223 seconds
+[BASH] (Worker pid=21749) INFO 04-08 21:53:07 [configuration_qwen3_tts.py:487] talker_config is None. Initializing talker model with default values
+[BASH] (Worker pid=21749) INFO 04-08 21:53:07 [configuration_qwen3_tts.py:490] speaker_encoder_config is None. Initializing talker model with default values
+[BASH] (Worker pid=21749) INFO 04-08 21:53:07 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] (Worker pid=21749) INFO 04-08 21:53:07 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] (Worker pid=21749) INFO 04-08 21:53:07 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] [2m2026-04-08T21:53:08.684212Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:10.686493Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:12.688812Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:53:13 [configuration_qwen3_tts.py:487] talker_config is None. Initializing talker model with default values
+[BASH] (Worker pid=21749) INFO 04-08 21:53:13 [configuration_qwen3_tts.py:490] speaker_encoder_config is None. Initializing talker model with default values
+[BASH] (Worker pid=21749) INFO 04-08 21:53:13 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] (Worker pid=21749) INFO 04-08 21:53:13 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] (Worker pid=21749) INFO 04-08 21:53:13 [configuration_qwen3_tts.py:441] code_predictor_config is None. Initializing code_predictor model with default values
+[BASH] [2m2026-04-08T21:53:14.691198Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:53:15 [backends.py:1051] Using cache directory: /home/dynamo/.cache/vllm/torch_compile_cache/ac94af9422/rank_0_0/backbone for vLLM's torch.compile
+[BASH] (Worker pid=21749) INFO 04-08 21:53:15 [backends.py:1111] Dynamo bytecode transform time: 7.90 s
+[BASH] [2m2026-04-08T21:53:16.693135Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) [rank0]:W0408 21:53:16.769000 21749 torch/_inductor/utils.py:1679] Not enough SMs to use max_autotune_gemm mode
+[BASH] [2m2026-04-08T21:53:18.695110Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:20.697139Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:53:21 [backends.py:372] Cache the graph of compile range (1, 512) for later use
+[BASH] [2m2026-04-08T21:53:22.699123Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:24.701208Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:53:25 [backends.py:390] Compiling a graph for compile range (1, 512) takes 9.75 s
+[BASH] [2m2026-04-08T21:53:26.703336Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:53:27 [decorators.py:640] saved AOT compiled function to /home/dynamo/.cache/vllm/torch_compile_cache/torch_aot_compile/73063b4568ebddb9bbf5ccf484f6ac437a1dfe80badc1c9f87974e206a9d451f/rank_0_0/model
+[BASH] (Worker pid=21749) INFO 04-08 21:53:27 [monitor.py:48] torch.compile took 20.33 s in total
+[BASH] (Worker pid=21749) INFO 04-08 21:53:28 [monitor.py:76] Initial profiling/warmup run took 1.07 s
+[BASH] [2m2026-04-08T21:53:28.705487Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:53:29 [base.py:150] Available KV cache memory: 2.86 GiB (profiling fallback)
+[BASH] (StageEngineCoreProc pid=21625) INFO 04-08 21:53:29 [kv_cache_utils.py:1319] GPU KV cache size: 26,784 tokens
+[BASH] (StageEngineCoreProc pid=21625) INFO 04-08 21:53:29 [kv_cache_utils.py:1324] Maximum concurrency for 4,096 tokens per request: 6.54x
+[BASH] (Worker pid=21749) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/5 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  80%|████████  | 4/5 [00:00<00:00, 31.57it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 5/5 [00:00<00:00, 28.37it/s]
+[BASH] (Worker pid=21749) Capturing CUDA graphs (decode, FULL):   0%|          | 0/4 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  50%|█████     | 2/4 [00:00<00:00, 15.71it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 4/4 [00:00<00:00, 22.17it/s]
+[BASH] [2m2026-04-08T21:53:30.707619Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21749) INFO 04-08 21:53:30 [gpu_model_runner.py:6046] Graph capturing finished in 1 secs, took 0.06 GiB
+[BASH] (StageEngineCoreProc pid=21625) INFO 04-08 21:53:30 [core.py:283] init engine (profile, create kv cache, warmup model) took 23.96 seconds
+[BASH] (StageEngineCoreProc pid=21625) The tokenizer you are loading from '/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[BASH] (StageEngineCoreProc pid=21625) WARNING 04-08 21:53:31 [scheduler.py:180] Using custom scheduler class vllm_omni.core.sched.omni_ar_scheduler.OmniARScheduler. This scheduler interface is not public and compatibility may not be maintained.
+[BASH] (StageEngineCoreProc pid=21625) INFO 04-08 21:53:31 [factory.py:46] Created connector: SharedMemoryConnector
+[BASH] (StageEngineCoreProc pid=21625) INFO 04-08 21:53:31 [vllm.py:790] Asynchronous scheduling is enabled.
+[BASH] [2m2026-04-08T21:53:31.516793Z[0m [32m INFO[0m [2masync_omni_engine._launch_llm_stage[0m[2m:[0m [AsyncOmniEngine] Stage 0 engine startup completed
+[BASH] [2m2026-04-08T21:53:31.525056Z[0m [32m INFO[0m [2masync_omni_engine._launch_llm_stage[0m[2m:[0m [AsyncOmniEngine] Stage 1 engine launch started
+[BASH] [2m2026-04-08T21:53:32.709820Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:34.711846Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:36.713860Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:38.715953Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (StageEngineCoreProc pid=21832) INFO 04-08 21:53:38 [core.py:105] Initializing a V1 LLM engine (v0.19.0) with config: model='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe', speculative_config=None, tokenizer='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=65536, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_images_per_batch': 0, 'compile_sizes': [], 'compile_ranges_endpoints': [65536], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+[BASH] (StageEngineCoreProc pid=21832) WARNING 04-08 21:53:38 [multiproc_executor.py:1014] Reducing Torch parallelism from 8 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+[BASH] (StageEngineCoreProc pid=21832) INFO 04-08 21:53:38 [multiproc_executor.py:134] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=10.1.86.111 (local), world_size=1, local_world_size=1
+[BASH] [2m2026-04-08T21:53:40.717960Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:42.719992Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:44.722103Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21890) INFO 04-08 21:53:46 [parallel_state.py:1400] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://127.0.0.1:54235 backend=nccl
+[BASH] (Worker pid=21890) INFO 04-08 21:53:46 [parallel_state.py:1716] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+[BASH] [2m2026-04-08T21:53:46.724277Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21890) INFO 04-08 21:53:47 [topk_topp_sampler.py:51] Using FlashInfer for top-p & top-k sampling.
+[BASH] [0;93m2026-04-08 21:53:47.476169457 [W:onnxruntime:Default, device_discovery.cc:325 DiscoverDevicesForPlatform] GPU device discovery failed: device_discovery.cc:92 ReadFileContents Failed to open file: "/sys/class/drm/card0/device/vendor"[m
+[BASH] /bin/sh: 1: sox: not found
+[BASH] (Worker pid=21890) SoX could not be found!
+[BASH] (Worker pid=21890) 
+[BASH] (Worker pid=21890)     If you do not have SoX, proceed here:
+[BASH] (Worker pid=21890)      - - - http://sox.sourceforge.net/ - - -
+[BASH] (Worker pid=21890) 
+[BASH] (Worker pid=21890)     If you do (or think that you should) have SoX, double-check your
+[BASH] (Worker pid=21890)     path variables.
+[BASH] (Worker pid=21890)     
+[BASH] (Worker pid=21890) INFO 04-08 21:53:47 [gpu_model_runner.py:4735] Starting to load model /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe...
+[BASH] (Worker pid=21890) INFO 04-08 21:53:47 [default_loader.py:384] Loading weights took 12596.85 seconds
+[BASH] (Worker pid=21890) INFO 04-08 21:53:48 [gpu_model_runner.py:4820] Model loading took 0.0 GiB memory and 0.001551 seconds
+[BASH] (Worker pid=21890) `torch_dtype` is deprecated! Use `dtype` instead!
+[BASH] (Worker pid=21890) INFO 04-08 21:53:48 [configuration_qwen3_tts_tokenizer_v2.py:156] encoder_config is None. Initializing encoder with default values
+[BASH] (Worker pid=21890) INFO 04-08 21:53:48 [configuration_qwen3_tts_tokenizer_v2.py:159] decoder_config is None. Initializing decoder with default values
+[BASH] [2m2026-04-08T21:53:48.726595Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:50.728723Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21890) INFO 04-08 21:53:50 [modeling_qwen3_tts_tokenizer_v2.py:969] Precomputed exp caches for 29 SnakeBeta activations
+[BASH] (Worker pid=21890) INFO 04-08 21:53:50 [cuda_graph_decoder_wrapper.py:104] Starting CUDA Graph warmup for 11 sizes: [2, 4, 8, 16, 25, 32, 50, 64, 128, 256, 325]
+[BASH] [2m2026-04-08T21:53:52.731254Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:54.733445Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (Worker pid=21890) INFO 04-08 21:53:54 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=2
+[BASH] (Worker pid=21890) INFO 04-08 21:53:54 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=4
+[BASH] (Worker pid=21890) INFO 04-08 21:53:54 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=8
+[BASH] (Worker pid=21890) INFO 04-08 21:53:54 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=16
+[BASH] (Worker pid=21890) INFO 04-08 21:53:54 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=25
+[BASH] (Worker pid=21890) INFO 04-08 21:53:55 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=32
+[BASH] (Worker pid=21890) INFO 04-08 21:53:55 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=50
+[BASH] (Worker pid=21890) INFO 04-08 21:53:55 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=64
+[BASH] (Worker pid=21890) INFO 04-08 21:53:55 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=128
+[BASH] (Worker pid=21890) INFO 04-08 21:53:55 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=256
+[BASH] (Worker pid=21890) INFO 04-08 21:53:55 [cuda_graph_decoder_wrapper.py:117]   Captured CUDA Graph for size=325
+[BASH] (Worker pid=21890) INFO 04-08 21:53:55 [cuda_graph_decoder_wrapper.py:122] CUDA Graph warmup complete: 11/11 captured
+[BASH] (Worker pid=21890) INFO 04-08 21:53:55 [modeling_qwen3_tts_tokenizer_v2.py:999] CUDA Graph enabled for decoder: seq_lens=[2, 4, 8, 16, 25, 32, 50, 64, 128, 256, 325]
+[BASH] (Worker pid=21890) INFO 04-08 21:53:55 [qwen3_tts_code2wav.py:137] Code2Wav decoder CUDA Graph enabled
+[BASH] (Worker pid=21890) WARNING 04-08 21:53:55 [qwen3_tts_code2wav.py:238] Code2Wav input_ids length 1 not divisible by num_quantizers 16; skipping malformed request.
+[BASH] (Worker pid=21890) WARNING 04-08 21:53:55 [gpu_generation_model_runner.py:470] Dummy sampler run is not implemented for generation model
+[BASH] (StageEngineCoreProc pid=21832) INFO 04-08 21:53:55 [core.py:283] init engine (profile, create kv cache, warmup model) took 7.42 seconds
+[BASH] (StageEngineCoreProc pid=21832) The tokenizer you are loading from '/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[BASH] (StageEngineCoreProc pid=21832) WARNING 04-08 21:53:56 [scheduler.py:180] Using custom scheduler class vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler. This scheduler interface is not public and compatibility may not be maintained.
+[BASH] (StageEngineCoreProc pid=21832) WARNING 04-08 21:53:56 [core.py:134] Disabling chunked prefill for model without KVCache
+[BASH] (StageEngineCoreProc pid=21832) INFO 04-08 21:53:56 [factory.py:46] Created connector: SharedMemoryConnector
+[BASH] (StageEngineCoreProc pid=21832) INFO 04-08 21:53:56 [vllm.py:790] Asynchronous scheduling is enabled.
+[BASH] (StageEngineCoreProc pid=21832) WARNING 04-08 21:53:56 [vllm.py:848] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+[BASH] (StageEngineCoreProc pid=21832) WARNING 04-08 21:53:56 [vllm.py:859] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+[BASH] (StageEngineCoreProc pid=21832) INFO 04-08 21:53:56 [vllm.py:1025] Cudagraph is disabled under eager mode
+[BASH] (StageEngineCoreProc pid=21832) INFO 04-08 21:53:56 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+[BASH] [2m2026-04-08T21:53:56.558527Z[0m [32m INFO[0m [2masync_omni_engine._launch_llm_stage[0m[2m:[0m [AsyncOmniEngine] Stage 1 engine startup completed
+[BASH] [2m2026-04-08T21:53:56.558951Z[0m [32m INFO[0m [2mstage_engine_core_client.__init__[0m[2m:[0m [StageEngineCoreClient] Stage-0 initializing EngineCore
+[BASH] [2m2026-04-08T21:53:56.655695Z[0m [32m INFO[0m [2mstage_engine_core_client.__init__[0m[2m:[0m [StageEngineCoreClient] Stage-0 EngineCore running
+[BASH] [2m2026-04-08T21:53:56.735566Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] The tokenizer you are loading from '/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[BASH] [2m2026-04-08T21:53:57.049760Z[0m [32m INFO[0m [2masync_omni_engine._attach_llm_stage[0m[2m:[0m [AsyncOmniEngine] Stage 0 initialized
+[BASH] [2m2026-04-08T21:53:57.049879Z[0m [32m INFO[0m [2mstage_engine_core_client.__init__[0m[2m:[0m [StageEngineCoreClient] Stage-1 initializing EngineCore
+[BASH] [2m2026-04-08T21:53:57.201401Z[0m [32m INFO[0m [2mstage_engine_core_client.__init__[0m[2m:[0m [StageEngineCoreClient] Stage-1 EngineCore running
+[BASH] [2m2026-04-08T21:53:57.201554Z[0m [32m INFO[0m [2masync_omni_engine._attach_llm_stage[0m[2m:[0m [AsyncOmniEngine] Stage 1 initialized
+[BASH] [2m2026-04-08T21:53:57.201774Z[0m [32m INFO[0m [2morchestrator.run[0m[2m:[0m [Orchestrator] Starting event loop
+[BASH] [2m2026-04-08T21:53:57.202311Z[0m [32m INFO[0m [2masync_omni_engine.__init__[0m[2m:[0m [AsyncOmniEngine] Orchestrator ready with 2 stages
+[BASH] [2m2026-04-08T21:53:57.202378Z[0m [32m INFO[0m [2momni_base.__init__[0m[2m:[0m [AsyncOmni] AsyncOmniEngine initialized in 90.28 seconds
+[BASH] [2m2026-04-08T21:53:57.202425Z[0m [32m INFO[0m [2momni_base.__init__[0m[2m:[0m [AsyncOmni] Initialized with 2 stages for model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+[BASH] [2m2026-04-08T21:53:57.203230Z[0m [32m INFO[0m [2mbase_handler.__init__[0m[2m:[0m OmniHandler initialized successfully
+[BASH] [2m2026-04-08T21:53:57.203335Z[0m [32m INFO[0m [2maudio_handler.__init__[0m[2m:[0m Loaded 9 TTS speakers: ['aiden', 'dylan', 'eric', 'ono_anna', 'ryan', 'serena', 'sohee', 'uncle_fu', 'vivian']
+[BASH] [2m2026-04-08T21:53:57.203363Z[0m [32m INFO[0m [2maudio_handler.__init__[0m[2m:[0m Loaded 12 TTS languages: ['beijing_dialect', 'chinese', 'english', 'french', 'german', 'italian', 'japanese', 'korean', 'portuguese', 'russian', 'sichuan_dialect', 'spanish']
+[BASH] [2m2026-04-08T21:53:57.203391Z[0m [32m INFO[0m [2mmain.init_omni[0m[2m:[0m Omni worker initialized for model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+[BASH] [2m2026-04-08T21:53:57.235545Z[0m [33m WARN[0m [2mutils.ensure_dummy_tokenizer_for_tts[0m[2m:[0m TTS model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice has no tokenizer.json; creating a minimal placeholder at /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe/tokenizer.json
+[BASH] [2m2026-04-08T21:53:57.235994Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe", skipping download
+[BASH] [2m2026-04-08T21:53:57.236012Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' without API validation
+[BASH] [2m2026-04-08T21:53:57.240564Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe", skipping download
+[BASH] [2m2026-04-08T21:53:57.240586Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' without API validation
+[BASH] [2m2026-04-08T21:53:57.240786Z[0m [32m INFO[0m [2m_core[0m[2m:[0m Registered base model 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' MDC
+[BASH] [2m2026-04-08T21:53:57.241026Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m audios endpoints enabled
+[BASH] [2m2026-04-08T21:53:57.241053Z[0m [32m INFO[0m [2mdynamo_llm::discovery::model[0m[2m:[0m Adding worker set to model [3mmodel[0m[2m=[0mQwen/Qwen3-TTS-12Hz-1.7B-CustomVoice [3mnamespace[0m[2m=[0mdynamo
+[BASH] [2m2026-04-08T21:53:57.241308Z[0m [32m INFO[0m [2mutils.cleanup_dummy_tokenizer_for_tts[0m[2m:[0m Removed dummy tokenizer placeholder: /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-TTS-12Hz-1.7B-CustomVoice/snapshots/0c0e3051f131929182e2c023b9537f8b1c68adfe/tokenizer.json
+[BASH] [2m2026-04-08T21:53:57.241351Z[0m [32m INFO[0m [2mmain.init_omni[0m[2m:[0m Starting to serve Omni worker endpoint...
+[BASH] [2m2026-04-08T21:53:57.241067Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m added model [3mmodel_name[0m[2m=[0m"Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" [3mnamespace[0m[2m=[0m"dynamo"
+[BASH] [2m2026-04-08T21:53:57.242029Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Creating TCP request plane server [3mbind_addr[0m[2m=[0m10.1.86.111:0 [3mport_source[0m[2m=[0m"OS-assigned"
+[BASH] [2m2026-04-08T21:53:57.242048Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Initializing TCP server with dispatcher (concurrency=1500, queue=6000)
+[BASH] [2m2026-04-08T21:53:57.242055Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Started TCP worker dispatcher with concurrency limit 1500
+[BASH] [2m2026-04-08T21:53:57.242060Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Binding TCP server to 10.1.86.111:0
+[BASH] [2m2026-04-08T21:53:57.242090Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m TCP server bound successfully [3mrequested[0m[2m=[0m10.1.86.111:0 [3mactual[0m[2m=[0m10.1.86.111:37707
+[BASH] [2m2026-04-08T21:53:57.242101Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m TCP request plane server started [3mactual_addr[0m[2m=[0m10.1.86.111:37707 [3mactual_port[0m[2m=[0m37707
+[BASH] [2m2026-04-08T21:53:57.242311Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'dynamo.backend.generate' with shared TCP server on 10.1.86.111:37707
+[BASH] [2m2026-04-08T21:53:58.737916Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:53:59.740730Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T21:54:00.743541Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request received [3mrequest_id[0m[2m=[0mc7cc29ce-fd8a-4599-8ed7-5d0b5232bede [3mmodel[0m[2m=[0mqwen/qwen3-tts-12hz-1.7b-customvoice [3mendpoint[0m[2m=[0maudios [3mrequest_type[0m[2m=[0munary [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/audio/speech [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m499ac05b-c556-497b-ae88-d064a92d5dd6 [3mmodel[0m[2m=[0m"qwen/qwen3-tts-12hz-1.7b-customvoice"[0m
+[BASH] [2m2026-04-08T21:54:00.744033Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request received [3mrequest_id[0m[2m=[0mc7cc29ce-fd8a-4599-8ed7-5d0b5232bede [2m[3mrequest_id[0m[2m=[0m"c7cc29ce-fd8a-4599-8ed7-5d0b5232bede" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m2942712506949647625[0m
+[BASH] [0;93m2026-04-08 21:54:00.820107491 [W:onnxruntime:Default, device_discovery.cc:325 DiscoverDevicesForPlatform] GPU device discovery failed: device_discovery.cc:92 ReadFileContents Failed to open file: "/sys/class/drm/card0/device/vendor"[m
+[BASH] /bin/sh: 1: sox: not found
+[BASH] [2m2026-04-08T21:54:00.826301Z[0m [33m WARN[0m [2m__init__[0m[2m:[0m SoX could not be found!
+[BASH] 
+[BASH]     If you do not have SoX, proceed here:
+[BASH]      - - - http://sox.sourceforge.net/ - - -
+[BASH] 
+[BASH]     If you do (or think that you should) have SoX, double-check your
+[BASH]     path variables.
+[BASH]     
+[BASH] The tokenizer you are loading from 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[BASH] [2m2026-04-08T21:54:01.275345Z[0m [32m INFO[0m [2maudio_handler._engine_inputs_tts[0m[2m:[0m Audio TTS request: input='Hello, this is a test of Dynamo audio generation....', voice=vivian, task_type=CustomVoice, prompt_len=22
+[BASH] [2m2026-04-08T21:54:01.295851Z[0m [33mWARNING[0m [2minput_processor.process_inputs[0m[2m:[0m Passing raw prompts to InputProcessor is deprecated and will be removed in v0.18. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
+[BASH] [2m2026-04-08T21:54:01.296484Z[0m [32m INFO[0m [2morchestrator._handle_add_request[0m[2m:[0m [Orchestrator] _handle_add_request: stage=0 req=c7cc29ce-fd8a-4599-8ed7-5d0b5232bede prompt_type=OmniEngineCoreRequest original_prompt_type=dict final_stage=1 num_sampling_params=2
+[BASH] [2m2026-04-08T21:54:01.296566Z[0m [32m INFO[0m [2mstage_engine_core_client.add_request_async[0m[2m:[0m [StageEngineCoreClient] Stage-0 adding request: c7cc29ce-fd8a-4599-8ed7-5d0b5232bede
+[BASH] [2m2026-04-08T21:54:01.296872Z[0m [32m INFO[0m [2mstage_engine_core_client.add_request_async[0m[2m:[0m [StageEngineCoreClient] Stage-1 adding request: c7cc29ce-fd8a-4599-8ed7-5d0b5232bede
+[BASH] (Worker pid=21749) WARNING 04-08 21:54:01 [gpu_model_runner.py:369] additional_information on request data is deprecated, use model_intermediate_buffer
+[BASH] (Worker pid=21749) WARNING 04-08 21:54:01 [gpu_model_runner.py:1092] additional_information on scheduled_cached_reqs is deprecated, use model_intermediate_buffer
+[BASH] (Worker pid=21749) WARNING 04-08 21:54:01 [gpu_model_runner.py:1396] _merge_additional_information_update is deprecated, use _update_intermediate_buffer
+[BASH] (Worker pid=21749) /opt/dynamo/venv/lib/python3.12/site-packages/torch/_inductor/compile_fx.py:321: UserWarning: TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled. Consider setting `torch.set_float32_matmul_precision('high')` for better performance.
+[BASH] (Worker pid=21749)   warnings.warn(
+[BASH] (Worker pid=21749) INFO 04-08 21:54:51 [qwen3_tts_code_predictor_vllm.py:453] code_predictor: warmup done for buckets [1, 2, 4, 8, 10]
+[BASH] (Worker pid=21749) INFO 04-08 21:54:51 [qwen3_tts_code_predictor_vllm.py:474] code_predictor: captured CUDA graphs for buckets [1, 2, 4, 8, 10]
+[BASH] (Worker pid=21749) INFO 04-08 21:54:51 [qwen3_tts_code_predictor_vllm.py:427] code_predictor: torch.compile (no epilogue fusion) + CUDA graphs
+[BASH] (Worker pid=21890) WARNING 04-08 21:54:51 [gpu_model_runner.py:369] additional_information on request data is deprecated, use model_intermediate_buffer
+[BASH] (Worker pid=21890) WARNING 04-08 21:54:51 [gpu_model_runner.py:1092] additional_information on scheduled_cached_reqs is deprecated, use model_intermediate_buffer
+[BASH] (Worker pid=21890) INFO 04-08 21:54:51 [qwen3_tts_code2wav.py:266] Code2Wav codec: frames=2 q=16 uniq=32 range=[6,1995] batch=1
+[BASH] [2m2026-04-08T21:54:51.730795Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 3840 samples, sr=24000, 7724 bytes wav
+[BASH] [2m2026-04-08T21:54:51.740373Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 7680 samples, sr=24000, 15404 bytes wav
+[BASH] [2m2026-04-08T21:54:51.755082Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 11520 samples, sr=24000, 23084 bytes wav
+[BASH] [2m2026-04-08T21:54:51.769929Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 15360 samples, sr=24000, 30764 bytes wav
+[BASH] [2m2026-04-08T21:54:51.831850Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 19200 samples, sr=24000, 38444 bytes wav
+[BASH] [2m2026-04-08T21:54:51.905752Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 23040 samples, sr=24000, 46124 bytes wav
+[BASH] [2m2026-04-08T21:54:51.972202Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 26880 samples, sr=24000, 53804 bytes wav
+[BASH] [2m2026-04-08T21:54:52.039657Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 30720 samples, sr=24000, 61484 bytes wav
+[BASH] [2m2026-04-08T21:54:52.118375Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 34560 samples, sr=24000, 69164 bytes wav
+[BASH] [2m2026-04-08T21:54:52.196860Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 38400 samples, sr=24000, 76844 bytes wav
+[BASH] [2m2026-04-08T21:54:52.274894Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 42240 samples, sr=24000, 84524 bytes wav
+[BASH] [2m2026-04-08T21:54:52.344064Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 46080 samples, sr=24000, 92204 bytes wav
+[BASH] (Worker pid=21890) WARNING 04-08 21:54:52 [qwen3_tts_code2wav.py:238] Code2Wav input_ids length 1 not divisible by num_quantizers 16; skipping malformed request.
+[BASH] [2m2026-04-08T21:54:52.984429Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request c7cc29ce-fd8a-4599-8ed7-5d0b5232bede: 86400 samples, sr=24000, 172844 bytes wav
+[BASH] [2m2026-04-08T21:54:52.984941Z[0m [32m INFO[0m [2momni_base._log_summary_and_cleanup[0m[2m:[0m [Summary] {}
+[BASH] [2m2026-04-08T21:54:52.985389Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0mc7cc29ce-fd8a-4599-8ed7-5d0b5232bede [2m[3mrequest_id[0m[2m=[0m"c7cc29ce-fd8a-4599-8ed7-5d0b5232bede" [3mcomponent[0m[2m=[0m"backend" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"dynamo" [3minstance_id[0m[2m=[0m2942712506949647625[0m
+[BASH] [2m2026-04-08T21:54:52.986261Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0mc7cc29ce-fd8a-4599-8ed7-5d0b5232bede [3mmodel[0m[2m=[0mqwen/qwen3-tts-12hz-1.7b-customvoice [3mendpoint[0m[2m=[0maudios [3mrequest_type[0m[2m=[0munary [3mstatus[0m[2m=[0msuccess [3melapsed_ms[0m[2m=[0m52242 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/audio/speech [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m499ac05b-c556-497b-ae88-d064a92d5dd6 [3mmodel[0m[2m=[0m"qwen/qwen3-tts-12hz-1.7b-customvoice" [3minput_tokens[0m[2m=[0m0 [3moutput_tokens[0m[2m=[0m0[0m
+[BASH] [2m2026-04-08T21:54:52.986292Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m52242 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/audio/speech [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m499ac05b-c556-497b-ae88-d064a92d5dd6 [3mmodel[0m[2m=[0m"qwen/qwen3-tts-12hz-1.7b-customvoice" [3minput_tokens[0m[2m=[0m0 [3moutput_tokens[0m[2m=[0m0[0m
+[BASH] Cleaning up...
+[BASH] (Worker pid=21890) WARNING 04-08 21:54:53 [multiproc_executor.py:871] WorkerProc was terminated
+[BASH] [2m2026-04-08T21:54:53.008466Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] (Worker pid=21749) WARNING 04-08 21:54:53 [multiproc_executor.py:871] WorkerProc was terminated
+[BASH] [2m2026-04-08T21:54:53.008490Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Received shutdown signal; unregistering endpoints from discovery
+[BASH] (Worker pid=21890) INFO 04-08 21:54:53 [multiproc_executor.py:764] Parent process exited, terminating worker queues
+[BASH] [2m2026-04-08T21:54:53.008534Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T21:54:53.008554Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T21:54:53.008561Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T21:54:53.008567Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T21:54:53.008572Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T21:54:53.008613Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+[BASH] [2m2026-04-08T21:54:53.008607Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T21:54:53.008637Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] (Worker pid=21749) INFO 04-08 21:54:53 [multiproc_executor.py:764] Parent process exited, terminating worker queues
+[BASH] [2m2026-04-08T21:54:53.008640Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T21:54:53.008643Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T21:54:53.012550Z[0m [32m INFO[0m [2mdynamo_runtime::component::endpoint[0m[2m:[0m Successfully unregistered endpoint instance from discovery - worker removed from routing pool [3minstance_id[0m[2m=[0m2942712506949647625
+[BASH] [2m2026-04-08T21:54:53.013101Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Grace period 5.00s before stopping endpoints
+[BASH] [2m2026-04-08T21:54:58.010036Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T21:54:58.010163Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T21:54:58.010188Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T21:54:58.010193Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T21:54:58.010196Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T21:54:58.013747Z[0m [32m INFO[0m [2mgraceful_shutdown.graceful_shutdown_with_discovery[0m[2m:[0m Initiating runtime shutdown
+[BASH] [2m2026-04-08T21:54:58.013778Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T21:54:58.013924Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T21:54:58.013961Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T21:54:58.013965Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 1
+[BASH] [2m2026-04-08T21:54:58.014009Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Unregistered TCP endpoint handler [3mendpoint_name[0m[2m=[0mgenerate [3mendpoint_path[0m[2m=[0m28d69d6f14d53d09/generate
+[BASH] [2m2026-04-08T21:54:58.014037Z[0m [32m INFO[0m [2mdynamo_runtime::utils::graceful_shutdown[0m[2m:[0m Last endpoint completed, notifying all waiters
+[BASH] [2m2026-04-08T21:54:58.014066Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T21:54:58.014184Z[0m [32m INFO[0m [2momni_base.shutdown[0m[2m:[0m [AsyncOmni] Shutting down
+[BASH] [2m2026-04-08T21:54:58.014295Z[0m [32m INFO[0m [2masync_omni_engine.shutdown[0m[2m:[0m [AsyncOmniEngine] Shutting down Orchestrator
+[BASH] [2m2026-04-08T21:54:58.014537Z[0m [32m INFO[0m [2morchestrator._request_handler[0m[2m:[0m [Orchestrator] Received shutdown signal
+[BASH] [2m2026-04-08T21:54:58.014596Z[0m [32m INFO[0m [2morchestrator._shutdown_stages[0m[2m:[0m [Orchestrator] Shutting down all stages
+[BASH] [2m2026-04-08T21:54:58.014832Z[0m [32m INFO[0m [2morchestrator._shutdown_stages[0m[2m:[0m [Orchestrator] Stage 0 shut down
+[BASH] [2m2026-04-08T21:54:58.015007Z[0m [32m INFO[0m [2morchestrator._shutdown_stages[0m[2m:[0m [Orchestrator] Stage 1 shut down
+[BASH] [2m2026-04-08T21:54:58.015439Z[0m [32m INFO[0m [2mbase_handler.cleanup[0m[2m:[0m AsyncOmni orchestrator closed

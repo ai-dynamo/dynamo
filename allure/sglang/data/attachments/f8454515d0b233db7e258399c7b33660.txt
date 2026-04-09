@@ -1,0 +1,16 @@
+INFO     httpx:_client.py:1025 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json "HTTP/1.1 503 Service Unavailable"
+WARNING  sglang.srt.utils.common:common.py:2588 retry() failed once (0th try, maximum 2 retries). Will delay 0.83s and retry. Error: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json' (Request ID: Root=1-69d779dc-7e2b48fc2f08bdf558c8e281;0f074c46-f239-4c1d-936c-62c203415457)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+Internal Error - We're working hard to fix this as soon as possible!
+INFO     httpx:_client.py:1025 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json "HTTP/1.1 503 Service Unavailable"
+WARNING  sglang.srt.utils.common:common.py:2588 retry() failed once (1th try, maximum 2 retries). Will delay 1.74s and retry. Error: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json' (Request ID: Root=1-69d779dd-3b00ada95b5aac5d1721f675;7e32800b-44bf-4b8b-b09f-aee9bf92aa68)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+Internal Error - We're working hard to fix this as soon as possible!
+INFO     httpx:_client.py:1025 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json "HTTP/1.1 503 Service Unavailable"
+WARNING  sglang.srt.configs.model_config:model_config.py:777 Failed to load hf_quant_config.json for model Qwen/Qwen3-0.6B: retry() exceed maximum number of retries.
+INFO     sglang.srt.server_args:server_args.py:2292 Attention backend not specified. Use flashinfer backend by default.
+INFO     httpx:_client.py:1025 HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+INFO     root:args.py:397 Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True
+INFO     root:args.py:413 Derived use_kv_events=False from kv_events_config=None

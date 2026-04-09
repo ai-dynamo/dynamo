@@ -1,0 +1,64 @@
+[BASH] ==========================================
+[BASH] Launching LLaVA Raw Embeddings E/PD
+[BASH] ==========================================
+[BASH] Model:       llava-hf/llava-v1.6-mistral-7b-hf
+[BASH] Frontend:    http://localhost:8048
+[BASH] Embeddings: /tmp/llava_embeddings.pt
+[BASH] ==========================================
+[BASH] 
+[BASH] Example test command:
+[BASH] 
+[BASH]   curl http://localhost:8048/v1/chat/completions \
+[BASH]     -H 'Content-Type: application/json' \
+[BASH]     -d '{
+[BASH]       "model": "llava-hf/llava-v1.6-mistral-7b-hf",
+[BASH]       "messages": [{"role": "user", "content": [
+[BASH]         {"type": "text", "text": "Describe this image"},
+[BASH]         {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/300px-PNG_transparency_demonstration_1.png"}}
+[BASH]       ]}],
+[BASH]       "max_tokens": 50
+[BASH]     }'
+[BASH] 
+[BASH] ==========================================
+[BASH] 
+[BASH] Phase 1: Generating vision embeddings from test image …
+[BASH]          Image : https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png
+[BASH]          Output: /tmp/llava_embeddings.pt
+[BASH]          Phase 1 GPU: CUDA_VISIBLE_DEVICES=0
+[BASH] /opt/dynamo/venv/lib/python3.12/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+[BASH]   Overriding a previously registered kernel for the same operator and the same dispatch key
+[BASH]   operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+[BASH]     registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922
+[BASH]   dispatch key: ADInplaceOrView
+[BASH]   previous kernel: no debug info
+[BASH]        new kernel: registered at /opt/dynamo/venv/lib/python3.12/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+[BASH]   self.m.impl(
+[BASH] Resolving model llava-hf/llava-v1.6-mistral-7b-hf (revision=52320fb52229) …
+[BASH] Fetching 17 files:   0%|          | 0/17 [00:00<?, ?it/s]Fetching 17 files:   6%|▌         | 1/17 [00:00<00:05,  2.86it/s]Fetching 17 files:  47%|████▋     | 8/17 [00:00<00:00, 17.54it/s]Fetching 17 files:  71%|███████   | 12/17 [00:02<00:01,  3.84it/s]Fetching 17 files: 100%|██████████| 17/17 [00:02<00:00,  6.34it/s]
+[BASH] `torch_dtype` is deprecated! Use `dtype` instead!
+[BASH] Model path: /home/dynamo/.cache/huggingface/hub/models--llava-hf--llava-v1.6-mistral-7b-hf/snapshots/52320fb52229c8d942b1dcb8b63b3dc8087bc83b
+[BASH] Loading LlavaNext model …
+[BASH] Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:01,  1.96it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:00<00:00,  2.17it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:01<00:00,  2.24it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:01<00:00,  2.86it/s]
+[BASH] Using a slow image processor as `use_fast` is unset and a slow processor was saved with this model. `use_fast=True` will be the default behavior in v4.52, even if the model was saved with a slow processor. This will result in minor differences in outputs. You'll still be able to use a slow processor with `use_fast=False`.
+[BASH] Downloading test image from https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png …
+[BASH] Traceback (most recent call last):
+[BASH]   File "<stdin>", line 26, in <module>
+[BASH]   File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+[BASH]     return opener.open(url, data, timeout)
+[BASH]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+[BASH]     response = meth(req, response)
+[BASH]                ^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+[BASH]     response = self.parent.error(
+[BASH]                ^^^^^^^^^^^^^^^^^^
+[BASH]   File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+[BASH]     return self._call_chain(*args)
+[BASH]            ^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+[BASH]     result = func(*args)
+[BASH]              ^^^^^^^^^^^
+[BASH]   File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+[BASH]     raise HTTPError(req.full_url, code, msg, hdrs, fp)
+[BASH] urllib.error.HTTPError: HTTP Error 429: Too Many Requests
+[BASH] Cleaning up...

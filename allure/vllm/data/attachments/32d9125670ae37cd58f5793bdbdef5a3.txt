@@ -1,0 +1,65 @@
+[2m2026-04-08T10:14:37.633923Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4222 -js --store_dir /tmp/nats_r45w43m1 in /workspace
+[2m2026-04-08T10:14:37.634922Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4222
+[2m2026-04-08T10:14:37.735589Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4222
+[2m2026-04-08T10:14:37.735825Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T10:14:37.738709Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T10:14:37.739867Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd_tp596cnw in /workspace
+[2m2026-04-08T10:14:37.740710Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2379
+[2m2026-04-08T10:14:37.841362Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2379
+[2m2026-04-08T10:14:37.842443Z[0m [32m INFO[0m [2mtest_vllm_health_check.test_vllm_health_check_passive[0m[2m:[0m Starting frontend...
+[2m2026-04-08T10:14:37.842727Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --migration-limit 0 in /workspace
+[2m2026-04-08T10:14:37.843889Z[0m [32m INFO[0m [2mtest_vllm_health_check.test_vllm_health_check_passive[0m[2m:[0m Frontend started.
+[2m2026-04-08T10:14:37.843948Z[0m [32m INFO[0m [2mtest_vllm_health_check.test_vllm_health_check_passive[0m[2m:[0m Starting worker...
+[2m2026-04-08T10:14:37.844175Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --max-model-len 8192 in /workspace
+[2m2026-04-08T10:14:37.845318Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8000/v1/models
+[2m2026-04-08T10:14:59.871852Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8000/v1/models (attempt=13, elapsed=21.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775643298,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T10:14:59.872098Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:9345/health
+[2m2026-04-08T10:14:59.874326Z[0m [32m INFO[0m [2mtest_vllm_health_check.is_ready[0m[2m:[0m DynamoWorkerProcess { name: decode } status is ready
+[2m2026-04-08T10:14:59.874436Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:9345/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 14,
+    "nanos": 931583046
+  },
+  "endpoints": {
+    "get_perf_metrics": "ready",
+    "clear_kv_blocks": "ready",
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T10:14:59.874575Z[0m [32m INFO[0m [2mtest_vllm_health_check.test_vllm_health_check_passive[0m[2m:[0m Worker PID: 14370
+[2m2026-04-08T10:15:11.874869Z[0m [32m INFO[0m [2mtest_vllm_health_check.send_completion_request[0m[2m:[0m Sending completion request with prompt: 'Who are you?...' and max_tokens: 100
+[2m2026-04-08T10:15:13.764844Z[0m [32m INFO[0m [2mtest_vllm_health_check.send_completion_request[0m[2m:[0m Received response with status code: 200
+[2m2026-04-08T10:15:13.764948Z[0m [32m INFO[0m [2mtest_vllm_health_check.test_vllm_health_check_passive[0m[2m:[0m Test request completed successfully
+[2m2026-04-08T10:15:13.765736Z[0m [32m INFO[0m [2mtest_vllm_health_check.test_vllm_health_check_passive[0m[2m:[0m Worker children: [14542, 14543]
+[2m2026-04-08T10:15:13.765901Z[0m [33m WARN[0m [2mtest_vllm_health_check.test_vllm_health_check_passive[0m[2m:[0m Killing vLLM engine process { pid: 14543, cmdline: 'VLLM::EngineCore                                                                                                                              ' }
+[2m2026-04-08T10:15:19.766579Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14370
+[2m2026-04-08T10:15:19.767323Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14372 name: tee
+[2m2026-04-08T10:15:19.767421Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14372 tee
+[2m2026-04-08T10:15:19.767901Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14371 name: sed
+[2m2026-04-08T10:15:19.767989Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14371 sed
+[2m2026-04-08T10:15:19.768418Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14367
+[2m2026-04-08T10:15:25.174763Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14369 name: tee
+[2m2026-04-08T10:15:25.174928Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14369 tee
+[2m2026-04-08T10:15:25.175398Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14368 name: sed
+[2m2026-04-08T10:15:25.175491Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14368 sed
+[2m2026-04-08T10:15:25.176798Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14355
+[2m2026-04-08T10:15:25.277375Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14356 name: sed
+[2m2026-04-08T10:15:25.277502Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14356 sed
+[2m2026-04-08T10:15:25.278807Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 14341
+[2m2026-04-08T10:15:25.379706Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 14342 name: sed
+[2m2026-04-08T10:15:25.379909Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 14342 sed

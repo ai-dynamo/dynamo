@@ -1,0 +1,1 @@
+{"id":"f8dce98579f358e0b21017ab7141f34f","fullName":"tests.frontend.test_prepost_mistral#test_mistral_tool_call_interval_20","name":"test_mistral_tool_call_interval_20","status":"passed","testResultsByEnv":{"vllm-amd64":"5e05741fedf92b80b3a4cfc11cde0a4b","vllm-arm64":"89c49eee65596377231695c0603da78e"}}

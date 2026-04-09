@@ -1,0 +1,99 @@
+[2m2026-04-08T18:08:43.456338Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4261 in /workspace
+[2m2026-04-08T18:08:43.458589Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4261
+[2m2026-04-08T18:08:43.559565Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4261
+[2m2026-04-08T18:08:43.559853Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:08:43.563416Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:08:43.564135Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2446 --advertise-client-urls http://0.0.0.0:2446 --listen-peer-urls http://0.0.0.0:2447 --initial-advertise-peer-urls http://localhost:2447 --initial-cluster default=http://localhost:2447 --data-dir /tmp/etcd_x2z0gc_8 in /workspace
+[2m2026-04-08T18:08:43.565308Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2446
+[2m2026-04-08T18:08:43.666055Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2446
+[2m2026-04-08T18:08:43.669008Z[0m [32m INFO[0m [2mtest_router_e2e_with_trtllm.__init__[0m[2m:[0m Created TRT-LLM worker 0 on GPU 0 (gpu_mem_frac=0.4, system_port=8145) with endpoint: dyn://test-namespace-qelxizqgzw.prefill.generate
+[2m2026-04-08T18:08:43.669275Z[0m [32m INFO[0m [2mtest_router_e2e_with_trtllm.__init__[0m[2m:[0m Created TRT-LLM worker 1 on GPU 0 (gpu_mem_frac=0.4, system_port=8146) with endpoint: dyn://test-namespace-qelxizqgzw.prefill.generate
+[2m2026-04-08T18:08:43.669376Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Starting 2 worker processes sequentially...
+[2m2026-04-08T18:08:43.669430Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Starting TRT-LLM worker 0...
+[2m2026-04-08T18:08:43.669520Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Launching process 0 (pid will be assigned)...
+[2m2026-04-08T18:08:43.669578Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --kv-block-size 32 --publish-events-and-metrics --disaggregation-mode prefill --free-gpu-memory-fraction 0.4 --max-seq-len 1024 in /workspace
+[2m2026-04-08T18:08:43.671708Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Worker 0 launched with PID: 1387
+[2m2026-04-08T18:08:43.671850Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+[2m2026-04-08T18:08:48.672209Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Starting TRT-LLM worker 1...
+[2m2026-04-08T18:08:48.672598Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Launching process 1 (pid will be assigned)...
+[2m2026-04-08T18:08:48.672720Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --kv-block-size 32 --publish-events-and-metrics --disaggregation-mode prefill --free-gpu-memory-fraction 0.4 --max-seq-len 1024 in /workspace
+[2m2026-04-08T18:08:48.675092Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Worker 1 launched with PID: 1493
+[2m2026-04-08T18:08:48.675257Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] All 2 workers launched with sequential initialization.
+[2m2026-04-08T18:08:48.675332Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Waiting for health checks to complete...
+[2m2026-04-08T18:08:48.675392Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Checking health for worker 0...
+[2m2026-04-08T18:08:48.675456Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Worker 0 health checks passed
+[2m2026-04-08T18:08:48.675511Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Checking health for worker 1...
+[2m2026-04-08T18:08:48.675565Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Worker 1 health checks passed
+[2m2026-04-08T18:08:48.675622Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] All workers started successfully and passed health checks!
+[2m2026-04-08T18:08:48.676728Z[0m [32m INFO[0m [2mtest_router_e2e_with_trtllm.__init__[0m[2m:[0m Created TRT-LLM worker 0 on GPU 1 (gpu_mem_frac=0.4, system_port=8151) with endpoint: dyn://test-namespace-qelxizqgzw.tensorrt_llm.generate
+[2m2026-04-08T18:08:48.676795Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Starting 1 worker processes sequentially...
+[2m2026-04-08T18:08:48.676846Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Starting TRT-LLM worker 0...
+[2m2026-04-08T18:08:48.676931Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Launching process 0 (pid will be assigned)...
+[2m2026-04-08T18:08:48.676997Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --kv-block-size 32 --publish-events-and-metrics --disaggregation-mode decode --free-gpu-memory-fraction 0.4 --max-seq-len 1024 in /workspace
+[2m2026-04-08T18:08:48.678953Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Worker 0 launched with PID: 1496
+[2m2026-04-08T18:08:48.679096Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] All 1 workers launched with sequential initialization.
+[2m2026-04-08T18:08:48.679156Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Waiting for health checks to complete...
+[2m2026-04-08T18:08:48.679206Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Checking health for worker 0...
+[2m2026-04-08T18:08:48.679257Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] Worker 0 health checks passed
+[2m2026-04-08T18:08:48.679304Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [TRTLLMProcess] All workers started successfully and passed health checks!
+[2m2026-04-08T18:08:48.679491Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.frontend --router-mode kv --http-port 8063 --discovery-backend etcd --namespace test-namespace-qelxizqgzw --kv-cache-block-size 32 --enforce-disagg in /workspace
+[2m2026-04-08T18:08:48.680921Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 8063
+[2m2026-04-08T18:08:51.509542Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 8063
+[2m2026-04-08T18:08:51.509709Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8063/v1/models
+[2m2026-04-08T18:08:51.511256Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8063/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": []
+}
+[2m2026-04-08T18:08:51.511405Z[0m [32m INFO[0m [2mcommon._test_router_decisions_disagg[0m[2m:[0m Starting KV router frontend on port 8063 for disagg test
+[2m2026-04-08T18:08:51.511462Z[0m [32m INFO[0m [2mcommon._test_router_decisions_disagg[0m[2m:[0m Waiting for prefill and decode workers to register with frontend...
+[2m2026-04-08T18:08:51.511672Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Waiting for 1 workers to register on HTTP frontend (timeout=120s)...
+[2m2026-04-08T18:09:42.648221Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Workers registered. Found 1 model(s): ['TinyLlama/TinyLlama-1.1B-Chat-v1.0']
+[2m2026-04-08T18:09:42.648544Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Waiting for chat completions pipeline to be built...
+[2m2026-04-08T18:14:50.757848Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1499
+[2m2026-04-08T18:14:56.165399Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1501 name: tee
+[2m2026-04-08T18:14:56.165541Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1501 tee
+[2m2026-04-08T18:14:56.166353Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1500 name: sed
+[2m2026-04-08T18:14:56.166447Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1500 sed
+[2m2026-04-08T18:14:56.166592Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping TRT-LLM worker 0
+[2m2026-04-08T18:14:56.167399Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1496
+[2m2026-04-08T18:14:56.167470Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1668
+[2m2026-04-08T18:14:56.167529Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2504
+[2m2026-04-08T18:15:04.278701Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1496 name: python3
+[2m2026-04-08T18:15:04.278852Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1496 python3
+[2m2026-04-08T18:15:04.451529Z[0m [33m WARN[0m [2mmanaged_process.terminate_process[0m[2m:[0m PID 1668 no longer exists
+[2m2026-04-08T18:15:04.452966Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1498 name: tee
+[2m2026-04-08T18:15:04.453084Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1498 tee
+[2m2026-04-08T18:15:04.453877Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1497 name: sed
+[2m2026-04-08T18:15:04.453970Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1497 sed
+[2m2026-04-08T18:15:04.454120Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Waiting for TRT-LLM worker resources to fully clean up...
+[2m2026-04-08T18:15:06.454392Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping TRT-LLM worker 0
+[2m2026-04-08T18:15:06.456147Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2128
+[2m2026-04-08T18:15:06.456267Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1387
+[2m2026-04-08T18:15:06.456331Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1438
+[2m2026-04-08T18:15:14.567199Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1387 name: python3
+[2m2026-04-08T18:15:14.567392Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1387 python3
+[2m2026-04-08T18:15:14.740017Z[0m [33m WARN[0m [2mmanaged_process.terminate_process[0m[2m:[0m PID 1438 no longer exists
+[2m2026-04-08T18:15:14.740912Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1389 name: tee
+[2m2026-04-08T18:15:14.741008Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1389 tee
+[2m2026-04-08T18:15:14.741579Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1388 name: sed
+[2m2026-04-08T18:15:14.741673Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1388 sed
+[2m2026-04-08T18:15:14.741812Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping TRT-LLM worker 1
+[2m2026-04-08T18:15:14.742433Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2501
+[2m2026-04-08T18:15:14.742568Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1661
+[2m2026-04-08T18:15:14.742632Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1493
+[2m2026-04-08T18:15:22.853028Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1493 name: python3
+[2m2026-04-08T18:15:22.853220Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1493 python3
+[2m2026-04-08T18:15:23.025802Z[0m [33m WARN[0m [2mmanaged_process.terminate_process[0m[2m:[0m PID 1661 no longer exists
+[2m2026-04-08T18:15:23.026771Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1495 name: tee
+[2m2026-04-08T18:15:23.026868Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1495 tee
+[2m2026-04-08T18:15:23.027325Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1494 name: sed
+[2m2026-04-08T18:15:23.027417Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1494 sed
+[2m2026-04-08T18:15:23.027581Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Waiting for TRT-LLM worker resources to fully clean up...
+[2m2026-04-08T18:15:25.088485Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1372
+[2m2026-04-08T18:15:25.189697Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1373 name: sed
+[2m2026-04-08T18:15:25.189810Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1373 sed
+[2m2026-04-08T18:15:25.190679Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1360
+[2m2026-04-08T18:15:25.291601Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1361 name: sed
+[2m2026-04-08T18:15:25.291812Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1361 sed

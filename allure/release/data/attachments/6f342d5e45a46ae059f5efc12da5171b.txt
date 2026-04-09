@@ -1,0 +1,545 @@
+[2m2026-04-08T09:31:17.895511Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4314 in /workspace
+[2m2026-04-08T09:31:17.896793Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4314
+[2m2026-04-08T09:31:17.997548Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4314
+[2m2026-04-08T09:31:17.997846Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T09:31:17.999808Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T09:31:18.000607Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2420 --advertise-client-urls http://0.0.0.0:2420 --listen-peer-urls http://0.0.0.0:2421 --initial-advertise-peer-urls http://localhost:2421 --initial-cluster default=http://localhost:2421 --data-dir /tmp/etcd_m_js913u in /workspace
+[2m2026-04-08T09:31:18.001462Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2420
+[2m2026-04-08T09:31:18.102157Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2420
+[2m2026-04-08T09:31:18.116014Z[0m [32m INFO[0m [2mallocations.__init__[0m[2m:[0m GMSAllocationManager initialized: device=0, granularity=2097152, alloc_retry_interval=0.500, alloc_retry_timeout=none
+[2m2026-04-08T09:31:18.116105Z[0m [32m INFO[0m [2mgms.__init__[0m[2m:[0m GMS initialized: device=0
+[2m2026-04-08T09:31:18.116147Z[0m [32m INFO[0m [2mrpc.__init__[0m[2m:[0m GMSRPCServer initialized: device=0
+[2m2026-04-08T09:31:18.116594Z[0m [32m INFO[0m [2mrpc.serve[0m[2m:[0m Server started: /tmp/gms_GPU-c15829be-19ff-9b17-1859-936a33a4f1aa_weights.sock
+[2m2026-04-08T09:31:18.127324Z[0m [32m INFO[0m [2mallocations.__init__[0m[2m:[0m GMSAllocationManager initialized: device=0, granularity=2097152, alloc_retry_interval=0.500, alloc_retry_timeout=none
+[2m2026-04-08T09:31:18.127427Z[0m [32m INFO[0m [2mgms.__init__[0m[2m:[0m GMS initialized: device=0
+[2m2026-04-08T09:31:18.127476Z[0m [32m INFO[0m [2mrpc.__init__[0m[2m:[0m GMSRPCServer initialized: device=0
+[2m2026-04-08T09:31:18.127890Z[0m [32m INFO[0m [2mrpc.serve[0m[2m:[0m Server started: /tmp/gms_GPU-c15829be-19ff-9b17-1859-936a33a4f1aa_kv_cache.sock
+[2m2026-04-08T09:31:18.138525Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8271 --migration-limit 0 in /workspace
+[2m2026-04-08T09:31:18.139904Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --load-format gms --enable-memory-saver --mem-fraction-static 0.9 --port 30065 in /workspace
+[2m2026-04-08T09:31:18.141050Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8103/health
+[2m2026-04-08T09:31:35.674839Z[0m [32m INFO[0m [2mgms.handle_request[0m[2m:[0m Committed layout with state hash: 103ddbc712957e3d...
+[2m2026-04-08T09:31:38.173472Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8103/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 868847347
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T09:31:38.173589Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8271/v1/models
+[2m2026-04-08T09:31:39.175179Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8271/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775640698,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T09:31:39.175422Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8271/health
+[2m2026-04-08T09:31:40.177587Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8271/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2239588003746841609,
+      "transport": {
+        "tcp": "10.1.94.89:34483/1f149d6c6e8e8409/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-08T09:31:40.891781Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._sleep_shadow[0m[2m:[0m Shadow inference OK: {'id': 'cmpl-b470c1f5-dfe7-4dbe-95ea-5837cd03c22c', 'choices': [{'text': '_Arresta = input("Enter a day: ")\ncurrent_day = input("Enter the current', 'index': 0, 'finish_reason': 'length'}], 'created': 1775640700, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 1, 'completion_tokens': 20, 'total_tokens': 21}, 'nvext': {'timing': {'request_received_ms': 1775640700179, 'total_time_ms': 711.806182}}}
+[2m2026-04-08T09:31:40.900096Z[0m [33mWARNING[0m [2mgms.cleanup_connection[0m[2m:[0m RW aborted; clearing active layout
+[2m2026-04-08T09:31:40.910589Z[0m [32m INFO[0m [2mallocations.clear_all[0m[2m:[0m Cleared 57 allocations
+[2m2026-04-08T09:31:40.970232Z[0m [32m INFO[0m [2msglang.sleep[0m[2m:[0m shadow-a release_memory_occupation: {'status': 'ok', 'message': "Memory released for tags: ['weights', 'kv_cache']"}
+[2m2026-04-08T09:31:40.970515Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._sleep_shadow[0m[2m:[0m Shadow sleep: 21.47 -> 2.65 GiB (freed 19266 MB)
+[2m2026-04-08T09:31:40.975657Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --load-format gms --enable-memory-saver --mem-fraction-static 0.9 --port 30021 in /workspace
+[2m2026-04-08T09:31:40.988323Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8152/health
+[2m2026-04-08T09:32:01.020519Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8152/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 833636773
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T09:32:01.020658Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8271/v1/models
+[2m2026-04-08T09:32:02.022321Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8271/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775640721,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T09:32:02.022533Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8271/health
+[2m2026-04-08T09:32:03.024484Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8271/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2239588003746841622,
+      "transport": {
+        "tcp": "10.1.94.89:42283/1f149d6c6e8e8416/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-08T09:32:03.733667Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._sleep_shadow[0m[2m:[0m Shadow inference OK: {'id': 'cmpl-385231d6-eed3-477b-9e43-ed2a14756085', 'choices': [{'text': '!== "Hello welcome %s" % format(url_query[\'janitor\'])\n\n# Helpers\ndef sl', 'index': 0, 'finish_reason': 'length'}], 'created': 1775640723, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 1, 'completion_tokens': 20, 'total_tokens': 21}, 'nvext': {'timing': {'request_received_ms': 1775640723025, 'total_time_ms': 706.706916}}}
+[2m2026-04-08T09:32:03.741920Z[0m [33mWARNING[0m [2mgms.cleanup_connection[0m[2m:[0m RW aborted; clearing active layout
+[2m2026-04-08T09:32:03.751040Z[0m [32m INFO[0m [2mallocations.clear_all[0m[2m:[0m Cleared 57 allocations
+[2m2026-04-08T09:32:03.820089Z[0m [32m INFO[0m [2msglang.sleep[0m[2m:[0m shadow-b release_memory_occupation: {'status': 'ok', 'message': "Memory released for tags: ['weights', 'kv_cache']"}
+[2m2026-04-08T09:32:03.826690Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._sleep_shadow[0m[2m:[0m Shadow sleep: 21.36 -> 4.75 GiB (freed 17010 MB)
+[2m2026-04-08T09:32:03.839593Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --load-format gms --enable-memory-saver --mem-fraction-static 0.9 --port 30038 in /workspace
+[2m2026-04-08T09:32:03.856465Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8120/health
+[2m2026-04-08T09:32:23.888205Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8120/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 892657796
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T09:32:23.888332Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8271/v1/models
+[2m2026-04-08T09:32:24.890291Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8271/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775640743,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T09:32:24.890505Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8271/health
+[2m2026-04-08T09:32:25.892621Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8271/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2239588003746841631,
+      "transport": {
+        "tcp": "10.1.94.89:42699/1f149d6c6e8e841f/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-08T09:32:26.694432Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._run_shadow_failover_test[0m[2m:[0m Primary inference OK: {'id': 'cmpl-96d81c92-bbf3-4ded-8175-859f6ab8925b', 'choices': [{'text': ":\t\r\n\t\r\n\t[Andy - Mildred]:\tfor the purpose of this test, let's say", 'index': 0, 'finish_reason': 'length'}], 'created': 1775640745, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 2, 'completion_tokens': 20, 'total_tokens': 22}, 'nvext': {'timing': {'request_received_ms': 1775640745893, 'total_time_ms': 793.182324}}}
+[2m2026-04-08T09:32:26.694985Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._run_shadow_failover_test[0m[2m:[0m Primary active memory: 21.37 GiB
+[2m2026-04-08T09:32:36.718304Z[0m [33mWARNING[0m [2mgms.cleanup_connection[0m[2m:[0m RW aborted; clearing active layout
+[2m2026-04-08T09:32:36.719271Z[0m [32m INFO[0m [2mallocations.clear_all[0m[2m:[0m Cleared 57 allocations
+[2m2026-04-08T09:32:36.720533Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:37.221733Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:37.722564Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:38.222962Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:38.723758Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:39.225005Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:39.725635Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:40.009825Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._run_shadow_failover_test[0m[2m:[0m Primary kill snapshot: 22.36 -> 22.36 GiB
+[2m2026-04-08T09:32:40.510666Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:41.011466Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:41.512222Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:42.012788Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:42.513520Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:43.014253Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:43.514971Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:44.015699Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:44.516528Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:45.017307Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:45.518004Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:46.018729Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:46.519479Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:47.020216Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:47.520959Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:48.021798Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:48.522614Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:49.023406Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:49.523866Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:50.024616Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:50.525354Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:51.026094Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:51.526839Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:52.027581Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:52.528311Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:53.029056Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:53.529766Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:54.030490Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:54.531311Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:55.032091Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:55.532799Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:56.033566Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:56.534339Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:57.035077Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:57.535791Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:58.036595Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:58.537403Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:59.038210Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:32:59.538960Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:00.039795Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:00.540586Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:01.041352Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:01.542055Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:02.042751Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:02.543272Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:03.043669Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:03.544390Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:04.045110Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:04.545925Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:05.046689Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:05.547422Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:06.048203Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:06.548999Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:07.049738Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:07.550483Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:08.051306Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:08.552099Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:09.052865Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:09.553595Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:10.054298Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:10.555042Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:11.055806Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:11.556537Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:12.057252Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:12.557972Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:13.058689Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:13.559403Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:14.060105Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:14.560930Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:15.061694Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:15.562416Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:16.063218Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:16.563997Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:17.064742Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:17.565500Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:18.066324Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:18.567129Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:19.067896Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:19.568637Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:20.069379Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:20.570124Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:21.070869Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:21.571652Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:22.072433Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:22.573172Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:23.073973Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:23.574735Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:24.075024Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:24.575841Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:25.076638Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:25.577417Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:26.078241Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:26.579066Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:27.079726Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:27.580446Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:28.081263Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:28.582126Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:29.082929Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:29.583664Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:30.084417Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:30.585172Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:31.085915Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:31.586653Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:32.087384Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:32.588098Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:33.088816Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:33.589525Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:34.090234Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:34.591058Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:35.091837Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:35.592556Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:36.093358Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:36.594146Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:37.094895Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:37.595621Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:38.096444Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:38.597291Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:39.098076Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:39.598810Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:40.099515Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:40.600220Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:41.100974Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:41.601714Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:42.102445Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:42.603203Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:43.103986Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:43.604817Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:44.105599Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:44.606423Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:45.107181Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:45.607890Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:46.108618Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:46.609362Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:47.110096Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:47.610808Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:48.111594Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:48.612381Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:49.113137Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:49.613875Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:50.114615Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:50.615388Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:51.116159Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:51.616898Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:52.117619Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:52.618349Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:53.119097Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:53.619821Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:54.120550Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:54.621379Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:55.122148Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:55.622868Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:56.123615Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:56.624390Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:57.125194Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:57.625952Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:58.126810Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:58.627734Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:59.128568Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:33:59.629332Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:00.130111Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:00.630865Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:01.131618Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:01.632340Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:02.133057Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:02.633780Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:03.134498Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:03.635213Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:04.136032Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:04.636916Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:05.137690Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:05.638415Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:06.138789Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:06.639594Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:07.140355Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:07.641090Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:08.141910Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:08.642718Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:09.143468Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:09.644195Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:10.144905Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:10.645651Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:11.146402Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:11.647134Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:12.147845Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:12.648566Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:13.149108Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:13.649466Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:14.150183Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:14.650986Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:15.151783Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:15.652621Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:16.153416Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:16.654167Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:17.154911Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:17.655627Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:18.156427Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:18.657243Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:19.158017Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:19.658758Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:20.159484Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:20.660204Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:21.160983Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:21.661723Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:22.162428Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:22.663148Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:23.163883Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:23.664607Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:24.165390Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:24.666212Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:25.166974Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:25.667688Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:26.168442Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:26.669177Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:27.169897Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:27.670619Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:28.171440Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:28.672277Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:29.173050Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:29.673779Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:30.174537Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:30.675295Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:31.176069Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:31.676810Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:32.177515Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:32.678223Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:33.178933Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:33.679685Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:34.180456Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:34.680876Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:35.181627Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:35.682350Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:36.183150Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:36.683946Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:37.184700Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:37.685437Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:38.186249Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:38.687050Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:39.187834Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:39.688584Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:40.189294Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:40.690010Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:41.190747Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:41.691466Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:42.192171Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:42.692889Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:43.193602Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:43.694303Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:44.195101Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:44.695935Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:45.196692Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:45.697452Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:46.198210Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:46.698951Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:47.199711Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:47.700433Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:48.201241Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:48.702050Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:49.202822Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:49.703572Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:50.204299Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:50.705021Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:51.205784Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:51.706522Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:52.207287Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:52.708038Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:53.208863Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:53.709651Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:54.210427Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:54.711271Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:55.212034Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:55.712753Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:56.213494Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:56.714229Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:57.214953Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:57.715658Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:58.216469Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:58.717271Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:59.218022Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:34:59.718769Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:00.219547Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:00.720316Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:01.221092Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:01.721829Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:02.222538Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:02.723244Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:03.223642Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:03.724350Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:04.225110Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:04.725892Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:05.226658Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:05.727411Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:06.228205Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:06.728863Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:07.229611Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:07.730338Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:08.231152Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:08.731973Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:09.232735Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:09.733474Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:10.234181Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:10.734911Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:11.235650Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:11.736372Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:12.237107Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:12.737840Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:13.238560Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:13.739352Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:14.240176Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:14.740984Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:15.241749Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:15.742502Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:16.243307Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:16.744079Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:17.244824Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:17.745540Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:18.246338Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:18.747127Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:19.247906Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:19.748677Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:20.249413Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:20.750145Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:21.250878Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:21.751595Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:22.252302Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:22.753093Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:23.253855Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:23.754586Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:24.255425Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:24.756223Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:25.256949Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:25.757758Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:26.258564Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:26.759317Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=354418688 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T09:35:26.812529Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13771
+[2m2026-04-08T09:35:26.814456Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13773 name: tee
+[2m2026-04-08T09:35:26.814560Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13773 tee
+[2m2026-04-08T09:35:26.815941Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13772 name: sed
+[2m2026-04-08T09:35:26.816035Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13772 sed
+[2m2026-04-08T09:35:26.817905Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13496
+[2m2026-04-08T09:35:33.133659Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13498 name: tee
+[2m2026-04-08T09:35:33.133825Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13498 tee
+[2m2026-04-08T09:35:33.134797Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13497 name: sed
+[2m2026-04-08T09:35:33.134894Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13497 sed
+[2m2026-04-08T09:35:33.136352Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13200
+[2m2026-04-08T09:35:33.146181Z[0m [33mWARNING[0m [2mgms.cleanup_connection[0m[2m:[0m RW aborted; clearing active layout
+[2m2026-04-08T09:35:33.175074Z[0m [32m INFO[0m [2mallocations.clear_all[0m[2m:[0m Cleared 57 allocations
+[2m2026-04-08T09:35:39.545170Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13202 name: tee
+[2m2026-04-08T09:35:39.545329Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13202 tee
+[2m2026-04-08T09:35:39.545838Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13201 name: sed
+[2m2026-04-08T09:35:39.545935Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13201 sed
+[2m2026-04-08T09:35:39.546392Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13197
+[2m2026-04-08T09:35:44.652686Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13199 name: tee
+[2m2026-04-08T09:35:44.652853Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13199 tee
+[2m2026-04-08T09:35:44.653274Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13198 name: sed
+[2m2026-04-08T09:35:44.653371Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13198 sed
+[2m2026-04-08T09:35:44.833102Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13182
+[2m2026-04-08T09:35:44.934161Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13183 name: sed
+[2m2026-04-08T09:35:44.934447Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13183 sed
+[2m2026-04-08T09:35:44.935276Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13169
+[2m2026-04-08T09:35:45.036155Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13170 name: sed
+[2m2026-04-08T09:35:45.036412Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13170 sed

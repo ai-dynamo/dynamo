@@ -1,0 +1,9 @@
+DEBUG    dynamo.vllm.args:args.py:223 --enable-prefix-caching or --no-enable-prefix-caching not specified. Defaulting to True (vLLM v1 default behavior)
+DEBUG    dynamo.vllm.args:args.py:230 block_size is not set in engine config. vLLM engine block_size will be determined at runtime based on the model and attention backend.
+INFO     dynamo.vllm.args:args.py:253 Using kv_events_config for publishing vLLM kv events over zmq: None (use_kv_events=False)
+DEBUG    dynamo.vllm.args:args.py:311 Setting Dynamo defaults for vLLM
+DEBUG    dynamo.vllm.args:args.py:315  engine_args.runner = generate
+DEBUG    dynamo.vllm.args:args.py:315  engine_args.skip_tokenizer_init = False
+DEBUG    dynamo.vllm.args:args.py:315  engine_args.enable_log_requests = False
+DEBUG    dynamo.vllm.args:args.py:315  engine_args.disable_log_stats = False
+DEBUG    dynamo.vllm.args:args.py:315  engine_args.kv_events_config = None

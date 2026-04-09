@@ -1,0 +1,7 @@
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+INFO     sglang.srt.server_args:server_args.py:1835 Attention backend not specified. Use flashinfer backend by default.
+INFO     root:args.py:397 Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True
+INFO     root:args.py:413 Derived use_kv_events=False from kv_events_config=None

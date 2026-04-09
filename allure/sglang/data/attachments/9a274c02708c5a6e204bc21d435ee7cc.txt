@@ -1,0 +1,2 @@
+[04/08/2026-09:28:59] [TRT-LLM AUTO-DEPLOY] [I] Using cuda_graph_batch_sizes: [8, 1]
+[04/08/2026-09:28:59] [TRT-LLM AUTO-DEPLOY] [I] Using cuda_graph_batch_sizes: [8, 1]

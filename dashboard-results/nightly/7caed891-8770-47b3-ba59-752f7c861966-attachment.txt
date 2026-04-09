@@ -1,0 +1,5 @@
+INFO     root:conftest.py:430 Downloading 1 models needed for collected tests
+Models: {'Qwen/Qwen3-0.6B'}
+INFO     root:conftest.py:279 HF_TOKEN found in environment
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-0.6B
+INFO     root:conftest.py:323 Successfully pre-downloaded: Qwen/Qwen3-0.6B

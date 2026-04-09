@@ -1,0 +1,2 @@
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:58 Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:67 Image diffusion generator cleanup complete

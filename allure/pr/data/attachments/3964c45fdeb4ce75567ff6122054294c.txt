@@ -1,0 +1,15 @@
+INFO     httpx:_client.py:1025 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json "HTTP/1.1 503 Service Unavailable"
+WARNING  sglang.srt.utils.common:common.py:2588 retry() failed once (0th try, maximum 2 retries). Will delay 0.94s and retry. Error: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json' (Request ID: Root=1-69d77add-1b69ed4f1dfdfb18573b76c1;270e28d7-69f7-49e3-9ce4-6fd34783309d)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+Internal Error - We're working hard to fix this as soon as possible!
+INFO     httpx:_client.py:1025 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json "HTTP/1.1 503 Service Unavailable"
+WARNING  sglang.srt.utils.common:common.py:2588 retry() failed once (1th try, maximum 2 retries). Will delay 1.98s and retry. Error: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json' (Request ID: Root=1-69d77ade-5c1747df196701290d3c5811;8879feb8-aae8-49f7-bf79-2052a856cf83)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+Internal Error - We're working hard to fix this as soon as possible!
+INFO     httpx:_client.py:1025 HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json "HTTP/1.1 404 Not Found"
+INFO     sglang.srt.server_args:server_args.py:2292 Attention backend not specified. Use flashinfer backend by default.
+INFO     httpx:_client.py:1025 HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+INFO     root:args.py:397 Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True
+INFO     root:args.py:413 Derived use_kv_events=False from kv_events_config=None

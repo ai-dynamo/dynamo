@@ -1,0 +1,186 @@
+INFO     NatsServer:managed_process.py:468 Running command: nats-server --trace -p 4320 in /workspace
+INFO     NatsServer:managed_process.py:693 Checking Port: 4320
+INFO     NatsServer:managed_process.py:701 SUCCESS: Check Port: 4320
+INFO     NatsServer:managed_process.py:806 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:826 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:468 Running command: etcd --listen-client-urls http://0.0.0.0:2455 --advertise-client-urls http://0.0.0.0:2455 --listen-peer-urls http://0.0.0.0:2456 --initial-advertise-peer-urls http://localhost:2456 --initial-cluster default=http://localhost:2456 --data-dir /tmp/etcd_bh2p4ieo in /workspace
+INFO     EtcdServer:managed_process.py:693 Checking Port: 2455
+INFO     EtcdServer:managed_process.py:701 SUCCESS: Check Port: 2455
+INFO     test_sglang_deployment[disaggregated-2]:common.py:43 Starting disaggregated test_deployment
+INFO     test_sglang_deployment[disaggregated-2]:common.py:49 Using model: Qwen/Qwen3-0.6B
+INFO     test_sglang_deployment[disaggregated-2]:common.py:50 Script: disagg.sh
+INFO     EngineProcess:managed_process.py:468 Running command: bash /workspace/examples/backends/sglang/launch/disagg.sh in /workspace/examples/backends/sglang
+INFO     EngineProcess:managed_process.py:721 Checking URL http://localhost:8015/v1/models
+INFO     EngineProcess:managed_process.py:773 Still waiting for URL http://localhost:8015/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+INFO     EngineProcess:managed_process.py:741 SUCCESS: Check URL: http://localhost:8015/v1/models (attempt=14, elapsed=25.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775729171,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:721 Checking URL http://localhost:8015/health
+INFO     EngineProcess:managed_process.py:741 SUCCESS: Check URL: http://localhost:8015/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.prefill.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 4749781868700482057,
+      "transport": {
+        "tcp": "10.1.54.112:35003/41ea9d71b47bba09/generate"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 4749781868700482059,
+      "transport": {
+        "tcp": "10.1.54.112:34907/41ea9d71b47bba0b/generate"
+      }
+    }
+  ]
+}
+INFO     test_sglang_deployment[disaggregated-2]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8015/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=12.16s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8015/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=5.77s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8015/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=5.75s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+INFO     test_sglang_deployment[disaggregated-2]:common.py:124 TESTING: Payload: CompletionPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8015/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=5.74s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8015/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=5.75s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8015/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=5.75s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+INFO     EngineProcess:managed_process.py:264 Checking for straggler processes: stragglers=['SGLANG:EngineCore', 'sglang::scheduler', 'sglang::detokenizer'], straggler_commands=[]
+INFO     EngineProcess:managed_process.py:274 Terminating Straggler sglang::scheduler 3626
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3626 name: sglang::scheduler
+INFO     EngineProcess:managed_process.py:33 Sending SIGKILL (kill -9): 3626 sglang::scheduler
+INFO     EngineProcess:managed_process.py:274 Terminating Straggler sglang::scheduler 3632
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3632 name: sglang::scheduler
+INFO     EngineProcess:managed_process.py:33 Sending SIGKILL (kill -9): 3632 sglang::scheduler
+INFO     EngineProcess:managed_process.py:589 Sending SIGTERM to process group: 3047
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3049 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3049 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3048 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3048 sed
+INFO     EngineProcess:managed_process.py:264 Checking for straggler processes: stragglers=['SGLANG:EngineCore', 'sglang::scheduler', 'sglang::detokenizer'], straggler_commands=[]
+INFO     EtcdServer:managed_process.py:589 Sending SIGTERM to process group: 3032
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3033 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3033 sed
+INFO     NatsServer:managed_process.py:589 Sending SIGTERM to process group: 3020
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3021 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3021 sed

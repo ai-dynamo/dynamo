@@ -1,0 +1,82 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4293 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4293
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4293
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2470 --advertise-client-urls http://0.0.0.0:2470 --listen-peer-urls http://0.0.0.0:2471 --initial-advertise-peer-urls http://localhost:2471 --initial-cluster default=http://localhost:2471 --data-dir /tmp/etcd_vg1s8f86 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2470
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2470
+INFO     DynamoFrontendProcess:managed_process.py:437 Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8037 --migration-limit 0 in /workspace
+INFO     tests.fault_tolerance.cancellation.test_trtllm:test_trtllm.py:495 Frontend started successfully
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill --max-seq-len 16384 --max-num-tokens 16384 --extra-engine-args test_request_cancellation_trtllm_config.yaml in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9135/health
+INFO     DynamoWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:9135/health (status code 503) (attempt=21, elapsed=20.0s)
+INFO     DynamoWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:9135/health (status code 503) (attempt=41, elapsed=40.1s)
+INFO     tests.fault_tolerance.cancellation.test_trtllm:test_trtllm.py:146 Prefill worker status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9135/health (attempt=44, elapsed=43.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 28,
+    "nanos": 196093482
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     tests.fault_tolerance.cancellation.test_trtllm:test_trtllm.py:501 Prefill Worker PID: 5101
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode --max-seq-len 16384 --max-num-tokens 16384 --extra-engine-args test_request_cancellation_trtllm_config.yaml in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9157/health
+INFO     DynamoWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:9157/health (status code 503) (attempt=21, elapsed=20.0s)
+INFO     DynamoWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:9157/health (status code 503) (attempt=41, elapsed=40.1s)
+INFO     tests.fault_tolerance.cancellation.test_trtllm:test_trtllm.py:146 Decode worker status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9157/health (attempt=44, elapsed=43.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 28,
+    "nanos": 354225723
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     tests.fault_tolerance.cancellation.test_trtllm:test_trtllm.py:507 Decode Worker PID: 5422
+INFO     tests.fault_tolerance.cancellation.test_trtllm:test_trtllm.py:513 Testing completion request cancellation during KV transfer phase...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:182 Sending completion request with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:511 Starting to poll for 'Prefill Request ID: ' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:539 Found pattern 'Prefill Request ID: ' at iteration 27
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:541 Content after pattern: '7d004eb3-7056-45bc-85bc-f2dfb5d4baef'
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:511 Starting to poll for 'Decode Request ID: 7d004eb3-7056-45bc-85bc-f2dfb5d4baef' pattern (max 250 iterations)...
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 5440
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 5558
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 5422
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 5422 name: python3
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 5422 python3
+WARNING  DynamoWorkerProcess:managed_process.py:41 PID 5440 no longer exists
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 5424 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 5424 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 5423 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 5423 sed
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 5305
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 5139
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 5101
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 5101 name: python3
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 5101 python3
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 5103 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 5103 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 5102 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 5102 sed
+INFO     DynamoFrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 5098
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 5100 name: tee
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 5100 tee
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 5099 name: sed
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 5099 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 5085
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 5086 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 5086 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 5073
+INFO     NatsServer:managed_process.py:31 Terminating PID: 5074 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 5074 sed

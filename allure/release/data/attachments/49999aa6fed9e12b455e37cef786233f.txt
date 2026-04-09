@@ -1,0 +1,210 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4312 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4312
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4312
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2460 --advertise-client-urls http://0.0.0.0:2460 --listen-peer-urls http://0.0.0.0:2461 --initial-advertise-peer-urls http://localhost:2461 --initial-cluster default=http://localhost:2461 --data-dir /tmp/etcd_3a43o0m9 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2460
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2460
+INFO     test_omni_serve_deployment[omni_t2v]:common.py:43 Starting omni_t2v test_deployment
+INFO     test_omni_serve_deployment[omni_t2v]:common.py:49 Using model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+INFO     test_omni_serve_deployment[omni_t2v]:common.py:50 Script: agg_omni_video.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/vllm/launch/agg_omni_video.sh --vae-use-slicing --vae-use-tiling --enforce-eager in /workspace/examples/backends/vllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8015/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8015/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8015/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8015/v1/models (custom check failed) (attempt=33, elapsed=61.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8015/v1/models (custom check failed) (attempt=43, elapsed=81.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8015/v1/models (custom check failed) (attempt=53, elapsed=101.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 126
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8015/v1/models (attempt=57, elapsed=109.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+      "object": "model",
+      "created": 1775676114,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8015/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /health HTTP/1.1" 200 247
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8015/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2308267907107966985,
+      "transport": {
+        "tcp": "10.1.73.255:39747/20089d6e899ad009/generate"
+      }
+    }
+  ]
+}
+INFO     test_omni_serve_deployment[omni_t2v]:common.py:124 TESTING: Payload: VideoGenerationPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8015/v1/videos" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Dog running on a beach",
+  "size": "480x272",
+  "response_format": "url",
+  "nvext": {
+    "num_inference_steps": 10,
+    "num_frames": 17
+  },
+  "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "POST /v1/videos HTTP/1.1" 200 293
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=7.72s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '293', 'date': 'Wed, 08 Apr 2026 19:22:04 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "0ae66387-2218-494e-8c42-49fa644a594b",
+  "object": "video",
+  "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+  "status": "completed",
+  "progress": 100,
+  "created": 1775676124,
+  "data": [
+    {
+      "url": "file:///tmp/dynamo_media/videos/0ae66387-2218-494e-8c42-49fa644a594b.mp4"
+    }
+  ],
+  "inference_time_s": 0.16223764419555664
+}
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+file:///tmp/dynamo_media/videos/0ae66387-2218-494e-8c42-49fa644a594b.mp4
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 11858
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 11860 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 11860 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 11859 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 11859 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 11844
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 11845 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 11845 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 11832
+INFO     NatsServer:managed_process.py:31 Terminating PID: 11833 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 11833 sed

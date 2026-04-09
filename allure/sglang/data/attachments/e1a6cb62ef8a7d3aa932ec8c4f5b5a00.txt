@@ -1,0 +1,62 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4288 -js --store_dir /tmp/nats_jmi76_qq in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4288
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4288
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2432 --advertise-client-urls http://0.0.0.0:2432 --listen-peer-urls http://0.0.0.0:2433 --initial-advertise-peer-urls http://localhost:2433 --initial-cluster default=http://localhost:2433 --data-dir /tmp/etcd_yeb73em0 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2432
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2432
+INFO     TRTLLMWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.trtllm --model-path Qwen/Qwen3-VL-2B-Instruct --served-model-name Qwen/Qwen3-VL-2B-Instruct__internal --endpoint dyn://test-mm.trtllm.generate --modality multimodal --publish-events-and-metrics --kv-block-size 32 in /workspace
+INFO     TRTLLMWorkerProcess:managed_process.py:690 Checking URL http://localhost:10056/health
+INFO     TRTLLMWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:10056/health (status code 503) (attempt=21, elapsed=20.0s)
+INFO     TRTLLMWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:10056/health (status code 503) (attempt=41, elapsed=40.1s)
+INFO     TRTLLMWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:10056/health (status code 503) (attempt=61, elapsed=60.1s)
+INFO     TRTLLMWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:10056/health (status code 503) (attempt=81, elapsed=80.1s)
+INFO     TRTLLMWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:10056/health (attempt=84, elapsed=83.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 68,
+    "nanos": 391442007
+  },
+  "endpoints": {
+    "generate": "ready",
+    "worker_kv_indexer_query_dp0": "ready"
+  }
+}
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:437 Running command: python3 -m examples.backends.trtllm.mm_router_worker --model Qwen/Qwen3-VL-2B-Instruct --model-type qwen3_vl --namespace test-mm --component mm_router --endpoint generate --downstream-component trtllm --downstream-endpoint generate --block-size 32 in /workspace
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:690 Checking URL http://localhost:10057/health
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:10057/health (attempt=17, elapsed=16.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 1,
+    "nanos": 216808539
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     FrontendProcess:managed_process.py:437 Running command: python3 -m dynamo.frontend --http-port 10055 --router-mode round-robin in /workspace
+INFO     FrontendProcess:managed_process.py:690 Checking URL http://localhost:10055/v1/models
+INFO     FrontendProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:10055/v1/models (attempt=4, elapsed=3.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct",
+      "object": "model",
+      "created": 1775696900,
+      "owned_by": "nvidia"
+    },
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct__internal",
+      "object": "model",
+      "created": 1775696900,
+      "owned_by": "nvidia"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"id":"b93e0ce8b560ab0195c7ecbc28326524","fullName":"components.src.dynamo.vllm.tests.test_vllm_worker_handler.TestBuildEmbeddingParams#test_no_image_data_returns_none","name":"test_no_image_data_returns_none","status":"passed","testResultsByEnv":{"default":"b965dc0cf520330fffcd32bdb850e5ec"}}

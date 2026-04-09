@@ -1,0 +1,12 @@
+INFO     dynamo.planner.core.base:base.py:522 Observed num_req: 10.00 isl: 3000.00 osl: 150.00
+INFO     dynamo.planner.core.base:base.py:525 Observed ttft: 400.00ms itl: 30.00ms
+INFO     dynamo.planner.core.base:base.py:557 Predicted load: num_req=10.00, isl=3000.00, osl=150.00
+INFO     dynamo.planner.core.prefill:prefill.py:110 Prefill calculation: 500.00(p_thpt) / 49481.09(p_engine_cap) = 1(num_p)
+INFO     dynamo.planner.core.base:base.py:557 Predicted load: num_req=10.00, isl=3000.00, osl=150.00
+INFO     dynamo.planner.core.decode:decode.py:126 Decode calculation: 25.00(d_thpt) / 6794.77(d_engine_cap) = 1(num_d)
+INFO     dynamo.planner.core.base:base.py:522 Observed num_req: 5000.00 isl: 3000.00 osl: 150.00
+INFO     dynamo.planner.core.base:base.py:525 Observed ttft: 400.00ms itl: 30.00ms
+INFO     dynamo.planner.core.base:base.py:557 Predicted load: num_req=5000.00, isl=3000.00, osl=150.00
+INFO     dynamo.planner.core.prefill:prefill.py:110 Prefill calculation: 250000.00(p_thpt) / 49481.09(p_engine_cap) = 6(num_p)
+INFO     dynamo.planner.core.base:base.py:557 Predicted load: num_req=5000.00, isl=3000.00, osl=150.00
+INFO     dynamo.planner.core.decode:decode.py:126 Decode calculation: 12500.00(d_thpt) / 6794.77(d_engine_cap) = 2(num_d)

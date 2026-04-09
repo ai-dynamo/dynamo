@@ -1,0 +1,22 @@
+[TEST] 2026-04-08T20:58:17 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Received generation request: 7c05044e-867b-488b-9d47-20ed84326d8a
+[TEST] 2026-04-08T20:58:17 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request 7c05044e-867b-488b-9d47-20ed84326d8a: prompt='a test video...', size=832x480, frames=81, steps=50
+[TEST] 2026-04-08T20:58:17 ERROR dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request 7c05044e-867b-488b-9d47-20ed84326d8a failed: GPU OOM
+Traceback (most recent call last):
+  File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/trtllm/request_handlers/video_diffusion/video_handler.py", line 221, in generate
+    output = await asyncio.to_thread(
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1134, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1138, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1193, in _execute_mock_call
+    raise effect
+RuntimeError: GPU OOM

@@ -1,0 +1,220 @@
+[2m2026-04-08T16:54:48.290005Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4303 in /workspace
+[2m2026-04-08T16:54:48.291040Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4303
+[2m2026-04-08T16:54:48.391816Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4303
+[2m2026-04-08T16:54:48.391995Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T16:54:48.393940Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T16:54:48.394683Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2428 --advertise-client-urls http://0.0.0.0:2428 --listen-peer-urls http://0.0.0.0:2429 --initial-advertise-peer-urls http://localhost:2429 --initial-cluster default=http://localhost:2429 --data-dir /tmp/etcd_8ovko2ll in /workspace
+[2m2026-04-08T16:54:48.395560Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2428
+[2m2026-04-08T16:54:48.496194Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2428
+[2m2026-04-08T16:54:48.496741Z[0m [32m INFO[0m [2mconftest.file_storage_backend[0m[2m:[0m Set up file storage backend in: /tmp/tmp6jm7amql
+[2m2026-04-08T16:54:48.499104Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__init__[0m[2m:[0m Created SGLang worker 0 on GPU 0 (mem_frac=0.4, system_port=8114, kv_port=8156) with endpoint: dyn://test-namespace-bhwhvascaw.backend.generate
+[2m2026-04-08T16:54:48.499239Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__init__[0m[2m:[0m Created SGLang worker 1 on GPU 0 (mem_frac=0.4, system_port=8115, kv_port=8157) with endpoint: dyn://test-namespace-bhwhvascaw.backend.generate
+[2m2026-04-08T16:54:48.499297Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Starting 2 worker processes sequentially...
+[2m2026-04-08T16:54:48.499347Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Starting SGLang worker 0...
+[2m2026-04-08T16:54:48.499434Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Launching process 0 (pid will be assigned)...
+[2m2026-04-08T16:54:48.499491Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8156"} in /workspace
+[2m2026-04-08T16:54:48.500692Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Worker 0 launched with PID: 2271
+[2m2026-04-08T16:54:48.500860Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+[2m2026-04-08T16:54:53.501095Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Starting SGLang worker 1...
+[2m2026-04-08T16:54:53.501314Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Launching process 1 (pid will be assigned)...
+[2m2026-04-08T16:54:53.501400Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8157"} in /workspace
+[2m2026-04-08T16:54:53.502714Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Worker 1 launched with PID: 2308
+[2m2026-04-08T16:54:53.502878Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] All 2 workers launched with sequential initialization.
+[2m2026-04-08T16:54:53.502953Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Waiting for health checks to complete...
+[2m2026-04-08T16:54:53.503011Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Checking health for worker 0...
+[2m2026-04-08T16:54:53.503071Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Worker 0 health checks passed
+[2m2026-04-08T16:54:53.503128Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Checking health for worker 1...
+[2m2026-04-08T16:54:53.503186Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Worker 1 health checks passed
+[2m2026-04-08T16:54:53.503244Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] All workers started successfully and passed health checks!
+[2m2026-04-08T16:54:53.503518Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Creating first KV router with its own runtime
+[2m2026-04-08T16:54:53.507510Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2428)
+[2m2026-04-08T16:54:53.510571Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.3.93 [3mport[0m[2m=[0mOS-assigned
+[2m2026-04-08T16:54:53.511260Z[0m [33m WARN[0m [2m_core::llm::kv[0m[2m:[0m No model card found in discovery; defaulting to non-Eagle routing semantics [3mnamespace[0m[2m=[0mtest-namespace-bhwhvascaw [3mcomponent[0m[2m=[0mbackend [3mendpoint[0m[2m=[0mgenerate
+[2m2026-04-08T16:55:11.934976Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=test-namespace-bhwhvascaw/backend/active_sequences_events/3e6b9d6e04995d05
+[2m2026-04-08T16:55:11.936284Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mactive_sequences_events [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m4497861748708695301
+[2m2026-04-08T16:55:11.936303Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=test-namespace-bhwhvascaw//kv_metrics/3e6b9d6e04995d05
+[2m2026-04-08T16:55:11.937523Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mkv_metrics [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m4497861748708695301
+[2m2026-04-08T16:55:11.937552Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::scheduler[0m[2m:[0m Router queue policy: fcfs
+[2m2026-04-08T16:55:11.937560Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::queue[0m[2m:[0m Router queue enabled with threshold fraction 4
+[2m2026-04-08T16:55:11.937575Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::subscriber[0m[2m:[0m Using NATS Core subscription (local_indexer mode)
+[2m2026-04-08T16:55:11.937599Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventSubscriber created [3mtopic[0m[2m=[0mkv-events [3mtransport[0m[2m=[0mNats
+[2m2026-04-08T16:55:12.038844Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::subscriber[0m[2m:[0m KV Router using NATS Core subscription (local_indexer mode) [3msubject[0m[2m=[0mnamespace.test-namespace-bhwhvascaw.component.backend.kv-events
+[2m2026-04-08T16:55:12.038883Z[0m [32m INFO[0m [2mdynamo_llm::kv_router[0m[2m:[0m KV Routing initialized
+[2m2026-04-08T16:55:12.039121Z[0m [32m INFO[0m [2mhelper.wait_for_workers_ready[0m[2m:[0m Waiting for workers to be ready
+[2m2026-04-08T16:55:12.039488Z[0m [32m INFO[0m [2mhelper.wait_for_workers_ready[0m[2m:[0m Found 2 instance(s): [4497861748708695309, 4497861748708695311]
+[2m2026-04-08T16:55:12.039588Z[0m [32m INFO[0m [2mhelper.wait_for_workers_ready[0m[2m:[0m Sending warmup request with 4 tokens
+[2m2026-04-08T16:55:12.039751Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m WorkerQueryClient: discovered worker 4497861748708695309 dp_rank 0, scheduling restore
+[2m2026-04-08T16:55:12.039772Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m WorkerQueryClient: discovered worker 4497861748708695311 dp_rank 0, scheduling restore
+[2m2026-04-08T16:55:12.039777Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 0.250
+[2m2026-04-08T16:55:12.039832Z[0m [33m WARN[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Worker 4497861748708695311 dp_rank 0 query failed on attempt 0, retrying after 200ms
+[2m2026-04-08T16:55:12.039872Z[0m [33m WARN[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Worker 4497861748708695309 dp_rank 0 query failed on attempt 0, retrying after 200ms
+[2m2026-04-08T16:55:12.241966Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Worker 4497861748708695311 dp_rank 0 query succeeded after retry 1
+[2m2026-04-08T16:55:12.242001Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Got tree dump from worker 4497861748708695311 dp_rank 0 (range too old or unspecified), count: 0, last_event_id: 0
+[2m2026-04-08T16:55:12.242098Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Worker 4497861748708695309 dp_rank 0 query succeeded after retry 1
+[2m2026-04-08T16:55:12.242119Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Got tree dump from worker 4497861748708695309 dp_rank 0 (range too old or unspecified), count: 0, last_event_id: 0
+[2m2026-04-08T16:55:13.643178Z[0m [32m INFO[0m [2mhelper.wait_for_workers_ready[0m[2m:[0m All 2 workers are ready
+[2m2026-04-08T16:55:13.643291Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Sending 25 requests to first router
+[2m2026-04-08T16:55:13.644106Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:13.644155Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:13.644269Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:13.644316Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:13.644440Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 8.625
+[2m2026-04-08T16:55:13.644494Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 8.625
+[2m2026-04-08T16:55:13.644521Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 11.500
+[2m2026-04-08T16:55:13.644541Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 11.500
+[2m2026-04-08T16:55:13.644570Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 14.375
+[2m2026-04-08T16:55:13.644595Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 14.375
+[2m2026-04-08T16:55:13.644615Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 17.250
+[2m2026-04-08T16:55:13.644704Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 17.250
+[2m2026-04-08T16:55:13.644814Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 20.125
+[2m2026-04-08T16:55:13.644876Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 20.125
+[2m2026-04-08T16:55:13.644903Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 23.000
+[2m2026-04-08T16:55:13.644925Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 23.000
+[2m2026-04-08T16:55:13.645149Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 25.875
+[2m2026-04-08T16:55:13.645324Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 25.875
+[2m2026-04-08T16:55:13.645359Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 28.750
+[2m2026-04-08T16:55:13.645931Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 28.750
+[2m2026-04-08T16:55:13.646000Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 31.625
+[2m2026-04-08T16:55:13.646163Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 31.625
+[2m2026-04-08T16:55:13.646311Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 34.500
+[2m2026-04-08T16:55:13.646420Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 34.500
+[2m2026-04-08T16:55:13.646503Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 37.375
+[2m2026-04-08T16:55:16.190663Z[0m [32m INFO[0m [2mcommon.send_requests_to_router[0m[2m:[0m Completed 25/25 requests for Router 1
+[2m2026-04-08T16:55:17.191765Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m === NATS INTERRUPTION TEST: Phase 1 ===
+[2m2026-04-08T16:55:17.191901Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Stopping NATS server
+[2m2026-04-08T16:55:17.191975Z[0m [32m INFO[0m [2mconftest.stop[0m[2m:[0m Stopping NATS server on port 4303
+[2m2026-04-08T16:55:17.193733Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2246
+[2m2026-04-08T16:55:17.295265Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2247 name: sed
+[2m2026-04-08T16:55:17.295375Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2247 sed
+[2m2026-04-08T16:55:17.295521Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Sending 10 requests while NATS is down (via TCP)
+[2m2026-04-08T16:55:17.296008Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:17.296069Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:17.296086Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:17.296104Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:17.296120Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 8.625
+[2m2026-04-08T16:55:17.296132Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 8.625
+[2m2026-04-08T16:55:17.296144Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 11.500
+[2m2026-04-08T16:55:17.296161Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 11.500
+[2m2026-04-08T16:55:17.296184Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 14.375
+[2m2026-04-08T16:55:17.296216Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 14.375
+[2m2026-04-08T16:55:18.084274Z[0m [32m INFO[0m [2mcommon.send_requests_to_router[0m[2m:[0m Completed 10/10 requests for Router 1 (NATS down)
+[2m2026-04-08T16:55:18.084380Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Restarting NATS server (fresh state)
+[2m2026-04-08T16:55:18.084434Z[0m [32m INFO[0m [2mconftest.start[0m[2m:[0m Starting NATS server on port 4303 with fresh state
+[2m2026-04-08T16:55:18.084490Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4303 in /workspace
+[2m2026-04-08T16:55:18.085395Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4303
+[2m2026-04-08T16:55:18.185949Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4303
+[2m2026-04-08T16:55:18.186128Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T16:55:18.188496Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T16:55:24.190925Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Creating second KV router with its own runtime
+[2m2026-04-08T16:55:24.195024Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2428)
+[2m2026-04-08T16:55:24.197614Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.3.93 [3mport[0m[2m=[0mOS-assigned
+[2m2026-04-08T16:55:24.200834Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=test-namespace-bhwhvascaw/backend/active_sequences_events/3e6b9d6e04995d25
+[2m2026-04-08T16:55:24.210894Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mactive_sequences_events [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m4497861748708695333
+[2m2026-04-08T16:55:24.210919Z[0m [32m INFO[0m [2mdynamo_runtime::discovery::kv_store[0m[2m:[0m KVStoreDiscovery::register: EventChannel bucket=v1/event_channels, key=test-namespace-bhwhvascaw//kv_metrics/3e6b9d6e04995d25
+[2m2026-04-08T16:55:24.212353Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher registered with discovery [3mtopic[0m[2m=[0mkv_metrics [3mtransport[0m[2m=[0mNats [3minstance_id[0m[2m=[0m4497861748708695333
+[2m2026-04-08T16:55:24.212383Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::scheduler[0m[2m:[0m Router queue policy: fcfs
+[2m2026-04-08T16:55:24.212392Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::queue[0m[2m:[0m Router queue enabled with threshold fraction 4
+[2m2026-04-08T16:55:24.212406Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::subscriber[0m[2m:[0m Using NATS Core subscription (local_indexer mode)
+[2m2026-04-08T16:55:24.212432Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventSubscriber created [3mtopic[0m[2m=[0mkv-events [3mtransport[0m[2m=[0mNats
+[2m2026-04-08T16:55:24.313691Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::subscriber[0m[2m:[0m KV Router using NATS Core subscription (local_indexer mode) [3msubject[0m[2m=[0mnamespace.test-namespace-bhwhvascaw.component.backend.kv-events
+[2m2026-04-08T16:55:24.313721Z[0m [32m INFO[0m [2mdynamo_llm::kv_router[0m[2m:[0m KV Routing initialized
+[2m2026-04-08T16:55:24.313844Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Sending 25 requests to second router
+[2m2026-04-08T16:55:24.314604Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m WorkerQueryClient: discovered worker 4497861748708695311 dp_rank 0, scheduling restore
+[2m2026-04-08T16:55:24.314630Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m WorkerQueryClient: discovered worker 4497861748708695309 dp_rank 0, scheduling restore
+[2m2026-04-08T16:55:24.314685Z[0m [33m WARN[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Worker 4497861748708695309 dp_rank 0 query failed on attempt 0, retrying after 200ms
+[2m2026-04-08T16:55:24.314687Z[0m [33m WARN[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Worker 4497861748708695311 dp_rank 0 query failed on attempt 0, retrying after 200ms
+[2m2026-04-08T16:55:24.315013Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:24.315051Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:24.315121Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:24.315269Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:24.315302Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 8.625
+[2m2026-04-08T16:55:24.315317Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 8.625
+[2m2026-04-08T16:55:24.315337Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 11.500
+[2m2026-04-08T16:55:24.315361Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 11.500
+[2m2026-04-08T16:55:24.315376Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 14.375
+[2m2026-04-08T16:55:24.315494Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 14.375
+[2m2026-04-08T16:55:24.315521Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 17.250
+[2m2026-04-08T16:55:24.315532Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 17.250
+[2m2026-04-08T16:55:24.315568Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 20.125
+[2m2026-04-08T16:55:24.315598Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 20.125
+[2m2026-04-08T16:55:24.315617Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 23.000
+[2m2026-04-08T16:55:24.315650Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 23.000
+[2m2026-04-08T16:55:24.315680Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 25.875
+[2m2026-04-08T16:55:24.315708Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 25.875
+[2m2026-04-08T16:55:24.315820Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 28.750
+[2m2026-04-08T16:55:24.315883Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 28.750
+[2m2026-04-08T16:55:24.315908Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 31.625
+[2m2026-04-08T16:55:24.315925Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 31.625
+[2m2026-04-08T16:55:24.315963Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 34.500
+[2m2026-04-08T16:55:24.316037Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 34.500
+[2m2026-04-08T16:55:24.316108Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 37.375
+[2m2026-04-08T16:55:24.516249Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Worker 4497861748708695309 dp_rank 0 query succeeded after retry 1
+[2m2026-04-08T16:55:24.516270Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Worker 4497861748708695311 dp_rank 0 query succeeded after retry 1
+[2m2026-04-08T16:55:24.516279Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Got tree dump from worker 4497861748708695309 dp_rank 0 (range too old or unspecified), count: 46, last_event_id: 46
+[2m2026-04-08T16:55:24.516287Z[0m [32m INFO[0m [2mdynamo_llm::kv_router::indexer::worker_query[0m[2m:[0m Got tree dump from worker 4497861748708695311 dp_rank 0 (range too old or unspecified), count: 49, last_event_id: 49
+[2m2026-04-08T16:55:24.687627Z[0m [32m INFO[0m [2mcommon.send_requests_to_router[0m[2m:[0m Completed 25/25 requests for Router 2
+[2m2026-04-08T16:55:25.688886Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m === NATS INTERRUPTION TEST: Phase 2 ===
+[2m2026-04-08T16:55:25.689011Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Stopping NATS server
+[2m2026-04-08T16:55:25.689076Z[0m [32m INFO[0m [2mconftest.stop[0m[2m:[0m Stopping NATS server on port 4303
+[2m2026-04-08T16:55:25.690777Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3121
+[2m2026-04-08T16:55:25.792485Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3122 name: sed
+[2m2026-04-08T16:55:25.792594Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3122 sed
+[2m2026-04-08T16:55:25.792742Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Sending 10 requests while NATS is down (via TCP)
+[2m2026-04-08T16:55:25.793213Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:25.793266Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:25.793287Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:25.793320Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:25.793348Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 8.625
+[2m2026-04-08T16:55:25.793531Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 8.625
+[2m2026-04-08T16:55:25.793588Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 11.500
+[2m2026-04-08T16:55:25.793615Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 11.500
+[2m2026-04-08T16:55:25.793638Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 14.375
+[2m2026-04-08T16:55:25.793658Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 14.375
+[2m2026-04-08T16:55:26.069413Z[0m [32m INFO[0m [2mcommon.send_requests_to_router[0m[2m:[0m Completed 10/10 requests for Router 2 (NATS down)
+[2m2026-04-08T16:55:26.069565Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Restarting NATS server (fresh state)
+[2m2026-04-08T16:55:26.069626Z[0m [32m INFO[0m [2mconftest.start[0m[2m:[0m Starting NATS server on port 4303 with fresh state
+[2m2026-04-08T16:55:26.069686Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4303 in /workspace
+[2m2026-04-08T16:55:26.070720Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4303
+[2m2026-04-08T16:55:26.171234Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4303
+[2m2026-04-08T16:55:26.171429Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T16:55:26.173705Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T16:55:31.178950Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Sending 5 more requests after NATS recovery
+[2m2026-04-08T16:55:31.179402Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:31.179445Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 2.875
+[2m2026-04-08T16:55:31.179461Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:31.179477Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695309 dp_rank=0, logit: 5.750
+[2m2026-04-08T16:55:31.179487Z[0m [32m INFO[0m [2mdynamo_kv_router::scheduling::selector[0m[2m:[0m Selected worker: worker_type=decode, worker_id=4497861748708695311 dp_rank=0, logit: 8.625
+[2m2026-04-08T16:55:31.498079Z[0m [32m INFO[0m [2mcommon.send_requests_to_router[0m[2m:[0m Completed 5/5 requests for Router 1 (post-recovery)
+[2m2026-04-08T16:55:31.498188Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Waiting for final synchronization
+[2m2026-04-08T16:55:33.500408Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Skipping NATS object store verification (NATS was restarted fresh for interruption test)
+[2m2026-04-08T16:55:33.500560Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Dumping states from all sources
+[2m2026-04-08T16:55:33.502101Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Router 1 has 75 events
+[2m2026-04-08T16:55:33.502174Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Router 2 has 75 events
+[2m2026-04-08T16:55:33.502314Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Successfully verified Router 1 and Router 2 states are equal
+[2m2026-04-08T16:55:33.502367Z[0m [32m INFO[0m [2mcommon.test_sync[0m[2m:[0m Skipping NATS consumers verification (local indexer uses NATS Core, not JetStream)
+[2m2026-04-08T16:55:33.502440Z[0m [32m INFO[0m [2mdynamo_llm::kv_router[0m[2m:[0m Dropping KvRouter - cancelling background tasks
+[2m2026-04-08T16:55:33.502482Z[0m [32m INFO[0m [2mdynamo_llm::kv_router[0m[2m:[0m Dropping KvRouter - cancelling background tasks
+[2m2026-04-08T16:55:33.503033Z[0m [32m INFO[0m [2mcommon._test_router_indexers_sync[0m[2m:[0m Indexers sync test completed successfully
+[2m2026-04-08T16:55:33.503244Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping SGLang worker 0
+[2m2026-04-08T16:55:33.505466Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2271
+[2m2026-04-08T16:55:33.513180Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher unregistered from discovery [3mtopic[0m[2m=[0mactive_sequences_events [3minstance_id[0m[2m=[0m4497861748708695333
+[2m2026-04-08T16:55:33.513219Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher unregistered from discovery [3mtopic[0m[2m=[0mkv_metrics [3minstance_id[0m[2m=[0m4497861748708695333
+[2m2026-04-08T16:55:33.514626Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher unregistered from discovery [3mtopic[0m[2m=[0mkv_metrics [3minstance_id[0m[2m=[0m4497861748708695301
+[2m2026-04-08T16:55:33.514721Z[0m [32m INFO[0m [2mdynamo_runtime::transports::event_plane[0m[2m:[0m EventPublisher unregistered from discovery [3mtopic[0m[2m=[0mactive_sequences_events [3minstance_id[0m[2m=[0m4497861748708695301
+[2m2026-04-08T16:55:39.917585Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2273 name: tee
+[2m2026-04-08T16:55:39.917743Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2273 tee
+[2m2026-04-08T16:55:39.918645Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2272 name: sed
+[2m2026-04-08T16:55:39.918741Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2272 sed
+[2m2026-04-08T16:55:39.918885Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping SGLang worker 1
+[2m2026-04-08T16:55:39.920197Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2308
+[2m2026-04-08T16:55:46.228535Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2310 name: tee
+[2m2026-04-08T16:55:46.228713Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2310 tee
+[2m2026-04-08T16:55:46.229179Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2309 name: sed
+[2m2026-04-08T16:55:46.229276Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2309 sed
+[2m2026-04-08T16:55:46.229427Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Waiting for SGLang worker resources to fully clean up...
+[2m2026-04-08T16:55:48.233098Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2258
+[2m2026-04-08T16:55:48.334054Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2259 name: sed
+[2m2026-04-08T16:55:48.334263Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2259 sed
+[2m2026-04-08T16:55:48.335149Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3190
+[2m2026-04-08T16:55:48.436091Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3191 name: sed
+[2m2026-04-08T16:55:48.436343Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3191 sed

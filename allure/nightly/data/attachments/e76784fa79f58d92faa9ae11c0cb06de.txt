@@ -1,0 +1,16 @@
+[2m2026-04-08T18:07:08.439765Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 4 models needed for collected tests
+Models: {'Qwen/Qwen2-Audio-7B-Instruct', 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'Qwen/Qwen3-0.6B', 'deepseek-ai/DeepSeek-V2-Lite'}
+[2m2026-04-08T18:07:08.439872Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-08T18:07:08.439922Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2-Audio-7B-Instruct
+Fetching 15 files:   0%|          | 0/15 [00:00<?, ?it/s]Fetching 15 files:   7%|▋         | 1/15 [00:00<00:05,  2.80it/s]Fetching 15 files:  40%|████      | 6/15 [00:14<00:22,  2.52s/it]Fetching 15 files: 100%|██████████| 15/15 [00:14<00:00,  1.04it/s]
+[2m2026-04-08T18:07:23.060223Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2-Audio-7B-Instruct
+[2m2026-04-08T18:07:23.060308Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  8.45it/s]Fetching 10 files:  60%|██████    | 6/10 [00:03<00:02,  1.91it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  3.31it/s]
+[2m2026-04-08T18:07:26.198637Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+[2m2026-04-08T18:07:26.198722Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  8.13it/s]Fetching 10 files:  70%|███████   | 7/10 [00:02<00:00,  3.07it/s]Fetching 10 files: 100%|██████████| 10/10 [00:02<00:00,  4.50it/s]
+[2m2026-04-08T18:07:28.533562Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
+[2m2026-04-08T18:07:28.533636Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: deepseek-ai/DeepSeek-V2-Lite
+Fetching 15 files:   0%|          | 0/15 [00:00<?, ?it/s]Fetching 15 files:   7%|▋         | 1/15 [00:00<00:01,  7.94it/s]Fetching 15 files:  47%|████▋     | 7/15 [00:24<00:28,  3.61s/it]Fetching 15 files:  53%|█████▎    | 8/15 [00:25<00:21,  3.12s/it]Fetching 15 files: 100%|██████████| 15/15 [00:25<00:00,  1.67s/it]
+[2m2026-04-08T18:07:53.672755Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: deepseek-ai/DeepSeek-V2-Lite
+[2m2026-04-08T18:07:53.673225Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

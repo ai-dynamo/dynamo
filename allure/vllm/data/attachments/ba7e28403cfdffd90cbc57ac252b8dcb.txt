@@ -1,0 +1,13 @@
+[2m2026-04-08T16:11:02.519364Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 3 models needed for collected tests
+Models: {'Qwen/Qwen3-VL-2B-Instruct', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers', 'Qwen/Qwen3-0.6B'}
+[2m2026-04-08T16:11:02.519478Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-08T16:11:02.519530Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files:   8%|▊         | 1/12 [00:00<00:04,  2.53it/s]Fetching 12 files:  58%|█████▊    | 7/12 [00:05<00:03,  1.27it/s]Fetching 12 files: 100%|██████████| 12/12 [00:05<00:00,  2.22it/s]
+[2m2026-04-08T16:11:08.112358Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-08T16:11:08.112440Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+Fetching 31 files:   0%|          | 0/31 [00:00<?, ?it/s]Fetching 31 files:   3%|▎         | 1/31 [00:00<00:03,  8.42it/s]Fetching 31 files:  10%|▉         | 3/31 [00:00<00:03,  7.38it/s]Fetching 31 files:  13%|█▎        | 4/31 [00:00<00:04,  6.24it/s]Fetching 31 files:  29%|██▉       | 9/31 [00:00<00:01, 15.87it/s]Fetching 31 files:  39%|███▊      | 12/31 [00:01<00:01, 13.44it/s]Fetching 31 files:  39%|███▊      | 12/31 [00:14<00:01, 13.44it/s]Fetching 31 files:  52%|█████▏    | 16/31 [00:29<00:45,  3.00s/it]Fetching 31 files:  55%|█████▍    | 17/31 [00:30<00:39,  2.83s/it]Fetching 31 files:  61%|██████▏   | 19/31 [00:31<00:25,  2.15s/it]Fetching 31 files:  87%|████████▋ | 27/31 [00:33<00:04,  1.00s/it]Fetching 31 files: 100%|██████████| 31/31 [00:33<00:00,  1.09s/it]
+[2m2026-04-08T16:11:41.860042Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+[2m2026-04-08T16:11:41.860127Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  8.74it/s]Fetching 10 files:  70%|███████   | 7/10 [00:03<00:01,  2.11it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  3.12it/s]
+[2m2026-04-08T16:11:45.175919Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
+[2m2026-04-08T16:11:45.176364Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

@@ -1,0 +1,301 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4273 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4273
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4273
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2425 --advertise-client-urls http://0.0.0.0:2425 --listen-peer-urls http://0.0.0.0:2426 --initial-advertise-peer-urls http://localhost:2426 --initial-cluster default=http://localhost:2426 --data-dir /tmp/etcd_zr_v7vbu in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2425
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2425
+INFO     test_serve_deployment[multimodal_agg_llava]:common.py:43 Starting multimodal_agg_llava test_deployment
+INFO     test_serve_deployment[multimodal_agg_llava]:common.py:49 Using model: llava-hf/llava-1.5-7b-hf
+INFO     test_serve_deployment[multimodal_agg_llava]:common.py:50 Script: agg_multimodal.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/vllm/launch/agg_multimodal.sh --model llava-hf/llava-1.5-7b-hf in /workspace/examples/backends/vllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8002/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8002/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8002/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8002/v1/models (custom check failed) (attempt=33, elapsed=61.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8002/v1/models (custom check failed) (attempt=43, elapsed=81.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /v1/models HTTP/1.1" 200 118
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8002/v1/models (attempt=49, elapsed=93.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "llava-hf/llava-1.5-7b-hf",
+      "object": "model",
+      "created": 1775645615,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8002/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "GET /health HTTP/1.1" 200 687
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8002/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 6417239609326571529,
+      "transport": {
+        "tcp": "10.1.23.14:37193/590e9d6cb87a1009/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6417239609326571529,
+      "transport": {
+        "tcp": "10.1.23.14:37193/590e9d6cb87a1009/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 6417239609326571529,
+      "transport": {
+        "tcp": "10.1.23.14:37193/590e9d6cb87a1009/get_perf_metrics"
+      }
+    }
+  ]
+}
+INFO     test_serve_deployment[multimodal_agg_llava]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8002/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What is in this image?"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 300,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "llava-hf/llava-1.5-7b-hf"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "POST /v1/chat/completions HTTP/1.1" 200 608
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=3.78s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '608', 'date': 'Wed, 08 Apr 2026 10:53:41 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-74959c9f-f3ad-4de1-8668-1362659fe8ca",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": " The image features a city bus parked on the side of a street, with a \"Out of Service\" sign on the front. The bus is parked near a railroad crossing, and there is a stop sign visible in the scene.",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1775645617,
+  "model": "llava-hf/llava-1.5-7b-hf",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 593,
+    "completion_tokens": 50,
+    "total_tokens": 643
+  },
+  "nvext": {
+    "timing": {
+      "request_received_ms": 1775645617649,
+      "total_time_ms": 3776.780917
+    }
+  }
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['bus']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+ The image features a city bus parked on the side of a street, with a "Out of Service" sign on the front. The bus is parked near a railroad crossing, and there is a stop sign visible in the scene.
+INFO     test_serve_deployment[multimodal_agg_llava]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8002/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "llava-hf/llava-1.5-7b-hf"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8002
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8002 "POST /v1/chat/completions HTTP/1.1" 200 487
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=1.92s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '487', 'date': 'Wed, 08 Apr 2026 10:53:43 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-93a3ba9c-8b46-4d6d-9c1b-f14263667c14",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": " Knock knock!\n\nWho's there?\n\nAI.\n\nAI who?\n\nDon't cry, it's just a joke!",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1775645621,
+  "model": "llava-hf/llava-1.5-7b-hf",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 19,
+    "completion_tokens": 36,
+    "total_tokens": 55
+  },
+  "nvext": {
+    "timing": {
+      "request_received_ms": 1775645621428,
+      "total_time_ms": 1922.986651
+    }
+  }
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 3/6 expected keywords: ['AI', 'knock', 'joke']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+ Knock knock!
+
+Who's there?
+
+AI.
+
+AI who?
+
+Don't cry, it's just a joke!
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 30046
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 30048 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 30048 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 30047 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 30047 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 30034
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 30035 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 30035 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 30022
+INFO     NatsServer:managed_process.py:31 Terminating PID: 30023 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 30023 sed

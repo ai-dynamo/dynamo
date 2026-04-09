@@ -1,0 +1,331 @@
+[BASH] ==========================================
+[BASH] Launching Aggregated Multimodal Serving
+[BASH] ==========================================
+[BASH] Model:       Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+[BASH] Frontend:    http://localhost:8088
+[BASH] Backend:     dynamo.vllm --enable-multimodal
+[BASH] Media:       image_url and video_url (model support dependent)
+[BASH] ==========================================
+[BASH] 
+[BASH] Example test command:
+[BASH] 
+[BASH]   curl http://localhost:8088/v1/chat/completions \
+[BASH]     -H 'Content-Type: application/json' \
+[BASH]     -d '{
+[BASH]       "model": "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+[BASH]       "messages": [{"role": "user", "content": [
+[BASH]         {"type": "text", "text": "Describe the image"},
+[BASH]         {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/300px-PNG_transparency_demonstration_1.png"}}
+[BASH]       ]}],
+[BASH]       "max_tokens": 50
+[BASH]     }'
+[BASH] 
+[BASH]   # For video-capable models such as Qwen/Qwen3-VL-2B-Instruct:
+[BASH]   curl http://localhost:8088/v1/chat/completions \
+[BASH]     -H 'Content-Type: application/json' \
+[BASH]     -d '{
+[BASH]       "model": "Qwen/Qwen3-VL-2B-Instruct",
+[BASH]       "messages": [{"role": "user", "content": [
+[BASH]         {"type": "text", "text": "Describe the video in detail"},
+[BASH]         {"type": "video_url", "video_url": {"url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"}}
+[BASH]       ]}],
+[BASH]       "max_tokens": 128
+[BASH]     }'
+[BASH] 
+[BASH] ==========================================
+[BASH] [2m2026-04-08T10:30:11.803955Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
+[BASH] [2m2026-04-08T10:30:11.806040Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2427)
+[BASH] [2m2026-04-08T10:30:11.809514Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.12.168 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-08T10:30:11.814049Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8088"
+[BASH] [2m2026-04-08T10:30:12.168475Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:14.170618Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] dynamo.nixl_connect: Failed to load CuPy for GPU acceleration, utilizing numpy to provide CPU based operations.
+[BASH] [2m2026-04-08T10:30:15.954029Z[0m [33mWARNING[0m [2margparse_utils.parse_args[0m[2m:[0m Found duplicate keys --max-model-len
+[BASH] [2m2026-04-08T10:30:15.957091Z[0m [32m INFO[0m [2marg_utils.__post_init__[0m[2m:[0m HF_HUB_OFFLINE is True, replace model_id [Qwen/Qwen3-VL-30B-A3B-Instruct-FP8] to model_path [/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-30B-A3B-Instruct-FP8/snapshots/d9748a51ae66354c4dad665aab2c71f26cf2c8cd]
+[BASH] [2m2026-04-08T10:30:15.957304Z[0m [32m INFO[0m [2margs.update_engine_config_with_dynamo[0m[2m:[0m Using kv_events_config for publishing vLLM kv events over zmq: None (use_kv_events=False)
+[BASH] [2m2026-04-08T10:30:16.172660Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:16.284788Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Found cached model 'Qwen/Qwen3-VL-30B-A3B-Instruct-FP8' at "/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-30B-A3B-Instruct-FP8/snapshots/d9748a51ae66354c4dad665aab2c71f26cf2c8cd", skipping download
+[BASH] [2m2026-04-08T10:30:16.284826Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m Offline mode: using cached model 'Qwen/Qwen3-VL-30B-A3B-Instruct-FP8' without API validation
+[BASH] [2m2026-04-08T10:30:16.286793Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2427)
+[BASH] [2m2026-04-08T10:30:16.289687Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.12.168 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-08T10:30:16.290079Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] binding to: 0.0.0.0:8083
+[BASH] [2m2026-04-08T10:30:16.290116Z[0m [32m INFO[0m [2mdynamo_runtime::system_status_server[0m[2m:[0m [spawn_system_status_server] system status server bound to: 0.0.0.0:8083
+[BASH] [2m2026-04-08T10:30:16.290136Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m System status server started successfully on 0.0.0.0:8083
+[BASH] [2m2026-04-08T10:30:16.290245Z[0m [32m INFO[0m [2mgraceful_shutdown.install_signal_handlers[0m[2m:[0m Signal handlers set up for graceful shutdown (discovery unregister + grace period)
+[BASH] [2m2026-04-08T10:30:16.291232Z[0m [33mWARNING[0m [2mprometheus.setup_multiprocess_prometheus[0m[2m:[0m Found PROMETHEUS_MULTIPROC_DIR was set by user. This directory must be wiped between vLLM runs or you will find inaccurate metrics. Unset the variable and vLLM will properly handle cleanup.
+[BASH] [2m2026-04-08T10:30:18.174774Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:20.177094Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:22.179125Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:24.181162Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:25.478180Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3VLMoeForConditionalGeneration
+[BASH] [2m2026-04-08T10:30:25.478976Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 10000
+[BASH] [2m2026-04-08T10:30:25.580076Z[0m [33mWARNING[0m [2mmodel.get_diff_sampling_param[0m[2m:[0m Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.7, 'top_k': 20, 'top_p': 0.8}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+[BASH] [2m2026-04-08T10:30:25.588844Z[0m [32m INFO[0m [2mmodel.__post_init__[0m[2m:[0m Resolved architecture: Qwen3VLMoeForConditionalGeneration
+[BASH] [2m2026-04-08T10:30:25.588955Z[0m [32m INFO[0m [2mmodel.get_and_verify_max_len[0m[2m:[0m Using max model len 10000
+[BASH] [2m2026-04-08T10:30:25.590229Z[0m [32m INFO[0m [2mvllm.__post_init__[0m[2m:[0m Asynchronous scheduling is enabled.
+[BASH] [2m2026-04-08T10:30:25.590415Z[0m [32m INFO[0m [2mcompilation.log_enabled_passes[0m[2m:[0m Enabled custom fusions: norm_quant, act_quant
+[BASH] [2m2026-04-08T10:30:26.183351Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:28.185626Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:30.187732Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:32.189987Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T10:30:34.192048Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:36 [core.py:105] Initializing a V1 LLM engine (v0.19.0) with config: model='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-30B-A3B-Instruct-FP8/snapshots/d9748a51ae66354c4dad665aab2c71f26cf2c8cd', speculative_config=None, tokenizer='/home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-30B-A3B-Instruct-FP8/snapshots/d9748a51ae66354c4dad665aab2c71f26cf2c8cd', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=10000, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=fp8, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen/Qwen3-VL-30B-A3B-Instruct-FP8, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['+quant_fp8', 'none', '+quant_fp8'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_images_per_batch': 0, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 4, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+[BASH] [2m2026-04-08T10:30:36.194173Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:36 [parallel_state.py:1400] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.1.12.168:46239 backend=nccl
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:36 [parallel_state.py:1716] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0, EPLB rank N/A
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:37 [topk_topp_sampler.py:51] Using FlashInfer for top-p & top-k sampling.
+[BASH] [2m2026-04-08T10:30:38.196337Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:39 [gpu_model_runner.py:4735] Starting to load model /home/dynamo/.cache/huggingface/hub/models--Qwen--Qwen3-VL-30B-A3B-Instruct-FP8/snapshots/d9748a51ae66354c4dad665aab2c71f26cf2c8cd...
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:40 [cuda.py:390] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:40 [mm_encoder_attention.py:230] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:40 [vllm.py:790] Asynchronous scheduling is enabled.
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:40 [compilation.py:290] Enabled custom fusions: norm_quant, act_quant
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:40 [__init__.py:261] Selected CutlassFP8ScaledMMLinearKernel for Fp8LinearMethod
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:40 [cuda.py:334] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:40 [flash_attn.py:596] Using FlashAttention version 2
+[BASH] (EngineCore pid=31262) INFO 04-08 10:30:40 [fp8.py:396] Using TRITON Fp8 MoE backend out of potential backends: ['AITER', 'FLASHINFER_TRTLLM', 'FLASHINFER_CUTLASS', 'DEEPGEMM', 'TRITON', 'MARLIN', 'BATCHED_DEEPGEMM', 'BATCHED_TRITON', 'XPU'].
+[BASH] [2m2026-04-08T10:30:40.198387Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [gpu_model_runner.py:4818] Failed to load model - not enough GPU memory. Try lowering --gpu-memory-utilization to free memory for weights, increasing --tensor-parallel-size, or using --quantization. See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ for more tips. (original error: CUDA out of memory. Tried to allocate 384.00 MiB. GPU 0 has a total capacity of 22.03 GiB of which 65.12 MiB is free. Including non-PyTorch memory, this process has 20.79 GiB memory in use. Of the allocated memory 20.48 GiB is allocated by PyTorch, and 83.42 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables))
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108] EngineCore failed to start.
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108] Traceback (most recent call last):
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1082, in run_engine_core
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 848, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     super().__init__(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 114, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.model_executor = executor_class(vllm_config)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/executor/abstract.py", line 103, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self._init_executor()
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 52, in _init_executor
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.driver_worker.load_model()
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py", line 323, in load_model
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 4819, in load_model
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     raise e
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 4751, in load_model
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.model = model_loader.load_model(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]                  ^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/model_loader/base_loader.py", line 55, in load_model
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     model = initialize_model(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]             ^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/model_loader/utils.py", line 57, in initialize_model
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     model = model_class(vllm_config=vllm_config, prefix=prefix)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_vl_moe.py", line 446, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.language_model = Qwen3MoeLLMForCausalLM(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]                           ^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_vl_moe.py", line 327, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.model = Qwen3MoeLLMModel(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]                  ^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/compilation/decorators.py", line 364, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     old_init(self, **kwargs)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/compilation/decorators.py", line 364, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     old_init(self, **kwargs)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_moe.py", line 462, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.start_layer, self.end_layer, self.layers = make_layers(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]                                                     ^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/utils.py", line 652, in make_layers
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     + get_offloader().wrap_modules(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/offloader/base.py", line 90, in wrap_modules
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     return list(modules_generator)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]            ^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/utils.py", line 653, in <genexpr>
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     layer_fn(prefix=f"{prefix}.{idx}") for idx in range(start_layer, end_layer)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_moe.py", line 464, in <lambda>
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     lambda prefix: decoder_layer_type(vllm_config=vllm_config, prefix=prefix),
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_moe.py", line 397, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.mlp = Qwen3MoeSparseMoeBlock(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]                ^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_moe.py", line 208, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.experts = SharedFusedMoE(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]                    ^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/layers/fused_moe/layer.py", line 566, in __init__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     self.quant_method.create_weights(layer=self, **moe_quant_params)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/fp8.py", line 653, in create_weights
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     torch.empty(
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/utils/_device.py", line 109, in __torch_function__
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108]            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) ERROR 04-08 10:30:40 [core.py:1108] torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 384.00 MiB. GPU 0 has a total capacity of 22.03 GiB of which 65.12 MiB is free. Including non-PyTorch memory, this process has 20.79 GiB memory in use. Of the allocated memory 20.48 GiB is allocated by PyTorch, and 83.42 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+[BASH] (EngineCore pid=31262) Process EngineCore:
+[BASH] (EngineCore pid=31262) Traceback (most recent call last):
+[BASH] (EngineCore pid=31262)   File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+[BASH] (EngineCore pid=31262)     self.run()
+[BASH] (EngineCore pid=31262)   File "/usr/lib/python3.12/multiprocessing/process.py", line 108, in run
+[BASH] (EngineCore pid=31262)     self._target(*self._args, **self._kwargs)
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1112, in run_engine_core
+[BASH] (EngineCore pid=31262)     raise e
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1082, in run_engine_core
+[BASH] (EngineCore pid=31262)     engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+[BASH] (EngineCore pid=31262)                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262)     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262)            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 848, in __init__
+[BASH] (EngineCore pid=31262)     super().__init__(
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 114, in __init__
+[BASH] (EngineCore pid=31262)     self.model_executor = executor_class(vllm_config)
+[BASH] (EngineCore pid=31262)                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262)     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262)            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/executor/abstract.py", line 103, in __init__
+[BASH] (EngineCore pid=31262)     self._init_executor()
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 52, in _init_executor
+[BASH] (EngineCore pid=31262)     self.driver_worker.load_model()
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py", line 323, in load_model
+[BASH] (EngineCore pid=31262)     self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262)     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262)            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 4819, in load_model
+[BASH] (EngineCore pid=31262)     raise e
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 4751, in load_model
+[BASH] (EngineCore pid=31262)     self.model = model_loader.load_model(
+[BASH] (EngineCore pid=31262)                  ^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262)     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262)            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/model_loader/base_loader.py", line 55, in load_model
+[BASH] (EngineCore pid=31262)     model = initialize_model(
+[BASH] (EngineCore pid=31262)             ^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH] (EngineCore pid=31262)     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262)            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/model_loader/utils.py", line 57, in initialize_model
+[BASH] (EngineCore pid=31262)     model = model_class(vllm_config=vllm_config, prefix=prefix)
+[BASH] (EngineCore pid=31262)             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_vl_moe.py", line 446, in __init__
+[BASH] (EngineCore pid=31262)     self.language_model = Qwen3MoeLLMForCausalLM(
+[BASH] (EngineCore pid=31262)                           ^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_vl_moe.py", line 327, in __init__
+[BASH] (EngineCore pid=31262)     self.model = Qwen3MoeLLMModel(
+[BASH] (EngineCore pid=31262)                  ^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/compilation/decorators.py", line 364, in __init__
+[BASH] (EngineCore pid=31262)     old_init(self, **kwargs)
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/compilation/decorators.py", line 364, in __init__
+[BASH] (EngineCore pid=31262)     old_init(self, **kwargs)
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_moe.py", line 462, in __init__
+[BASH] (EngineCore pid=31262)     self.start_layer, self.end_layer, self.layers = make_layers(
+[BASH] (EngineCore pid=31262)                                                     ^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/utils.py", line 652, in make_layers
+[BASH] (EngineCore pid=31262)     + get_offloader().wrap_modules(
+[BASH] (EngineCore pid=31262)       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/offloader/base.py", line 90, in wrap_modules
+[BASH] (EngineCore pid=31262)     return list(modules_generator)
+[BASH] (EngineCore pid=31262)            ^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/utils.py", line 653, in <genexpr>
+[BASH] (EngineCore pid=31262)     layer_fn(prefix=f"{prefix}.{idx}") for idx in range(start_layer, end_layer)
+[BASH] (EngineCore pid=31262)     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_moe.py", line 464, in <lambda>
+[BASH] (EngineCore pid=31262)     lambda prefix: decoder_layer_type(vllm_config=vllm_config, prefix=prefix),
+[BASH] (EngineCore pid=31262)                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_moe.py", line 397, in __init__
+[BASH] (EngineCore pid=31262)     self.mlp = Qwen3MoeSparseMoeBlock(
+[BASH] (EngineCore pid=31262)                ^^^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/models/qwen3_moe.py", line 208, in __init__
+[BASH] (EngineCore pid=31262)     self.experts = SharedFusedMoE(
+[BASH] (EngineCore pid=31262)                    ^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/layers/fused_moe/layer.py", line 566, in __init__
+[BASH] (EngineCore pid=31262)     self.quant_method.create_weights(layer=self, **moe_quant_params)
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/model_executor/layers/quantization/fp8.py", line 653, in create_weights
+[BASH] (EngineCore pid=31262)     torch.empty(
+[BASH] (EngineCore pid=31262)   File "/opt/dynamo/venv/lib/python3.12/site-packages/torch/utils/_device.py", line 109, in __torch_function__
+[BASH] (EngineCore pid=31262)     return func(*args, **kwargs)
+[BASH] (EngineCore pid=31262)            ^^^^^^^^^^^^^^^^^^^^^
+[BASH] (EngineCore pid=31262) torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 384.00 MiB. GPU 0 has a total capacity of 22.03 GiB of which 65.12 MiB is free. Including non-PyTorch memory, this process has 20.79 GiB memory in use. Of the allocated memory 20.48 GiB is allocated by PyTorch, and 83.42 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+[BASH] [rank0]:[W408 10:30:41.373138590 ProcessGroupNCCL.cpp:1553] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
+[BASH] [2m2026-04-08T10:30:42.200466Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] Traceback (most recent call last):
+[BASH]   File "<frozen runpy>", line 198, in _run_module_as_main
+[BASH]   File "<frozen runpy>", line 88, in _run_code
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/__main__.py", line 12, in <module>
+[BASH]     main()
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py", line 725, in main
+[BASH]     uvloop.run(worker())
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/uvloop/__init__.py", line 109, in run
+[BASH]     return __asyncio.run(
+[BASH]            ^^^^^^^^^^^^^^
+[BASH]   File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+[BASH]     return runner.run(main)
+[BASH]            ^^^^^^^^^^^^^^^^
+[BASH]   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+[BASH]     return self._loop.run_until_complete(task)
+[BASH]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/uvloop/__init__.py", line 61, in wrapper
+[BASH]     return await main
+[BASH]            ^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py", line 177, in worker
+[BASH]     await factory.create(
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/worker_factory.py", line 147, in create
+[BASH]     await self._create_decode_worker(
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/worker_factory.py", line 260, in _create_decode_worker
+[BASH]     ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+[BASH]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py", line 574, in setup_vllm_engine
+[BASH]     engine_client = AsyncLLM.from_vllm_config(
+[BASH]                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 225, in from_vllm_config
+[BASH]     return cls(
+[BASH]            ^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 154, in __init__
+[BASH]     self.engine_core = EngineCoreClient.make_async_mp_client(
+[BASH]                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH]     return func(*args, **kwargs)
+[BASH]            ^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 130, in make_async_mp_client
+[BASH]     return AsyncMPClient(*client_args)
+[BASH]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+[BASH]     return func(*args, **kwargs)
+[BASH]            ^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 887, in __init__
+[BASH]     super().__init__(
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 535, in __init__
+[BASH]     with launch_core_engines(
+[BASH]   File "/usr/lib/python3.12/contextlib.py", line 144, in __exit__
+[BASH]     next(self.gen)
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 998, in launch_core_engines
+[BASH]     wait_for_engine_startup(
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 1057, in wait_for_engine_startup
+[BASH]     raise RuntimeError(
+[BASH] RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+[BASH] Cleaning up...
+[BASH] [2m2026-04-08T10:30:44.111096Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T10:30:44.111188Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T10:30:44.111214Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T10:30:44.111218Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T10:30:44.111222Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T10:30:44.111266Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+[BASH] [2m2026-04-08T10:30:44.202870Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T10:30:44.202937Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T10:30:44.202950Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T10:30:44.202954Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T10:30:44.202957Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T10:30:49.112642Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T10:30:49.112751Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T10:30:49.112773Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T10:30:49.112781Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T10:30:49.112788Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected

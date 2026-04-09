@@ -1,0 +1,2 @@
+INFO     dynamo.planner.connectors.kubernetes_api:kubernetes_api.py:121 DGDSA test-deployment-test-component not found, falling back to DGD update
+INFO     dynamo.planner.connectors.kubernetes_api:kubernetes_api.py:141 Updated DGD test-deployment service test-component to 1 replicas

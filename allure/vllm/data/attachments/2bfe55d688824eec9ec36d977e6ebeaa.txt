@@ -1,0 +1,56 @@
+[2m2026-04-08T20:22:27.113220Z[0m [32m INFO[0m [2mprofile_sla._extract_profiler_params[0m[2m:[0m Profiler config: model=Qwen/Qwen3-32B, backend=trtllm, system=h200_sxm, total_gpus=64, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=thorough, picking=load_match
+[2m2026-04-08T20:22:27.113783Z[0m [32m INFO[0m [2mutils._infer_quantization_fields[0m[2m:[0m Quant inference result: quant_algo=None, kv_cache_quant_algo=None, quant_dynamic=None
+[2m2026-04-08T20:22:27.113883Z[0m [32m INFO[0m [2mutils.get_model_config_from_model_path[0m[2m:[0m Loaded model config for Qwen/Qwen3-32B: architecture=Qwen3ForCausalLM, layers=64, n=64, n_kv=8, d=128, hidden_size=5120, inter_size=25600, vocab=151936, context=40960, topk=0, num_experts=0, moe_inter_size=25600, extra_params={'architecture': 'Qwen3ForCausalLM', 'use_qk_norm': True}
+[2m2026-04-08T20:22:27.173086Z[0m [33m WARN[0m [2mthorough.run_thorough[0m[2m:[0m THOROUGH mode: only disagg configurations are supported.
+[2m2026-04-08T20:22:27.175350Z[0m [32m INFO[0m [2mnaive._estimate_model_weight_bytes[0m[2m:[0m Estimated model weight size for Qwen/Qwen3-32B: 60.83 GiB (32.66B params)
+[2m2026-04-08T20:22:27.175996Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m AIC disagg support for Qwen/Qwen3-32B on h200_sxm/trtllm: True
+[2m2026-04-08T20:22:27.176057Z[0m [32m INFO[0m [2mnaive._calculate_min_tp[0m[2m:[0m TP calculation: model=60.83GiB, vram=141.00GiB, required=91.24GiB (1.5x), min_tp=1, selected_tp=1
+[2m2026-04-08T20:22:27.176236Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Minimum GPUs per engine (memory fit): 1
+[2m2026-04-08T20:22:27.176295Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Parallel lists: is_moe=False, enable_wideep=False, min_gpus=1, prefill_max_gpus=8, decode_max_gpus=8, prefill_num_gpu_list=[1, 2, 4, 8], prefill_dp_list=[1], prefill_moe_ep_list=[1]
+[2m2026-04-08T20:22:27.176352Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Enumerated 4 prefill configs, 4 decode configs
+[2m2026-04-08T20:22:27.176392Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Building prefill DGD: tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1
+[2m2026-04-08T20:22:27.292355Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Building prefill DGD: tp=2 pp=1 dp=1 moe_tp=1 moe_ep=1
+[2m2026-04-08T20:22:27.321689Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Building prefill DGD: tp=4 pp=1 dp=1 moe_tp=1 moe_ep=1
+[2m2026-04-08T20:22:27.350745Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Building prefill DGD: tp=8 pp=1 dp=1 moe_tp=1 moe_ep=1
+[2m2026-04-08T20:22:27.379641Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Building decode DGD: tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1
+[2m2026-04-08T20:22:27.408940Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Building decode DGD: tp=2 pp=1 dp=1 moe_tp=1 moe_ep=1
+[2m2026-04-08T20:22:27.437992Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Building decode DGD: tp=4 pp=1 dp=1 moe_tp=1 moe_ep=1
+[2m2026-04-08T20:22:27.470894Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Building decode DGD: tp=8 pp=1 dp=1 moe_tp=1 moe_ep=1
+[2m2026-04-08T20:22:27.500546Z[0m [32m INFO[0m [2menumerate.enumerate_profiling_configs[0m[2m:[0m Enumeration complete: 4 prefill DGDs, 4 decode DGDs
+[2m2026-04-08T20:22:27.500644Z[0m [32m INFO[0m [2mthorough.run_thorough[0m[2m:[0m Enumerated 4 prefill candidates, 4 decode candidates
+[2m2026-04-08T20:22:27.503295Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Profiling prefill candidate tp1 with 1 GPUs...
+[2m2026-04-08T20:22:27.504738Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Waiting for prefill deployment to be ready...
+[2m2026-04-08T20:22:27.504938Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Prefill deployment ready
+[2m2026-04-08T20:22:27.507423Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Profiling prefill candidate tp2 with 2 GPUs...
+[2m2026-04-08T20:22:27.508910Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Waiting for prefill deployment to be ready...
+[2m2026-04-08T20:22:27.509161Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Prefill deployment ready
+[2m2026-04-08T20:22:27.511753Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Profiling prefill candidate tp4 with 4 GPUs...
+[2m2026-04-08T20:22:27.513027Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Waiting for prefill deployment to be ready...
+[2m2026-04-08T20:22:27.513256Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Prefill deployment ready
+[2m2026-04-08T20:22:27.515655Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Profiling prefill candidate tp8 with 8 GPUs...
+[2m2026-04-08T20:22:27.516930Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Waiting for prefill deployment to be ready...
+[2m2026-04-08T20:22:27.517127Z[0m [32m INFO[0m [2mthorough._benchmark_prefill_candidates[0m[2m:[0m Prefill deployment ready
+[2m2026-04-08T20:22:27.521747Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Profiling decode candidate tp1 with 1 GPUs...
+[2m2026-04-08T20:22:27.529167Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Waiting for decode deployment to be ready...
+[2m2026-04-08T20:22:27.529403Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Decode deployment ready
+[2m2026-04-08T20:22:27.529836Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Sweeping num_request: [1, 4, 8]
+[2m2026-04-08T20:22:27.532620Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Profiling decode candidate tp2 with 2 GPUs...
+[2m2026-04-08T20:22:27.537178Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Waiting for decode deployment to be ready...
+[2m2026-04-08T20:22:27.537379Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Decode deployment ready
+[2m2026-04-08T20:22:27.537633Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Sweeping num_request: [1, 4, 8]
+[2m2026-04-08T20:22:27.539861Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Profiling decode candidate tp4 with 4 GPUs...
+[2m2026-04-08T20:22:27.541061Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Waiting for decode deployment to be ready...
+[2m2026-04-08T20:22:27.541248Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Decode deployment ready
+[2m2026-04-08T20:22:27.541524Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Sweeping num_request: [1, 4, 8]
+[2m2026-04-08T20:22:27.543639Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Profiling decode candidate tp8 with 8 GPUs...
+[2m2026-04-08T20:22:27.544841Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Waiting for decode deployment to be ready...
+[2m2026-04-08T20:22:27.545033Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Decode deployment ready
+[2m2026-04-08T20:22:27.545274Z[0m [32m INFO[0m [2mthorough._benchmark_decode_candidates[0m[2m:[0m Sweeping num_request: [1, 4, 8]
+[2m2026-04-08T20:22:27.611847Z[0m [32m INFO[0m [2mperf_database.get_database[0m[2m:[0m Loading database for system='h200_sxm', backend='trtllm', version='1.2.0rc5'
+[2m2026-04-08T20:22:32.903742Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Prefill worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-08T20:22:32.903911Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Decode worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-08T20:22:32.980539Z[0m [32m INFO[0m [2mprofile_sla._execute_strategy[0m[2m:[0m Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp8 (8 GPUs, tp=8 pp=1 dp=1 moe_tp=1 moe_ep=1)
+[2m2026-04-08T20:22:32.984026Z[0m [32m INFO[0m [2mprofile_sla._write_final_output[0m[2m:[0m Final DGD config saved to /tmp/pytest_temp/popen-gw2/test_thorough_no_planner_with_0/profiling_results/final_config.yaml
+[2m2026-04-08T20:22:32.984484Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
+[2m2026-04-08T20:22:32.984553Z[0m [32m INFO[0m [2mdynamo_deployment.cleanup_remaining_deployments[0m[2m:[0m No deployments to clean up
+[2m2026-04-08T20:22:32.984590Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

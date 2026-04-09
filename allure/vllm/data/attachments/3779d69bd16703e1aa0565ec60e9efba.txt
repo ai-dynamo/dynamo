@@ -1,0 +1,1 @@
+ERROR    root:prometheus.py:299 Error getting metrics: Registry error

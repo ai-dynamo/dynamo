@@ -1,0 +1,398 @@
+[2m2026-04-08T10:26:23.757910Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4226 in /workspace
+[2m2026-04-08T10:26:23.758938Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4226
+[2m2026-04-08T10:26:23.859634Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4226
+[2m2026-04-08T10:26:23.859910Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T10:26:23.861905Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T10:26:23.865128Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2473 --advertise-client-urls http://0.0.0.0:2473 --listen-peer-urls http://0.0.0.0:2474 --initial-advertise-peer-urls http://localhost:2474 --initial-cluster default=http://localhost:2474 --data-dir /tmp/etcd_wjxih2p5 in /workspace
+[2m2026-04-08T10:26:23.865988Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2473
+[2m2026-04-08T10:26:23.966676Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2473
+[2m2026-04-08T10:26:24.090845Z[0m [32m INFO[0m [2mallocations.__init__[0m[2m:[0m GMSAllocationManager initialized: device=0, granularity=2097152, alloc_retry_interval=0.500, alloc_retry_timeout=none
+[2m2026-04-08T10:26:24.090998Z[0m [32m INFO[0m [2mgms.__init__[0m[2m:[0m GMS initialized: device=0
+[2m2026-04-08T10:26:24.091056Z[0m [32m INFO[0m [2mrpc.__init__[0m[2m:[0m GMSRPCServer initialized: device=0
+[2m2026-04-08T10:26:24.091749Z[0m [32m INFO[0m [2mrpc.serve[0m[2m:[0m Server started: /tmp/gms_GPU-4eb9d501-312c-9d00-a5c8-6410b211b38f_weights.sock
+[2m2026-04-08T10:26:24.102354Z[0m [32m INFO[0m [2mallocations.__init__[0m[2m:[0m GMSAllocationManager initialized: device=0, granularity=2097152, alloc_retry_interval=0.500, alloc_retry_timeout=none
+[2m2026-04-08T10:26:24.102461Z[0m [32m INFO[0m [2mgms.__init__[0m[2m:[0m GMS initialized: device=0
+[2m2026-04-08T10:26:24.102509Z[0m [32m INFO[0m [2mrpc.__init__[0m[2m:[0m GMSRPCServer initialized: device=0
+[2m2026-04-08T10:26:24.103062Z[0m [32m INFO[0m [2mrpc.serve[0m[2m:[0m Server started: /tmp/gms_GPU-4eb9d501-312c-9d00-a5c8-6410b211b38f_kv_cache.sock
+[2m2026-04-08T10:26:24.114153Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8300 --migration-limit 0 in /workspace
+[2m2026-04-08T10:26:24.115710Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.vllm --model Qwen/Qwen3-0.6B --load-format gms --enforce-eager --enable-sleep-mode --gpu-memory-utilization 0.9 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:20094", "enable_kv_cache_events": true} in /workspace
+[2m2026-04-08T10:26:24.116876Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8150/health
+[2m2026-04-08T10:26:42.186157Z[0m [32m INFO[0m [2mgms.handle_request[0m[2m:[0m Committed layout with state hash: b0617dc37b1f119c...
+[2m2026-04-08T10:26:44.155092Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8150/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T10:26:45.157710Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8150/health (attempt=22, elapsed=21.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 13,
+    "nanos": 864821642
+  },
+  "endpoints": {
+    "generate": "ready",
+    "clear_kv_blocks": "ready",
+    "worker_kv_indexer_query_dp0": "ready",
+    "get_perf_metrics": "ready"
+  }
+}
+[2m2026-04-08T10:26:45.157879Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8300/v1/models
+[2m2026-04-08T10:26:46.159651Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8300/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775644005,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T10:26:46.159991Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8300/health
+[2m2026-04-08T10:26:47.162671Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8300/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+[2m2026-04-08T10:26:47.870094Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._sleep_shadow[0m[2m:[0m Shadow inference OK: {'id': 'cmpl-6e474555-427f-463b-91a5-4362688ecf93', 'choices': [{'text': 'Class\nclass Hello:\n    def __init__(self, name):\n        self.name = name\n', 'index': 0, 'finish_reason': 'length'}], 'created': 1775644007, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 1, 'completion_tokens': 20, 'total_tokens': 21}, 'nvext': {'timing': {'request_received_ms': 1775644007164, 'total_time_ms': 704.486658}}}
+[2m2026-04-08T10:26:47.901002Z[0m [33mWARNING[0m [2mgms.cleanup_connection[0m[2m:[0m RW aborted; clearing active layout
+[2m2026-04-08T10:26:47.901797Z[0m [32m INFO[0m [2mvllm.sleep[0m[2m:[0m shadow-a sleep: {'status': 'ok', 'message': 'Engine slept (level=2)'}
+[2m2026-04-08T10:26:47.902260Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._sleep_shadow[0m[2m:[0m Shadow sleep: 20.55 -> 19.25 GiB (freed 1324 MB)
+[2m2026-04-08T10:26:47.910138Z[0m [32m INFO[0m [2mallocations.clear_all[0m[2m:[0m Cleared 28 allocations
+[2m2026-04-08T10:26:47.910787Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.vllm --model Qwen/Qwen3-0.6B --load-format gms --enforce-eager --enable-sleep-mode --gpu-memory-utilization 0.9 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:20175", "enable_kv_cache_events": true} in /workspace
+[2m2026-04-08T10:26:47.912130Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8177/health
+[2m2026-04-08T10:27:07.949216Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8177/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T10:27:08.951363Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8177/health (attempt=22, elapsed=21.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 14,
+    "nanos": 40875356
+  },
+  "endpoints": {
+    "get_perf_metrics": "ready",
+    "clear_kv_blocks": "ready",
+    "worker_kv_indexer_query_dp0": "ready",
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T10:27:08.951504Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8300/v1/models
+[2m2026-04-08T10:27:09.952967Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8300/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775644028,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T10:27:09.953182Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8300/health
+[2m2026-04-08T10:27:10.955708Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8300/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985818,
+      "transport": {
+        "tcp": "10.1.23.14:32897/28a09d6ca1000b1a/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985818,
+      "transport": {
+        "tcp": "10.1.23.14:32897/28a09d6ca1000b1a/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985818,
+      "transport": {
+        "tcp": "10.1.23.14:32897/28a09d6ca1000b1a/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/worker_kv_indexer_query_dp0"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985818,
+      "transport": {
+        "tcp": "10.1.23.14:32897/28a09d6ca1000b1a/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+[2m2026-04-08T10:27:11.642307Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._sleep_shadow[0m[2m:[0m Shadow inference OK: {'id': 'cmpl-e1105f3f-2dc6-41e8-a9e2-498cee1b4cd8', 'choices': [{'text': 'Class\nclass Hello:\n    def __init__(self, name):\n        self.name = name\n', 'index': 0, 'finish_reason': 'length'}], 'created': 1775644030, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 1, 'completion_tokens': 20, 'total_tokens': 21}, 'nvext': {'timing': {'request_received_ms': 1775644030957, 'total_time_ms': 684.1760780000001}}}
+[2m2026-04-08T10:27:11.673407Z[0m [33mWARNING[0m [2mgms.cleanup_connection[0m[2m:[0m RW aborted; clearing active layout
+[2m2026-04-08T10:27:11.674271Z[0m [32m INFO[0m [2mvllm.sleep[0m[2m:[0m shadow-b sleep: {'status': 'ok', 'message': 'Engine slept (level=2)'}
+[2m2026-04-08T10:27:11.674753Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._sleep_shadow[0m[2m:[0m Shadow sleep: 21.37 -> 19.43 GiB (freed 1986 MB)
+[2m2026-04-08T10:27:11.682438Z[0m [32m INFO[0m [2mallocations.clear_all[0m[2m:[0m Cleared 28 allocations
+[2m2026-04-08T10:27:11.683708Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.vllm --model Qwen/Qwen3-0.6B --load-format gms --enforce-eager --enable-sleep-mode --gpu-memory-utilization 0.9 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:20155", "enable_kv_cache_events": true} in /workspace
+[2m2026-04-08T10:27:11.685039Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8189/health
+[2m2026-04-08T10:27:31.723911Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8189/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T10:27:32.726257Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8189/health (attempt=22, elapsed=21.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 14,
+    "nanos": 820396
+  },
+  "endpoints": {
+    "clear_kv_blocks": "ready",
+    "worker_kv_indexer_query_dp0": "ready",
+    "generate": "ready",
+    "get_perf_metrics": "ready"
+  }
+}
+[2m2026-04-08T10:27:32.726336Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8300/v1/models
+[2m2026-04-08T10:27:33.727843Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8300/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775644052,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T10:27:33.728142Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8300/health
+[2m2026-04-08T10:27:34.730801Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8300/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985818,
+      "transport": {
+        "tcp": "10.1.23.14:32897/28a09d6ca1000b1a/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985831,
+      "transport": {
+        "tcp": "10.1.23.14:36691/28a09d6ca1000b27/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985831,
+      "transport": {
+        "tcp": "10.1.23.14:36691/28a09d6ca1000b27/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985818,
+      "transport": {
+        "tcp": "10.1.23.14:32897/28a09d6ca1000b1a/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985831,
+      "transport": {
+        "tcp": "10.1.23.14:36691/28a09d6ca1000b27/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985801,
+      "transport": {
+        "tcp": "10.1.23.14:43615/28a09d6ca1000b09/worker_kv_indexer_query_dp0"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985818,
+      "transport": {
+        "tcp": "10.1.23.14:32897/28a09d6ca1000b1a/worker_kv_indexer_query_dp0"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 2927512847673985831,
+      "transport": {
+        "tcp": "10.1.23.14:36691/28a09d6ca1000b27/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+[2m2026-04-08T10:27:35.425468Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._run_shadow_failover_test[0m[2m:[0m Primary inference OK: {'id': 'cmpl-ad1a2dfc-c832-4abd-a9db-7dd5c1d5db8d', 'choices': [{'text': ': A 2000-kg mass is released from rest at height h above the ground', 'index': 0, 'finish_reason': 'length'}], 'created': 1775644054, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 2, 'completion_tokens': 20, 'total_tokens': 22}, 'nvext': {'timing': {'request_received_ms': 1775644054732, 'total_time_ms': 692.5056050000001}}}
+[2m2026-04-08T10:27:35.426050Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._run_shadow_failover_test[0m[2m:[0m Primary active memory: 22.19 GiB
+[2m2026-04-08T10:27:45.432854Z[0m [33mWARNING[0m [2mgms.cleanup_connection[0m[2m:[0m RW aborted; clearing active layout
+[2m2026-04-08T10:27:45.433402Z[0m [32m INFO[0m [2mallocations.clear_all[0m[2m:[0m Cleared 28 allocations
+[2m2026-04-08T10:27:45.433936Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=694157312 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T10:27:45.935295Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=694157312 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T10:27:46.436339Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=694157312 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T10:27:46.937530Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=694157312 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T10:27:47.438966Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=694157312 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T10:27:47.940340Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=694157312 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T10:27:48.440927Z[0m [33mWARNING[0m [2mallocations.allocate[0m[2m:[0m cuMemCreate OOM for aligned_size=694157312 bytes, tag=kv_cache; retrying in 0.500s
+[2m2026-04-08T10:27:48.523282Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._run_shadow_failover_test[0m[2m:[0m Primary kill snapshot: 22.19 -> 22.19 GiB
+[2m2026-04-08T10:27:49.097567Z[0m [32m INFO[0m [2mvllm.wake[0m[2m:[0m shadow-a wake: {'status': 'ok', 'message': 'Engine woke'}
+[2m2026-04-08T10:27:49.126051Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 19601
+[2m2026-04-08T10:27:49.127132Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 19603 name: tee
+[2m2026-04-08T10:27:49.127229Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 19603 tee
+[2m2026-04-08T10:27:49.127932Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 19602 name: sed
+[2m2026-04-08T10:27:49.128021Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 19602 sed
+[2m2026-04-08T10:27:49.128235Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._run_shadow_failover_test[0m[2m:[0m Shadow wake memory: 21.37 GiB (reacquired 1986 MB)
+[2m2026-04-08T10:27:49.441003Z[0m [32m INFO[0m [2mtest_gms_shadow_failover._run_shadow_failover_test[0m[2m:[0m Shadow inference after failover OK: {'id': 'cmpl-a42bc579-492d-4f2b-ab0c-91f68a526bf3', 'choices': [{'text': ' in SQL Server: A Comprehensive Guide\n\nSQL Server is a powerful relational database management system that supports both', 'index': 0, 'finish_reason': 'length'}], 'created': 1775644069, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 3, 'completion_tokens': 20, 'total_tokens': 23}, 'nvext': {'timing': {'request_received_ms': 1775644069130, 'total_time_ms': 309.587091}}}
+[2m2026-04-08T10:27:49.441931Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 19335
+[2m2026-04-08T10:27:50.444092Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 19337 name: tee
+[2m2026-04-08T10:27:50.444245Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 19337 tee
+[2m2026-04-08T10:27:50.444823Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 19336 name: sed
+[2m2026-04-08T10:27:50.444914Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 19336 sed
+[2m2026-04-08T10:27:50.445526Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 18997
+[2m2026-04-08T10:27:50.729855Z[0m [33mWARNING[0m [2mgms.cleanup_connection[0m[2m:[0m RW aborted; clearing active layout
+[2m2026-04-08T10:27:50.748423Z[0m [32m INFO[0m [2mallocations.clear_all[0m[2m:[0m Cleared 28 allocations
+[2m2026-04-08T10:27:51.147386Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 18999 name: tee
+[2m2026-04-08T10:27:51.147537Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 18999 tee
+[2m2026-04-08T10:27:51.148002Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 18998 name: sed
+[2m2026-04-08T10:27:51.148091Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 18998 sed
+[2m2026-04-08T10:27:51.148526Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 18994
+[2m2026-04-08T10:27:56.655436Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 18996 name: tee
+[2m2026-04-08T10:27:56.655585Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 18996 tee
+[2m2026-04-08T10:27:56.655997Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 18995 name: sed
+[2m2026-04-08T10:27:56.656087Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 18995 sed
+[2m2026-04-08T10:27:56.659715Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 18979
+[2m2026-04-08T10:27:56.760310Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 18980 name: sed
+[2m2026-04-08T10:27:56.760415Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 18980 sed
+[2m2026-04-08T10:27:56.761199Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 18967
+[2m2026-04-08T10:27:56.862081Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 18968 name: sed
+[2m2026-04-08T10:27:56.862327Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 18968 sed

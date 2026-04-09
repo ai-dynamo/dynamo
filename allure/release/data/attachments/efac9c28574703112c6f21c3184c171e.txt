@@ -1,0 +1,10 @@
+[2m2026-04-09T01:51:48.344831Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 1 models needed for collected tests
+Models: {'Qwen/Qwen3-0.6B'}
+[2m2026-04-09T01:51:48.344923Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-09T01:51:48.344972Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+[2m2026-04-09T01:51:48.483611Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen3-0.6B: 401 Client Error. (Request ID: Root=1-69d70634-06b256317dcf60563ac17d45;44a535f3-0e6f-4b05-81f5-7722224b2679)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired

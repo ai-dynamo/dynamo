@@ -1,0 +1,72 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4298 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4298
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4298
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2407 --advertise-client-urls http://0.0.0.0:2407 --listen-peer-urls http://0.0.0.0:2408 --initial-advertise-peer-urls http://localhost:2408 --initial-cluster default=http://localhost:2408 --data-dir /tmp/etcd_mwrswduz in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2407
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2407
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:225 Created SGLang worker 0 on GPU 0 (mem_frac=0.4, system_port=8107, kv_port=8128) with endpoint: dyn://test-namespace-jenporvaqa.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:225 Created SGLang worker 1 on GPU 0 (mem_frac=0.4, system_port=8108, kv_port=8129) with endpoint: dyn://test-namespace-jenporvaqa.backend.generate
+INFO     tests.router.e2e_harness:e2e_harness.py:57 [SGLangProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.e2e_harness:e2e_harness.py:64 [SGLangProcess] Starting SGLang worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:79 [SGLangProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8128"} in /workspace
+INFO     tests.router.e2e_harness:e2e_harness.py:85 [SGLangProcess] Worker 0 launched with PID: 331
+INFO     tests.router.e2e_harness:e2e_harness.py:94 [SGLangProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+INFO     tests.router.e2e_harness:e2e_harness.py:64 [SGLangProcess] Starting SGLang worker 1...
+INFO     tests.router.e2e_harness:e2e_harness.py:79 [SGLangProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8129"} in /workspace
+INFO     tests.router.e2e_harness:e2e_harness.py:85 [SGLangProcess] Worker 1 launched with PID: 367
+INFO     tests.router.e2e_harness:e2e_harness.py:117 [SGLangProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.e2e_harness:e2e_harness.py:122 [SGLangProcess] Waiting for health checks to complete...
+INFO     tests.router.e2e_harness:e2e_harness.py:127 [SGLangProcess] Checking health for worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:134 [SGLangProcess] Worker 0 health checks passed
+INFO     tests.router.e2e_harness:e2e_harness.py:127 [SGLangProcess] Checking health for worker 1...
+INFO     tests.router.e2e_harness:e2e_harness.py:134 [SGLangProcess] Worker 1 health checks passed
+INFO     tests.router.e2e_harness:e2e_harness.py:144 [SGLangProcess] All workers started successfully and passed health checks!
+INFO     FrontendRouterProcess:managed_process.py:437 Running command: /usr/bin/python3 -m dynamo.frontend --router-mode kv --http-port 8050 --discovery-backend etcd --namespace test-namespace-jenporvaqa --kv-cache-block-size 16 in /workspace
+INFO     FrontendRouterProcess:managed_process.py:662 Checking Port: 8050
+INFO     FrontendRouterProcess:managed_process.py:670 SUCCESS: Check Port: 8050
+INFO     FrontendRouterProcess:managed_process.py:690 Checking URL http://localhost:8050/v1/models
+INFO     FrontendRouterProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8050/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": []
+}
+INFO     tests.router.common:common.py:118 Starting frontend --router-mode kv on port 8050
+INFO     tests.router.common:common.py:125 Waiting for workers to register with frontend...
+INFO     tests.router.helper:helper.py:169 Waiting for 2 workers to register on HTTP frontend (timeout=180s)...
+INFO     tests.router.helper:helper.py:191 Workers registered. Found 1 model(s): ['silence09/DeepSeek-R1-Small-2layers']
+INFO     tests.router.helper:helper.py:206 Waiting for chat completions pipeline to be built...
+INFO     tests.router.helper:helper.py:226 Chat completions pipeline ready!
+INFO     tests.router.common:common.py:135 Sending 10 concurrent requests to frontend...
+INFO     tests.router.helper:helper.py:476 Sending initial test request to URL 0 (http://localhost:8050/v1/chat/completions) with retry...
+INFO     tests.router.helper:helper.py:518 Completed all requests: 10 successful, 0 failed
+INFO     tests.router.helper:helper.py:523 All 10 requests completed successfully
+INFO     tests.router.common:common.py:144 Successfully completed 10 requests
+INFO     FrontendRouterProcess:managed_process.py:558 Sending SIGTERM to process group: 370
+INFO     FrontendRouterProcess:managed_process.py:31 Terminating PID: 372 name: tee
+INFO     FrontendRouterProcess:managed_process.py:36 Sending SIGTERM (kill): 372 tee
+INFO     FrontendRouterProcess:managed_process.py:31 Terminating PID: 371 name: sed
+INFO     FrontendRouterProcess:managed_process.py:36 Sending SIGTERM (kill): 371 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:152 Stopping SGLang worker 0
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 331
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 333 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 333 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 332 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 332 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:152 Stopping SGLang worker 1
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 367
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 369 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 369 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 368 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 368 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:155 Waiting for SGLang worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 316
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 317 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 317 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 304
+INFO     NatsServer:managed_process.py:31 Terminating PID: 305 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 305 sed

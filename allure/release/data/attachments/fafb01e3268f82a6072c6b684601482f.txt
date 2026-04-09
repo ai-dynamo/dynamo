@@ -1,0 +1,181 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4290 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4290
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4290
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2454 --advertise-client-urls http://0.0.0.0:2454 --listen-peer-urls http://0.0.0.0:2455 --initial-advertise-peer-urls http://localhost:2455 --initial-cluster default=http://localhost:2455 --data-dir /tmp/etcd_f9rrnkii in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2454
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2454
+INFO     GMSServerProcess:managed_process.py:437 Running command: python -m gpu_memory_service --device 0 --tag weights in /workspace
+INFO     GMSServerProcess:managed_process.py:775 Running custom health check '_runtime_state_ready'
+INFO     GMSServerProcess:managed_process.py:795 SUCCESS: Custom health check '_runtime_state_ready' passed (attempt=1, elapsed=0.0s)
+INFO     GMSServerProcess:managed_process.py:437 Running command: python -m gpu_memory_service --device 0 --tag kv_cache in /workspace
+INFO     GMSServerProcess:managed_process.py:775 Running custom health check '_runtime_state_ready'
+INFO     GMSServerProcess:managed_process.py:795 SUCCESS: Custom health check '_runtime_state_ready' passed (attempt=1, elapsed=0.0s)
+INFO     DynamoFrontendProcess:managed_process.py:437 Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8202 --migration-limit 0 in /workspace
+INFO     VLLMWithGMSProcess:managed_process.py:437 Running command: python -m dynamo.vllm --model Qwen/Qwen3-0.6B --load-format gms --enforce-eager --enable-sleep-mode --gpu-memory-utilization 0.9 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:20158", "enable_kv_cache_events": true} in /workspace
+INFO     VLLMWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8152/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 503 74
+INFO     VLLMWithGMSProcess:managed_process.py:742 Still waiting for URL http://localhost:8152/health (status code 503) (attempt=21, elapsed=20.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "GET /health HTTP/1.1" 200 180
+INFO     VLLMWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8152/health (attempt=22, elapsed=21.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 14,
+    "nanos": 44964905
+  },
+  "endpoints": {
+    "generate": "ready",
+    "clear_kv_blocks": "ready",
+    "worker_kv_indexer_query_dp0": "ready",
+    "get_perf_metrics": "ready"
+  }
+}
+INFO     VLLMWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8202/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8202
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8202 "GET /v1/models HTTP/1.1" 200 109
+INFO     VLLMWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8202/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775642764,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     VLLMWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8202/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8202
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8202 "GET /health HTTP/1.1" 200 938
+INFO     VLLMWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8202/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 112763080248762889,
+      "transport": {
+        "tcp": "10.1.12.168:46703/1909d6c8e01a209/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 112763080248762889,
+      "transport": {
+        "tcp": "10.1.12.168:46703/1909d6c8e01a209/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 112763080248762889,
+      "transport": {
+        "tcp": "10.1.12.168:46703/1909d6c8e01a209/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 112763080248762889,
+      "transport": {
+        "tcp": "10.1.12.168:46703/1909d6c8e01a209/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8202
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8202 "POST /v1/completions HTTP/1.1" 200 439
+INFO     tests.gms.integration.test_gms_sleep_wake:test_gms_sleep_wake.py:55 Initial inference result: {'id': 'cmpl-ae170186-8f30-4994-9163-10f30560b575', 'choices': [{'text': 'Class\nclass Hello:\n    def __init__(self, name):\n        self.name = name\n', 'index': 0, 'finish_reason': 'length'}], 'created': 1775642766, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 1, 'completion_tokens': 20, 'total_tokens': 21}, 'nvext': {'timing': {'request_received_ms': 1775642766663, 'total_time_ms': 704.84616}}}
+INFO     tests.gms.integration.test_gms_sleep_wake:test_gms_sleep_wake.py:77 Memory before sleep: 22243 MB
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "POST /engine/sleep HTTP/1.1" 200 50
+INFO     tests.gms.harness.vllm:vllm.py:108 engine sleep: {'status': 'ok', 'message': 'Engine slept (level=2)'}
+INFO     tests.gms.integration.test_gms_sleep_wake:test_gms_sleep_wake.py:84 Memory after sleep: 20257 MB
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8152
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8152 "POST /engine/wake_up HTTP/1.1" 200 39
+INFO     tests.gms.harness.vllm:vllm.py:119 engine wake: {'status': 'ok', 'message': 'Engine woke'}
+INFO     tests.gms.integration.test_gms_sleep_wake:test_gms_sleep_wake.py:133 Memory after wake: 22243 MB
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8202
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8202 "POST /v1/completions HTTP/1.1" 200 435
+INFO     tests.gms.integration.test_gms_sleep_wake:test_gms_sleep_wake.py:177 Post-wake inference result: {'id': 'cmpl-a2470a04-4687-4a15-b561-a09be3fbd43e', 'choices': [{'text': ', My Friends, to the Past, and to the Future\n\nThe first time I saw her,', 'index': 0, 'finish_reason': 'length'}], 'created': 1775642767, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 2, 'completion_tokens': 20, 'total_tokens': 22}, 'nvext': {'timing': {'request_received_ms': 1775642767855, 'total_time_ms': 317.096517}}}
+INFO     tests.gms.integration.test_gms_sleep_wake:test_gms_sleep_wake.py:180 Memory freed: 1986 MB
+INFO     VLLMWithGMSProcess:managed_process.py:558 Sending SIGTERM to process group: 19914
+INFO     VLLMWithGMSProcess:managed_process.py:31 Terminating PID: 19916 name: tee
+INFO     VLLMWithGMSProcess:managed_process.py:36 Sending SIGTERM (kill): 19916 tee
+INFO     VLLMWithGMSProcess:managed_process.py:31 Terminating PID: 19915 name: sed
+INFO     VLLMWithGMSProcess:managed_process.py:36 Sending SIGTERM (kill): 19915 sed
+INFO     DynamoFrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 19911
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 19913 name: tee
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 19913 tee
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 19912 name: sed
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 19912 sed
+INFO     GMSServerProcess:managed_process.py:558 Sending SIGTERM to process group: 19892
+INFO     GMSServerProcess:managed_process.py:31 Terminating PID: 19894 name: tee
+INFO     GMSServerProcess:managed_process.py:36 Sending SIGTERM (kill): 19894 tee
+INFO     GMSServerProcess:managed_process.py:31 Terminating PID: 19893 name: sed
+INFO     GMSServerProcess:managed_process.py:36 Sending SIGTERM (kill): 19893 sed
+INFO     GMSServerProcess:managed_process.py:558 Sending SIGTERM to process group: 19872
+INFO     GMSServerProcess:managed_process.py:31 Terminating PID: 19874 name: tee
+INFO     GMSServerProcess:managed_process.py:36 Sending SIGTERM (kill): 19874 tee
+INFO     GMSServerProcess:managed_process.py:31 Terminating PID: 19873 name: sed
+INFO     GMSServerProcess:managed_process.py:36 Sending SIGTERM (kill): 19873 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 19858
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 19859 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 19859 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 19846
+INFO     NatsServer:managed_process.py:31 Terminating PID: 19847 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 19847 sed

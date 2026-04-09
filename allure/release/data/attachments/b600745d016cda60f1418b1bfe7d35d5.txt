@@ -1,0 +1,47 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4288 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4288
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4288
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2453 --advertise-client-urls http://0.0.0.0:2453 --listen-peer-urls http://0.0.0.0:2454 --initial-advertise-peer-urls http://localhost:2454 --initial-cluster default=http://localhost:2454 --data-dir /tmp/etcd_9m25h2z2 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2453
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2453
+INFO     test_sglang_deployment[disaggregated_same_gpu-2]:common.py:43 Starting disaggregated_same_gpu test_deployment
+INFO     test_sglang_deployment[disaggregated_same_gpu-2]:common.py:49 Using model: Qwen/Qwen3-0.6B
+INFO     test_sglang_deployment[disaggregated_same_gpu-2]:common.py:50 Script: disagg_same_gpu.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/sglang/launch/disagg_same_gpu.sh in /workspace/examples/backends/sglang
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8172/health
+ERROR    EngineProcess:managed_process.py:642 Main server process died with exit code 0 while waiting for health check
+ERROR    EngineProcess:managed_process.py:627 === Last 20 lines from /tmp/dynamo_tests/test_sglang_deployment[disaggregated_same_gpu-2]/bash.log.txt ===
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/sgl-workspace/sglang/python/sglang/srt/entrypoints/engine.py", line 894, in _wait_for_scheduler_ready
+ERROR    EngineProcess:managed_process.py:633 [BASH]     data = scheduler_pipe_readers[i].recv()
+ERROR    EngineProcess:managed_process.py:633 [BASH]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/usr/lib/python3.12/multiprocessing/connection.py", line 250, in recv
+ERROR    EngineProcess:managed_process.py:633 [BASH]     buf = self._recv_bytes()
+ERROR    EngineProcess:managed_process.py:633 [BASH]           ^^^^^^^^^^^^^^^^^^
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/usr/lib/python3.12/multiprocessing/connection.py", line 430, in _recv_bytes
+ERROR    EngineProcess:managed_process.py:633 [BASH]     buf = self._recv(4)
+ERROR    EngineProcess:managed_process.py:633 [BASH]           ^^^^^^^^^^^^^
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/usr/lib/python3.12/multiprocessing/connection.py", line 399, in _recv
+ERROR    EngineProcess:managed_process.py:633 [BASH]     raise EOFError
+ERROR    EngineProcess:managed_process.py:633 [BASH] EOFError
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T17:21:26.985650Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 503 Service Unavailable [3mlatency[0m[2m=[0m0 ms
+ERROR    EngineProcess:managed_process.py:633 [BASH] Cleaning up...
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T17:21:27.984160Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T17:21:27.984232Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T17:21:27.984248Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T17:21:27.984253Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T17:21:27.984256Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T17:21:27.984302Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+ERROR    EngineProcess:managed_process.py:634 === End of log tail ===
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3717
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3719 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3719 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3718 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3718 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 3704
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3705 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3705 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 3692
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3693 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3693 sed

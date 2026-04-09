@@ -1,0 +1,45 @@
+[2m2026-04-09T01:51:09.897176Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 6 models needed for collected tests
+Models: {'Qwen/Qwen2-VL-7B-Instruct', 'Qwen/Qwen3-0.6B', 'Qwen/Qwen2.5-VL-7B-Instruct', 'silence09/DeepSeek-R1-Small-2layers', 'Qwen/Qwen3-Embedding-4B', 'Qwen/Qwen3-VL-2B-Instruct'}
+[2m2026-04-09T01:51:09.897272Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-09T01:51:09.897324Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2-VL-7B-Instruct
+[2m2026-04-09T01:51:10.034438Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen2-VL-7B-Instruct: 401 Client Error. (Request ID: Root=1-69d7060d-55336ff80a4a020144616909;c7812bcf-4a41-43e2-9d85-2ca8317e5fe6)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen2-VL-7B-Instruct/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+[2m2026-04-09T01:51:10.034518Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+[2m2026-04-09T01:51:10.123906Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen3-0.6B: 401 Client Error. (Request ID: Root=1-69d7060e-5446cc2a2beb3d3d5c930073;689f7335-645b-43fa-bcb0-27060242b5d4)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+[2m2026-04-09T01:51:10.123970Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-04-09T01:51:10.214983Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen2.5-VL-7B-Instruct: 401 Client Error. (Request ID: Root=1-69d7060e-5cafd1287f78920828184650;d0b3bb66-7bc0-49ee-955f-2be3d0f02793)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen2.5-VL-7B-Instruct/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+[2m2026-04-09T01:51:10.215042Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: silence09/DeepSeek-R1-Small-2layers
+[2m2026-04-09T01:51:10.308718Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download silence09/DeepSeek-R1-Small-2layers: 401 Client Error. (Request ID: Root=1-69d7060e-066cf3321d16a3634f62414e;88e6d20e-2dd3-4393-afc1-795720e20c91)
+
+Repository Not Found for url: https://huggingface.co/api/models/silence09/DeepSeek-R1-Small-2layers/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+[2m2026-04-09T01:51:10.308822Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-Embedding-4B
+[2m2026-04-09T01:51:10.407058Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen3-Embedding-4B: 401 Client Error. (Request ID: Root=1-69d7060e-77a466271a1b8e556e79f362;5e55f0e2-ea10-47f1-9c49-3dcbf2dabaf2)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-Embedding-4B/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+[2m2026-04-09T01:51:10.407123Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-09T01:51:10.505049Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen3-VL-2B-Instruct: 401 Client Error. (Request ID: Root=1-69d7060e-4553d2d4405c95723dc886a0;8cbe482a-a5ec-46e4-99aa-2f639ce7c2cd)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-VL-2B-Instruct/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired

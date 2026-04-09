@@ -1,0 +1,21 @@
+[2m2026-04-08T18:38:33.108737Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 9352
+[2m2026-04-08T18:38:38.615161Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 9354 name: tee
+[2m2026-04-08T18:38:38.615278Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 9354 tee
+[2m2026-04-08T18:38:38.615859Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 9353 name: sed
+[2m2026-04-08T18:38:38.615934Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 9353 sed
+[2m2026-04-08T18:38:38.616492Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 9225
+[2m2026-04-08T18:38:39.918835Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 9227 name: tee
+[2m2026-04-08T18:38:39.918951Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 9227 tee
+[2m2026-04-08T18:38:39.919459Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 9226 name: sed
+[2m2026-04-08T18:38:39.919533Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 9226 sed
+[2m2026-04-08T18:38:39.920075Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 8851
+[2m2026-04-08T18:38:42.523451Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 8853 name: tee
+[2m2026-04-08T18:38:42.523566Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 8853 tee
+[2m2026-04-08T18:38:42.523969Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 8852 name: sed
+[2m2026-04-08T18:38:42.524043Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 8852 sed
+[2m2026-04-08T18:38:42.525292Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 8838
+[2m2026-04-08T18:38:42.625779Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 8839 name: sed
+[2m2026-04-08T18:38:42.625866Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 8839 sed
+[2m2026-04-08T18:38:42.626707Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 8825
+[2m2026-04-08T18:38:42.727712Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 8826 name: sed
+[2m2026-04-08T18:38:42.727797Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 8826 sed

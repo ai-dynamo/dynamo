@@ -1,0 +1,85 @@
+INFO     root:conftest.py:430 Downloading 6 models needed for collected tests
+Models: {'Qwen/Qwen3-0.6B', 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', 'Qwen/Qwen3-VL-2B-Instruct', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers', 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice', 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'}
+INFO     root:conftest.py:279 HF_TOKEN found in environment
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-0.6B
+INFO     root:conftest.py:323 Successfully pre-downloaded: Qwen/Qwen3-0.6B
+INFO     root:conftest.py:296 Pre-downloading model: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+INFO     root:conftest.py:323 Successfully pre-downloaded: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+INFO     root:conftest.py:323 Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct
+INFO     root:conftest.py:296 Pre-downloading model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+INFO     root:conftest.py:323 Successfully pre-downloaded: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/vocab.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+ERROR    root:conftest.py:326 Failed to pre-download Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+INFO     root:conftest.py:296 Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+INFO     root:conftest.py:323 Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0

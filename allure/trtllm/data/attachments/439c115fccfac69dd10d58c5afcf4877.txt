@@ -1,0 +1,4 @@
+WARNING  dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:98 Invalid size format: 832480, using defaults
+WARNING  dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:98 Invalid size format: 832, using defaults
+WARNING  dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:98 Invalid size format: widthxheight, using defaults
+WARNING  dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:98 Invalid size format: 832x, using defaults

@@ -1,0 +1,44 @@
+[BASH] Checking audio multimodal dependencies...
+[BASH]   ✓ accelerate is installed
+[BASH]   ✓ vllm with audio support is installed
+[BASH] All required dependencies are already installed
+[BASH] [2m2026-04-08T09:58:28.599940Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
+[BASH] [2m2026-04-08T09:58:28.604498Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2385)
+[BASH] [2m2026-04-08T09:58:28.608438Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.27.54 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-08T09:58:28.614957Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8011"
+[BASH] [2m2026-04-08T09:58:29.452314Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T09:58:31.454232Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] dynamo.nixl_connect: Failed to load CuPy for GPU acceleration, utilizing numpy to provide CPU based operations.
+[BASH] Traceback (most recent call last):
+[BASH]   File "/workspace/examples/multimodal/components/worker.py", line 20, in <module>
+[BASH]     from vllm.inputs.data import TokensPrompt
+[BASH] ModuleNotFoundError: No module named 'vllm.inputs.data'
+[BASH] Traceback (most recent call last):
+[BASH]   File "/workspace/examples/multimodal/components/audio_encode_worker.py", line 37, in <module>
+[BASH]     from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
+[BASH]   File "/workspace/examples/multimodal/components/../utils/protocol.py", line 24, in <module>
+[BASH]     from vllm.inputs.data import TokensPrompt
+[BASH] ModuleNotFoundError: No module named 'vllm.inputs.data'
+[BASH] Traceback (most recent call last):
+[BASH]   File "/workspace/examples/multimodal/components/processor.py", line 32, in <module>
+[BASH]     from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
+[BASH]   File "/workspace/examples/multimodal/components/../utils/chat_processor.py", line 31, in <module>
+[BASH]     from vllm.inputs.data import TokensPrompt
+[BASH] ModuleNotFoundError: No module named 'vllm.inputs.data'
+[BASH] Cleaning up...
+[BASH] [2m2026-04-08T09:58:32.819114Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T09:58:32.819235Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T09:58:32.819280Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T09:58:32.819285Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T09:58:32.819289Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T09:58:32.819350Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+[BASH] [2m2026-04-08T09:58:33.456517Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T09:58:33.456637Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T09:58:33.456668Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T09:58:33.456675Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T09:58:33.456682Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T09:58:37.820862Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T09:58:37.820981Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T09:58:37.821004Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T09:58:37.821013Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T09:58:37.821020Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected

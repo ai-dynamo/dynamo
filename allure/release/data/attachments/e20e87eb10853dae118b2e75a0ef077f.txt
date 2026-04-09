@@ -1,0 +1,58 @@
+[2m2026-04-08T18:19:09.560757Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4312 in /workspace
+[2m2026-04-08T18:19:09.561947Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4312
+[2m2026-04-08T18:19:09.662705Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4312
+[2m2026-04-08T18:19:09.662854Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:19:09.664709Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:19:09.665547Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2469 --advertise-client-urls http://0.0.0.0:2469 --listen-peer-urls http://0.0.0.0:2470 --initial-advertise-peer-urls http://localhost:2470 --initial-cluster default=http://localhost:2470 --data-dir /tmp/etcd_qwiu1hkz in /workspace
+[2m2026-04-08T18:19:09.666354Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2469
+[2m2026-04-08T18:19:09.767037Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2469
+[2m2026-04-08T18:19:09.782012Z[0m [32m INFO[0m [2mallocations.__init__[0m[2m:[0m GMSAllocationManager initialized: device=0, granularity=2097152, alloc_retry_interval=0.500, alloc_retry_timeout=none
+[2m2026-04-08T18:19:09.782104Z[0m [32m INFO[0m [2mgms.__init__[0m[2m:[0m GMS initialized: device=0
+[2m2026-04-08T18:19:09.782146Z[0m [32m INFO[0m [2mrpc.__init__[0m[2m:[0m GMSRPCServer initialized: device=0
+[2m2026-04-08T18:19:09.782587Z[0m [32m INFO[0m [2mrpc.serve[0m[2m:[0m Server started: /tmp/gms_GPU-8360bb79-133b-7af4-7a16-9810850574c7_weights.sock
+[2m2026-04-08T18:19:09.793300Z[0m [32m INFO[0m [2mallocations.__init__[0m[2m:[0m GMSAllocationManager initialized: device=0, granularity=2097152, alloc_retry_interval=0.500, alloc_retry_timeout=none
+[2m2026-04-08T18:19:09.793542Z[0m [32m INFO[0m [2mgms.__init__[0m[2m:[0m GMS initialized: device=0
+[2m2026-04-08T18:19:09.793601Z[0m [32m INFO[0m [2mrpc.__init__[0m[2m:[0m GMSRPCServer initialized: device=0
+[2m2026-04-08T18:19:09.794076Z[0m [32m INFO[0m [2mrpc.serve[0m[2m:[0m Server started: /tmp/gms_GPU-8360bb79-133b-7af4-7a16-9810850574c7_kv_cache.sock
+[2m2026-04-08T18:19:09.804842Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8215 --migration-limit 0 in /workspace
+[2m2026-04-08T18:19:09.806826Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --load-format gms --enable-memory-saver --mem-fraction-static 0.9 --port 30100 in /workspace
+[2m2026-04-08T18:19:09.808109Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8157/health
+[2m2026-04-08T18:19:27.837206Z[0m [31mERROR[0m [2mmanaged_process._check_process_alive[0m[2m:[0m Main server process died with exit code -9 while waiting for health check
+[2m2026-04-08T18:19:27.837793Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === Last 20 lines from /tmp/dynamo_tests/test_gms_shadow_engine_failover_sglang_shadow-a/shadow-a.log.txt ===
+[2m2026-04-08T18:19:27.838022Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]     torch_impl = _TorchMemorySaverImpl(hook_mode="torch")
+[2m2026-04-08T18:19:27.838121Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:19:27.838170Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]   File "/usr/local/lib/python3.12/dist-packages/torch_memory_saver/entrypoint.py", line 83, in __init__
+[2m2026-04-08T18:19:27.838216Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]     self._hook_util = HookUtilBase.create(hook_mode=hook_mode)
+[2m2026-04-08T18:19:27.838261Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:19:27.838304Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]   File "/usr/local/lib/python3.12/dist-packages/torch_memory_saver/hooks/base.py", line 12, in create
+[2m2026-04-08T18:19:27.838347Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]     return {
+[2m2026-04-08T18:19:27.838390Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]            ^
+[2m2026-04-08T18:19:27.838433Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]   File "/usr/local/lib/python3.12/dist-packages/torch_memory_saver/hooks/mode_torch.py", line 12, in __init__
+[2m2026-04-08T18:19:27.838487Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]     self.allocator = CUDAPluggableAllocator(self.get_path_binary(), "tms_torch_malloc", "tms_torch_free")
+[2m2026-04-08T18:19:27.838531Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:19:27.838587Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]   File "/usr/local/lib/python3.12/dist-packages/torch/cuda/memory.py", line 1128, in __init__
+[2m2026-04-08T18:19:27.838633Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]     allocator = ctypes.CDLL(path_to_so_file)
+[2m2026-04-08T18:19:27.838673Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:19:27.838714Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]   File "/usr/lib/python3.12/ctypes/__init__.py", line 379, in __init__
+[2m2026-04-08T18:19:27.838753Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]     self._handle = _dlopen(self._name, mode)
+[2m2026-04-08T18:19:27.838794Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]                    ^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T18:19:27.838835Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A] OSError: libcudart.so.12: cannot open shared object file: No such file or directory
+[2m2026-04-08T18:19:27.838883Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A]
+[2m2026-04-08T18:19:27.838926Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [SHADOW-A] \x1b[2m2026-04-08T18:19:27.044558Z\x1b[0m \x1b[31mERROR\x1b[0m \x1b[2mengine.launch_phase_sigquit_handler\x1b[0m\x1b[2m:\x1b[0m Received sigquit from a child process. It usually means the child failed.
+[2m2026-04-08T18:19:27.838969Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === End of log tail ===
+[2m2026-04-08T18:19:27.839048Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13028
+[2m2026-04-08T18:19:27.839658Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13030 name: tee
+[2m2026-04-08T18:19:27.839757Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13030 tee
+[2m2026-04-08T18:19:27.840238Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13029 name: sed
+[2m2026-04-08T18:19:27.840330Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13029 sed
+[2m2026-04-08T18:19:27.840787Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13025
+[2m2026-04-08T18:19:32.946946Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13027 name: tee
+[2m2026-04-08T18:19:32.947112Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13027 tee
+[2m2026-04-08T18:19:32.947535Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13026 name: sed
+[2m2026-04-08T18:19:32.947630Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13026 sed
+[2m2026-04-08T18:19:32.975722Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13009
+[2m2026-04-08T18:19:33.076669Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13010 name: sed
+[2m2026-04-08T18:19:33.076886Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13010 sed
+[2m2026-04-08T18:19:33.077855Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12997
+[2m2026-04-08T18:19:33.178739Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12998 name: sed
+[2m2026-04-08T18:19:33.178985Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12998 sed

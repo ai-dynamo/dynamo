@@ -1,0 +1,1 @@
+{"id":"1c8e2628d7af66e3610eae0e939a1b64","fullName":"components.src.dynamo.vllm.tests.test_vllm_audio_handler#test_extract_multimodal_data_rejects_requests_when_disabled","name":"test_extract_multimodal_data_rejects_requests_when_disabled","status":"passed","testResultsByEnv":{"default":"e32896b6010f15d96eb620538d99ae2b"}}

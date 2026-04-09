@@ -1,0 +1,12 @@
+[2m2026-04-09T00:19:32.732594Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m Cannot connect to ModelExpress server: Transport error: transport error. Using direct download.
+[2m2026-04-09T00:19:32.732623Z[0m [32m INFO[0m [2mmodelexpress_common::download[0m[2m:[0m Downloading model 'Qwen/Qwen3-0.6B' using provider: Hugging Face
+[2m2026-04-09T00:19:32.732660Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Using cache directory: "/home/dynamo/.cache/huggingface/hub"
+[2m2026-04-09T00:19:32.876876Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Downloaded model files for Qwen/Qwen3-0.6B
+[2m2026-04-09T00:19:32.876915Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m ModelExpress download completed successfully for model: Qwen/Qwen3-0.6B
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json
+[2m2026-04-09T00:19:33.040621Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:19:33.040709Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:19:34.370285Z[0m [32m INFO[0m [2mserver_args._handle_attention_backend_compatibility[0m[2m:[0m Attention backend not specified. Use flashinfer backend by default.
+[2m2026-04-09T00:19:34.370494Z[0m [32m INFO[0m [2margs.parse_args[0m[2m:[0m Using dynamo's built in tokenizer
+[2m2026-04-09T00:19:34.370542Z[0m [32m INFO[0m [2margs.parse_args[0m[2m:[0m Derived use_kv_events=False from kv_events_config=None

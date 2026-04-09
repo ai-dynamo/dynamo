@@ -1,0 +1,12 @@
+[2m2026-04-08T19:28:57.682468Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Received generation request: 356863d1-c16c-40bd-9593-dd058b5740bc
+[2m2026-04-08T19:28:57.682609Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 356863d1-c16c-40bd-9593-dd058b5740bc: prompt='a test video...', size=832x480, frames=81, steps=50
+[2m2026-04-08T19:28:57.683185Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Received generation request: d2fdc5ac-f047-4191-9bd4-af1ccb21ab92
+[2m2026-04-08T19:28:57.683264Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request d2fdc5ac-f047-4191-9bd4-af1ccb21ab92: prompt='a test video...', size=832x480, frames=81, steps=50
+[2m2026-04-08T19:28:57.683467Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Received generation request: 05551133-16df-496a-acab-e4b60380361d
+[2m2026-04-08T19:28:57.683535Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 05551133-16df-496a-acab-e4b60380361d: prompt='a test video...', size=832x480, frames=81, steps=50
+[2m2026-04-08T19:28:57.784677Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 356863d1-c16c-40bd-9593-dd058b5740bc: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[2m2026-04-08T19:28:57.785331Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 356863d1-c16c-40bd-9593-dd058b5740bc completed in 0.10s
+[2m2026-04-08T19:28:57.885801Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request d2fdc5ac-f047-4191-9bd4-af1ccb21ab92: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[2m2026-04-08T19:28:57.886294Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request d2fdc5ac-f047-4191-9bd4-af1ccb21ab92 completed in 0.20s
+[2m2026-04-08T19:28:57.987267Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 05551133-16df-496a-acab-e4b60380361d: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[2m2026-04-08T19:28:57.987678Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 05551133-16df-496a-acab-e4b60380361d completed in 0.30s

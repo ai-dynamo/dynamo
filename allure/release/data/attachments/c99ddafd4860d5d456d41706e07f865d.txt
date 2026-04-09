@@ -1,0 +1,1 @@
+[2m2026-04-08T19:27:33.392014Z[0m [32m INFO[0m [2mprefill.load_plan_adjustment[0m[2m:[0m TTFT regression: insufficient data (2/5), skipping load-based scaling

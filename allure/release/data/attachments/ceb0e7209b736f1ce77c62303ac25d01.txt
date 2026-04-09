@@ -1,0 +1,116 @@
+[2m2026-04-08T18:15:57.319242Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4222 -js --store_dir /tmp/nats_madztqf5 in /workspace
+[2m2026-04-08T18:15:57.320251Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4222
+[2m2026-04-08T18:15:57.420858Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4222
+[2m2026-04-08T18:15:57.421087Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:15:57.423522Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:15:57.423589Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_aggregated[0m[2m:[0m NATS server started successfully
+[2m2026-04-08T18:15:57.423732Z[0m [32m INFO[0m [2mutils.start[0m[2m:[0m Starting 1-node ETCD cluster
+[2m2026-04-08T18:15:57.423918Z[0m [32m INFO[0m [2mutils._start_replica[0m[2m:[0m Starting etcd-0 on client port 2379, peer port 2380
+[2m2026-04-08T18:15:57.424121Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --name etcd-0 --data-dir /tmp/etcd_0_pt6pil6n --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://0.0.0.0:2380 --initial-advertise-peer-urls http://127.0.0.1:2380 --initial-cluster etcd-0=http://127.0.0.1:2380 --initial-cluster-state new --initial-cluster-token etcd-cluster in /workspace
+[2m2026-04-08T18:15:57.424978Z[0m [32m INFO[0m [2mutils.start[0m[2m:[0m All 1 ETCD replicas started successfully
+[2m2026-04-08T18:15:57.425035Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:15:57.425835Z[0m [33m WARN[0m [2mutils.get_status[0m[2m:[0m Failed to get status for etcd-0: HTTPConnectionPool(host='127.0.0.1', port=2379): Max retries exceeded with url: /v3/maintenance/status (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=2379): Failed to establish a new connection: [Errno 111] Connection refused"))
+[2m2026-04-08T18:15:58.428703Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-0
+[2m2026-04-08T18:15:58.428782Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_aggregated[0m[2m:[0m Single ETCD node started successfully
+[2m2026-04-08T18:15:58.428832Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_aggregated[0m[2m:[0m ETCD endpoint: ['http://127.0.0.1:2379']
+[2m2026-04-08T18:15:58.430155Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --migration-limit 0 in /workspace
+[2m2026-04-08T18:15:58.431368Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_aggregated[0m[2m:[0m Frontend started successfully
+[2m2026-04-08T18:15:58.431655Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --gpu-memory-utilization 0.45 --max-model-len 8192 in /workspace
+[2m2026-04-08T18:15:58.432839Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8081/health
+[2m2026-04-08T18:16:18.470915Z[0m [32m INFO[0m [2mtest_vllm.is_ready[0m[2m:[0m Worker status is ready
+[2m2026-04-08T18:16:18.471035Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8081/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 13,
+    "nanos": 49157932
+  },
+  "endpoints": {
+    "generate": "ready",
+    "clear_kv_blocks": "ready",
+    "get_perf_metrics": "ready"
+  }
+}
+[2m2026-04-08T18:16:18.471147Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8000/v1/models
+[2m2026-04-08T18:16:21.474948Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8000/v1/models (attempt=2, elapsed=2.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775672180,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T18:16:21.475255Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8000/health
+[2m2026-04-08T18:16:22.477699Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8000/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 7668677362600707081,
+      "transport": {
+        "tcp": "10.1.84.211:46201/6a6c9d6e4ee50409/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7668677362600707081,
+      "transport": {
+        "tcp": "10.1.84.211:46201/6a6c9d6e4ee50409/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 7668677362600707081,
+      "transport": {
+        "tcp": "10.1.84.211:46201/6a6c9d6e4ee50409/get_perf_metrics"
+      }
+    }
+  ]
+}
+[2m2026-04-08T18:16:22.477956Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_aggregated[0m[2m:[0m Worker started successfully
+[2m2026-04-08T18:16:22.478023Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_aggregated[0m[2m:[0m Sending inference request
+[2m2026-04-08T18:16:22.478078Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Sending inference request: 'What is 2+2? The answer is'
+[2m2026-04-08T18:16:23.619604Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Inference generated text: '4. But what if there are other numbers? What if there are more than two numbers? What if there are more than two numbers and the numbers are not all positive integers? What if there are more than two numbers and the numbers are not'
+[2m2026-04-08T18:16:23.619782Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_aggregated[0m[2m:[0m System is working correctly with single ETCD node
+[2m2026-04-08T18:16:23.619836Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_aggregated[0m[2m:[0m Terminating single ETCD node
+[2m2026-04-08T18:16:23.619896Z[0m [32m INFO[0m [2mutils.stop[0m[2m:[0m Cleaning up ETCD cluster
+[2m2026-04-08T18:16:23.620558Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2852
+[2m2026-04-08T18:16:30.628956Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2853 name: sed
+[2m2026-04-08T18:16:30.629117Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2853 sed
+[2m2026-04-08T18:16:30.629573Z[0m [33m WARN[0m [2mutils.stop[0m[2m:[0m Error removing data directory /tmp/etcd_0_pt6pil6n: [Errno 2] No such file or directory: '/tmp/etcd_0_pt6pil6n'
+[2m2026-04-08T18:16:30.629644Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Waiting for 2 process(es) to terminate
+[2m2026-04-08T18:16:42.631205Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Worker process has terminated after 12s
+[2m2026-04-08T18:16:43.631668Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Frontend process has terminated after 13s
+[2m2026-04-08T18:16:43.631881Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2869
+[2m2026-04-08T18:16:43.632748Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2871 name: tee
+[2m2026-04-08T18:16:43.632850Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2871 tee
+[2m2026-04-08T18:16:43.633258Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2870 name: sed
+[2m2026-04-08T18:16:43.633346Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2870 sed
+[2m2026-04-08T18:16:43.633482Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2866
+[2m2026-04-08T18:16:43.633829Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2868 name: tee
+[2m2026-04-08T18:16:43.633916Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2868 tee
+[2m2026-04-08T18:16:43.634256Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2867 name: sed
+[2m2026-04-08T18:16:43.634341Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2867 sed
+[2m2026-04-08T18:16:43.635061Z[0m [32m INFO[0m [2mutils.stop[0m[2m:[0m Cleaning up ETCD cluster
+[2m2026-04-08T18:16:43.635309Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2838
+[2m2026-04-08T18:16:43.736097Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2839 name: sed
+[2m2026-04-08T18:16:43.736297Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2839 sed

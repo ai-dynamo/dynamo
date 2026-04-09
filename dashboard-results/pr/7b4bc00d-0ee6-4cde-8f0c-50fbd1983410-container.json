@@ -1,0 +1,1 @@
+{"uuid": "4ba6ecd3-95a1-4864-9d68-8285d8a6e7a6", "children": ["4018173b-ad12-4a77-8d02-352c8fd55a2c"], "befores": [{"name": "kubernetes_connector", "status": "passed", "start": 1775728666874, "stop": 1775728666874}], "start": 1775728666874, "stop": 1775728666876}

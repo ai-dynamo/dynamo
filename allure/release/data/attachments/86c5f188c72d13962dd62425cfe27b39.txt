@@ -1,0 +1,323 @@
+INFO     root:conftest.py:430 Downloading 10 models needed for collected tests
+Models: {'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice', 'TinyLlama/TinyLlama-1.1B-Chat-v1.0', 'Qwen/Qwen3-0.6B', 'Qwen/Qwen2.5-VL-7B-Instruct', 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', 'openai/gpt-oss-20b', 'Qwen/Qwen2-VL-2B-Instruct', 'deepseek-ai/deepseek-llm-7b-base', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers', 'Qwen/Qwen3-VL-2B-Instruct'}
+INFO     root:conftest.py:279 HF_TOKEN found in environment
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/vocab.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/configuration.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/vocab.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/speech_tokenizer/preprocessor_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/README.md
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice/resolve/0c0e3051f131929182e2c023b9537f8b1c68adfe/merges.txt
+ERROR    root:conftest.py:326 Failed to pre-download Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+INFO     root:conftest.py:296 Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+INFO     root:conftest.py:323 Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-0.6B
+INFO     root:conftest.py:323 Successfully pre-downloaded: Qwen/Qwen3-0.6B
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen2.5-VL-7B-Instruct
+INFO     root:conftest.py:323 Successfully pre-downloaded: Qwen/Qwen2.5-VL-7B-Instruct
+INFO     root:conftest.py:296 Pre-downloading model: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/comp_effic.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/comp_effic.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/model_index.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/model_index.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/model_index.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/performance.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/logo.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_2.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/vae.png
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/examples/i2v_input.JPG
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/scheduler/scheduler_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/assets/moe_arch.png
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/model-00002-of-00003.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/model.safetensors.index.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers/resolve/b8fff7315c768468a5333511427288870b2e9635/text_encoder/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+ERROR    root:conftest.py:326 Failed to pre-download Wan-AI/Wan2.2-TI2V-5B-Diffusers: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+INFO     root:conftest.py:296 Pre-downloading model: openai/gpt-oss-20b
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/LICENSE
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/model-00000-of-00002.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/special_tokens_map.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/model-00000-of-00002.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+INFO     root:conftest.py:323 Successfully pre-downloaded: openai/gpt-oss-20b
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen2-VL-2B-Instruct
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct/resolve/895c3a49bc3fa70a340399125c650a463535e71c/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+INFO     root:conftest.py:323 Successfully pre-downloaded: Qwen/Qwen2-VL-2B-Instruct
+INFO     root:conftest.py:296 Pre-downloading model: deepseek-ai/deepseek-llm-7b-base
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/generation_config.json
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00001-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/config.json
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer.json
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model.bin.index.json
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/pytorch_model-00002-of-00002.bin
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/README.md
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/deepseek-ai/deepseek-llm-7b-base/resolve/7683fea62db869066ddaff6a41d032262c490d4f/tokenizer_config.json
+ERROR    root:conftest.py:326 Failed to pre-download deepseek-ai/deepseek-llm-7b-base: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+INFO     root:conftest.py:296 Pre-downloading model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+WARNING  huggingface_hub.utils._http:_http.py:320 '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: 8c8c8aa8-7159-4d82-86f6-b436944c45e0)')' thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:320 '(ReadTimeoutError("HTTPSConnectionPool(host='huggingface.co', port=443): Read timed out. (read timeout=10)"), '(Request ID: e394f5d6-a288-4265-ac3e-415e1aba68a5)')' thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/resolve/0fad780a534b6463e45facd96134c9f345acfa5b/tokenizer/tokenizer_config.json
+ERROR    root:conftest.py:326 Failed to pre-download Wan-AI/Wan2.1-T2V-1.3B-Diffusers: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/.gitattributes
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/vocab.json
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 1s [Retry 1/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/model.safetensors
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 2s [Retry 2/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 4s [Retry 3/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 4/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/merges.txt
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+WARNING  huggingface_hub.utils._http:_http.py:329 Retrying in 8s [Retry 5/5].
+WARNING  huggingface_hub.utils._http:_http.py:312 HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/README.md
+ERROR    root:conftest.py:326 Failed to pre-download Qwen/Qwen3-VL-2B-Instruct: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.

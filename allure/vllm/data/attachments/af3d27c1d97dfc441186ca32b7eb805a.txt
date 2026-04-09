@@ -1,0 +1,47 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4278 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4278
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4278
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2438 --advertise-client-urls http://0.0.0.0:2438 --listen-peer-urls http://0.0.0.0:2439 --initial-advertise-peer-urls http://localhost:2439 --initial-cluster default=http://localhost:2439 --data-dir /tmp/etcd_g0xrd9v6 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2438
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2438
+INFO     test_deployment[raw_embeddings_epd-2]:common.py:43 Starting raw_embeddings_epd test_deployment
+INFO     test_deployment[raw_embeddings_epd-2]:common.py:49 Using model: llava-hf/llava-v1.6-mistral-7b-hf
+INFO     test_deployment[raw_embeddings_epd-2]:common.py:50 Script: agg_raw_embeddings_llava.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/tests/serve/launch/agg_raw_embeddings_llava.sh in /workspace/tests/serve
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8048/v1/models
+ERROR    EngineProcess:managed_process.py:642 Main server process died with exit code -15 while waiting for health check
+ERROR    EngineProcess:managed_process.py:627 === Last 20 lines from /tmp/dynamo_tests/test_deployment[raw_embeddings_epd-2]/bash.log.txt ===
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "<stdin>", line 26, in <module>
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+ERROR    EngineProcess:managed_process.py:633 [BASH]     return opener.open(url, data, timeout)
+ERROR    EngineProcess:managed_process.py:633 [BASH]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+ERROR    EngineProcess:managed_process.py:633 [BASH]     response = meth(req, response)
+ERROR    EngineProcess:managed_process.py:633 [BASH]                ^^^^^^^^^^^^^^^^^^^
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+ERROR    EngineProcess:managed_process.py:633 [BASH]     response = self.parent.error(
+ERROR    EngineProcess:managed_process.py:633 [BASH]                ^^^^^^^^^^^^^^^^^^
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+ERROR    EngineProcess:managed_process.py:633 [BASH]     return self._call_chain(*args)
+ERROR    EngineProcess:managed_process.py:633 [BASH]            ^^^^^^^^^^^^^^^^^^^^^^^
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+ERROR    EngineProcess:managed_process.py:633 [BASH]     result = func(*args)
+ERROR    EngineProcess:managed_process.py:633 [BASH]              ^^^^^^^^^^^
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+ERROR    EngineProcess:managed_process.py:633 [BASH]     raise HTTPError(req.full_url, code, msg, hdrs, fp)
+ERROR    EngineProcess:managed_process.py:633 [BASH] urllib.error.HTTPError: HTTP Error 429: Too Many Requests
+ERROR    EngineProcess:managed_process.py:633 [BASH] Cleaning up...
+ERROR    EngineProcess:managed_process.py:634 === End of log tail ===
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3226
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3228 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3228 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3227 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3227 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 3211
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3212 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3212 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 3199
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3200 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3200 sed

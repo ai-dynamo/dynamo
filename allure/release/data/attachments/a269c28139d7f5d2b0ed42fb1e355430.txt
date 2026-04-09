@@ -1,0 +1,1 @@
+ERROR    root:args.py:84 Cannot use both --tool-call-parser and --dyn-tool-call-parser.

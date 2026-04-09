@@ -1,0 +1,151 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4253 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4253
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4253
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2394 --advertise-client-urls http://0.0.0.0:2394 --listen-peer-urls http://0.0.0.0:2395 --initial-advertise-peer-urls http://localhost:2395 --initial-cluster default=http://localhost:2395 --data-dir /tmp/etcd_gfi0irqq in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2394
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2394
+INFO     test_sglang_deployment[completions_only-2]:common.py:43 Starting completions_only test_deployment
+INFO     test_sglang_deployment[completions_only-2]:common.py:49 Using model: deepseek-ai/deepseek-llm-7b-base
+INFO     test_sglang_deployment[completions_only-2]:common.py:50 Script: agg.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/sglang/launch/agg.sh --model-path deepseek-ai/deepseek-llm-7b-base --dyn-endpoint-types completions in /workspace/examples/backends/sglang
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8059/v1/models
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8059/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8059/v1/models (custom check failed) (attempt=22, elapsed=41.0s)
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8059/v1/models (custom check failed) (attempt=32, elapsed=61.1s)
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8059/v1/models (attempt=39, elapsed=75.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "deepseek-ai/deepseek-llm-7b-base",
+      "object": "model",
+      "created": 1775673565,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8059/health
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8059/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6871821703874151945,
+      "transport": {
+        "tcp": "10.1.77.185:44409/5f5d9d6e633d0609/generate"
+      }
+    }
+  ]
+}
+INFO     test_sglang_deployment[completions_only-2]:common.py:124 TESTING: Payload: CompletionPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8059/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/deepseek-llm-7b-base"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=52.55s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8059/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/deepseek-llm-7b-base"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=51.91s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8059/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/deepseek-llm-7b-base"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=51.93s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 10984
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 10986 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 10986 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 10985 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 10985 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 10971
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 10972 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 10972 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 10959
+INFO     NatsServer:managed_process.py:31 Terminating PID: 10960 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 10960 sed

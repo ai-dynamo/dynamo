@@ -1,0 +1,1 @@
+[TEST] 2026-04-08T20:53:24 ERROR root: Unrecognized argument: --unknown-flag

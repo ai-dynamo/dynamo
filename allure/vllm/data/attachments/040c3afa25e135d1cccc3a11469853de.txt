@@ -1,0 +1,1 @@
+INFO     dynamo.vllm.handlers:handlers.py:1245 [PERF] extract_mm_data request_id=req-1 images=0 videos=1 time_ms=0.04

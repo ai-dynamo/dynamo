@@ -1,0 +1,1 @@
+[2m2026-04-09T02:22:09.820724Z[0m [33m WARN[0m [2magg.find_best_engine_agg_rps[0m[2m:[0m Agg SLA unreachable at batch_size=1: TTFT=427.6ms (target 500.0ms), ITL=421.7ms (target 50.0ms)

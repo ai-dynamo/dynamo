@@ -1,0 +1,17 @@
+[2m2026-04-09T01:21:57.711784Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 2 models needed for collected tests
+Models: {'llava-hf/llava-v1.6-mistral-7b-hf', 'Qwen/Qwen3-0.6B'}
+[2m2026-04-09T01:21:57.711898Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-09T01:21:57.711983Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: llava-hf/llava-v1.6-mistral-7b-hf
+[2m2026-04-09T01:21:57.852878Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download llava-hf/llava-v1.6-mistral-7b-hf: 401 Client Error. (Request ID: Root=1-69d6ff35-4a32e20b1cdd5ef103337134;3436e368-b3dc-4cd3-b1f8-6772db7fc7a4)
+
+Repository Not Found for url: https://huggingface.co/api/models/llava-hf/llava-v1.6-mistral-7b-hf/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+[2m2026-04-09T01:21:57.852945Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+[2m2026-04-09T01:21:57.948226Z[0m [31mERROR[0m [2mconftest.download_models[0m[2m:[0m Failed to pre-download Qwen/Qwen3-0.6B: 401 Client Error. (Request ID: Root=1-69d6ff35-023dae7d4e547cc516f0d7cb;6c721b2f-36c4-49c4-b347-b23338b5399f)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired

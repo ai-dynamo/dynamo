@@ -1,0 +1,1 @@
+INFO     dynamo.profiler.rapid:rapid.py:259 AIC picked aggregated config but interpolation data is required — overriding to 'disagg' to support mocker/throughput-scaling.

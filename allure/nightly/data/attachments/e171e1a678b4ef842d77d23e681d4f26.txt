@@ -1,0 +1,29 @@
+[2m2026-04-08T19:11:21.739068Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13000
+[2m2026-04-08T19:11:27.145950Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13002 name: tee
+[2m2026-04-08T19:11:27.146065Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13002 tee
+[2m2026-04-08T19:11:27.146746Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13001 name: sed
+[2m2026-04-08T19:11:27.146822Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13001 sed
+[2m2026-04-08T19:11:27.147520Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12849
+[2m2026-04-08T19:11:27.147575Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12867
+[2m2026-04-08T19:11:28.950953Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12851 name: tee
+[2m2026-04-08T19:11:28.951087Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12851 tee
+[2m2026-04-08T19:11:28.951709Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12850 name: sed
+[2m2026-04-08T19:11:28.951787Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12850 sed
+[2m2026-04-08T19:11:28.952516Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12578
+[2m2026-04-08T19:11:28.952569Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13133
+[2m2026-04-08T19:11:28.952611Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12702
+[2m2026-04-08T19:11:28.952697Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12559
+[2m2026-04-08T19:11:37.062684Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12559 name: python3
+[2m2026-04-08T19:11:37.062824Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12559 python3
+[2m2026-04-08T19:11:37.275309Z[0m [33m WARN[0m [2mmanaged_process.terminate_process[0m[2m:[0m PID 12578 no longer exists
+[2m2026-04-08T19:11:37.275451Z[0m [33m WARN[0m [2mmanaged_process.terminate_process[0m[2m:[0m PID 13133 no longer exists
+[2m2026-04-08T19:11:37.276082Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12561 name: tee
+[2m2026-04-08T19:11:37.276158Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12561 tee
+[2m2026-04-08T19:11:37.276572Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12560 name: sed
+[2m2026-04-08T19:11:37.276643Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12560 sed
+[2m2026-04-08T19:11:37.277876Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12544
+[2m2026-04-08T19:11:37.378724Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12545 name: sed
+[2m2026-04-08T19:11:37.378808Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12545 sed
+[2m2026-04-08T19:11:37.379655Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12531
+[2m2026-04-08T19:11:37.480614Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12532 name: sed
+[2m2026-04-08T19:11:37.480833Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12532 sed

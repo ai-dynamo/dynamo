@@ -1,0 +1,178 @@
+[TEST] 2026-04-08T18:36:14 INFO NatsServer: Running command: nats-server --trace -p 4318 in /workspace
+[TEST] 2026-04-08T18:36:14 INFO NatsServer: Checking Port: 4318
+[TEST] 2026-04-08T18:36:14 INFO NatsServer: SUCCESS: Check Port: 4318
+[TEST] 2026-04-08T18:36:14 INFO NatsServer: Running custom health check '_nats_ready'
+[TEST] 2026-04-08T18:36:14 INFO NatsServer: SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[TEST] 2026-04-08T18:36:14 INFO EtcdServer: Running command: etcd --listen-client-urls http://0.0.0.0:2386 --advertise-client-urls http://0.0.0.0:2386 --listen-peer-urls http://0.0.0.0:2387 --initial-advertise-peer-urls http://localhost:2387 --initial-cluster default=http://localhost:2387 --data-dir /tmp/etcd_afb5dgc5 in /workspace
+[TEST] 2026-04-08T18:36:14 INFO EtcdServer: Checking Port: 2386
+[TEST] 2026-04-08T18:36:14 INFO EtcdServer: SUCCESS: Check Port: 2386
+[TEST] 2026-04-08T18:36:14 INFO test_sglang_deployment[disaggregated-2]: Starting disaggregated test_deployment
+[TEST] 2026-04-08T18:36:14 INFO test_sglang_deployment[disaggregated-2]: Using model: Qwen/Qwen3-0.6B
+[TEST] 2026-04-08T18:36:14 INFO test_sglang_deployment[disaggregated-2]: Script: disagg.sh
+[TEST] 2026-04-08T18:36:14 INFO EngineProcess: Running command: bash /workspace/examples/backends/sglang/launch/disagg.sh in /workspace/examples/backends/sglang
+[TEST] 2026-04-08T18:36:14 INFO EngineProcess: Checking URL http://localhost:8092/v1/models
+[TEST] 2026-04-08T18:36:36 INFO EngineProcess: Still waiting for URL http://localhost:8092/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+[TEST] 2026-04-08T18:36:40 INFO EngineProcess: SUCCESS: Check URL: http://localhost:8092/v1/models (attempt=14, elapsed=25.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775673399,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[TEST] 2026-04-08T18:36:40 INFO EngineProcess: Checking URL http://localhost:8092/health
+[TEST] 2026-04-08T18:36:41 INFO EngineProcess: SUCCESS: Check URL: http://localhost:8092/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.prefill.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8603174285591741961,
+      "transport": {
+        "tcp": "10.1.39.26:44287/77649d6e61788609/generate"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8603174285591741963,
+      "transport": {
+        "tcp": "10.1.39.26:33775/77649d6e6178860b/generate"
+      }
+    }
+  ]
+}
+[TEST] 2026-04-08T18:36:41 INFO test_sglang_deployment[disaggregated-2]: TESTING: Payload: ChatPayload
+[TEST] 2026-04-08T18:36:41 INFO tests.utils.client: Sending request (curl equivalent):
+curl -X POST "http://localhost:8092/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[TEST] 2026-04-08T18:36:53 INFO tests.utils.client: Received response: status=200, elapsed=12.01s
+[TEST] 2026-04-08T18:36:53 INFO tests.utils.payloads: SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[TEST] 2026-04-08T18:36:53 INFO tests.utils.engine_process: Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[TEST] 2026-04-08T18:36:53 INFO tests.utils.client: Sending request (curl equivalent):
+curl -X POST "http://localhost:8092/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[TEST] 2026-04-08T18:36:59 INFO tests.utils.client: Received response: status=200, elapsed=5.79s
+[TEST] 2026-04-08T18:36:59 INFO tests.utils.payloads: SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[TEST] 2026-04-08T18:36:59 INFO tests.utils.engine_process: Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[TEST] 2026-04-08T18:36:59 INFO tests.utils.client: Sending request (curl equivalent):
+curl -X POST "http://localhost:8092/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[TEST] 2026-04-08T18:37:05 INFO tests.utils.client: Received response: status=200, elapsed=5.77s
+[TEST] 2026-04-08T18:37:05 INFO tests.utils.payloads: SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[TEST] 2026-04-08T18:37:05 INFO tests.utils.engine_process: Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[TEST] 2026-04-08T18:37:05 INFO test_sglang_deployment[disaggregated-2]: TESTING: Payload: CompletionPayload
+[TEST] 2026-04-08T18:37:05 INFO tests.utils.client: Sending request (curl equivalent):
+curl -X POST "http://localhost:8092/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[TEST] 2026-04-08T18:37:11 INFO tests.utils.client: Received response: status=200, elapsed=5.76s
+[TEST] 2026-04-08T18:37:11 INFO tests.utils.payloads: SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[TEST] 2026-04-08T18:37:11 INFO tests.utils.engine_process: Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+[TEST] 2026-04-08T18:37:11 INFO tests.utils.client: Sending request (curl equivalent):
+curl -X POST "http://localhost:8092/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[TEST] 2026-04-08T18:37:17 INFO tests.utils.client: Received response: status=200, elapsed=5.77s
+[TEST] 2026-04-08T18:37:17 INFO tests.utils.payloads: SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[TEST] 2026-04-08T18:37:17 INFO tests.utils.engine_process: Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+[TEST] 2026-04-08T18:37:17 INFO tests.utils.client: Sending request (curl equivalent):
+curl -X POST "http://localhost:8092/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[TEST] 2026-04-08T18:37:22 INFO tests.utils.client: Received response: status=200, elapsed=5.77s
+[TEST] 2026-04-08T18:37:22 INFO tests.utils.payloads: SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[TEST] 2026-04-08T18:37:22 INFO tests.utils.engine_process: Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+[TEST] 2026-04-08T18:37:22 INFO EngineProcess: Sending SIGTERM to process group: 3084
+[TEST] 2026-04-08T18:37:27 INFO EngineProcess: Terminating PID: 3086 name: tee
+[TEST] 2026-04-08T18:37:27 INFO EngineProcess: Sending SIGTERM (kill): 3086 tee
+[TEST] 2026-04-08T18:37:27 INFO EngineProcess: Terminating PID: 3085 name: sed
+[TEST] 2026-04-08T18:37:27 INFO EngineProcess: Sending SIGTERM (kill): 3085 sed
+[TEST] 2026-04-08T18:37:27 INFO EtcdServer: Sending SIGTERM to process group: 3069
+[TEST] 2026-04-08T18:37:28 INFO EtcdServer: Terminating PID: 3070 name: sed
+[TEST] 2026-04-08T18:37:28 INFO EtcdServer: Sending SIGTERM (kill): 3070 sed
+[TEST] 2026-04-08T18:37:28 INFO NatsServer: Sending SIGTERM to process group: 3057
+[TEST] 2026-04-08T18:37:28 INFO NatsServer: Terminating PID: 3058 name: sed
+[TEST] 2026-04-08T18:37:28 INFO NatsServer: Sending SIGTERM (kill): 3058 sed

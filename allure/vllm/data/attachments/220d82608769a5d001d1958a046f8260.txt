@@ -1,0 +1,24 @@
+INFO     root:conftest.py:430 Downloading 3 models needed for collected tests
+Models: {'Qwen/Qwen3-VL-2B-Instruct', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers', 'Qwen/Qwen3-0.6B'}
+INFO     root:conftest.py:279 HF_TOKEN found in environment
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+ERROR    root:conftest.py:326 Failed to pre-download Qwen/Qwen3-VL-2B-Instruct: 401 Client Error. (Request ID: Root=1-69d6ff7f-3e69d07b701ba2930fa7ed95;5de5bfe1-6838-4a10-bbf2-39fd3a31ab31)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-VL-2B-Instruct/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+INFO     root:conftest.py:296 Pre-downloading model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+ERROR    root:conftest.py:326 Failed to pre-download Wan-AI/Wan2.1-T2V-1.3B-Diffusers: 401 Client Error. (Request ID: Root=1-69d6ff7f-73511c5e68fb326e2afdba67;e78910ef-3c4b-49c1-95ab-8450ffc7b82d)
+
+Repository Not Found for url: https://huggingface.co/api/models/Wan-AI/Wan2.1-T2V-1.3B-Diffusers/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-0.6B
+ERROR    root:conftest.py:326 Failed to pre-download Qwen/Qwen3-0.6B: 401 Client Error. (Request ID: Root=1-69d6ff80-75e3532853fde8e330a466c5;25d70cdb-717f-4b84-8d85-25139f503497)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired

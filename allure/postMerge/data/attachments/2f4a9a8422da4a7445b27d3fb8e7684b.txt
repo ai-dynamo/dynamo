@@ -1,0 +1,64 @@
+[2m2026-04-08T19:12:12.151090Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4239 in /workspace
+[2m2026-04-08T19:12:12.152301Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4239
+[2m2026-04-08T19:12:12.252998Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4239
+[2m2026-04-08T19:12:12.253391Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T19:12:12.255451Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T19:12:12.256667Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2476 --advertise-client-urls http://0.0.0.0:2476 --listen-peer-urls http://0.0.0.0:2477 --initial-advertise-peer-urls http://localhost:2477 --initial-cluster default=http://localhost:2477 --data-dir /tmp/etcd_c3446_7f in /workspace
+[2m2026-04-08T19:12:12.257642Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2476
+[2m2026-04-08T19:12:12.358090Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2476
+[2m2026-04-08T19:12:12.362679Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting aggregated_toolcalling test_deployment
+[2m2026-04-08T19:12:12.362759Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+[2m2026-04-08T19:12:12.362810Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_multimodal.sh
+[2m2026-04-08T19:12:12.362992Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg_multimodal.sh --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 --max-model-len 10000 --dyn-tool-call-parser hermes in /workspace/examples/backends/vllm
+[2m2026-04-08T19:12:12.364413Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8085/v1/models
+[2m2026-04-08T19:12:16.194849Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T19:12:16.198959Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2454"]
+[2m2026-04-08T19:12:21.200209Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T19:12:21.200660Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2454"]
+[2m2026-04-08T19:12:26.201806Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T19:12:26.202293Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2454"]
+[2m2026-04-08T19:12:31.202744Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T19:12:31.203297Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2454"]
+[2m2026-04-08T19:12:34.399901Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8085/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T19:12:36.204454Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T19:12:36.204968Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2454"]
+[2m2026-04-08T19:12:41.206077Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T19:12:41.206635Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2454"]
+[2m2026-04-08T19:12:46.207741Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T19:12:46.208287Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2454"]
+[2m2026-04-08T19:12:49.416215Z[0m [31mERROR[0m [2mmanaged_process._check_process_alive[0m[2m:[0m Main server process died with exit code -15 while waiting for health check
+[2m2026-04-08T19:12:49.416624Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === Last 20 lines from /tmp/dynamo_tests/test_serve_deployment[aggregated_toolcalling]/bash.log.txt ===
+[2m2026-04-08T19:12:49.416714Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]            ^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T19:12:49.416779Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 887, in __init__
+[2m2026-04-08T19:12:49.416839Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     super().__init__(
+[2m2026-04-08T19:12:49.416911Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 535, in __init__
+[2m2026-04-08T19:12:49.416989Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     with launch_core_engines(
+[2m2026-04-08T19:12:49.417046Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/usr/lib/python3.12/contextlib.py", line 144, in __exit__
+[2m2026-04-08T19:12:49.417100Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     next(self.gen)
+[2m2026-04-08T19:12:49.417152Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 998, in launch_core_engines
+[2m2026-04-08T19:12:49.417210Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     wait_for_engine_startup(
+[2m2026-04-08T19:12:49.417246Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 1057, in wait_for_engine_startup
+[2m2026-04-08T19:12:49.417281Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     raise RuntimeError(
+[2m2026-04-08T19:12:49.417316Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+[2m2026-04-08T19:12:49.417353Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T19:12:47.415356Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_llm::http::service::service_v2\x1b[0m\x1b[2m:\x1b[0m http response sent \x1b[3mstatus\x1b[0m\x1b[2m=\x1b[0m200 \x1b[3mlatency_ms\x1b[0m\x1b[2m=\x1b[0m0
+[2m2026-04-08T19:12:49.417394Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] Cleaning up...
+[2m2026-04-08T19:12:49.417430Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T19:12:47.811005Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Runtime shutdown initiated
+[2m2026-04-08T19:12:49.417466Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T19:12:47.811095Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 1: Cancelling endpoint shutdown token
+[2m2026-04-08T19:12:49.417508Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T19:12:47.811131Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 2: Waiting for graceful endpoints to complete
+[2m2026-04-08T19:12:49.417547Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T19:12:47.811136Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Active graceful endpoints: 0
+[2m2026-04-08T19:12:49.417587Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T19:12:47.811139Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[2m2026-04-08T19:12:49.417624Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T19:12:47.811179Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_llm::http::service::service_v2\x1b[0m\x1b[2m:\x1b[0m HTTP server shutdown requested
+[2m2026-04-08T19:12:49.417661Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === End of log tail ===
+[2m2026-04-08T19:12:49.417736Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 31259
+[2m2026-04-08T19:12:51.209322Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-08T19:12:51.210075Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2454"]
+[2m2026-04-08T19:12:53.222631Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 31261 name: tee
+[2m2026-04-08T19:12:53.222779Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 31261 tee
+[2m2026-04-08T19:12:53.223206Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 31260 name: sed
+[2m2026-04-08T19:12:53.223295Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 31260 sed
+[2m2026-04-08T19:12:53.253271Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 31246
+[2m2026-04-08T19:12:53.354321Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 31247 name: sed
+[2m2026-04-08T19:12:53.354442Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 31247 sed
+[2m2026-04-08T19:12:53.355226Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 31234
+[2m2026-04-08T19:12:53.456112Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 31235 name: sed
+[2m2026-04-08T19:12:53.456346Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 31235 sed

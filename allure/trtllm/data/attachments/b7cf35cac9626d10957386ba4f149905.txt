@@ -1,0 +1,14 @@
+[2m2026-04-08T16:47:06.733941Z[0m [32m INFO[0m [2mprefill._update_correction_factor[0m[2m:[0m Correction factor (prefill TTFT): 1.000
+[2m2026-04-08T16:47:06.734068Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=10.00, isl=3000.00, osl=150.00
+[2m2026-04-08T16:47:06.734136Z[0m [32m INFO[0m [2mprefill._compute_replica_requirements[0m[2m:[0m Prefill calculation: 500.00(p_thpt) / 40000.00(p_engine_cap) = 1(num_p)
+[2m2026-04-08T16:47:06.734179Z[0m [33m WARN[0m [2mdecode._update_correction_factor[0m[2m:[0m No decode workers found for correction factor, skipping correction update
+[2m2026-04-08T16:47:06.734255Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=10.00, isl=3000.00, osl=150.00
+[2m2026-04-08T16:47:06.734293Z[0m [33m WARN[0m [2mdecode._compute_replica_requirements[0m[2m:[0m d_correction_factor is 0.0, using default value of 1.0
+[2m2026-04-08T16:47:06.734355Z[0m [32m INFO[0m [2mdecode._compute_replica_requirements[0m[2m:[0m Decode calculation: 25.00(d_thpt) / 10000.00(d_engine_cap) = 1(num_d)
+[2m2026-04-08T16:47:06.734695Z[0m [32m INFO[0m [2mprefill._update_correction_factor[0m[2m:[0m Correction factor (prefill TTFT): 1.000
+[2m2026-04-08T16:47:06.734785Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=10.00, isl=3000.00, osl=150.00
+[2m2026-04-08T16:47:06.734844Z[0m [32m INFO[0m [2mprefill._compute_replica_requirements[0m[2m:[0m Prefill calculation: 500.00(p_thpt) / 40000.00(p_engine_cap) = 1(num_p)
+[2m2026-04-08T16:47:06.734883Z[0m [33m WARN[0m [2mdecode._update_correction_factor[0m[2m:[0m No decode workers found for correction factor, skipping correction update
+[2m2026-04-08T16:47:06.734976Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=10.00, isl=3000.00, osl=150.00
+[2m2026-04-08T16:47:06.735013Z[0m [33m WARN[0m [2mdecode._compute_replica_requirements[0m[2m:[0m d_correction_factor is -1.0, using default value of 1.0
+[2m2026-04-08T16:47:06.735073Z[0m [32m INFO[0m [2mdecode._compute_replica_requirements[0m[2m:[0m Decode calculation: 25.00(d_thpt) / 10000.00(d_engine_cap) = 1(num_d)

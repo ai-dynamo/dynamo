@@ -1,0 +1,100 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4268 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4268
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4268
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2457 --advertise-client-urls http://0.0.0.0:2457 --listen-peer-urls http://0.0.0.0:2458 --initial-advertise-peer-urls http://localhost:2458 --initial-cluster default=http://localhost:2458 --data-dir /tmp/etcd_u6q0xam6 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2457
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2457
+INFO     DynamoFrontendProcess:managed_process.py:437 Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8048 --migration-limit 0 in /workspace
+INFO     tests.fault_tolerance.migration.test_sglang:test_sglang.py:236 Frontend started successfully
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --trust-remote-code --page-size 16 --tp 1 --mem-fraction-static 0.3 --context-length 8192 --skip-tokenizer-init in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9173/health
+INFO     tests.fault_tolerance.migration.test_sglang:test_sglang.py:202 worker1 status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9173/health (attempt=20, elapsed=19.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 37639468
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:8048/v1/models
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8048/v1/models (attempt=2, elapsed=2.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775682537,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     tests.fault_tolerance.migration.test_sglang:test_sglang.py:240 Worker 1 PID: 4559
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --trust-remote-code --page-size 16 --tp 1 --mem-fraction-static 0.3 --context-length 8192 --skip-tokenizer-init in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9183/health
+INFO     tests.fault_tolerance.migration.test_sglang:test_sglang.py:202 worker2 status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9183/health (attempt=20, elapsed=19.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 54531910
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:8048/v1/models
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8048/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775682557,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     tests.fault_tolerance.migration.test_sglang:test_sglang.py:247 Worker 2 PID: 4831
+INFO     tests.fault_tolerance.migration.utils:utils.py:227 Sending chat completion request (stream=True) with prompt: 'Tell me a long long long story about yourself?...'
+INFO     tests.fault_tolerance.migration.utils:utils.py:241 Received response with status code: 200
+INFO     tests.fault_tolerance.migration.utils:utils.py:344 Request was received by Worker 2
+INFO     tests.fault_tolerance.migration.utils:utils.py:588 Gracefully shutting down Worker 2 with PID 4831
+INFO     root:managed_process.py:31 Terminating PID: 4831 name: python3
+INFO     root:managed_process.py:36 Sending SIGTERM (kill): 4831 python3
+WARNING  root:managed_process.py:41 PID 4920 no longer exists
+WARNING  root:managed_process.py:41 PID 4921 no longer exists
+WARNING  root:managed_process.py:41 PID 4922 no longer exists
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 4831
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 4833 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 4833 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 4832 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 4832 sed
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 4559
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 4561 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 4561 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 4560 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 4560 sed
+INFO     DynamoFrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 4556
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 4558 name: tee
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 4558 tee
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 4557 name: sed
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 4557 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 4543
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 4544 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 4544 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 4531
+INFO     NatsServer:managed_process.py:31 Terminating PID: 4532 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 4532 sed

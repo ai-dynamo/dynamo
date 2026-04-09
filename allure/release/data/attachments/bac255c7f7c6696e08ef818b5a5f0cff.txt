@@ -1,0 +1,50 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4287 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4287
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4287
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2424 --advertise-client-urls http://0.0.0.0:2424 --listen-peer-urls http://0.0.0.0:2425 --initial-advertise-peer-urls http://localhost:2425 --initial-cluster default=http://localhost:2425 --data-dir /tmp/etcd_99f3i_xp in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2424
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2424
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:43 Starting multimodal_agg_qwen test_deployment
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:49 Using model: Qwen/Qwen2.5-VL-7B-Instruct
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:50 Script: agg.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/sglang/launch/agg.sh --model-path Qwen/Qwen2.5-VL-7B-Instruct --chat-template qwen2-vl in /workspace/examples/backends/sglang
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8003/v1/models
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8003/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8003/v1/models (custom check failed) (attempt=22, elapsed=41.0s)
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8003/v1/models (custom check failed) (attempt=32, elapsed=61.1s)
+ERROR    EngineProcess:managed_process.py:642 Main server process died with exit code 0 while waiting for health check
+ERROR    EngineProcess:managed_process.py:627 === Last 20 lines from /tmp/dynamo_tests/test_sglang_deployment[multimodal_agg_qwen-2]/bash.log.txt ===
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/sgl-workspace/sglang/python/sglang/srt/managers/tp_worker.py", line 330, in _init_model_runner
+ERROR    EngineProcess:managed_process.py:633 [BASH]     self._model_runner = ModelRunner(
+ERROR    EngineProcess:managed_process.py:633 [BASH]                          ^^^^^^^^^^^^
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/sgl-workspace/sglang/python/sglang/srt/model_executor/model_runner.py", line 413, in __init__
+ERROR    EngineProcess:managed_process.py:633 [BASH]     self.initialize(min_per_gpu_memory)
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/sgl-workspace/sglang/python/sglang/srt/model_executor/model_runner.py", line 590, in initialize
+ERROR    EngineProcess:managed_process.py:633 [BASH]     self.init_memory_pool(min_per_gpu_memory)
+ERROR    EngineProcess:managed_process.py:633 [BASH]   File "/sgl-workspace/sglang/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py", line 416, in init_memory_pool
+ERROR    EngineProcess:managed_process.py:633 [BASH]     raise RuntimeError(
+ERROR    EngineProcess:managed_process.py:633 [BASH] RuntimeError: Not enough memory. Please try to increase --mem-fraction-static. Current value: self.server_args.mem_fraction_static=0.7504228124999999
+ERROR    EngineProcess:managed_process.py:633 [BASH]
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T09:43:23.883943Z[0m [31mERROR[0m [2mengine.launch_phase_sigquit_handler[0m[2m:[0m Received sigquit from a child process. It usually means the child failed.
+ERROR    EngineProcess:managed_process.py:633 [BASH] /workspace/examples/backends/sglang/launch/../../../common/launch_utils.sh: line 78: 19256 Killed                  OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} python3 -m dynamo.sglang --model-path "$MODEL" --served-model-name "$MODEL" --page-size 16 --tp 1 --trust-remote-code --skip-tokenizer-init --enable-metrics $GPU_MEM_ARGS "${TRACE_ARGS[@]}" "${EXTRA_ARGS[@]}"
+ERROR    EngineProcess:managed_process.py:633 [BASH] Cleaning up...
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T09:43:23.980601Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T09:43:23.980679Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T09:43:23.980703Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T09:43:23.980707Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T09:43:23.980711Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+ERROR    EngineProcess:managed_process.py:633 [BASH] [2m2026-04-08T09:43:23.980762Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+ERROR    EngineProcess:managed_process.py:634 === End of log tail ===
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 19248
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 19250 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 19250 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 19249 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 19249 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 19234
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 19235 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 19235 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 19222
+INFO     NatsServer:managed_process.py:31 Terminating PID: 19223 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 19223 sed

@@ -1,0 +1,59 @@
+[2m2026-04-08T18:09:29.864785Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4222 -js --store_dir /tmp/nats_24ham3j3 in /workspace
+[2m2026-04-08T18:09:29.866753Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4222
+[2m2026-04-08T18:09:30.067804Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4222
+[2m2026-04-08T18:09:30.068135Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:09:30.072578Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:09:30.073902Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd_9qpxr11e in /workspace
+[2m2026-04-08T18:09:30.075860Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2379
+[2m2026-04-08T18:09:30.277088Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2379
+[2m2026-04-08T18:09:30.278154Z[0m [32m INFO[0m [2mtest_autodeploy_backend.test_smoke[0m[2m:[0m Starting frontend...
+[2m2026-04-08T18:09:30.278468Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --migration-limit 0 in /workspace
+[2m2026-04-08T18:09:30.280604Z[0m [32m INFO[0m [2mtest_autodeploy_backend.test_smoke[0m[2m:[0m Frontend started.
+[2m2026-04-08T18:09:30.280735Z[0m [32m INFO[0m [2mtest_autodeploy_backend.test_smoke[0m[2m:[0m Starting worker...
+[2m2026-04-08T18:09:30.281039Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --extra-engine-args /workspace/tests/basic/autodeploy_engine_config.yaml in /workspace
+[2m2026-04-08T18:09:30.282464Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8000/v1/models
+[2m2026-04-08T18:09:52.305496Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T18:10:12.324479Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+[2m2026-04-08T18:10:32.343614Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=33, elapsed=61.1s)
+[2m2026-04-08T18:10:52.363153Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=43, elapsed=81.1s)
+[2m2026-04-08T18:11:12.382801Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=53, elapsed=101.1s)
+[2m2026-04-08T18:11:32.406032Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=63, elapsed=121.1s)
+[2m2026-04-08T18:11:43.416536Z[0m [31mERROR[0m [2mmanaged_process._check_process_alive[0m[2m:[0m Main server process died with exit code 1 while waiting for health check
+[2m2026-04-08T18:11:43.416955Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === Last 20 lines from /tmp/dynamo_tests/test_smoke_decode/python3.log.txt ===
+[2m2026-04-08T18:11:43.417029Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [11] /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_python.so(+0x52a4c2)[0x7f4d912d64c2]
+[2m2026-04-08T18:11:43.417080Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [12] /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libc10.so(_ZN3c1010TensorImplD0Ev+0x9)[0x7f4d63c93a29]
+[2m2026-04-08T18:11:43.417124Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [13] /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_python.so(+0x905470)[0x7f4d916b1470]
+[2m2026-04-08T18:11:43.417168Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [14] /opt/dynamo/venv/lib/python3.12/site-packages/torch/lib/libtorch_python.so(+0x90579f)[0x7f4d916b179f]
+[2m2026-04-08T18:11:43.417213Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [15] /opt/dynamo/venv/bin/python3[0x575eae]
+[2m2026-04-08T18:11:43.417257Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [16] /opt/dynamo/venv/bin/python3[0x575bfc]
+[2m2026-04-08T18:11:43.417299Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [17] /opt/dynamo/venv/bin/python3[0x5799e2]
+[2m2026-04-08T18:11:43.417360Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [18] /opt/dynamo/venv/bin/python3[0x59edf9]
+[2m2026-04-08T18:11:43.417403Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [19] /opt/dynamo/venv/bin/python3[0x5799e2]
+[2m2026-04-08T18:11:43.417446Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [20] /opt/dynamo/venv/bin/python3[0x59edf9]
+[2m2026-04-08T18:11:43.417486Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [21] /opt/dynamo/venv/bin/python3(_PyObject_ClearManagedDict+0x1c2)[0x57b842]
+[2m2026-04-08T18:11:43.417526Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [22] /opt/dynamo/venv/bin/python3[0x5a17a2]
+[2m2026-04-08T18:11:43.417566Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [23] /opt/dynamo/venv/bin/python3[0x61d10d]
+[2m2026-04-08T18:11:43.417608Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [24] /opt/dynamo/venv/bin/python3[0x61c69c]
+[2m2026-04-08T18:11:43.417647Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [25] /opt/dynamo/venv/bin/python3(PyGC_Collect+0x58)[0x6bcd88]
+[2m2026-04-08T18:11:43.417686Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [26] /opt/dynamo/venv/bin/python3(Py_FinalizeEx+0x9c)[0x6b0e0c]
+[2m2026-04-08T18:11:43.417724Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [27] /opt/dynamo/venv/bin/python3(Py_RunMain+0x281)[0x6bc7d1]
+[2m2026-04-08T18:11:43.417776Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [28] /opt/dynamo/venv/bin/python3(Py_BytesMain+0x2d)[0x6bc3ed]
+[2m2026-04-08T18:11:43.417819Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] [29] /lib/x86_64-linux-gnu/libc.so.6(+0x2a1ca)[0x7f4db3c481ca]
+[2m2026-04-08T18:11:43.417859Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [PYTHON3] [prod-tester-amd-gpu-v1-phg7c-runner-nzng6:00847] *** End of error message ***
+[2m2026-04-08T18:11:43.417901Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === End of log tail ===
+[2m2026-04-08T18:11:43.418009Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 640
+[2m2026-04-08T18:11:43.418818Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 642 name: tee
+[2m2026-04-08T18:11:43.418914Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 642 tee
+[2m2026-04-08T18:11:43.420634Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 641 name: sed
+[2m2026-04-08T18:11:43.420728Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 641 sed
+[2m2026-04-08T18:11:43.421512Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 637
+[2m2026-04-08T18:11:48.827603Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 639 name: tee
+[2m2026-04-08T18:11:48.827783Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 639 tee
+[2m2026-04-08T18:11:48.828282Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 638 name: sed
+[2m2026-04-08T18:11:48.828374Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 638 sed
+[2m2026-04-08T18:11:48.915564Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 626
+[2m2026-04-08T18:11:49.016371Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 627 name: sed
+[2m2026-04-08T18:11:49.016523Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 627 sed
+[2m2026-04-08T18:11:49.018070Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 612
+[2m2026-04-08T18:11:49.118688Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 613 name: sed
+[2m2026-04-08T18:11:49.118829Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 613 sed

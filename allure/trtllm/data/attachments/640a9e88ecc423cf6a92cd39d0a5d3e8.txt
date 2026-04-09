@@ -1,0 +1,2 @@
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:67 ScaleRequestHandler initialized for namespaces: ['authorized-ns']
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:85 GPU budget enforcement DISABLED (unlimited)

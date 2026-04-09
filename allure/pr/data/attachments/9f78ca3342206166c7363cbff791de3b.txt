@@ -1,0 +1,2 @@
+WARNING  dynamo.vllm.omni.audio_handler:audio_handler.py:157 _is_tts_model: could not detect TTS model. stage_list=False, stage_configs=True
+INFO     dynamo.vllm.omni.audio_handler:audio_handler.py:187 Audio request (generic): input='hello...'

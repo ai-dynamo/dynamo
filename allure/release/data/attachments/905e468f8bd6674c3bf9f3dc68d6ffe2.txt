@@ -1,0 +1,91 @@
+[TEST] 2026-04-08T18:35:15 INFO NatsServer: Running command: nats-server --trace -p 4309 in /workspace
+[TEST] 2026-04-08T18:35:15 INFO NatsServer: Checking Port: 4309
+[TEST] 2026-04-08T18:35:16 INFO NatsServer: SUCCESS: Check Port: 4309
+[TEST] 2026-04-08T18:35:16 INFO NatsServer: Running custom health check '_nats_ready'
+[TEST] 2026-04-08T18:35:16 INFO NatsServer: SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[TEST] 2026-04-08T18:35:16 INFO EtcdServer: Running command: etcd --listen-client-urls http://0.0.0.0:2382 --advertise-client-urls http://0.0.0.0:2382 --listen-peer-urls http://0.0.0.0:2383 --initial-advertise-peer-urls http://localhost:2383 --initial-cluster default=http://localhost:2383 --data-dir /tmp/etcd_sc22e762 in /workspace
+[TEST] 2026-04-08T18:35:16 INFO EtcdServer: Checking Port: 2382
+[TEST] 2026-04-08T18:35:16 INFO EtcdServer: SUCCESS: Check Port: 2382
+[TEST] 2026-04-08T18:35:16 INFO DynamoFrontendProcess: Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8065 --migration-limit 0 in /workspace
+[TEST] 2026-04-08T18:35:16 INFO tests.fault_tolerance.cancellation.test_sglang: Frontend started successfully
+[TEST] 2026-04-08T18:35:16 INFO DynamoWorkerProcess: Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --disaggregation-mode decode --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl in /workspace
+[TEST] 2026-04-08T18:35:16 INFO DynamoWorkerProcess: Checking URL http://localhost:9185/health
+[TEST] 2026-04-08T18:35:36 INFO DynamoWorkerProcess: Still waiting for URL http://localhost:9185/health (status code 503) (attempt=21, elapsed=20.0s)
+[TEST] 2026-04-08T18:35:41 INFO tests.fault_tolerance.cancellation.test_sglang: Decode worker status is ready
+[TEST] 2026-04-08T18:35:41 INFO DynamoWorkerProcess: SUCCESS: Check URL: http://localhost:9185/health (attempt=26, elapsed=25.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 13,
+    "nanos": 697208733
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[TEST] 2026-04-08T18:35:41 INFO tests.fault_tolerance.cancellation.test_sglang: Decode Worker PID: 1776
+[TEST] 2026-04-08T18:35:41 INFO DynamoWorkerProcess: Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --disaggregation-mode prefill --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl in /workspace
+[TEST] 2026-04-08T18:35:41 INFO DynamoWorkerProcess: Checking URL http://localhost:9204/health
+[TEST] 2026-04-08T18:36:01 INFO DynamoWorkerProcess: Still waiting for URL http://localhost:9204/health (status code 503) (attempt=21, elapsed=20.0s)
+[TEST] 2026-04-08T18:36:05 INFO tests.fault_tolerance.cancellation.test_sglang: Prefill worker status is ready
+[TEST] 2026-04-08T18:36:05 INFO DynamoWorkerProcess: SUCCESS: Check URL: http://localhost:9204/health (attempt=25, elapsed=24.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 12,
+    "nanos": 873288938
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[TEST] 2026-04-08T18:36:05 INFO tests.fault_tolerance.cancellation.test_sglang: Prefill Worker PID: 2461
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.test_sglang: Testing chat completion stream request cancellation during decode phase...
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Sending chat completion request (stream=True) with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Starting to poll for 'New Request ID: ' pattern (max 100 iterations)...
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Found pattern 'New Request ID: ' at iteration 1
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Content after pattern: 'e206d52f-a3aa-46a5-a6e1-9a64ef057a3e'
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Starting to poll for 'New Request ID: e206d52f-a3aa-46a5-a6e1-9a64ef057a3e' pattern (max 100 iterations)...
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Found pattern 'New Request ID: e206d52f-a3aa-46a5-a6e1-9a64ef057a3e' at iteration 0
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Received streaming response 1: data: {"id":"chatcmpl-e206d52f-a3aa-46a5-a6e1-9a64ef057a3e","choices":[{"index":0,"delta":{"content"
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Successfully read 1 responses
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Starting to poll for 'New SGLang Request ID: ' pattern (max 100 iterations)...
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Found pattern 'New SGLang Request ID: ' at iteration 0
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Content after pattern: '0bbdbd2df95c40c18bc952b104986c94'
+[TEST] 2026-04-08T18:36:07 WARNING tests.fault_tolerance.cancellation.utils: Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+[TEST] 2026-04-08T18:36:07 WARNING tests.fault_tolerance.cancellation.utils: Failed to shutdown socket: [Errno 9] Bad file descriptor
+[TEST] 2026-04-08T18:36:07 WARNING tests.fault_tolerance.cancellation.utils: Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+[TEST] 2026-04-08T18:36:07 WARNING tests.fault_tolerance.cancellation.utils: Failed to shutdown socket: [Errno 9] Bad file descriptor
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.test_sglang: Cancelled request ID: e206d52f-a3aa-46a5-a6e1-9a64ef057a3e
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Starting to poll for 'Aborted Request ID: e206d52f-a3aa-46a5-a6e1-9a64ef057a3e' pattern (max 100 iterations)...
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Found pattern 'Aborted Request ID: e206d52f-a3aa-46a5-a6e1-9a64ef057a3e' at iteration 0
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Starting to poll for 'issued control message Kill to sender' pattern (max 100 iterations)...
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Found pattern 'issued control message Kill to sender' at iteration 0
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.test_sglang: Chat completion stream cancellation in decode phase detected successfully
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Frontend cancellation metrics - endpoint=chat_completions, request_type=stream: 1
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Runtime cancellation metrics (component=backend): 1
+[TEST] 2026-04-08T18:36:07 INFO tests.fault_tolerance.cancellation.utils: Runtime cancellation metrics (component=prefill): 0
+[TEST] 2026-04-08T18:36:07 INFO DynamoWorkerProcess: Sending SIGTERM to process group: 2461
+[TEST] 2026-04-08T18:36:08 INFO DynamoWorkerProcess: Terminating PID: 2463 name: tee
+[TEST] 2026-04-08T18:36:08 INFO DynamoWorkerProcess: Sending SIGTERM (kill): 2463 tee
+[TEST] 2026-04-08T18:36:08 INFO DynamoWorkerProcess: Terminating PID: 2462 name: sed
+[TEST] 2026-04-08T18:36:08 INFO DynamoWorkerProcess: Sending SIGTERM (kill): 2462 sed
+[TEST] 2026-04-08T18:36:08 INFO DynamoWorkerProcess: Sending SIGTERM to process group: 1776
+[TEST] 2026-04-08T18:36:08 INFO DynamoWorkerProcess: Sending SIGTERM to process group: 3044
+[TEST] 2026-04-08T18:36:09 INFO DynamoWorkerProcess: Terminating PID: 1778 name: tee
+[TEST] 2026-04-08T18:36:09 INFO DynamoWorkerProcess: Sending SIGTERM (kill): 1778 tee
+[TEST] 2026-04-08T18:36:09 INFO DynamoWorkerProcess: Terminating PID: 1777 name: sed
+[TEST] 2026-04-08T18:36:09 INFO DynamoWorkerProcess: Sending SIGTERM (kill): 1777 sed
+[TEST] 2026-04-08T18:36:09 INFO DynamoFrontendProcess: Sending SIGTERM to process group: 1773
+[TEST] 2026-04-08T18:36:14 INFO DynamoFrontendProcess: Terminating PID: 1775 name: tee
+[TEST] 2026-04-08T18:36:14 INFO DynamoFrontendProcess: Sending SIGTERM (kill): 1775 tee
+[TEST] 2026-04-08T18:36:14 INFO DynamoFrontendProcess: Terminating PID: 1774 name: sed
+[TEST] 2026-04-08T18:36:14 INFO DynamoFrontendProcess: Sending SIGTERM (kill): 1774 sed
+[TEST] 2026-04-08T18:36:14 INFO EtcdServer: Sending SIGTERM to process group: 1758
+[TEST] 2026-04-08T18:36:14 INFO EtcdServer: Terminating PID: 1759 name: sed
+[TEST] 2026-04-08T18:36:14 INFO EtcdServer: Sending SIGTERM (kill): 1759 sed
+[TEST] 2026-04-08T18:36:14 INFO NatsServer: Sending SIGTERM to process group: 1746
+[TEST] 2026-04-08T18:36:14 INFO NatsServer: Terminating PID: 1747 name: sed
+[TEST] 2026-04-08T18:36:14 INFO NatsServer: Sending SIGTERM (kill): 1747 sed

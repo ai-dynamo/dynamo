@@ -1,0 +1,131 @@
+[2m2026-04-09T10:05:26.496129Z[0m [32m INFO[0m [2margs._load_disagg_config_section[0m[2m:[0m Loading disagg config section 'prefill' from /tmp/pytest_temp/test_disagg_config_preserves_b0/disagg.yaml
+[2m2026-04-09T10:05:26.496723Z[0m [32m INFO[0m [2margs._dump_disagg_config_section[0m[2m:[0m Successfully wrote config section to temp file
+[2m2026-04-09T10:05:26.498032Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m Cannot connect to ModelExpress server: Transport error: transport error. Using direct download.
+[2m2026-04-09T10:05:26.498051Z[0m [32m INFO[0m [2mmodelexpress_common::download[0m[2m:[0m Downloading model 'Qwen/Qwen3-0.6B' using provider: Hugging Face
+[2m2026-04-09T10:05:26.498104Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Using cache directory: "/home/dynamo/.cache/huggingface/hub"
+[2m2026-04-09T10:05:26.631239Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Downloaded model files for Qwen/Qwen3-0.6B
+[2m2026-04-09T10:05:26.631331Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m ModelExpress download completed successfully for model: Qwen/Qwen3-0.6B
+[2m2026-04-09T10:05:26.721454Z[0m [32m INFO[0m [2m_client._send_single_request[0m[2m:[0m HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json "HTTP/1.1 503 Service Unavailable"
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 761, in hf_raise_for_status
+    response.raise_for_status()
+  File "/usr/local/lib/python3.12/dist-packages/httpx/_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/utils/common.py", line 2571, in retry
+    return fn()
+           ^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/configs/model_config.py", line 737, in <lambda>
+    lambda: hf_api.file_exists(
+            ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/hf_api.py", line 3431, in file_exists
+    get_hf_file_metadata(url, token=token)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/file_download.py", line 1587, in get_hf_file_metadata
+    response = _httpx_follow_relative_redirects_with_backoff(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 692, in _httpx_follow_relative_redirects_with_backoff
+    hf_raise_for_status(response)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 889, in hf_raise_for_status
+    raise _format(HfHubHTTPError, str(e), response) from e
+huggingface_hub.errors.HfHubHTTPError: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json' (Request ID: Root=1-69d779e6-0b02f95c677797e430c4d16a;105463e7-7a55-44b7-b17e-50e32c648b4f)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+Internal Error - We're working hard to fix this as soon as possible!
+[2m2026-04-09T10:05:26.722517Z[0m [33m WARN[0m [2mcommon.retry[0m[2m:[0m retry() failed once (0th try, maximum 2 retries). Will delay 0.84s and retry. Error: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json' (Request ID: Root=1-69d779e6-0b02f95c677797e430c4d16a;105463e7-7a55-44b7-b17e-50e32c648b4f)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+Internal Error - We're working hard to fix this as soon as possible!
+[2m2026-04-09T10:05:27.657607Z[0m [32m INFO[0m [2m_client._send_single_request[0m[2m:[0m HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json "HTTP/1.1 503 Service Unavailable"
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 761, in hf_raise_for_status
+    response.raise_for_status()
+  File "/usr/local/lib/python3.12/dist-packages/httpx/_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/utils/common.py", line 2571, in retry
+    return fn()
+           ^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/configs/model_config.py", line 737, in <lambda>
+    lambda: hf_api.file_exists(
+            ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/hf_api.py", line 3431, in file_exists
+    get_hf_file_metadata(url, token=token)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/file_download.py", line 1587, in get_hf_file_metadata
+    response = _httpx_follow_relative_redirects_with_backoff(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 692, in _httpx_follow_relative_redirects_with_backoff
+    hf_raise_for_status(response)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 889, in hf_raise_for_status
+    raise _format(HfHubHTTPError, str(e), response) from e
+huggingface_hub.errors.HfHubHTTPError: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json' (Request ID: Root=1-69d779e7-551ed331030c42fd2591f02d;83d622dc-50d5-43cc-b8ad-725fa952d345)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+Internal Error - We're working hard to fix this as soon as possible!
+[2m2026-04-09T10:05:27.658593Z[0m [33m WARN[0m [2mcommon.retry[0m[2m:[0m retry() failed once (1th try, maximum 2 retries). Will delay 1.64s and retry. Error: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json' (Request ID: Root=1-69d779e7-551ed331030c42fd2591f02d;83d622dc-50d5-43cc-b8ad-725fa952d345)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+Internal Error - We're working hard to fix this as soon as possible!
+[2m2026-04-09T10:05:29.389384Z[0m [32m INFO[0m [2m_client._send_single_request[0m[2m:[0m HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json "HTTP/1.1 503 Service Unavailable"
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 761, in hf_raise_for_status
+    response.raise_for_status()
+  File "/usr/local/lib/python3.12/dist-packages/httpx/_models.py", line 829, in raise_for_status
+    raise HTTPStatusError(message, request=request, response=self)
+httpx.HTTPStatusError: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/utils/common.py", line 2571, in retry
+    return fn()
+           ^^^^
+  File "/sgl-workspace/sglang/python/sglang/srt/configs/model_config.py", line 737, in <lambda>
+    lambda: hf_api.file_exists(
+            ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/hf_api.py", line 3431, in file_exists
+    get_hf_file_metadata(url, token=token)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_validators.py", line 88, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/file_download.py", line 1587, in get_hf_file_metadata
+    response = _httpx_follow_relative_redirects_with_backoff(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 692, in _httpx_follow_relative_redirects_with_backoff
+    hf_raise_for_status(response)
+  File "/usr/local/lib/python3.12/dist-packages/huggingface_hub/utils/_http.py", line 889, in hf_raise_for_status
+    raise _format(HfHubHTTPError, str(e), response) from e
+huggingface_hub.errors.HfHubHTTPError: Server error '503 Service Unavailable' for url 'https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json' (Request ID: Root=1-69d779e9-529590841a6aa5da4d1a36b8;88ffa89b-c0c1-4009-b668-7e378bd8be1c)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503
+
+Internal Error - We're working hard to fix this as soon as possible!
+[2m2026-04-09T10:05:29.390578Z[0m [33m WARN[0m [2mmodel_config._parse_quant_hf_config[0m[2m:[0m Failed to load hf_quant_config.json for model Qwen/Qwen3-0.6B: retry() exceed maximum number of retries.
+[2m2026-04-09T10:05:29.411693Z[0m [32m INFO[0m [2mserver_args._handle_attention_backend_compatibility[0m[2m:[0m Attention backend not specified. Use flashinfer backend by default.
+[2m2026-04-09T10:05:29.511220Z[0m [32m INFO[0m [2m_client._send_single_request[0m[2m:[0m HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-0.6B "HTTP/1.1 200 OK"
+[2m2026-04-09T10:05:29.512049Z[0m [32m INFO[0m [2margs.parse_args[0m[2m:[0m Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True
+[2m2026-04-09T10:05:29.512098Z[0m [32m INFO[0m [2margs.parse_args[0m[2m:[0m Derived use_kv_events=False from kv_events_config=None

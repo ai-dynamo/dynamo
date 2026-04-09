@@ -1,0 +1,307 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4302 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4302
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4302
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2439 --advertise-client-urls http://0.0.0.0:2439 --listen-peer-urls http://0.0.0.0:2440 --initial-advertise-peer-urls http://localhost:2440 --initial-cluster default=http://localhost:2440 --data-dir /tmp/etcd_cv_5q_cd in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2439
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2439
+INFO     test_serve_deployment[multimodal_video_disagg]:common.py:43 Starting multimodal_video_disagg test_deployment
+INFO     test_serve_deployment[multimodal_video_disagg]:common.py:49 Using model: Qwen/Qwen3-VL-2B-Instruct
+INFO     test_serve_deployment[multimodal_video_disagg]:common.py:50 Script: disagg_multimodal_epd.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/vllm/launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu in /workspace/examples/backends/vllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8103/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8103/health (status code 503) (attempt=21, elapsed=20.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8103/health (status code 503) (attempt=41, elapsed=40.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 503 75
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 200 143
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8103/health (attempt=48, elapsed=47.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 39,
+    "nanos": 844197502
+  },
+  "endpoints": {
+    "get_perf_metrics": "ready",
+    "generate": "ready",
+    "clear_kv_blocks": "ready"
+  }
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8103/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8103
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8103 "GET /health HTTP/1.1" 200 143
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8103/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 39,
+    "nanos": 845973267
+  },
+  "endpoints": {
+    "generate": "ready",
+    "clear_kv_blocks": "ready",
+    "get_perf_metrics": "ready"
+  }
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8015/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /v1/models HTTP/1.1" 200 119
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8015/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct",
+      "object": "model",
+      "created": 1775677659,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8015/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "GET /health HTTP/1.1" 200 1529
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8015/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.encode.generate",
+    "dyn://dynamo.prefill.clear_kv_blocks",
+    "dyn://dynamo.prefill.generate",
+    "dyn://dynamo.prefill.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 4127440682000467469,
+      "transport": {
+        "tcp": "10.1.83.222:45799/39479d6ea222460d/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 4127440682000467469,
+      "transport": {
+        "tcp": "10.1.83.222:45799/39479d6ea222460d/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 4127440682000467469,
+      "transport": {
+        "tcp": "10.1.83.222:45799/39479d6ea222460d/get_perf_metrics"
+      }
+    },
+    {
+      "component": "encode",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 4127440682000467467,
+      "transport": {
+        "tcp": "10.1.83.222:42303/39479d6ea222460b/generate"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 4127440682000467465,
+      "transport": {
+        "tcp": "10.1.83.222:38077/39479d6ea2224609/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 4127440682000467465,
+      "transport": {
+        "tcp": "10.1.83.222:38077/39479d6ea2224609/generate"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 4127440682000467465,
+      "transport": {
+        "tcp": "10.1.83.222:38077/39479d6ea2224609/get_perf_metrics"
+      }
+    }
+  ]
+}
+INFO     test_serve_deployment[multimodal_video_disagg]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8015/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe the video in detail"
+        },
+        {
+          "type": "video_url",
+          "video_url": {
+            "url": "file:///workspace/lib/llm/tests/data/media/240p_10.mp4"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen3-VL-2B-Instruct"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8015
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8015 "POST /v1/chat/completions HTTP/1.1" 200 721
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=5.05s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '721', 'date': 'Wed, 08 Apr 2026 19:47:46 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-e0b586d2-f70e-4f4c-a858-733052170a25",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "The video is a simple, static image of a solid red color. There are no visible objects, text, or any other elements in the frame. The entire screen is filled with a uniform red hue, and there is no change in the image or any movement. The video is completely still and does not contain any action or animation.",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1775677661,
+  "model": "Qwen/Qwen3-VL-2B-Instruct",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 453,
+    "completion_tokens": 68,
+    "total_tokens": 521
+  },
+  "nvext": {
+    "timing": {
+      "request_received_ms": 1775677661813,
+      "total_time_ms": 5051.781402
+    }
+  }
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 3/3 expected keywords: ['red', 'static', 'still']
+INFO     tests.utils.engine_process:engine_process.py:105 Extracted content: 
+The video is a simple, static image of a solid red color. There are no visible objects, text, or any other elements in the frame. The entire screen is filled with a uniform red hue, and there is no ch...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 9378
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 9380 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 9380 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 9379 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 9379 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 9365
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 9366 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 9366 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 9353
+INFO     NatsServer:managed_process.py:31 Terminating PID: 9354 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 9354 sed

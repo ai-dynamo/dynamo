@@ -1,0 +1,1 @@
+Complex GPU budget test: P=1, D=1, Total GPUs=4

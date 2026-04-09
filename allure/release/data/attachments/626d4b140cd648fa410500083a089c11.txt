@@ -1,0 +1,1 @@
+WARNING  dynamo.planner.connectors.kubernetes:kubernetes.py:633 Deployment test-graph is not ready, ignoring this scaling

@@ -1,0 +1,1 @@
+INFO     dynamo.planner.connectors.global_planner:global_planner.py:67 GlobalPlannerConnector initialized: will delegate to global-ns.GlobalPlanner

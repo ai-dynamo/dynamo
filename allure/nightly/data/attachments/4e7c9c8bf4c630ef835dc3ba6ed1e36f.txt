@@ -1,0 +1,27 @@
+INFO     FrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 21389
+INFO     FrontendProcess:managed_process.py:31 Terminating PID: 21391 name: tee
+INFO     FrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 21391 tee
+INFO     FrontendProcess:managed_process.py:31 Terminating PID: 21390 name: sed
+INFO     FrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 21390 sed
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 21256
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 21238
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:31 Terminating PID: 21240 name: tee
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 21240 tee
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:31 Terminating PID: 21239 name: sed
+INFO     TRTLLMMMRouterWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 21239 sed
+INFO     TRTLLMWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 20961
+INFO     TRTLLMWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 21523
+INFO     TRTLLMWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 21085
+INFO     TRTLLMWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 20942
+INFO     TRTLLMWorkerProcess:managed_process.py:31 Terminating PID: 20942 name: python3
+INFO     TRTLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 20942 python3
+INFO     TRTLLMWorkerProcess:managed_process.py:31 Terminating PID: 20944 name: tee
+INFO     TRTLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 20944 tee
+INFO     TRTLLMWorkerProcess:managed_process.py:31 Terminating PID: 20943 name: sed
+INFO     TRTLLMWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 20943 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 20929
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 20930 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 20930 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 20916
+INFO     NatsServer:managed_process.py:31 Terminating PID: 20917 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 20917 sed

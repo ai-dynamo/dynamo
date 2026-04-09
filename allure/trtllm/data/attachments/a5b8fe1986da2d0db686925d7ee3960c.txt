@@ -1,0 +1,86 @@
+[2m2026-04-08T18:30:20.928034Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4222 -js --store_dir /tmp/nats_2ck7apfv in /workspace
+[2m2026-04-08T18:30:20.929215Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4222
+[2m2026-04-08T18:30:21.029906Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4222
+[2m2026-04-08T18:30:21.030144Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:30:21.033240Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:30:21.033315Z[0m [32m INFO[0m [2mtest_trtllm.test_etcd_non_ha_shutdown_trtllm_disaggregated[0m[2m:[0m NATS server started successfully
+[2m2026-04-08T18:30:21.033463Z[0m [32m INFO[0m [2mutils.start[0m[2m:[0m Starting 1-node ETCD cluster
+[2m2026-04-08T18:30:21.033649Z[0m [32m INFO[0m [2mutils._start_replica[0m[2m:[0m Starting etcd-0 on client port 2379, peer port 2380
+[2m2026-04-08T18:30:21.033886Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --name etcd-0 --data-dir /tmp/etcd_0_iw06vyot --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://0.0.0.0:2380 --initial-advertise-peer-urls http://127.0.0.1:2380 --initial-cluster etcd-0=http://127.0.0.1:2380 --initial-cluster-state new --initial-cluster-token etcd-cluster in /workspace
+[2m2026-04-08T18:30:21.034848Z[0m [32m INFO[0m [2mutils.start[0m[2m:[0m All 1 ETCD replicas started successfully
+[2m2026-04-08T18:30:21.034909Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:30:21.035652Z[0m [33m WARN[0m [2mutils.get_status[0m[2m:[0m Failed to get status for etcd-0: HTTPConnectionPool(host='127.0.0.1', port=2379): Max retries exceeded with url: /v3/maintenance/status (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=2379): Failed to establish a new connection: [Errno 111] Connection refused"))
+[2m2026-04-08T18:30:22.039464Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-0
+[2m2026-04-08T18:30:22.039572Z[0m [32m INFO[0m [2mtest_trtllm.test_etcd_non_ha_shutdown_trtllm_disaggregated[0m[2m:[0m Single ETCD node started successfully
+[2m2026-04-08T18:30:22.039629Z[0m [32m INFO[0m [2mtest_trtllm.test_etcd_non_ha_shutdown_trtllm_disaggregated[0m[2m:[0m ETCD endpoint: ['http://127.0.0.1:2379']
+[2m2026-04-08T18:30:22.041226Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --migration-limit 0 in /workspace
+[2m2026-04-08T18:30:22.043219Z[0m [32m INFO[0m [2mtest_trtllm.test_etcd_non_ha_shutdown_trtllm_disaggregated[0m[2m:[0m Frontend started successfully
+[2m2026-04-08T18:30:22.043665Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill --free-gpu-memory-fraction 0.45 --max-seq-len 8192 --extra-engine-args test_etcd_ha_trtllm_config.yaml in /workspace
+[2m2026-04-08T18:30:22.045031Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8082/health
+[2m2026-04-08T18:30:42.076826Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8082/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T18:31:02.111850Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8082/health (status code 503) (attempt=41, elapsed=40.1s)
+[2m2026-04-08T18:31:06.118812Z[0m [32m INFO[0m [2mtest_trtllm.is_ready[0m[2m:[0m Prefill worker status is ready
+[2m2026-04-08T18:31:06.118968Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8082/health (attempt=45, elapsed=44.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 29,
+    "nanos": 435941920
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T18:31:06.119042Z[0m [32m INFO[0m [2mtest_trtllm.test_etcd_non_ha_shutdown_trtllm_disaggregated[0m[2m:[0m Prefill worker started successfully
+[2m2026-04-08T18:31:06.119472Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode --free-gpu-memory-fraction 0.45 --max-seq-len 8192 --extra-engine-args test_etcd_ha_trtllm_config.yaml in /workspace
+[2m2026-04-08T18:31:06.120870Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8081/health
+[2m2026-04-08T18:31:26.151653Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8081/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T18:31:46.187462Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8081/health (status code 503) (attempt=41, elapsed=40.1s)
+[2m2026-04-08T18:31:49.193162Z[0m [32m INFO[0m [2mtest_trtllm.is_ready[0m[2m:[0m Decode worker status is ready
+[2m2026-04-08T18:31:49.193331Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8081/health (attempt=44, elapsed=43.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 28,
+    "nanos": 465916978
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T18:31:49.193410Z[0m [32m INFO[0m [2mtest_trtllm.test_etcd_non_ha_shutdown_trtllm_disaggregated[0m[2m:[0m Decode worker started successfully
+[2m2026-04-08T18:31:51.193630Z[0m [32m INFO[0m [2mtest_trtllm.test_etcd_non_ha_shutdown_trtllm_disaggregated[0m[2m:[0m Sending inference request
+[2m2026-04-08T18:31:51.193785Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Sending inference request: 'What is 2+2? The answer is'
+[2m2026-04-08T18:31:51.669545Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Inference generated text: '4. But what if there are other numbers? What if there are more than two numbers? What if there are more than two numbers and the numbers are not all positive integers? What if there are more than two numbers and the numbers are not'
+[2m2026-04-08T18:31:51.669738Z[0m [32m INFO[0m [2mtest_trtllm.test_etcd_non_ha_shutdown_trtllm_disaggregated[0m[2m:[0m System is working correctly with single ETCD node in disaggregated mode
+[2m2026-04-08T18:31:51.669806Z[0m [32m INFO[0m [2mtest_trtllm.test_etcd_non_ha_shutdown_trtllm_disaggregated[0m[2m:[0m Terminating single ETCD node
+[2m2026-04-08T18:31:51.669855Z[0m [32m INFO[0m [2mutils.stop[0m[2m:[0m Cleaning up ETCD cluster
+[2m2026-04-08T18:31:51.670781Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7393
+[2m2026-04-08T18:31:58.777596Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7394 name: sed
+[2m2026-04-08T18:31:58.777733Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7394 sed
+[2m2026-04-08T18:31:58.778169Z[0m [33m WARN[0m [2mutils.stop[0m[2m:[0m Error removing data directory /tmp/etcd_0_iw06vyot: [Errno 2] No such file or directory: '/tmp/etcd_0_iw06vyot'
+[2m2026-04-08T18:31:58.778247Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Waiting for 3 process(es) to terminate
+[2m2026-04-08T18:32:08.779556Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Decode Worker process has terminated after 10s
+[2m2026-04-08T18:32:09.780008Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Prefill Worker process has terminated after 11s
+[2m2026-04-08T18:32:13.780665Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Frontend process has terminated after 15s
+[2m2026-04-08T18:32:13.780821Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7727
+[2m2026-04-08T18:32:13.781454Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7729 name: tee
+[2m2026-04-08T18:32:13.781549Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7729 tee
+[2m2026-04-08T18:32:13.782040Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7728 name: sed
+[2m2026-04-08T18:32:13.782130Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7728 sed
+[2m2026-04-08T18:32:13.782304Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7409
+[2m2026-04-08T18:32:13.782741Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7411 name: tee
+[2m2026-04-08T18:32:13.782829Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7411 tee
+[2m2026-04-08T18:32:13.783245Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7410 name: sed
+[2m2026-04-08T18:32:13.783330Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7410 sed
+[2m2026-04-08T18:32:13.783463Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7406
+[2m2026-04-08T18:32:13.783851Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7408 name: tee
+[2m2026-04-08T18:32:13.783936Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7408 tee
+[2m2026-04-08T18:32:13.784314Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7407 name: sed
+[2m2026-04-08T18:32:13.784401Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7407 sed
+[2m2026-04-08T18:32:13.785342Z[0m [32m INFO[0m [2mutils.stop[0m[2m:[0m Cleaning up ETCD cluster
+[2m2026-04-08T18:32:13.785639Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 7380
+[2m2026-04-08T18:32:13.886611Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 7381 name: sed
+[2m2026-04-08T18:32:13.886754Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 7381 sed

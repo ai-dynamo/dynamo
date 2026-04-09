@@ -1,0 +1,188 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4314 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4314
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4314
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2420 --advertise-client-urls http://0.0.0.0:2420 --listen-peer-urls http://0.0.0.0:2421 --initial-advertise-peer-urls http://localhost:2421 --initial-cluster default=http://localhost:2421 --data-dir /tmp/etcd_m_js913u in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2420
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2420
+INFO     DynamoFrontendProcess:managed_process.py:437 Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8271 --migration-limit 0 in /workspace
+INFO     SGLangWithGMSProcess:managed_process.py:437 Running command: python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --load-format gms --enable-memory-saver --mem-fraction-static 0.9 --port 30065 in /workspace
+INFO     SGLangWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8103/health
+INFO     SGLangWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8103/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 868847347
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     SGLangWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8271/v1/models
+INFO     SGLangWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8271/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775640698,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     SGLangWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8271/health
+INFO     SGLangWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8271/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2239588003746841609,
+      "transport": {
+        "tcp": "10.1.94.89:34483/1f149d6c6e8e8409/generate"
+      }
+    }
+  ]
+}
+INFO     tests.gms.integration.test_gms_shadow_failover:test_gms_shadow_failover.py:100 Shadow inference OK: {'id': 'cmpl-b470c1f5-dfe7-4dbe-95ea-5837cd03c22c', 'choices': [{'text': '_Arresta = input("Enter a day: ")\ncurrent_day = input("Enter the current', 'index': 0, 'finish_reason': 'length'}], 'created': 1775640700, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 1, 'completion_tokens': 20, 'total_tokens': 21}, 'nvext': {'timing': {'request_received_ms': 1775640700179, 'total_time_ms': 711.806182}}}
+INFO     tests.gms.harness.sglang:sglang.py:99 shadow-a release_memory_occupation: {'status': 'ok', 'message': "Memory released for tags: ['weights', 'kv_cache']"}
+INFO     tests.gms.integration.test_gms_shadow_failover:test_gms_shadow_failover.py:125 Shadow sleep: 21.47 -> 2.65 GiB (freed 19266 MB)
+INFO     SGLangWithGMSProcess:managed_process.py:437 Running command: python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --load-format gms --enable-memory-saver --mem-fraction-static 0.9 --port 30021 in /workspace
+INFO     SGLangWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8152/health
+INFO     SGLangWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8152/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 833636773
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     SGLangWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8271/v1/models
+INFO     SGLangWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8271/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775640721,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     SGLangWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8271/health
+INFO     SGLangWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8271/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2239588003746841622,
+      "transport": {
+        "tcp": "10.1.94.89:42283/1f149d6c6e8e8416/generate"
+      }
+    }
+  ]
+}
+INFO     tests.gms.integration.test_gms_shadow_failover:test_gms_shadow_failover.py:100 Shadow inference OK: {'id': 'cmpl-385231d6-eed3-477b-9e43-ed2a14756085', 'choices': [{'text': '!== "Hello welcome %s" % format(url_query[\'janitor\'])\n\n# Helpers\ndef sl', 'index': 0, 'finish_reason': 'length'}], 'created': 1775640723, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 1, 'completion_tokens': 20, 'total_tokens': 21}, 'nvext': {'timing': {'request_received_ms': 1775640723025, 'total_time_ms': 706.706916}}}
+INFO     tests.gms.harness.sglang:sglang.py:99 shadow-b release_memory_occupation: {'status': 'ok', 'message': "Memory released for tags: ['weights', 'kv_cache']"}
+INFO     tests.gms.integration.test_gms_shadow_failover:test_gms_shadow_failover.py:125 Shadow sleep: 21.36 -> 4.75 GiB (freed 17010 MB)
+INFO     SGLangWithGMSProcess:managed_process.py:437 Running command: python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --load-format gms --enable-memory-saver --mem-fraction-static 0.9 --port 30038 in /workspace
+INFO     SGLangWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8120/health
+INFO     SGLangWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8120/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 892657796
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     SGLangWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8271/v1/models
+INFO     SGLangWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8271/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775640743,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     SGLangWithGMSProcess:managed_process.py:690 Checking URL http://localhost:8271/health
+INFO     SGLangWithGMSProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8271/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2239588003746841631,
+      "transport": {
+        "tcp": "10.1.94.89:42699/1f149d6c6e8e841f/generate"
+      }
+    }
+  ]
+}
+INFO     tests.gms.integration.test_gms_shadow_failover:test_gms_shadow_failover.py:208 Primary inference OK: {'id': 'cmpl-96d81c92-bbf3-4ded-8175-859f6ab8925b', 'choices': [{'text': ":\t\r\n\t\r\n\t[Andy - Mildred]:\tfor the purpose of this test, let's say", 'index': 0, 'finish_reason': 'length'}], 'created': 1775640745, 'model': 'Qwen/Qwen3-0.6B', 'system_fingerprint': None, 'object': 'text_completion', 'usage': {'prompt_tokens': 2, 'completion_tokens': 20, 'total_tokens': 22}, 'nvext': {'timing': {'request_received_ms': 1775640745893, 'total_time_ms': 793.182324}}}
+INFO     tests.gms.integration.test_gms_shadow_failover:test_gms_shadow_failover.py:211 Primary active memory: 21.37 GiB
+INFO     tests.gms.integration.test_gms_shadow_failover:test_gms_shadow_failover.py:343 Primary kill snapshot: 22.36 -> 22.36 GiB
+INFO     SGLangWithGMSProcess:managed_process.py:558 Sending SIGTERM to process group: 13771
+INFO     SGLangWithGMSProcess:managed_process.py:31 Terminating PID: 13773 name: tee
+INFO     SGLangWithGMSProcess:managed_process.py:36 Sending SIGTERM (kill): 13773 tee
+INFO     SGLangWithGMSProcess:managed_process.py:31 Terminating PID: 13772 name: sed
+INFO     SGLangWithGMSProcess:managed_process.py:36 Sending SIGTERM (kill): 13772 sed
+INFO     SGLangWithGMSProcess:managed_process.py:558 Sending SIGTERM to process group: 13496
+INFO     SGLangWithGMSProcess:managed_process.py:31 Terminating PID: 13498 name: tee
+INFO     SGLangWithGMSProcess:managed_process.py:36 Sending SIGTERM (kill): 13498 tee
+INFO     SGLangWithGMSProcess:managed_process.py:31 Terminating PID: 13497 name: sed
+INFO     SGLangWithGMSProcess:managed_process.py:36 Sending SIGTERM (kill): 13497 sed
+INFO     SGLangWithGMSProcess:managed_process.py:558 Sending SIGTERM to process group: 13200
+INFO     SGLangWithGMSProcess:managed_process.py:31 Terminating PID: 13202 name: tee
+INFO     SGLangWithGMSProcess:managed_process.py:36 Sending SIGTERM (kill): 13202 tee
+INFO     SGLangWithGMSProcess:managed_process.py:31 Terminating PID: 13201 name: sed
+INFO     SGLangWithGMSProcess:managed_process.py:36 Sending SIGTERM (kill): 13201 sed
+INFO     DynamoFrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 13197
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 13199 name: tee
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 13199 tee
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 13198 name: sed
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 13198 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 13182
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 13183 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 13183 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 13169
+INFO     NatsServer:managed_process.py:31 Terminating PID: 13170 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 13170 sed

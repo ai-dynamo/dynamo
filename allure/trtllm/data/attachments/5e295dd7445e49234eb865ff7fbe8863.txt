@@ -1,0 +1,78 @@
+[2m2026-04-08T18:11:49.124017Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4262 in /workspace
+[2m2026-04-08T18:11:49.125211Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4262
+[2m2026-04-08T18:11:49.225762Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4262
+[2m2026-04-08T18:11:49.225953Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:11:49.227935Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:11:49.228926Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2412 --advertise-client-urls http://0.0.0.0:2412 --listen-peer-urls http://0.0.0.0:2413 --initial-advertise-peer-urls http://localhost:2413 --initial-cluster default=http://localhost:2413 --data-dir /tmp/etcd_flwavuci in /workspace
+[2m2026-04-08T18:11:49.229991Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2412
+[2m2026-04-08T18:11:49.330586Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2412
+[2m2026-04-08T18:11:49.332102Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8068 --migration-limit 0 in /workspace
+[2m2026-04-08T18:11:49.333692Z[0m [32m INFO[0m [2mtest_trtllm.test_request_cancellation_trtllm_aggregated[0m[2m:[0m Frontend started successfully
+[2m2026-04-08T18:11:49.334479Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill_and_decode --max-seq-len 16384 --max-num-tokens 16384 in /workspace
+[2m2026-04-08T18:11:49.335942Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8068/v1/models
+[2m2026-04-08T18:12:11.359365Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8068/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T18:12:31.378890Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8068/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+[2m2026-04-08T18:12:41.388651Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8068/v1/models (attempt=28, elapsed=51.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775671960,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T18:12:41.388812Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8068/health
+[2m2026-04-08T18:12:42.391431Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8068/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.tensorrt_llm.generate"
+  ],
+  "instances": [
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8753200447803327241,
+      "transport": {
+        "nats_tcp": "dynamo_tensorrt_llm.generate-79799d6e4b1b8309"
+      }
+    }
+  ]
+}
+[2m2026-04-08T18:12:42.391705Z[0m [32m INFO[0m [2mtest_trtllm.test_request_cancellation_trtllm_aggregated[0m[2m:[0m Aggregated Worker PID: 1310
+[2m2026-04-08T18:12:44.391944Z[0m [32m INFO[0m [2mtest_trtllm.test_request_cancellation_trtllm_aggregated[0m[2m:[0m Testing completion request cancellation...
+[2m2026-04-08T18:12:44.392104Z[0m [32m INFO[0m [2mutils.send_completion_request[0m[2m:[0m Sending completion request with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+[2m2026-04-08T18:12:44.393206Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'AggregatedHandler Request ID: ' pattern (max 100 iterations)...
+[2m2026-04-08T18:12:44.399069Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'AggregatedHandler Request ID: ' at iteration 1
+[2m2026-04-08T18:12:44.399140Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Content after pattern: '4819ef8c-9f89-4d73-883b-41de7aad4ec3'
+[2m2026-04-08T18:12:44.399206Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:12:44.399264Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to shutdown socket: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:12:44.399357Z[0m [32m INFO[0m [2mtest_trtllm.test_request_cancellation_trtllm_aggregated[0m[2m:[0m Cancelled request ID: 4819ef8c-9f89-4d73-883b-41de7aad4ec3
+[2m2026-04-08T18:12:44.399418Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Aborted Request ID: 4819ef8c-9f89-4d73-883b-41de7aad4ec3' pattern (max 100 iterations)...
+[2m2026-04-08T18:12:44.918999Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1526
+[2m2026-04-08T18:12:44.919123Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1348
+[2m2026-04-08T18:12:44.919192Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1310
+[2m2026-04-08T18:12:53.028235Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1310 name: python3
+[2m2026-04-08T18:12:53.028424Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1310 python3
+[2m2026-04-08T18:12:53.200972Z[0m [33m WARN[0m [2mmanaged_process.terminate_process[0m[2m:[0m PID 1348 no longer exists
+[2m2026-04-08T18:12:53.201851Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1312 name: tee
+[2m2026-04-08T18:12:53.201965Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1312 tee
+[2m2026-04-08T18:12:53.202523Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1311 name: sed
+[2m2026-04-08T18:12:53.202620Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1311 sed
+[2m2026-04-08T18:12:53.203097Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1307
+[2m2026-04-08T18:12:58.609133Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1309 name: tee
+[2m2026-04-08T18:12:58.609286Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1309 tee
+[2m2026-04-08T18:12:58.609757Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1308 name: sed
+[2m2026-04-08T18:12:58.609850Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1308 sed
+[2m2026-04-08T18:12:58.620736Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1293
+[2m2026-04-08T18:12:58.721557Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1294 name: sed
+[2m2026-04-08T18:12:58.721714Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1294 sed
+[2m2026-04-08T18:12:58.722768Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 1281
+[2m2026-04-08T18:12:58.823482Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 1282 name: sed
+[2m2026-04-08T18:12:58.823623Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 1282 sed

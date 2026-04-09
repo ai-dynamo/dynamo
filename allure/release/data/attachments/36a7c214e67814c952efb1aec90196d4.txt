@@ -1,0 +1,18 @@
+[2m2026-04-09T00:19:50.295906Z[0m [32m INFO[0m [2margs._load_disagg_config_section[0m[2m:[0m Loading disagg config section 'prefill' from /tmp/pytest_temp/test_disagg_config_preserves_b0/disagg.yaml
+[2m2026-04-09T00:19:50.296508Z[0m [32m INFO[0m [2margs._dump_disagg_config_section[0m[2m:[0m Successfully wrote config section to temp file
+[2m2026-04-09T00:19:50.297819Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m Cannot connect to ModelExpress server: Transport error: transport error. Using direct download.
+[2m2026-04-09T00:19:50.297842Z[0m [32m INFO[0m [2mmodelexpress_common::download[0m[2m:[0m Downloading model 'Qwen/Qwen3-0.6B' using provider: Hugging Face
+[2m2026-04-09T00:19:50.297869Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Using cache directory: "/home/dynamo/.cache/huggingface/hub"
+[2m2026-04-09T00:19:50.453802Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Downloaded model files for Qwen/Qwen3-0.6B
+[2m2026-04-09T00:19:50.453899Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m ModelExpress download completed successfully for model: Qwen/Qwen3-0.6B
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json
+[2m2026-04-09T00:19:50.567753Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json
+Retrying in 1s [Retry 1/5].
+[2m2026-04-09T00:19:50.567891Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 1s [Retry 1/5].
+HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json
+[2m2026-04-09T00:19:51.670092Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/hf_quant_config.json
+Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:19:51.670158Z[0m [33m WARN[0m [2m_http.http_backoff[0m[2m:[0m Retrying in 2s [Retry 2/5].
+[2m2026-04-09T00:19:53.764627Z[0m [32m INFO[0m [2mserver_args._handle_attention_backend_compatibility[0m[2m:[0m Attention backend not specified. Use flashinfer backend by default.
+[2m2026-04-09T00:19:53.764826Z[0m [32m INFO[0m [2margs.parse_args[0m[2m:[0m Using dynamo's built in tokenizer
+[2m2026-04-09T00:19:53.764874Z[0m [32m INFO[0m [2margs.parse_args[0m[2m:[0m Derived use_kv_events=False from kv_events_config=None

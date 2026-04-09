@@ -1,0 +1,269 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4258 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4258
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4258
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2388 --advertise-client-urls http://0.0.0.0:2388 --listen-peer-urls http://0.0.0.0:2389 --initial-advertise-peer-urls http://localhost:2389 --initial-cluster default=http://localhost:2389 --data-dir /tmp/etcd_k36epa25 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2388
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2388
+INFO     test_serve_deployment[completions_only]:common.py:43 Starting completions_only test_deployment
+INFO     test_serve_deployment[completions_only]:common.py:49 Using model: deepseek-ai/deepseek-llm-7b-base
+INFO     test_serve_deployment[completions_only]:common.py:50 Script: agg.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/vllm/launch/agg.sh --model deepseek-ai/deepseek-llm-7b-base --dyn-endpoint-types completions in /workspace/examples/backends/vllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8021/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8021/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8021/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8021/v1/models (custom check failed) (attempt=33, elapsed=61.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /v1/models HTTP/1.1" 200 126
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8021/v1/models (attempt=37, elapsed=69.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "deepseek-ai/deepseek-llm-7b-base",
+      "object": "model",
+      "created": 1775684207,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8021/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "GET /health HTTP/1.1" 200 684
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8021/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 893574676242254089,
+      "transport": {
+        "tcp": "10.1.61.128:44789/c669d6f05b44909/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 893574676242254089,
+      "transport": {
+        "tcp": "10.1.61.128:44789/c669d6f05b44909/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 893574676242254089,
+      "transport": {
+        "tcp": "10.1.61.128:44789/c669d6f05b44909/get_perf_metrics"
+      }
+    }
+  ]
+}
+INFO     test_serve_deployment[completions_only]:common.py:124 TESTING: Payload: CompletionPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8021/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/deepseek-llm-7b-base"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "POST /v1/completions HTTP/1.1" 200 3051
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=52.58s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '3051', 'date': 'Wed, 08 Apr 2026 21:37:41 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "cmpl-0a68b21e-2e7f-45d5-a94e-9275735afa83",
+  "choices": [
+    {
+      "text": "\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u201... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8021/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/deepseek-llm-7b-base"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "POST /v1/completions HTTP/1.1" 200 3051
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=52.27s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '3051', 'date': 'Wed, 08 Apr 2026 21:38:34 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "cmpl-3693c9d4-6a68-4a6a-a861-e740b60ead5d",
+  "choices": [
+    {
+      "text": "\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u201... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8021/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/deepseek-llm-7b-base"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8021
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8021 "POST /v1/completions HTTP/1.1" 200 3050
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=52.32s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '3050', 'date': 'Wed, 08 Apr 2026 21:39:26 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "cmpl-1800af5a-8c4e-47f7-aab9-95598a1ee2fb",
+  "choices": [
+    {
+      "text": "\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u2019s there?\nAI who?\nAI you hear me?\nKnock knock.\nWho\u201... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?
+Knock knock.
+Who’s there?
+AI who?
+AI you hear me?...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 18761
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 18763 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 18763 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 18762 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 18762 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 18748
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 18749 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 18749 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 18736
+INFO     NatsServer:managed_process.py:31 Terminating PID: 18737 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 18737 sed

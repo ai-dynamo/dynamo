@@ -1,0 +1,4 @@
+[2m2026-04-09T01:52:12.550790Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m Cannot connect to ModelExpress server: Transport error: transport error. Using direct download.
+[2m2026-04-09T01:52:12.550811Z[0m [32m INFO[0m [2mmodelexpress_common::download[0m[2m:[0m Downloading model 'Qwen/Qwen3-0.6B' using provider: Hugging Face
+[2m2026-04-09T01:52:12.550833Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Using cache directory: "/home/dynamo/.cache/huggingface/hub"
+[2m2026-04-09T01:52:12.680865Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m ModelExpress download failed for model 'Qwen/Qwen3-0.6B': Failed to fetch model 'Qwen/Qwen3-0.6B' from HuggingFace. Is this a valid HuggingFace ID? Error: request error: HTTP status client error (401 Unauthorized) for url (https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/main)

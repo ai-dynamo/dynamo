@@ -1,0 +1,1 @@
+[2m2026-04-08T16:11:43.046163Z[0m [33m WARN[0m [2mrapid._run_default_sim[0m[2m:[0m AIC picked aggregated config and no disaggregated alternative is available; interpolation data will be skipped.

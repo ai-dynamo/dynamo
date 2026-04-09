@@ -1,0 +1,1 @@
+INFO     dynamo.planner.core.budget:budget.py:137 Using GPU counts from CLI: prefill=2, decode=4

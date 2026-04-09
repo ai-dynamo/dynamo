@@ -1,0 +1,4 @@
+INFO     dynamo.planner.connectors.remote_client:remote_client.py:46 Attempting to connect to GlobalPlanner at central-ns.Planner (attempt 1/3)
+INFO     dynamo.planner.connectors.remote_client:remote_client.py:60 Successfully connected to centralized planner at central-ns.Planner
+INFO     dynamo.planner.connectors.remote_client:remote_client.py:96 Sending scale request to centralized planner: prefill=[3], decode=[5]
+INFO     dynamo.planner.connectors.remote_client:remote_client.py:118 Scale request response: ScaleStatus.SUCCESS - Scaled successfully

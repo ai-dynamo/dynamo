@@ -1,0 +1,22 @@
+[2m2026-04-08T16:52:51.246586Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 6 models needed for collected tests
+Models: {'Qwen/Qwen3-VL-2B-Instruct', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers', 'Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice', 'Wan-AI/Wan2.2-TI2V-5B-Diffusers', 'Qwen/Qwen3-0.6B', 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'}
+[2m2026-04-08T16:52:51.246701Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-08T16:52:51.246754Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files:   8%|▊         | 1/12 [00:00<00:03,  2.93it/s]Fetching 12 files:  58%|█████▊    | 7/12 [00:05<00:04,  1.23it/s]Fetching 12 files: 100%|██████████| 12/12 [00:05<00:00,  2.16it/s]
+[2m2026-04-08T16:52:56.973608Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-08T16:52:56.973696Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+Fetching 31 files:   0%|          | 0/31 [00:00<?, ?it/s]Fetching 31 files:   3%|▎         | 1/31 [00:00<00:03,  8.62it/s]Fetching 31 files:   6%|▋         | 2/31 [00:00<00:03,  9.07it/s]Fetching 31 files:  10%|▉         | 3/31 [00:00<00:06,  4.03it/s]Fetching 31 files:  35%|███▌      | 11/31 [00:00<00:01, 17.28it/s]Fetching 31 files:  35%|███▌      | 11/31 [00:14<00:01, 17.28it/s]Fetching 31 files:  52%|█████▏    | 16/31 [00:32<00:41,  2.74s/it]Fetching 31 files:  87%|████████▋ | 27/31 [00:33<00:04,  1.24s/it]Fetching 31 files: 100%|██████████| 31/31 [00:33<00:00,  1.09s/it]
+[2m2026-04-08T16:53:30.869763Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+[2m2026-04-08T16:53:30.869843Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+Fetching 13 files:   0%|          | 0/13 [00:00<?, ?it/s]Fetching 13 files:   8%|▊         | 1/13 [00:00<00:01,  8.30it/s]Fetching 13 files:  46%|████▌     | 6/13 [00:05<00:06,  1.10it/s]Fetching 13 files: 100%|██████████| 13/13 [00:05<00:00,  2.49it/s]
+[2m2026-04-08T16:53:36.191540Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+[2m2026-04-08T16:53:36.191623Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+Fetching 29 files:   0%|          | 0/29 [00:00<?, ?it/s]Fetching 29 files:   3%|▎         | 1/29 [00:00<00:03,  7.89it/s]Fetching 29 files:  10%|█         | 3/29 [00:00<00:05,  4.64it/s]Fetching 29 files:  45%|████▍     | 13/29 [00:37<00:50,  3.17s/it]Fetching 29 files:  76%|███████▌  | 22/29 [00:42<00:12,  1.82s/it]Fetching 29 files: 100%|██████████| 29/29 [00:42<00:00,  1.48s/it]
+[2m2026-04-08T16:54:19.295848Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+[2m2026-04-08T16:54:19.295946Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  4.88it/s]Fetching 10 files:  70%|███████   | 7/10 [00:03<00:01,  2.24it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  3.28it/s]
+[2m2026-04-08T16:54:22.460722Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
+[2m2026-04-08T16:54:22.460820Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  8.35it/s]Fetching 10 files:  60%|██████    | 6/10 [00:04<00:02,  1.43it/s]Fetching 10 files: 100%|██████████| 10/10 [00:04<00:00,  2.49it/s]
+[2m2026-04-08T16:54:26.585533Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+[2m2026-04-08T16:54:26.585934Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

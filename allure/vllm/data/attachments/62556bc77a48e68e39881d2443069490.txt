@@ -1,0 +1,102 @@
+[BASH] ==========================================
+[BASH] Launching Aggregated Multimodal Serving
+[BASH] ==========================================
+[BASH] Model:       Qwen/Qwen2.5-VL-7B-Instruct
+[BASH] Frontend:    http://localhost:8043
+[BASH] Backend:     dynamo.vllm --enable-multimodal
+[BASH] Media:       image_url and video_url (model support dependent)
+[BASH] ==========================================
+[BASH] 
+[BASH] Example test command:
+[BASH] 
+[BASH]   curl http://localhost:8043/v1/chat/completions \
+[BASH]     -H 'Content-Type: application/json' \
+[BASH]     -d '{
+[BASH]       "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+[BASH]       "messages": [{"role": "user", "content": [
+[BASH]         {"type": "text", "text": "Describe the image"},
+[BASH]         {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/300px-PNG_transparency_demonstration_1.png"}}
+[BASH]       ]}],
+[BASH]       "max_tokens": 50
+[BASH]     }'
+[BASH] 
+[BASH]   # For video-capable models such as Qwen/Qwen3-VL-2B-Instruct:
+[BASH]   curl http://localhost:8043/v1/chat/completions \
+[BASH]     -H 'Content-Type: application/json' \
+[BASH]     -d '{
+[BASH]       "model": "Qwen/Qwen3-VL-2B-Instruct",
+[BASH]       "messages": [{"role": "user", "content": [
+[BASH]         {"type": "text", "text": "Describe the video in detail"},
+[BASH]         {"type": "video_url", "video_url": {"url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"}}
+[BASH]       ]}],
+[BASH]       "max_tokens": 128
+[BASH]     }'
+[BASH] 
+[BASH] ==========================================
+[BASH] [2m2026-04-08T09:40:18.895430Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
+[BASH] [2m2026-04-08T09:40:18.900532Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2389)
+[BASH] [2m2026-04-08T09:40:18.904256Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.10.214 [3mport[0m[2m=[0mOS-assigned
+[BASH] [2m2026-04-08T09:40:18.910811Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8043"
+[BASH] [2m2026-04-08T09:40:19.022305Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] [2m2026-04-08T09:40:21.024308Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] dynamo.nixl_connect: Failed to load CuPy for GPU acceleration, utilizing numpy to provide CPU based operations.
+[BASH] Traceback (most recent call last):
+[BASH]   File "<frozen runpy>", line 198, in _run_module_as_main
+[BASH]   File "<frozen runpy>", line 88, in _run_code
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/__main__.py", line 12, in <module>
+[BASH]     main()
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py", line 725, in main
+[BASH]     uvloop.run(worker())
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/uvloop/__init__.py", line 109, in run
+[BASH]     return __asyncio.run(
+[BASH]            ^^^^^^^^^^^^^^
+[BASH]   File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+[BASH]     return runner.run(main)
+[BASH]            ^^^^^^^^^^^^^^^^
+[BASH]   File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+[BASH]     return self._loop.run_until_complete(task)
+[BASH]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/uvloop/__init__.py", line 61, in wrapper
+[BASH]     return await main
+[BASH]            ^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py", line 115, in worker
+[BASH]     config = parse_args()
+[BASH]              ^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/args.py", line 110, in parse_args
+[BASH]     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
+[BASH]                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/engine/arg_utils.py", line 1379, in from_cli_args
+[BASH]     engine_args = cls(
+[BASH]                   ^^^^
+[BASH]   File "<string>", line 189, in __init__
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/engine/arg_utils.py", line 663, in __post_init__
+[BASH]     self.model = get_model_path(self.model, self.revision)
+[BASH]                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/vllm/transformers_utils/repo_utils.py", line 220, in get_model_path
+[BASH]     return snapshot_download(repo_id=model, **common_kwargs)
+[BASH]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+[BASH]     return fn(*args, **kwargs)
+[BASH]            ^^^^^^^^^^^^^^^^^^^
+[BASH]   File "/opt/dynamo/venv/lib/python3.12/site-packages/huggingface_hub/_snapshot_download.py", line 230, in snapshot_download
+[BASH]     raise LocalEntryNotFoundError(
+[BASH] huggingface_hub.errors.LocalEntryNotFoundError: Cannot find an appropriate cached snapshot folder for the specified revision on the local disk and outgoing traffic has been disabled. To enable repo look-ups and downloads online, pass 'local_files_only=False' as input.
+[BASH] [2m2026-04-08T09:40:23.026223Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[BASH] Cleaning up...
+[BASH] [2m2026-04-08T09:40:23.971997Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T09:40:23.972082Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T09:40:23.972103Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T09:40:23.972108Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T09:40:23.972112Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T09:40:23.972155Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+[BASH] [2m2026-04-08T09:40:25.029017Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T09:40:25.029068Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T09:40:25.029079Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T09:40:25.029083Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T09:40:25.029086Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[BASH] [2m2026-04-08T09:40:28.973480Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[BASH] [2m2026-04-08T09:40:28.973601Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[BASH] [2m2026-04-08T09:40:28.973641Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[BASH] [2m2026-04-08T09:40:28.973649Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[BASH] [2m2026-04-08T09:40:28.973655Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected

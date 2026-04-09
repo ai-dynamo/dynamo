@@ -1,0 +1,2 @@
+INFO     dynamo.planner.connectors.global_planner:global_planner.py:134 Delegating scale request to GlobalPlanner: DGD=dgd, prefill=[3], decode=[5]
+INFO     dynamo.planner.connectors.global_planner:global_planner.py:146 GlobalPlanner scaling successful: OK

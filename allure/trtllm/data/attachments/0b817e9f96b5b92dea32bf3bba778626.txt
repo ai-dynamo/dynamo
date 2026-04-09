@@ -1,0 +1,4 @@
+INFO     dynamo.planner.core.base:base.py:519 Predicted load: num_req=500.00, isl=3000.00, osl=150.00
+INFO     dynamo.planner.core.prefill:prefill.py:95 Prefill: 8.33(demand rps) / 13.33(engine rps) = 1(num_p), est_ttft=75.0ms
+INFO     dynamo.planner.core.base:base.py:519 Predicted load: num_req=500.00, isl=3000.00, osl=150.00
+INFO     dynamo.planner.core.decode:decode.py:88 Decode: 8.33(demand rps) / 6.67(engine rps) = 2(num_d), est_itl=9.5ms

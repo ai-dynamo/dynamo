@@ -1,0 +1,58 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4309 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4309
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4309
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2438 --advertise-client-urls http://0.0.0.0:2438 --listen-peer-urls http://0.0.0.0:2439 --initial-advertise-peer-urls http://localhost:2439 --initial-cluster default=http://localhost:2439 --data-dir /tmp/etcd_xt6t38gw in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2438
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2438
+INFO     DynamoFrontendProcess:managed_process.py:437 Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8024 --migration-limit 0 --dyn-chat-processor vllm --discovery-backend etcd --request-plane tcp --enable-auto-tool-choice --tool-call-parser hermes --reasoning-parser qwen3 in /workspace
+INFO     tests.frontend.test_vllm_prepost_integration:test_vllm_prepost_integration.py:206 Frontend started on port 8024
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:437 Running command: python3 -m tests.frontend.vllm_prepost_worker in /workspace
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:690 Checking URL http://localhost:8024/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8024 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8024 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8024 "GET /v1/models HTTP/1.1" 200 109
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8024/v1/models (attempt=10, elapsed=9.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775682706,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     tests.frontend.test_vllm_prepost_integration:test_vllm_prepost_integration.py:212 vLLM pre/post test worker registered model Qwen/Qwen3-0.6B
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8024
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8024 "POST /v1/chat/completions HTTP/1.1" 200 None
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 7282
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:31 Terminating PID: 7284 name: tee
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 7284 tee
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:31 Terminating PID: 7283 name: sed
+INFO     MockVllmPrepostWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 7283 sed
+INFO     DynamoFrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 7279
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 7281 name: tee
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 7281 tee
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 7280 name: sed
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 7280 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 7266
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 7267 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 7267 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 7254
+INFO     NatsServer:managed_process.py:31 Terminating PID: 7255 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 7255 sed

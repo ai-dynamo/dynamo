@@ -1,0 +1,92 @@
+[PYTHON3] [2m2026-04-09T00:26:34.460045Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2397)
+[PYTHON3] [2m2026-04-09T00:26:34.469720Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.11.15 [3mport[0m[2m=[0mOS-assigned
+[PYTHON3] [2m2026-04-09T00:26:34.471748Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m Cannot connect to ModelExpress server: Transport error: transport error. Using direct download.
+[PYTHON3] [2m2026-04-09T00:26:34.471774Z[0m [32m INFO[0m [2mmodelexpress_common::download[0m[2m:[0m Downloading model 'Qwen/Qwen3-0.6B' using provider: Hugging Face
+[PYTHON3] [2m2026-04-09T00:26:34.471798Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Using cache directory: "/home/dynamo/.cache/huggingface/hub"
+[PYTHON3] [2m2026-04-09T00:26:34.617717Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Downloaded model files for Qwen/Qwen3-0.6B
+[PYTHON3] [2m2026-04-09T00:26:34.617764Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m ModelExpress download completed successfully for model: Qwen/Qwen3-0.6B
+[PYTHON3] [2m2026-04-09T00:26:34.636722Z[0m [32m INFO[0m [2m_core[0m[2m:[0m Registered base model 'Qwen/Qwen3-0.6B' MDC
+[PYTHON3] HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/tokenizer_config.json
+[PYTHON3] Retrying in 1s [Retry 1/5].
+[PYTHON] [2m2026-04-09T00:26:34.831324Z[0m [32m INFO[0m [2mmain.async_main[0m[2m:[0m Request migration disabled (limit: 0)
+[PYTHON] [2m2026-04-09T00:26:34.833022Z[0m [32m INFO[0m [2mdynamo_runtime::distributed[0m[2m:[0m Initializing KV store discovery backend: Etcd(http://localhost:2397)
+[PYTHON] [2m2026-04-09T00:26:34.835882Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Initializing NetworkManager with TCP request plane [3mmode[0m[2m=[0mtcp [3mhost[0m[2m=[0m10.1.11.15 [3mport[0m[2m=[0mOS-assigned
+[PYTHON] [2m2026-04-09T00:26:34.936002Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m Starting HTTP(S) service [3mprotocol[0m[2m=[0m"HTTP" [3maddress[0m[2m=[0m"0.0.0.0:8094"
+[PYTHON] [2m2026-04-09T00:26:34.937399Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m Cannot connect to ModelExpress server: Transport error: transport error. Using direct download.
+[PYTHON] [2m2026-04-09T00:26:34.937423Z[0m [32m INFO[0m [2mmodelexpress_common::download[0m[2m:[0m Downloading model 'Qwen/Qwen3-0.6B' using provider: Hugging Face
+[PYTHON] [2m2026-04-09T00:26:34.937428Z[0m [33m WARN[0m [2mmodelexpress_common::download[0m[2m:[0m `ignore_weights` is set to true. All the model weight files will be ignored!
+[PYTHON] [2m2026-04-09T00:26:34.937454Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Using cache directory: "/home/dynamo/.cache/huggingface/hub"
+[PYTHON] [2m2026-04-09T00:26:35.076660Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Downloaded model files for Qwen/Qwen3-0.6B
+[PYTHON] [2m2026-04-09T00:26:35.076698Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m ModelExpress download completed successfully for model: Qwen/Qwen3-0.6B
+[PYTHON] [2m2026-04-09T00:26:35.076833Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m chat endpoints enabled
+[PYTHON] [2m2026-04-09T00:26:35.076843Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m responses endpoints enabled
+[PYTHON] [2m2026-04-09T00:26:35.077472Z[0m [33m WARN[0m [2mdynamo_llm::hub[0m[2m:[0m Cannot connect to ModelExpress server: Transport error: transport error. Using direct download.
+[PYTHON] [2m2026-04-09T00:26:35.077490Z[0m [32m INFO[0m [2mmodelexpress_common::download[0m[2m:[0m Downloading model 'Qwen/Qwen3-0.6B' using provider: Hugging Face
+[PYTHON] [2m2026-04-09T00:26:35.077494Z[0m [33m WARN[0m [2mmodelexpress_common::download[0m[2m:[0m `ignore_weights` is set to true. All the model weight files will be ignored!
+[PYTHON] [2m2026-04-09T00:26:35.077516Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Using cache directory: "/home/dynamo/.cache/huggingface/hub"
+[PYTHON] [2m2026-04-09T00:26:35.161284Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:35.216134Z[0m [32m INFO[0m [2mmodelexpress_common::providers::huggingface[0m[2m:[0m Downloaded model files for Qwen/Qwen3-0.6B
+[PYTHON] [2m2026-04-09T00:26:35.216216Z[0m [32m INFO[0m [2mdynamo_llm::hub[0m[2m:[0m ModelExpress download completed successfully for model: Qwen/Qwen3-0.6B
+[PYTHON] ERROR 04-09 00:26:35 [repo_utils.py:47] Error retrieving file list: 503 Server Error: Service Unavailable for url: https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main?recursive=True&expand=False (Request ID: Root=1-69d6f23b-698b59290320569100e25c34;c8819624-9e78-4445-a696-e02e05829e62)
+[PYTHON] ERROR 04-09 00:26:35 [repo_utils.py:47] 
+[PYTHON] ERROR 04-09 00:26:35 [repo_utils.py:47] Internal Error - We're working hard to fix this as soon as possible!, retrying 1 of 2
+[PYTHON3] HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/tokenizer_config.json
+[PYTHON3] Retrying in 2s [Retry 2/5].
+[PYTHON] [2m2026-04-09T00:26:36.163559Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:37.165648Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] ERROR 04-09 00:26:37 [repo_utils.py:47] Error retrieving file list: 503 Server Error: Service Unavailable for url: https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main?recursive=True&expand=False (Request ID: Root=1-69d6f23d-160286ca286d14b774e0e8e0;3f3e1bf9-4e57-426d-bd7b-629afb65c463)
+[PYTHON] ERROR 04-09 00:26:37 [repo_utils.py:47] 
+[PYTHON] ERROR 04-09 00:26:37 [repo_utils.py:47] Internal Error - We're working hard to fix this as soon as possible!, retrying 1 of 2
+[PYTHON] [2m2026-04-09T00:26:38.167613Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/added_tokens.json
+[PYTHON3] Retrying in 1s [Retry 1/5].
+[PYTHON] [2m2026-04-09T00:26:39.169745Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] HTTP Error 503 thrown while requesting HEAD https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/chat_template.jinja
+[PYTHON3] Retrying in 1s [Retry 1/5].
+[PYTHON] ERROR 04-09 00:26:40 [repo_utils.py:45] Error retrieving file list: 503 Server Error: Service Unavailable for url: https://huggingface.co/api/models/Qwen/Qwen3-0.6B/tree/main?recursive=True&expand=False (Request ID: Root=1-69d6f23f-07947272303569270e763b2e;8c930039-e021-42d4-83a5-6a33672d6f87)
+[PYTHON] ERROR 04-09 00:26:40 [repo_utils.py:45] 
+[PYTHON] ERROR 04-09 00:26:40 [repo_utils.py:45] Internal Error - We're working hard to fix this as soon as possible!
+[PYTHON] [2m2026-04-09T00:26:40.171623Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON3] [2m2026-04-09T00:26:41.142322Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m Creating TCP request plane server [3mbind_addr[0m[2m=[0m10.1.11.15:0 [3mport_source[0m[2m=[0m"OS-assigned"
+[PYTHON3] [2m2026-04-09T00:26:41.142363Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Initializing TCP server with dispatcher (concurrency=1500, queue=6000)
+[PYTHON3] [2m2026-04-09T00:26:41.142372Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Started TCP worker dispatcher with concurrency limit 1500
+[PYTHON3] [2m2026-04-09T00:26:41.142377Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Binding TCP server to 10.1.11.15:0
+[PYTHON3] [2m2026-04-09T00:26:41.142418Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m TCP server bound successfully [3mrequested[0m[2m=[0m10.1.11.15:0 [3mactual[0m[2m=[0m10.1.11.15:44743
+[PYTHON3] [2m2026-04-09T00:26:41.142432Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::manager[0m[2m:[0m TCP request plane server started [3mactual_addr[0m[2m=[0m10.1.11.15:44743 [3mactual_port[0m[2m=[0m44743
+[PYTHON3] [2m2026-04-09T00:26:41.142443Z[0m [32m INFO[0m [2mdynamo_runtime::pipeline::network::ingress::shared_tcp_endpoint[0m[2m:[0m Registered endpoint 'test.vllm-prepost.generate' with shared TCP server on 10.1.11.15:44743
+[PYTHON] [2m2026-04-09T00:26:41.173626Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:42.175604Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:43.177597Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:44.179624Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:45.181576Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:46.183482Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:47.185681Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:48.187667Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:49.189598Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] INFO 04-09 00:26:50 [model.py:549] Resolved architecture: Qwen3ForCausalLM
+[PYTHON] INFO 04-09 00:26:50 [model.py:1678] Using max model len 40960
+[PYTHON] INFO 04-09 00:26:50 [vllm.py:790] Asynchronous scheduling is enabled.
+[PYTHON] [2m2026-04-09T00:26:50.191518Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:51.083518Z[0m [32m INFO[0m [2mvllm_processor.chat_engine_factory[0m[2m:[0m vLLM OutputProcessor stream_interval=20
+[PYTHON] [2m2026-04-09T00:26:51.084910Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m Chat completions is ready
+[PYTHON] [2m2026-04-09T00:26:51.084942Z[0m [32m INFO[0m [2mdynamo_llm::discovery::model[0m[2m:[0m Adding worker set to model [3mmodel[0m[2m=[0mQwen/Qwen3-0.6B [3mnamespace[0m[2m=[0mtest
+[PYTHON] [2m2026-04-09T00:26:51.084954Z[0m [32m INFO[0m [2mdynamo_llm::discovery::watcher[0m[2m:[0m added model [3mmodel_name[0m[2m=[0m"Qwen/Qwen3-0.6B" [3mnamespace[0m[2m=[0m"test"
+[PYTHON] [2m2026-04-09T00:26:51.193866Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0
+[PYTHON] [2m2026-04-09T00:26:51.196334Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m07ad90be-23ee-4bf7-9777-b0c8b3a8296e [3mmodel[0m[2m=[0mqwen/qwen3-0.6b [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0mstream [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m7489afe6-f554-4a3c-a6da-70f46407dfa8 [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b"[0m
+[PYTHON] [2m2026-04-09T00:26:51.196626Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::service_v2[0m[2m:[0m http response sent [3mstatus[0m[2m=[0m200 [3mlatency_ms[0m[2m=[0m0 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m7489afe6-f554-4a3c-a6da-70f46407dfa8 [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b"[0m
+[PYTHON] INFO 04-09 00:26:51 [hf.py:314] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+[PYTHON] WARNING 04-09 00:26:51 [input_processor.py:235] Passing raw prompts to InputProcessor is deprecated and will be removed in v0.18. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
+[PYTHON3] [2m2026-04-09T00:26:51.260359Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request received [3mrequest_id[0m[2m=[0m242ed46d-cab2-43e7-9e76-e98a39d12a2e [2m[3mrequest_id[0m[2m=[0m"242ed46d-cab2-43e7-9e76-e98a39d12a2e" [3mcomponent[0m[2m=[0m"vllm-prepost" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"test" [3minstance_id[0m[2m=[0m6585843132885338885[0m
+[PYTHON3] [2m2026-04-09T00:26:51.262539Z[0m [32m INFO[0m [1mhandle_payload[0m: [2mdynamo_runtime::pipeline::network::ingress::push_handler[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m242ed46d-cab2-43e7-9e76-e98a39d12a2e [2m[3mrequest_id[0m[2m=[0m"242ed46d-cab2-43e7-9e76-e98a39d12a2e" [3mcomponent[0m[2m=[0m"vllm-prepost" [3mendpoint[0m[2m=[0m"generate" [3mnamespace[0m[2m=[0m"test" [3minstance_id[0m[2m=[0m6585843132885338885[0m
+[PYTHON] [2m2026-04-09T00:26:51.264451Z[0m [32m INFO[0m [1mhttp-request[0m: [2mdynamo_llm::http::service::metrics[0m[2m:[0m request completed [3mrequest_id[0m[2m=[0m07ad90be-23ee-4bf7-9777-b0c8b3a8296e [3mmodel[0m[2m=[0mqwen/qwen3-0.6b [3mendpoint[0m[2m=[0mchat_completions [3mrequest_type[0m[2m=[0mstream [3mstatus[0m[2m=[0msuccess [3melapsed_ms[0m[2m=[0m68 [2m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1 [3mrequest_id[0m[2m=[0m7489afe6-f554-4a3c-a6da-70f46407dfa8 [3mmodel[0m[2m=[0m"qwen/qwen3-0.6b" [3minput_tokens[0m[2m=[0m0 [3moutput_tokens[0m[2m=[0m0[0m
+[PYTHON] [2m2026-04-09T00:26:51.369042Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[PYTHON] [2m2026-04-09T00:26:51.369110Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[PYTHON] [2m2026-04-09T00:26:51.369131Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[PYTHON] [2m2026-04-09T00:26:51.369136Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[PYTHON] [2m2026-04-09T00:26:51.369140Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[PYTHON] [2m2026-04-09T00:26:51.369175Z[0m [32m INFO[0m [2mdynamo_llm::http::service::service_v2[0m[2m:[0m HTTP server shutdown requested
+[PYTHON] [2m2026-04-09T00:26:56.370538Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Runtime shutdown initiated
+[PYTHON] [2m2026-04-09T00:26:56.370663Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 1: Cancelling endpoint shutdown token
+[PYTHON] [2m2026-04-09T00:26:56.370707Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 2: Waiting for graceful endpoints to complete
+[PYTHON] [2m2026-04-09T00:26:56.370715Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Active graceful endpoints: 0
+[PYTHON] [2m2026-04-09T00:26:56.370722Z[0m [32m INFO[0m [2mdynamo_runtime::runtime[0m[2m:[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected

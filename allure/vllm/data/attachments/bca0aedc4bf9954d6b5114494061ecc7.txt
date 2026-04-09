@@ -1,0 +1,183 @@
+[2m2026-04-08T18:16:43.741001Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4222 -js --store_dir /tmp/nats_06dvhl_k in /workspace
+[2m2026-04-08T18:16:43.742006Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4222
+[2m2026-04-08T18:16:43.842792Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4222
+[2m2026-04-08T18:16:43.842925Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:16:43.845371Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:16:43.845437Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_disaggregated[0m[2m:[0m NATS server started successfully
+[2m2026-04-08T18:16:43.845582Z[0m [32m INFO[0m [2mutils.start[0m[2m:[0m Starting 1-node ETCD cluster
+[2m2026-04-08T18:16:43.845771Z[0m [32m INFO[0m [2mutils._start_replica[0m[2m:[0m Starting etcd-0 on client port 2379, peer port 2380
+[2m2026-04-08T18:16:43.845980Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --name etcd-0 --data-dir /tmp/etcd_0_brou5v1t --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://0.0.0.0:2380 --initial-advertise-peer-urls http://127.0.0.1:2380 --initial-cluster etcd-0=http://127.0.0.1:2380 --initial-cluster-state new --initial-cluster-token etcd-cluster in /workspace
+[2m2026-04-08T18:16:43.846824Z[0m [32m INFO[0m [2mutils.start[0m[2m:[0m All 1 ETCD replicas started successfully
+[2m2026-04-08T18:16:43.846881Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Waiting for cluster to become healthy...
+[2m2026-04-08T18:16:43.847672Z[0m [33m WARN[0m [2mutils.get_status[0m[2m:[0m Failed to get status for etcd-0: HTTPConnectionPool(host='127.0.0.1', port=2379): Max retries exceeded with url: /v3/maintenance/status (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=2379): Failed to establish a new connection: [Errno 111] Connection refused"))
+[2m2026-04-08T18:16:44.850866Z[0m [32m INFO[0m [2mutils._wait_for_healthy_cluster[0m[2m:[0m Cluster is healthy with leader at etcd-0
+[2m2026-04-08T18:16:44.850953Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_disaggregated[0m[2m:[0m Single ETCD node started successfully
+[2m2026-04-08T18:16:44.851011Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_disaggregated[0m[2m:[0m ETCD endpoint: ['http://127.0.0.1:2379']
+[2m2026-04-08T18:16:44.852412Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --migration-limit 0 in /workspace
+[2m2026-04-08T18:16:44.853632Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_disaggregated[0m[2m:[0m Frontend started successfully
+[2m2026-04-08T18:16:44.853934Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --gpu-memory-utilization 0.45 --max-model-len 8192 --disaggregation-mode prefill --kv-transfer-config {"kv_connector": "NixlConnector", "kv_role": "kv_both"} --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:20082", "enable_kv_cache_events": true} in /workspace
+[2m2026-04-08T18:16:44.855142Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8082/health
+[2m2026-04-08T18:17:04.894055Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8082/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T18:17:05.896202Z[0m [32m INFO[0m [2mtest_vllm.is_ready[0m[2m:[0m Prefill worker status is ready
+[2m2026-04-08T18:17:05.896331Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8082/health (attempt=22, elapsed=21.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 14,
+    "nanos": 16066414
+  },
+  "endpoints": {
+    "get_perf_metrics": "ready",
+    "worker_kv_indexer_query_dp0": "ready",
+    "generate": "ready",
+    "clear_kv_blocks": "ready"
+  }
+}
+[2m2026-04-08T18:17:05.896427Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_disaggregated[0m[2m:[0m Prefill worker started successfully
+[2m2026-04-08T18:17:05.896743Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --gpu-memory-utilization 0.45 --max-model-len 8192 --disaggregation-mode decode --kv-transfer-config {"kv_connector": "NixlConnector", "kv_role": "kv_both"} in /workspace
+[2m2026-04-08T18:17:05.897995Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8081/health
+[2m2026-04-08T18:17:25.935528Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8081/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T18:17:26.937597Z[0m [32m INFO[0m [2mtest_vllm.is_ready[0m[2m:[0m Worker status is ready
+[2m2026-04-08T18:17:26.937721Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8081/health (attempt=22, elapsed=21.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 14,
+    "nanos": 96479002
+  },
+  "endpoints": {
+    "clear_kv_blocks": "ready",
+    "get_perf_metrics": "ready",
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T18:17:26.937785Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8000/v1/models
+[2m2026-04-08T18:17:27.939548Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8000/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775672246,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T18:17:27.939797Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8000/health
+[2m2026-04-08T18:17:28.942099Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8000/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.prefill.clear_kv_blocks",
+    "dyn://dynamo.prefill.generate",
+    "dyn://dynamo.prefill.get_perf_metrics",
+    "dyn://dynamo.prefill.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 7668677362612590869,
+      "transport": {
+        "tcp": "10.1.84.211:32997/6a6c9d6e4f9a5915/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7668677362612590869,
+      "transport": {
+        "tcp": "10.1.84.211:32997/6a6c9d6e4f9a5915/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 7668677362612590869,
+      "transport": {
+        "tcp": "10.1.84.211:32997/6a6c9d6e4f9a5915/get_perf_metrics"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 7668677362612590857,
+      "transport": {
+        "tcp": "10.1.84.211:40191/6a6c9d6e4f9a5909/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7668677362612590857,
+      "transport": {
+        "tcp": "10.1.84.211:40191/6a6c9d6e4f9a5909/generate"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 7668677362612590857,
+      "transport": {
+        "tcp": "10.1.84.211:40191/6a6c9d6e4f9a5909/get_perf_metrics"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 7668677362612590857,
+      "transport": {
+        "tcp": "10.1.84.211:40191/6a6c9d6e4f9a5909/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+[2m2026-04-08T18:17:28.942328Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_disaggregated[0m[2m:[0m Decode worker started successfully
+[2m2026-04-08T18:17:28.942401Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_disaggregated[0m[2m:[0m Sending inference request
+[2m2026-04-08T18:17:28.942458Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Sending inference request: 'What is 2+2? The answer is'
+[2m2026-04-08T18:17:30.694715Z[0m [32m INFO[0m [2mutils.send_inference_request[0m[2m:[0m Inference generated text: '4. But what if there are other numbers? What if there are more than two numbers? What if there are more than two numbers and the numbers are not all positive integers? What if there are more than two numbers and the numbers are not'
+[2m2026-04-08T18:17:30.694899Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_disaggregated[0m[2m:[0m System is working correctly with single ETCD node in disaggregated mode
+[2m2026-04-08T18:17:30.694969Z[0m [32m INFO[0m [2mtest_vllm.test_etcd_non_ha_shutdown_vllm_disaggregated[0m[2m:[0m Terminating single ETCD node
+[2m2026-04-08T18:17:30.695018Z[0m [32m INFO[0m [2mutils.stop[0m[2m:[0m Cleaning up ETCD cluster
+[2m2026-04-08T18:17:30.695889Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3204
+[2m2026-04-08T18:17:37.702396Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3205 name: sed
+[2m2026-04-08T18:17:37.702534Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3205 sed
+[2m2026-04-08T18:17:37.702967Z[0m [33m WARN[0m [2mutils.stop[0m[2m:[0m Error removing data directory /tmp/etcd_0_brou5v1t: [Errno 2] No such file or directory: '/tmp/etcd_0_brou5v1t'
+[2m2026-04-08T18:17:37.703042Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Waiting for 3 process(es) to terminate
+[2m2026-04-08T18:17:45.704052Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Decode Worker process has terminated after 8s
+[2m2026-04-08T18:17:49.704793Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Prefill Worker process has terminated after 12s
+[2m2026-04-08T18:18:01.706612Z[0m [32m INFO[0m [2mutils.wait_for_processes_to_terminate[0m[2m:[0m Frontend process has terminated after 24s
+[2m2026-04-08T18:18:01.706878Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3552
+[2m2026-04-08T18:18:01.707471Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3554 name: tee
+[2m2026-04-08T18:18:01.707564Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3554 tee
+[2m2026-04-08T18:18:01.708004Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3553 name: sed
+[2m2026-04-08T18:18:01.708093Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3553 sed
+[2m2026-04-08T18:18:01.708230Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3221
+[2m2026-04-08T18:18:01.708657Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3223 name: tee
+[2m2026-04-08T18:18:01.708755Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3223 tee
+[2m2026-04-08T18:18:01.709152Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3222 name: sed
+[2m2026-04-08T18:18:01.709248Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3222 sed
+[2m2026-04-08T18:18:01.709382Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3218
+[2m2026-04-08T18:18:01.709735Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3220 name: tee
+[2m2026-04-08T18:18:01.709823Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3220 tee
+[2m2026-04-08T18:18:01.710167Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3219 name: sed
+[2m2026-04-08T18:18:01.710254Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3219 sed
+[2m2026-04-08T18:18:01.710963Z[0m [32m INFO[0m [2mutils.stop[0m[2m:[0m Cleaning up ETCD cluster
+[2m2026-04-08T18:18:01.711218Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3189
+[2m2026-04-08T18:18:01.812014Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 3190 name: sed
+[2m2026-04-08T18:18:01.812120Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 3190 sed

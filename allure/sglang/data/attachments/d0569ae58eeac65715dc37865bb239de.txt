@@ -1,0 +1,95 @@
+[2m2026-04-08T18:15:59.982275Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4301 in /workspace
+[2m2026-04-08T18:15:59.983472Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4301
+[2m2026-04-08T18:16:00.084049Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4301
+[2m2026-04-08T18:16:00.084226Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:16:00.086137Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:16:00.086971Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2395 --advertise-client-urls http://0.0.0.0:2395 --listen-peer-urls http://0.0.0.0:2396 --initial-advertise-peer-urls http://localhost:2396 --initial-cluster default=http://localhost:2396 --data-dir /tmp/etcd__z6xngcv in /workspace
+[2m2026-04-08T18:16:00.088006Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2395
+[2m2026-04-08T18:16:00.188585Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2395
+[2m2026-04-08T18:16:00.190162Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8029 --migration-limit 0 in /workspace
+[2m2026-04-08T18:16:00.191609Z[0m [32m INFO[0m [2mtest_trtllm.test_request_cancellation_trtllm_decode_cancel[0m[2m:[0m Frontend started successfully
+[2m2026-04-08T18:16:00.192425Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --disaggregation-mode prefill --max-seq-len 16384 --max-num-tokens 16384 --extra-engine-args test_request_cancellation_trtllm_config.yaml in /workspace
+[2m2026-04-08T18:16:00.193810Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:9118/health
+[2m2026-04-08T18:16:20.223173Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:9118/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T18:16:40.259010Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:9118/health (status code 503) (attempt=41, elapsed=40.1s)
+[2m2026-04-08T18:16:43.264119Z[0m [32m INFO[0m [2mtest_trtllm.is_ready[0m[2m:[0m Prefill worker status is ready
+[2m2026-04-08T18:16:43.264267Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:9118/health (attempt=44, elapsed=43.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 28,
+    "nanos": 193767925
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T18:16:43.264333Z[0m [32m INFO[0m [2mtest_trtllm.test_request_cancellation_trtllm_decode_cancel[0m[2m:[0m Prefill Worker PID: 2657
+[2m2026-04-08T18:16:43.265213Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode --max-seq-len 16384 --max-num-tokens 16384 --extra-engine-args test_request_cancellation_trtllm_config.yaml in /workspace
+[2m2026-04-08T18:16:43.266614Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:9130/health
+[2m2026-04-08T18:17:03.296048Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:9130/health (status code 503) (attempt=21, elapsed=20.0s)
+[2m2026-04-08T18:17:23.330904Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:9130/health (status code 503) (attempt=41, elapsed=40.1s)
+[2m2026-04-08T18:17:26.336228Z[0m [32m INFO[0m [2mtest_trtllm.is_ready[0m[2m:[0m Decode worker status is ready
+[2m2026-04-08T18:17:26.336394Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:9130/health (attempt=44, elapsed=43.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 28,
+    "nanos": 422979431
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T18:17:26.336461Z[0m [32m INFO[0m [2mtest_trtllm.test_request_cancellation_trtllm_decode_cancel[0m[2m:[0m Decode Worker PID: 2978
+[2m2026-04-08T18:17:28.336675Z[0m [32m INFO[0m [2mtest_trtllm.test_request_cancellation_trtllm_decode_cancel[0m[2m:[0m Testing chat completion stream request cancellation in decode worker (decode phase)...
+[2m2026-04-08T18:17:28.336837Z[0m [32m INFO[0m [2mutils.send_chat_completion_request[0m[2m:[0m Sending chat completion request (stream=True) with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+[2m2026-04-08T18:17:28.337202Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Prefill Request ID: ' pattern (max 100 iterations)...
+[2m2026-04-08T18:17:28.343806Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'Prefill Request ID: ' at iteration 1
+[2m2026-04-08T18:17:28.343899Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Content after pattern: '391ac593-32a5-4eed-b359-6da365fc8a17'
+[2m2026-04-08T18:17:28.343967Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Decode Request ID: 391ac593-32a5-4eed-b359-6da365fc8a17' pattern (max 100 iterations)...
+[2m2026-04-08T18:17:28.386235Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Found pattern 'Decode Request ID: 391ac593-32a5-4eed-b359-6da365fc8a17' at iteration 8
+[2m2026-04-08T18:17:28.646560Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 1: data: {"id":"chatcmpl-391ac593-32a5-4eed-b359-6da365fc8a17","choices":[{"index":0,"delta":{"content"
+[2m2026-04-08T18:17:28.646709Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 2: 
+[2m2026-04-08T18:17:28.654738Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 3: data: {"id":"chatcmpl-391ac593-32a5-4eed-b359-6da365fc8a17","choices":[{"index":0,"delta":{"content"
+[2m2026-04-08T18:17:28.654842Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 4: 
+[2m2026-04-08T18:17:28.662070Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Received streaming response 5: data: {"id":"chatcmpl-391ac593-32a5-4eed-b359-6da365fc8a17","choices":[{"index":0,"delta":{"content"
+[2m2026-04-08T18:17:28.662192Z[0m [32m INFO[0m [2mutils.read_streaming_responses[0m[2m:[0m Successfully read 5 responses
+[2m2026-04-08T18:17:28.662440Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:17:28.662543Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to shutdown socket: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:17:28.662621Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:17:28.662692Z[0m [33m WARN[0m [2mutils.cancel[0m[2m:[0m Failed to shutdown socket: [Errno 9] Bad file descriptor
+[2m2026-04-08T18:17:28.662805Z[0m [32m INFO[0m [2mtest_trtllm.test_request_cancellation_trtllm_decode_cancel[0m[2m:[0m Cancelled request ID: 391ac593-32a5-4eed-b359-6da365fc8a17
+[2m2026-04-08T18:17:28.662894Z[0m [32m INFO[0m [2mutils.poll_for_pattern[0m[2m:[0m Starting to poll for 'Aborted Request ID: 391ac593-32a5-4eed-b359-6da365fc8a17' pattern (max 100 iterations)...
+[2m2026-04-08T18:17:29.188063Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 3114
+[2m2026-04-08T18:17:29.188309Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2978
+[2m2026-04-08T18:17:29.188384Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2996
+[2m2026-04-08T18:17:37.296283Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2978 name: python3
+[2m2026-04-08T18:17:37.296443Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2978 python3
+[2m2026-04-08T18:17:37.469559Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2980 name: tee
+[2m2026-04-08T18:17:37.469722Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2980 tee
+[2m2026-04-08T18:17:37.470403Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2979 name: sed
+[2m2026-04-08T18:17:37.470497Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2979 sed
+[2m2026-04-08T18:17:37.471552Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2657
+[2m2026-04-08T18:17:37.471626Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2861
+[2m2026-04-08T18:17:37.471796Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2694
+[2m2026-04-08T18:17:45.581584Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2657 name: python3
+[2m2026-04-08T18:17:45.581745Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2657 python3
+[2m2026-04-08T18:17:45.754330Z[0m [33m WARN[0m [2mmanaged_process.terminate_process[0m[2m:[0m PID 2694 no longer exists
+[2m2026-04-08T18:17:45.755274Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2659 name: tee
+[2m2026-04-08T18:17:45.755372Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2659 tee
+[2m2026-04-08T18:17:45.755865Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2658 name: sed
+[2m2026-04-08T18:17:45.755955Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2658 sed
+[2m2026-04-08T18:17:45.756419Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2654
+[2m2026-04-08T18:17:51.162962Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2656 name: tee
+[2m2026-04-08T18:17:51.163118Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2656 tee
+[2m2026-04-08T18:17:51.163653Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2655 name: sed
+[2m2026-04-08T18:17:51.163749Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2655 sed
+[2m2026-04-08T18:17:51.174793Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2641
+[2m2026-04-08T18:17:51.275344Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2642 name: sed
+[2m2026-04-08T18:17:51.275450Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2642 sed
+[2m2026-04-08T18:17:51.276275Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 2629
+[2m2026-04-08T18:17:51.377077Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 2630 name: sed
+[2m2026-04-08T18:17:51.377184Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 2630 sed

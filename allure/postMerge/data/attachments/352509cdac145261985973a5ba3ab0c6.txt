@@ -1,0 +1,342 @@
+[2m2026-04-08T09:31:29.866477Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4274 in /workspace
+[2m2026-04-08T09:31:29.868065Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4274
+[2m2026-04-08T09:31:29.968841Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4274
+[2m2026-04-08T09:31:29.969146Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T09:31:29.972469Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T09:31:29.973610Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2425 --advertise-client-urls http://0.0.0.0:2425 --listen-peer-urls http://0.0.0.0:2426 --initial-advertise-peer-urls http://localhost:2426 --initial-cluster default=http://localhost:2426 --data-dir /tmp/etcd_xdz56ox0 in /workspace
+[2m2026-04-08T09:31:29.974871Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2425
+[2m2026-04-08T09:31:30.075664Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2425
+[2m2026-04-08T09:31:30.081538Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting deepep test_deployment
+[2m2026-04-08T09:31:30.081619Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: deepseek-ai/DeepSeek-V2-Lite
+[2m2026-04-08T09:31:30.081670Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: dsr1_dep.sh
+[2m2026-04-08T09:31:30.081871Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/dsr1_dep.sh --model deepseek-ai/DeepSeek-V2-Lite --num-nodes 1 --node-rank 0 --gpus-per-node 2 in /workspace/examples/backends/vllm
+[2m2026-04-08T09:31:30.083726Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8085/v1/models
+[2m2026-04-08T09:31:52.109378Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8085/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T09:32:12.129697Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8085/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+[2m2026-04-08T09:32:20.138678Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8085/v1/models (attempt=27, elapsed=49.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "deepseek-ai/DeepSeek-V2-Lite",
+      "object": "model",
+      "created": 1775640739,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T09:32:20.139028Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8085/health
+[2m2026-04-08T09:32:21.142138Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8085/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.backend.router-discovery",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp0",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp1"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 6417239608089464073,
+      "transport": {
+        "tcp": "10.1.10.214:46173/590e9d6c6ebd4d09/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 6417239608089464073,
+      "transport": {
+        "tcp": "10.1.10.214:46173/590e9d6c6ebd4d09/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 6417239608089464073,
+      "transport": {
+        "tcp": "10.1.10.214:46173/590e9d6c6ebd4d09/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "router-discovery",
+      "namespace": "dynamo",
+      "instance_id": 6417239608089464069,
+      "transport": {
+        "tcp": "10.1.10.214:41459/590e9d6c6ebd4d05/router-discovery"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 6417239608089464073,
+      "transport": {
+        "tcp": "10.1.10.214:46173/590e9d6c6ebd4d09/worker_kv_indexer_query_dp0"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp1",
+      "namespace": "dynamo",
+      "instance_id": 6417239608089464073,
+      "transport": {
+        "tcp": "10.1.10.214:46173/590e9d6c6ebd4d09/worker_kv_indexer_query_dp1"
+      }
+    }
+  ]
+}
+[2m2026-04-08T09:32:21.142581Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-08T09:32:21.142922Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8085/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/DeepSeek-V2-Lite"
+}'
+[2m2026-04-08T09:33:12.748242Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=51.61s
+[2m2026-04-08T09:33:12.748591Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+[2m2026-04-08T09:33:12.748670Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ Knock knock.
+
+User: Who's there?
+
+Assistant: AI.
+
+User: AI who?
+
+Assistant: AI don't know.
+
+User: AI don't know who?
+
+Assistant: AI don't know who who.
+
+User: AI don't know who who who?
+
+Assistant: A...
+[2m2026-04-08T09:33:12.748822Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8085/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/DeepSeek-V2-Lite"
+}'
+[2m2026-04-08T09:34:01.738560Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=48.99s
+[2m2026-04-08T09:34:01.739029Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+[2m2026-04-08T09:34:01.739121Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ Knock knock.
+
+User: Who's there?
+
+Assistant: AI.
+
+User: AI who?
+
+Assistant: AI don't know.
+
+User: AI don't know who?
+
+Assistant: AI don't know who who.
+
+User: AI don't know who who who?
+
+Assistant: A...
+[2m2026-04-08T09:34:01.739231Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8085/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/DeepSeek-V2-Lite"
+}'
+[2m2026-04-08T09:34:50.475396Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=48.74s
+[2m2026-04-08T09:34:50.475828Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+[2m2026-04-08T09:34:50.475901Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ Knock knock.
+
+User: Who's there?
+
+Assistant: AI.
+
+User: AI who?
+
+Assistant: AI don't know.
+
+User: AI don't know who?
+
+Assistant: AI don't know who who.
+
+User: AI don't know who who who?
+
+Assistant: A...
+[2m2026-04-08T09:34:50.475964Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: CompletionPayload
+[2m2026-04-08T09:34:50.476115Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8085/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/DeepSeek-V2-Lite"
+}'
+[2m2026-04-08T09:35:40.511351Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=50.04s
+[2m2026-04-08T09:35:40.511787Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+[2m2026-04-08T09:35:40.511864Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+
+
+Knock knock.
+
+Who's there?
+
+AI.
+
+AI who?
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't kno...
+[2m2026-04-08T09:35:40.511959Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8085/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/DeepSeek-V2-Lite"
+}'
+[2m2026-04-08T09:36:29.057115Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=48.55s
+[2m2026-04-08T09:36:29.057525Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+[2m2026-04-08T09:36:29.057599Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+
+
+Knock knock.
+
+Who's there?
+
+AI.
+
+AI who?
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't kno...
+[2m2026-04-08T09:36:29.057694Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8085/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "deepseek-ai/DeepSeek-V2-Lite"
+}'
+[2m2026-04-08T09:37:17.918597Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=48.86s
+[2m2026-04-08T09:37:17.919020Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 2/6 expected keywords: ['AI', 'knock']
+[2m2026-04-08T09:37:17.919107Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+
+
+Knock knock.
+
+Who's there?
+
+AI.
+
+AI who?
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't know.
+
+AI don't kno...
+[2m2026-04-08T09:37:17.920644Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 11053
+[2m2026-04-08T09:37:23.328384Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 11055 name: tee
+[2m2026-04-08T09:37:23.328535Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 11055 tee
+[2m2026-04-08T09:37:23.329014Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 11054 name: sed
+[2m2026-04-08T09:37:23.329109Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 11054 sed
+[2m2026-04-08T09:37:23.334277Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 11039
+[2m2026-04-08T09:37:23.435406Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 11040 name: sed
+[2m2026-04-08T09:37:23.435514Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 11040 sed
+[2m2026-04-08T09:37:23.436354Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 11027
+[2m2026-04-08T09:37:23.537349Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 11028 name: sed
+[2m2026-04-08T09:37:23.537472Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 11028 sed

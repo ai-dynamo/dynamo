@@ -1,0 +1,6 @@
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10030
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10030 "POST /v1/chat/completions HTTP/1.1" 200 415
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10030
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10030 "POST /v1/chat/completions HTTP/1.1" 200 484
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10030
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10030 "POST /v1/chat/completions HTTP/1.1" 200 484

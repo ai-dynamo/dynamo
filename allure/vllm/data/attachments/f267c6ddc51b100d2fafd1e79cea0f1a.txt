@@ -1,0 +1,10 @@
+INFO     root:conftest.py:430 Downloading 1 models needed for collected tests
+Models: {'Qwen/Qwen3-0.6B'}
+INFO     root:conftest.py:279 HF_TOKEN found in environment
+INFO     root:conftest.py:296 Pre-downloading model: Qwen/Qwen3-0.6B
+ERROR    root:conftest.py:326 Failed to pre-download Qwen/Qwen3-0.6B: 401 Client Error. (Request ID: Root=1-69d7060a-2253da517b7949073fba91d3;1e9d436e-dba2-489e-826d-1aa9c8fd893d)
+
+Repository Not Found for url: https://huggingface.co/api/models/Qwen/Qwen3-0.6B/revision/main.
+Please make sure you specified the correct `repo_id` and `repo_type`.
+If you are trying to access a private or gated repo, make sure you are authenticated. For more details, see https://huggingface.co/docs/huggingface_hub/authentication
+User Access Token "dynamo-ci-read-only" is expired

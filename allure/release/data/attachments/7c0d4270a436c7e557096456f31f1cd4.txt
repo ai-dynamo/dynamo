@@ -1,0 +1,66 @@
+[2m2026-04-08T10:28:43.021745Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4222 -js --store_dir /tmp/nats_c243c7a6 in /workspace
+[2m2026-04-08T10:28:43.022924Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4222
+[2m2026-04-08T10:28:43.123403Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4222
+[2m2026-04-08T10:28:43.123555Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T10:28:43.125993Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T10:28:43.127204Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd_f9y7xcmv in /workspace
+[2m2026-04-08T10:28:43.128205Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2379
+[2m2026-04-08T10:28:43.228649Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2379
+[2m2026-04-08T10:28:43.229287Z[0m [32m INFO[0m [2mtest_cuda_graph.test_kvbm_with_cuda_graph_enabled[0m[2m:[0m Starting frontend...
+[2m2026-04-08T10:28:43.229588Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --migration-limit 0 in /workspace
+[2m2026-04-08T10:28:43.231461Z[0m [32m INFO[0m [2mtest_cuda_graph.test_kvbm_with_cuda_graph_enabled[0m[2m:[0m Frontend started.
+[2m2026-04-08T10:28:43.231522Z[0m [32m INFO[0m [2mtest_cuda_graph.test_kvbm_with_cuda_graph_enabled[0m[2m:[0m Starting worker...
+[2m2026-04-08T10:28:43.231765Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.trtllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --served-model-name TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-args tests/kvbm_integration/engine_config_with_cuda_graph_and_kvbm.yaml in /workspace
+[2m2026-04-08T10:28:43.233059Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8000/v1/models
+[2m2026-04-08T10:29:05.255616Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-08T10:29:25.274656Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+[2m2026-04-08T10:29:35.284841Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8000/v1/models (attempt=28, elapsed=51.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+      "object": "model",
+      "created": 1775644174,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-08T10:29:35.284990Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:9345/health
+[2m2026-04-08T10:29:35.286527Z[0m [32m INFO[0m [2mtest_cuda_graph.is_ready[0m[2m:[0m DynamoWorkerProcess { name: decode } status is ready
+[2m2026-04-08T10:29:35.286625Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:9345/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 37,
+    "nanos": 567964858
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+[2m2026-04-08T10:29:35.286751Z[0m [32m INFO[0m [2mtest_cuda_graph.test_kvbm_with_cuda_graph_enabled[0m[2m:[0m Worker PID: 20374
+[2m2026-04-08T10:29:35.286809Z[0m [32m INFO[0m [2mtest_cuda_graph.send_completion_request[0m[2m:[0m Sending completion request with prompt: 'In the heart of Eldoria, an ancient land of boundl...' and max_tokens: 100
+[2m2026-04-08T10:29:36.215322Z[0m [32m INFO[0m [2mtest_cuda_graph.test_kvbm_with_cuda_graph_enabled[0m[2m:[0m Completion request succeeded: 200
+[2m2026-04-08T10:29:36.216263Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 20412
+[2m2026-04-08T10:29:36.216348Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 20374
+[2m2026-04-08T10:29:36.216432Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 20575
+[2m2026-04-08T10:29:44.326357Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 20374 name: python3
+[2m2026-04-08T10:29:44.326521Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 20374 python3
+[2m2026-04-08T10:29:44.499809Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 20376 name: tee
+[2m2026-04-08T10:29:44.499970Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 20376 tee
+[2m2026-04-08T10:29:44.500513Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 20375 name: sed
+[2m2026-04-08T10:29:44.500610Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 20375 sed
+[2m2026-04-08T10:29:44.501117Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 20371
+[2m2026-04-08T10:29:49.907509Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 20373 name: tee
+[2m2026-04-08T10:29:49.907748Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 20373 tee
+[2m2026-04-08T10:29:49.908289Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 20372 name: sed
+[2m2026-04-08T10:29:49.908386Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 20372 sed
+[2m2026-04-08T10:29:49.910977Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 20358
+[2m2026-04-08T10:29:50.012084Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 20359 name: sed
+[2m2026-04-08T10:29:50.012192Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 20359 sed
+[2m2026-04-08T10:29:50.013680Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 20344
+[2m2026-04-08T10:29:50.114556Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 20345 name: sed
+[2m2026-04-08T10:29:50.114763Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 20345 sed

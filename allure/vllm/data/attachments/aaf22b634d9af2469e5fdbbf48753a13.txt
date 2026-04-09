@@ -1,0 +1,12 @@
+ERROR    dynamo.profiler.profile_sla:profile_sla.py:462 Profile job failed with error
+Traceback (most recent call last):
+  File "/workspace/components/src/dynamo/profiler/profile_sla.py", line 306, in run_profile
+    valid_dgdr_spec(dgdr)
+  File "/workspace/components/src/dynamo/profiler/utils/dgdr_validate.py", line 66, in valid_dgdr_spec
+    _validate_parallelization_sweeping_mode(dgdr)
+  File "/workspace/components/src/dynamo/profiler/utils/dgdr_validate.py", line 132, in _validate_parallelization_sweeping_mode
+    raise ValueError(
+ValueError: THOROUGH search strategy does not support 'auto' backend. Please specify a concrete backend (trtllm, vllm, sglang).
+INFO     dynamo.profiler.profile_sla:profile_sla.py:472 Performing final cleanup of any remaining deployments...
+INFO     deploy.utils.dynamo_deployment:dynamo_deployment.py:510 No deployments to clean up
+INFO     dynamo.profiler.profile_sla:profile_sla.py:474 Final cleanup completed.

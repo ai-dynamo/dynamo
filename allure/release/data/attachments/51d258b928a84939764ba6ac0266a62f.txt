@@ -1,0 +1,159 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4268 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4268
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4268
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2403 --advertise-client-urls http://0.0.0.0:2403 --listen-peer-urls http://0.0.0.0:2404 --initial-advertise-peer-urls http://localhost:2404 --initial-cluster default=http://localhost:2404 --data-dir /tmp/etcd_8auzlnmb in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2403
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2403
+INFO     test_sglang_deployment[kv_events-2]:common.py:43 Starting kv_events test_deployment
+INFO     test_sglang_deployment[kv_events-2]:common.py:49 Using model: Qwen/Qwen3-0.6B
+INFO     test_sglang_deployment[kv_events-2]:common.py:50 Script: agg_router.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/sglang/launch/agg_router.sh in /workspace/examples/backends/sglang
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8081/v1/models
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8081/v1/models (attempt=12, elapsed=21.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1775639891,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8081/health
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8081/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.router-discovery",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7366091754371355401,
+      "transport": {
+        "tcp": "10.1.24.231:38391/66399d6c623d1309/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7366091754371355403,
+      "transport": {
+        "tcp": "10.1.24.231:34821/66399d6c623d130b/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "router-discovery",
+      "namespace": "dynamo",
+      "instance_id": 7366091754371355397,
+      "transport": {
+        "tcp": "10.1.24.231:41713/66399d6c623d1305/router-discovery"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 7366091754371355401,
+      "transport": {
+        "tcp": "10.1.24.231:38391/66399d6c623d1309/worker_kv_indexer_query_dp0"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 7366091754371355403,
+      "transport": {
+        "tcp": "10.1.24.231:34821/66399d6c623d130b/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+INFO     test_sglang_deployment[kv_events-2]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8081/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=3.18s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 5/6 expected keywords: ['AI', 'knock', 'joke', 'think', 'intelligence']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+INFO     tests.utils.engine_process:engine_process.py:147 SUCCESS: All expected log patterns: ['ZMQ listener .* received batch with \\d+ events \\(engine_seq=\\d+(?:, [^)]*)?\\)', 'Event processor for worker_id \\d+ processing event: Stored\\(', 'Selected worker: worker_type=\\w+, worker_id=\\d+ dp_rank=.*?, logit: '] found
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8081/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=5.80s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+INFO     tests.utils.engine_process:engine_process.py:147 SUCCESS: All expected log patterns: ['ZMQ listener .* received batch with \\d+ events \\(engine_seq=\\d+(?:, [^)]*)?\\)', 'Event processor for worker_id \\d+ processing event: Stored\\(', 'Selected worker: worker_type=\\w+, worker_id=\\d+ dp_rank=.*?, logit: '] found
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8081/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=5.80s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+INFO     tests.utils.engine_process:engine_process.py:147 SUCCESS: All expected log patterns: ['ZMQ listener .* received batch with \\d+ events \\(engine_seq=\\d+(?:, [^)]*)?\\)', 'Event processor for worker_id \\d+ processing event: Stored\\(', 'Selected worker: worker_type=\\w+, worker_id=\\d+ dp_rank=.*?, logit: '] found
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 10397
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 10399 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 10399 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 10398 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 10398 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 10380
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 10381 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 10381 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 10368
+INFO     NatsServer:managed_process.py:31 Terminating PID: 10369 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 10369 sed

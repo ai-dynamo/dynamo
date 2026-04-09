@@ -1,0 +1,47 @@
+[2m2026-04-08T18:32:42.085579Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4223 in /workspace
+[2m2026-04-08T18:32:42.087218Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4223
+[2m2026-04-08T18:32:42.187939Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4223
+[2m2026-04-08T18:32:42.188230Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T18:32:42.191364Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T18:32:42.192435Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2418 --advertise-client-urls http://0.0.0.0:2418 --listen-peer-urls http://0.0.0.0:2419 --initial-advertise-peer-urls http://localhost:2419 --initial-cluster default=http://localhost:2419 --data-dir /tmp/etcd_pgt5t_1n in /workspace
+[2m2026-04-08T18:32:42.194078Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2418
+[2m2026-04-08T18:32:42.294884Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2418
+[2m2026-04-08T18:32:42.300699Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting multimodal_audio_disagg test_deployment
+[2m2026-04-08T18:32:42.300775Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen2-Audio-7B-Instruct
+[2m2026-04-08T18:32:42.300826Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: audio_disagg.sh
+[2m2026-04-08T18:32:42.301368Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/multimodal/launch/audio_disagg.sh --model Qwen/Qwen2-Audio-7B-Instruct in /workspace/examples/multimodal
+[2m2026-04-08T18:32:42.303464Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8059/v1/models
+[2m2026-04-08T18:32:58.331184Z[0m [31mERROR[0m [2mmanaged_process._check_process_alive[0m[2m:[0m Main server process died with exit code 0 while waiting for health check
+[2m2026-04-08T18:32:58.331631Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === Last 20 lines from /tmp/dynamo_tests/test_serve_deployment[multimodal_audio_disagg]/bash.log.txt ===
+[2m2026-04-08T18:32:58.331794Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] ModuleNotFoundError: No module named 'vllm.inputs.data'
+[2m2026-04-08T18:32:58.331931Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] Traceback (most recent call last):
+[2m2026-04-08T18:32:58.332057Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/workspace/examples/multimodal/components/audio_encode_worker.py", line 37, in <module>
+[2m2026-04-08T18:32:58.332127Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
+[2m2026-04-08T18:32:58.332173Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/workspace/examples/multimodal/components/../utils/protocol.py", line 24, in <module>
+[2m2026-04-08T18:32:58.332218Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     from vllm.inputs.data import TokensPrompt
+[2m2026-04-08T18:32:58.332259Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] ModuleNotFoundError: No module named 'vllm.inputs.data'
+[2m2026-04-08T18:32:58.332299Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] Traceback (most recent call last):
+[2m2026-04-08T18:32:58.332337Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/workspace/examples/multimodal/components/processor.py", line 32, in <module>
+[2m2026-04-08T18:32:58.332376Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
+[2m2026-04-08T18:32:58.332415Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]   File "/workspace/examples/multimodal/components/../utils/chat_processor.py", line 31, in <module>
+[2m2026-04-08T18:32:58.332456Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH]     from vllm.inputs.data import TokensPrompt
+[2m2026-04-08T18:32:58.332497Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] ModuleNotFoundError: No module named 'vllm.inputs.data'
+[2m2026-04-08T18:32:58.332538Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] Cleaning up...
+[2m2026-04-08T18:32:58.332578Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:32:57.766340Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Runtime shutdown initiated
+[2m2026-04-08T18:32:58.332620Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:32:57.766457Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 1: Cancelling endpoint shutdown token
+[2m2026-04-08T18:32:58.332688Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:32:57.766489Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 2: Waiting for graceful endpoints to complete
+[2m2026-04-08T18:32:58.332734Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:32:57.766493Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Active graceful endpoints: 0
+[2m2026-04-08T18:32:58.332781Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:32:57.766496Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_runtime::runtime\x1b[0m\x1b[2m:\x1b[0m Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected
+[2m2026-04-08T18:32:58.332822Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [BASH] \x1b[2m2026-04-08T18:32:57.766545Z\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mdynamo_llm::http::service::service_v2\x1b[0m\x1b[2m:\x1b[0m HTTP server shutdown requested
+[2m2026-04-08T18:32:58.332863Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === End of log tail ===
+[2m2026-04-08T18:32:58.332932Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13361
+[2m2026-04-08T18:33:03.239018Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13363 name: tee
+[2m2026-04-08T18:33:03.239191Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13363 tee
+[2m2026-04-08T18:33:03.239625Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13362 name: sed
+[2m2026-04-08T18:33:03.239716Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13362 sed
+[2m2026-04-08T18:33:03.270620Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13346
+[2m2026-04-08T18:33:03.371943Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13347 name: sed
+[2m2026-04-08T18:33:03.372249Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13347 sed
+[2m2026-04-08T18:33:03.373117Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 13334
+[2m2026-04-08T18:33:03.474120Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 13335 name: sed
+[2m2026-04-08T18:33:03.474315Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 13335 sed

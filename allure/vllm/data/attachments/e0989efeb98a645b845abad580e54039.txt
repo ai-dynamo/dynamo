@@ -1,0 +1,4 @@
+[2m2026-04-08T16:09:56.385519Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Received generation request: 9699a023-4e04-45b2-8bc7-e16d065e228d
+[2m2026-04-08T16:09:56.385687Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 9699a023-4e04-45b2-8bc7-e16d065e228d: prompt='a test video...', size=832x480, frames=81, steps=50
+[2m2026-04-08T16:09:56.393220Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 9699a023-4e04-45b2-8bc7-e16d065e228d: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
+[2m2026-04-08T16:09:56.393618Z[0m [32m INFO[0m [2mvideo_handler.generate[0m[2m:[0m Request 9699a023-4e04-45b2-8bc7-e16d065e228d completed in 0.01s

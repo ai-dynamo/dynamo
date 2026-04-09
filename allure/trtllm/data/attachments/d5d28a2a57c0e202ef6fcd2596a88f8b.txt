@@ -1,0 +1,69 @@
+[2m2026-04-08T09:26:17.857481Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4253 in /workspace
+[2m2026-04-08T09:26:17.858481Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4253
+[2m2026-04-08T09:26:17.958974Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4253
+[2m2026-04-08T09:26:17.959173Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-08T09:26:17.961273Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T09:26:17.961995Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2465 --advertise-client-urls http://0.0.0.0:2465 --listen-peer-urls http://0.0.0.0:2466 --initial-advertise-peer-urls http://localhost:2466 --initial-cluster default=http://localhost:2466 --data-dir /tmp/etcd_cef2_riv in /workspace
+[2m2026-04-08T09:26:17.962852Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2465
+[2m2026-04-08T09:26:18.063382Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2465
+[2m2026-04-08T09:26:18.077648Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m gpu_memory_service --device 0 --tag weights in /workspace
+[2m2026-04-08T09:26:18.078825Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_runtime_state_ready'
+[2m2026-04-08T09:26:19.390311Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_runtime_state_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T09:26:19.390963Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m gpu_memory_service --device 0 --tag kv_cache in /workspace
+[2m2026-04-08T09:26:19.392247Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_runtime_state_ready'
+[2m2026-04-08T09:26:20.693993Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_runtime_state_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-08T09:26:20.694382Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8215 --migration-limit 0 in /workspace
+[2m2026-04-08T09:26:20.696072Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --load-format gms --enable-memory-saver --mem-fraction-static 0.9 --port 30056 --model-loader-extra-config {"gms_read_only": true} in /workspace
+[2m2026-04-08T09:26:20.697296Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8111/health
+WARNING:sglang.srt.models.registry:Ignore import error when loading sglang.srt.models.glm_ocr: No module named 'transformers.models.glm_ocr'
+WARNING:sglang.srt.models.registry:Ignore import error when loading sglang.srt.models.glm_ocr_nextn: No module named 'transformers.models.glm_ocr'
+WARNING:sglang.srt.models.registry:Ignore import error when loading sglang.srt.models.glmasr: cannot import name 'GlmAsrConfig' from 'transformers' (/usr/local/lib/python3.12/dist-packages/transformers/__init__.py)
+[2m2026-04-08T09:26:38.838200Z[0m [31mERROR[0m [2mmanaged_process._check_process_alive[0m[2m:[0m Main server process died with exit code -9 while waiting for health check
+[2m2026-04-08T09:26:38.838502Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === Last 20 lines from /tmp/dynamo_tests/test_external_weight_mgr_sglang_engine/engine.log.txt ===
+[2m2026-04-08T09:26:38.838569Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]     torch_impl = _TorchMemorySaverImpl(hook_mode="torch")
+[2m2026-04-08T09:26:38.838621Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T09:26:38.838669Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]   File "/usr/local/lib/python3.12/dist-packages/torch_memory_saver/entrypoint.py", line 83, in __init__
+[2m2026-04-08T09:26:38.838719Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]     self._hook_util = HookUtilBase.create(hook_mode=hook_mode)
+[2m2026-04-08T09:26:38.838815Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T09:26:38.838861Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]   File "/usr/local/lib/python3.12/dist-packages/torch_memory_saver/hooks/base.py", line 12, in create
+[2m2026-04-08T09:26:38.838906Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]     return {
+[2m2026-04-08T09:26:38.838950Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]            ^
+[2m2026-04-08T09:26:38.838994Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]   File "/usr/local/lib/python3.12/dist-packages/torch_memory_saver/hooks/mode_torch.py", line 12, in __init__
+[2m2026-04-08T09:26:38.839049Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]     self.allocator = CUDAPluggableAllocator(self.get_path_binary(), "tms_torch_malloc", "tms_torch_free")
+[2m2026-04-08T09:26:38.839091Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T09:26:38.839132Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]   File "/usr/local/lib/python3.12/dist-packages/torch/cuda/memory.py", line 1128, in __init__
+[2m2026-04-08T09:26:38.839180Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]     allocator = ctypes.CDLL(path_to_so_file)
+[2m2026-04-08T09:26:38.839221Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T09:26:38.839260Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]   File "/usr/lib/python3.12/ctypes/__init__.py", line 379, in __init__
+[2m2026-04-08T09:26:38.839300Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]     self._handle = _dlopen(self._name, mode)
+[2m2026-04-08T09:26:38.839338Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]                    ^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-04-08T09:26:38.839377Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE] OSError: libcudart.so.12: cannot open shared object file: No such file or directory
+[2m2026-04-08T09:26:38.839418Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE]
+[2m2026-04-08T09:26:38.839457Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m [ENGINE] \x1b[2m2026-04-08T09:26:38.081222Z\x1b[0m \x1b[31mERROR\x1b[0m \x1b[2mengine.launch_phase_sigquit_handler\x1b[0m\x1b[2m:\x1b[0m Received sigquit from a child process. It usually means the child failed.
+[2m2026-04-08T09:26:38.839500Z[0m [31mERROR[0m [2mmanaged_process._log_tail_on_error[0m[2m:[0m === End of log tail ===
+[2m2026-04-08T09:26:38.839575Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12748
+[2m2026-04-08T09:26:38.840298Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12750 name: tee
+[2m2026-04-08T09:26:38.840391Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12750 tee
+[2m2026-04-08T09:26:38.840966Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12749 name: sed
+[2m2026-04-08T09:26:38.841058Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12749 sed
+[2m2026-04-08T09:26:38.841919Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12744
+[2m2026-04-08T09:26:43.948556Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12746 name: tee
+[2m2026-04-08T09:26:43.948704Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12746 tee
+[2m2026-04-08T09:26:43.949288Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12745 name: sed
+[2m2026-04-08T09:26:43.949390Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12745 sed
+[2m2026-04-08T09:26:43.949903Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12725
+[2m2026-04-08T09:26:44.050917Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12727 name: tee
+[2m2026-04-08T09:26:44.051044Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12727 tee
+[2m2026-04-08T09:26:44.051513Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12726 name: sed
+[2m2026-04-08T09:26:44.051616Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12726 sed
+[2m2026-04-08T09:26:44.052183Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12705
+[2m2026-04-08T09:26:44.153393Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12707 name: tee
+[2m2026-04-08T09:26:44.153615Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12707 tee
+[2m2026-04-08T09:26:44.154022Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12706 name: sed
+[2m2026-04-08T09:26:44.154114Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12706 sed
+[2m2026-04-08T09:26:44.264414Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12691
+[2m2026-04-08T09:26:44.365476Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12692 name: sed
+[2m2026-04-08T09:26:44.365639Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12692 sed
+[2m2026-04-08T09:26:44.366447Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12679
+[2m2026-04-08T09:26:44.467350Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12680 name: sed
+[2m2026-04-08T09:26:44.467579Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12680 sed

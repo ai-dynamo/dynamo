@@ -1,0 +1,5 @@
+INFO     root:args.py:116 Loading disagg config section 'prefill' from /tmp/pytest_temp/test_disagg_config_preserves_b0/disagg.yaml
+INFO     root:args.py:153 Successfully wrote config section to temp file
+INFO     sglang.srt.server_args:server_args.py:1835 Attention backend not specified. Use flashinfer backend by default.
+INFO     root:args.py:397 Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True
+INFO     root:args.py:413 Derived use_kv_events=False from kv_events_config=None
