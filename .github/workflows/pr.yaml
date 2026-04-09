@@ -661,7 +661,7 @@ jobs:
       - deploy-test-vllm
       - deploy-test-sglang
       - deploy-test-trtllm
-    if: ${{ !cancelled() }}
+    if: false
     uses: ./.github/workflows/generate-allure-report.yml
     with:
       run_id: ${{ github.run_id }}
