@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-from pathlib import Path
 
 import pytest
 
+from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.utils.multimodal import (
     MultimodalModelProfile,
     TopologyConfig,
@@ -13,8 +13,6 @@ from tests.utils.multimodal import (
     make_image_payload,
     make_video_payload,
 )
-
-WORKSPACE_DIR = str(Path(__file__).resolve().parents[3])
 
 VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "agg_multimodal.sh",

@@ -56,6 +56,12 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
 
+# Generated multimodal configs from profile definitions
+_mm_configs: dict[str, VLLMConfig] = {}
+for _profile in VLLM_MULTIMODAL_PROFILES:
+    _mm_configs.update(
+        make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
+    )
 
 # vLLM test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~5.5 minutes total to run sequentially (with models pre-cached)
@@ -64,6 +70,7 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
 # A future collector/launcher can sum profiled_vram_gib values to decide how many tests fit
 # concurrently without exceeding available VRAM.
 vllm_configs = {
+    **_mm_configs,
     "aggregated": VLLMConfig(
         name="aggregated",
         directory=vllm_dir,
@@ -592,12 +599,6 @@ vllm_configs = {
         ],
     ),
 }
-
-# Merge generated multimodal configs
-for _profile in VLLM_MULTIMODAL_PROFILES:
-    vllm_configs.update(
-        make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
-    )
 
 
 @pytest.fixture(params=params_with_model_mark(vllm_configs))
