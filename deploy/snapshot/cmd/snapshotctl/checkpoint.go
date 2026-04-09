@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -151,10 +152,45 @@ func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, name
 		},
 	)
 	if err != nil {
-		if err == context.DeadlineExceeded {
-			return "", fmt.Errorf("checkpoint job %s/%s timed out: status=%q", namespace, jobName, status)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return "", err
 		}
-		return "", err
+		return "", fmt.Errorf("checkpoint job %s/%s timed out: %s", namespace, jobName, checkpointTimeoutSummary(clientset, namespace, jobName, status))
 	}
 	return status, nil
+}
+
+func checkpointTimeoutSummary(clientset kubernetes.Interface, namespace string, jobName string, status string) string {
+	summaryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pods, err := clientset.CoreV1().Pods(namespace).List(summaryCtx, metav1.ListOptions{
+		LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
+	})
+	if err != nil {
+		return "unable to list checkpoint pod: " + err.Error()
+	}
+	if len(pods.Items) == 0 {
+		return "no checkpoint pod created yet"
+	}
+
+	pod := pods.Items[0]
+	parts := []string{
+		fmt.Sprintf("job_status=%q", status),
+		fmt.Sprintf("pod=%s phase=%s", pod.Name, pod.Status.Phase),
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Status == corev1.ConditionTrue || condition.Status == corev1.ConditionFalse {
+			parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
+		}
+	}
+	for _, containerStatus := range pod.Status.ContainerStatuses {
+		if containerStatus.State.Waiting != nil {
+			parts = append(parts, fmt.Sprintf("container=%s waiting=%s", containerStatus.Name, containerStatus.State.Waiting.Reason))
+		}
+		if containerStatus.State.Terminated != nil {
+			parts = append(parts, fmt.Sprintf("container=%s terminated=%s", containerStatus.Name, containerStatus.State.Terminated.Reason))
+		}
+	}
+	return strings.Join(parts, " ")
 }
