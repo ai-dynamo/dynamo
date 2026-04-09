@@ -333,9 +333,12 @@ mod test_event_processing {
         let mm_hash =
             "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
         let infos = extra_keys_to_block_mm_infos(Some(vec![
-            Some(vec![mm_hash.clone()]),
+            Some(vec![ExtraKeyItem::Hash(mm_hash.clone())]),
             None,
-            Some(vec!["invalid".to_string(), mm_hash]),
+            Some(vec![
+                ExtraKeyItem::Hash("invalid".to_string()),
+                ExtraKeyItem::Hash(mm_hash),
+            ]),
         ]))
         .expect("expected parsed MM infos");
 
@@ -384,6 +387,32 @@ mod test_event_processing {
     }
 
     #[test]
+    fn test_seq_block_stored_field8_supports_tuple_extra_keys() {
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+        let extra_keys_payload = rmps::to_vec(&(
+            "BlockStored",
+            vec![10_u64],
+            None::<u64>,
+            vec![1_u32, 2, 3, 4],
+            4_usize,
+            None::<u64>,
+            None::<String>,
+            None::<String>,
+            vec![Some(vec![(mm_hash, 7_i64)])],
+        ))
+        .unwrap();
+        let extra_keys_event: RawKvEvent = rmps::from_slice(&extra_keys_payload).unwrap();
+        let RawKvEvent::BlockStored { block_mm_infos, .. } = extra_keys_event else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+    }
+
+    #[test]
     fn test_map_block_stored_supports_extra_keys() {
         #[derive(serde::Serialize)]
         struct MapBlockStoredEvent {
@@ -411,6 +440,49 @@ mod test_event_processing {
             extra_keys: Some(vec![Some(vec![
                 "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string(),
             ])]),
+        })
+        .unwrap();
+
+        let event: RawKvEvent = rmps::from_slice(&payload).unwrap();
+        let RawKvEvent::BlockStored { block_mm_infos, .. } = event else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            block_mm_infos.unwrap()[0].as_ref().unwrap().mm_objects[0].mm_hash,
+            0x0123_4567_89ab_cdef
+        );
+    }
+
+    #[test]
+    fn test_map_block_stored_supports_tuple_extra_keys() {
+        type BlockTupleExtraKeys = Option<Vec<Option<Vec<(String, i64)>>>>;
+
+        #[derive(serde::Serialize)]
+        struct MapBlockStoredEvent {
+            #[serde(rename = "type")]
+            event_type: &'static str,
+            block_hashes: Vec<u64>,
+            parent_block_hash: Option<u64>,
+            token_ids: Vec<u32>,
+            block_size: usize,
+            lora_id: Option<u64>,
+            medium: Option<String>,
+            lora_name: Option<String>,
+            extra_keys: BlockTupleExtraKeys,
+        }
+
+        let mm_hash =
+            "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210".to_string();
+        let payload = rmps::to_vec(&MapBlockStoredEvent {
+            event_type: "BlockStored",
+            block_hashes: vec![10],
+            parent_block_hash: None,
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 4,
+            lora_id: None,
+            medium: Some("GPU".to_string()),
+            lora_name: None,
+            extra_keys: Some(vec![Some(vec![(mm_hash, 3)])]),
         })
         .unwrap();
 

@@ -27,6 +27,7 @@ import (
 type RestoreRequest struct {
 	CheckpointID       string
 	CheckpointLocation string
+	StartedAt          time.Time
 	NSRestorePath      string
 	PodName            string
 	PodNamespace       string
@@ -47,30 +48,53 @@ func Restore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req 
 		"container", req.ContainerName,
 	)
 
-	// Phase 1: Inspect — resolve placeholder, discover target GPUs, build device map
+	// Phase 1: Host inspect — resolve placeholder, discover target GPUs, build device map
+	hostInspectStart := time.Now()
 	snap, err := inspectRestore(ctx, ctrd, log, req)
 	if err != nil {
 		return 0, err
 	}
+	hostInspectDuration := time.Since(hostInspectStart)
 
 	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
-	restoredPID, err := execNSRestore(ctx, log, req, snap)
+	result, err := execNSRestore(ctx, log, req, snap)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	log.Info("nsrestore completed", "restored_pid", restoredPID)
+	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
+	log.Info("Restore timing summary",
+		"restore", map[string]any{
+			"duration": restoreDuration.String(),
+			"phases": map[string]string{
+				"host_inspect_duration":    hostInspectDuration.String(),
+				"nsrestore_setup_duration": result.NSRestoreSetupDuration.String(),
+				"criu_restore_duration":    result.CRIURestoreDuration.String(),
+				"cuda_duration":            result.CUDADuration.String(),
+			},
+		},
+	)
+	if !req.StartedAt.IsZero() {
+		log.Info("Restore wall time from agent detection",
+			"started_to_restore_complete", time.Since(req.StartedAt),
+		)
+	}
 
 	// Validate restored process from the host side
+	validationStart := time.Now()
 	procRoot := filepath.Join(snap.TargetRoot, "proc")
-	if err := snapshotruntime.ValidateProcessState(procRoot, restoredPID); err != nil {
+	if err := snapshotruntime.ValidateProcessState(procRoot, result.RestoredPID); err != nil {
 		restoreLogPath := filepath.Join(snap.TargetRoot, "var", "criu-work", criu.RestoreLogFilename)
-		logging.LogProcessDiagnostics(procRoot, restoredPID, restoreLogPath, log)
+		logging.LogProcessDiagnostics(procRoot, result.RestoredPID, restoreLogPath, log)
 		return 0, fmt.Errorf("restored process failed post-restore validation: %w", err)
 	}
 
-	log.Info("=== External restore completed ===", "total_duration", time.Since(restoreStart))
+	log.Info("=== External restore completed ===",
+		"restored_pid", result.RestoredPID,
+		"validation_duration", time.Since(validationStart),
+		"total_duration", time.Since(restoreStart),
+	)
 
-	return restoredPID, nil
+	return result.RestoredPID, nil
 }
 
 func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logger, req RestoreRequest) (*types.RestoreContainerSnapshot, error) {
@@ -105,7 +129,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve placeholder container: %w", err)
 	}
-	log.Info("Resolved placeholder container", "pid", placeholderPID)
+	log.V(1).Info("Resolved placeholder container", "pid", placeholderPID)
 
 	cgroupRoot, err := snapshotruntime.ResolveCgroupRootFromHostPID(placeholderPID)
 	if err != nil {
@@ -137,7 +161,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 		if err != nil {
 			return nil, fmt.Errorf("failed to build CUDA device map: %w", err)
 		}
-		log.Info("GPU UUIDs for device map",
+		log.V(1).Info("GPU UUIDs for device map",
 			"source_uuids", m.CUDA.SourceGPUUUIDs,
 			"target_uuids", targetGPUUUIDs,
 			"device_map", cudaDeviceMap,
@@ -155,7 +179,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (int, error) {
+func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
 	args := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
@@ -181,18 +205,16 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		return 0, fmt.Errorf("nsrestore failed: %w\nstdout: %s", err, stdout.String())
+		return nil, fmt.Errorf("nsrestore failed: %w\nstdout: %s", err, stdout.String())
 	}
 
-	var result struct {
-		RestoredPID int `json:"restoredPID"`
-	}
+	var result RestoreInNamespaceResult
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		return 0, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, stdout.String())
+		return nil, fmt.Errorf("failed to parse nsrestore result: %w\nstdout: %s", err, stdout.String())
 	}
 	if result.RestoredPID <= 0 {
-		return 0, fmt.Errorf("nsrestore returned invalid PID %d", result.RestoredPID)
+		return nil, fmt.Errorf("nsrestore returned invalid PID %d", result.RestoredPID)
 	}
 
-	return result.RestoredPID, nil
+	return &result, nil
 }

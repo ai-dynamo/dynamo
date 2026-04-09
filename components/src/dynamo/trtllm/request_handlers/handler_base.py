@@ -27,6 +27,7 @@ import torch
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
@@ -83,6 +84,7 @@ class RequestHandlerConfig:
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
+    disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -114,6 +116,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
+        self.disagg_machine_id = config.disagg_machine_id
 
     def check_error(self, result: dict) -> bool:
         """
@@ -465,7 +468,18 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params = ep_disaggregated_params
             else:
                 disaggregated_params = LlmDisaggregatedParams(
-                    request_type="context_only"
+                    request_type="context_only",
+                    disagg_request_id=get_global_disagg_request_id(
+                        self.disagg_machine_id
+                    ),
+                )
+
+            # Ensure disagg_request_id is set even when using
+            # ep_disaggregated_params, so the PYTHON transceiver can track
+            # requests across prefill/decode workers.
+            if disaggregated_params.disagg_request_id is None:
+                disaggregated_params.disagg_request_id = get_global_disagg_request_id(
+                    self.disagg_machine_id
                 )
 
         # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:

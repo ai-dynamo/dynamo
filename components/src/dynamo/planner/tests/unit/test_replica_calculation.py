@@ -5,7 +5,7 @@
 Unit tests for SLA planner replica calculation logic.
 
 These tests focus specifically on the replica calculation formulas without
-testing load prediction, interpolation, or correction factors.
+testing load prediction or regression internals.
 """
 
 import asyncio
@@ -42,9 +42,9 @@ class PlannerHarness:
         if not self.shared_state.last_metrics.is_valid():
             return
 
-        p_endpoints, d_endpoints = await self.prefill_planner.get_workers_info()
-        self.shared_state.p_endpoints = p_endpoints
-        self.shared_state.d_endpoints = d_endpoints
+        num_p, num_d, is_stable = await self.prefill_planner.get_workers_info()
+        self.shared_state.num_p_workers = num_p
+        self.shared_state.num_d_workers = num_d
 
         next_num_p = self.prefill_planner.plan_adjustment()
         next_num_d = self.decode_planner.plan_adjustment()
@@ -86,14 +86,12 @@ class PlannerHarness:
             "config",
         }
         prefill_attrs = {
-            "prefill_interpolator",
+            "ttft_regression",
             "prefill_worker_info",
-            "p_correction_factor",
         }
         decode_attrs = {
-            "decode_interpolator",
+            "itl_regression",
             "decode_worker_info",
-            "d_correction_factor",
         }
         if name == "last_metrics":
             return self.shared_state.last_metrics
@@ -119,8 +117,8 @@ class PlannerHarness:
             "config",
             "get_workers_info",
         }
-        prefill_attrs = {"prefill_interpolator", "p_correction_factor"}
-        decode_attrs = {"decode_interpolator", "d_correction_factor"}
+        prefill_attrs = {"ttft_regression"}
+        decode_attrs = {"itl_regression"}
         if name == "last_metrics":
             self.shared_state.last_metrics = value
             return None
@@ -159,7 +157,6 @@ def planner():
         itl=10.0,
         backend="vllm",
         no_operation=True,
-        no_correction=False,
         metric_pulling_prometheus_endpoint="http://localhost:9090",
         metric_reporting_prometheus_port=0,
         load_predictor="constant",
@@ -176,12 +173,13 @@ def planner():
         enable_load_scaling=False,
         load_predictor_warmup_trace=None,
         load_predictor_log1p=False,
+        max_num_fpm_samples=50,
+        fpm_sample_bucket_size=16,
+        load_min_observations=5,
     )
 
-    # Mock the runtime
     mock_runtime = Mock()
 
-    # Patch Prometheus Gauge to avoid registry conflicts
     with patch("dynamo.planner.monitoring.planner_metrics.Gauge") as mock_gauge:
         mock_gauge.return_value = Mock()
 
@@ -206,9 +204,21 @@ def planner():
         decode_planner.prefill_worker_info = prefill_planner.prefill_worker_info
         decode_planner.decode_worker_info = prefill_planner.decode_worker_info
 
-        # Mock the interpolators to return fixed values for testing
-        planner.prefill_interpolator = Mock()
-        planner.decode_interpolator = Mock()
+        planner.ttft_regression = Mock()
+        # Default: 40000 tokens/s at isl=3000 → 40000/3000 rps
+        planner.ttft_regression.find_best_engine_prefill_rps.return_value = (
+            40000.0 / 3000.0,
+            75.0,
+        )
+        planner.ttft_regression.has_sufficient_data.return_value = True
+
+        planner.itl_regression = Mock()
+        # Default: 10000 tokens/s at osl=150 → 10000/150 rps
+        planner.itl_regression.find_best_engine_decode_rps.return_value = (
+            10000.0 / 150.0,
+            9.5,
+        )
+        planner.itl_regression.has_sufficient_data.return_value = True
 
         # Mock the predictors to return fixed values
         planner.num_req_predictor = Mock()
@@ -221,14 +231,9 @@ def planner():
         # Mock prometheus client
         planner.prometheus_traffic_client = Mock()
 
-        # Set up some baseline correction factors
-        planner.p_correction_factor = 1.0
-        planner.d_correction_factor = 1.0
-
         planner.config = config
 
         yield planner
-        # Cleanup is automatic with context manager
 
 
 class TestReplicaCalculation:
@@ -239,59 +244,40 @@ class TestReplicaCalculation:
     @pytest.mark.performance
     def test_prefill_replica_calculation_basic(self, planner):
         """Test basic prefill replica calculation."""
-        # Setup test data
         next_num_req = 10
         next_isl = 3000
-        prefill_thpt_per_gpu = 40000  # tokens/s/gpu (from the test data)
+        engine_rps = 40000.0 / next_isl
 
-        # Mock the predictor outputs
         planner.num_req_predictor.predict_next.return_value = next_num_req
         planner.isl_predictor.predict_next.return_value = next_isl
         planner.osl_predictor.predict_next.return_value = 150
 
-        # Mock interpolator output
-        planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = (
-            prefill_thpt_per_gpu
+        planner.ttft_regression.find_best_engine_prefill_rps.return_value = (
+            engine_rps,
+            75.0,
         )
-        planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-            10000,
-            0.01,
-            0.5,
-        )
-
-        # Calculate expected result manually
-        pred_prefill_load_per_gpu = (
-            next_num_req
-            * next_isl
-            / planner.config.throughput_adjustment_interval
-            * min(1, planner.p_correction_factor)
-        )
-        expected_prefill_replicas = math.ceil(
-            pred_prefill_load_per_gpu
-            / prefill_thpt_per_gpu
-            / planner.config.prefill_engine_num_gpu
+        planner.itl_regression.find_best_engine_decode_rps.return_value = (
+            10000.0 / 150.0,
+            9.5,
         )
 
-        # Set up valid metrics to trigger calculation
+        # Formula: ceil(num_req / interval / engine_rps)
+        pred_prefill_demand = (
+            next_num_req / planner.config.throughput_adjustment_interval
+        )
+        expected_prefill_replicas = math.ceil(pred_prefill_demand / engine_rps)
+
         planner.last_metrics = Metrics(
             num_req=10, isl=3000, osl=150, ttft=80.0, itl=10.0, request_duration=100.0
         )
 
-        # Mock workers info
-        async def mock_get_workers_info():
-            return (["prefill1"], ["decode1"])
+        async def mock_get_workers_info(*args, **kwargs):
+            return (1, 1, True)
 
         planner.get_workers_info = mock_get_workers_info
 
-        # Mock interpolation calls for correction factor calculation
-        planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-        planner.decode_interpolator.interpolate_itl.return_value = 10.0
-
-        # Run the calculation
         asyncio.run(planner.make_adjustments())
 
-        # Extract the calculated values from the log calls or by checking the mock calls
-        # Since we mocked the connector, we can check what replicas were requested
         prefill_component = "VllmPrefillWorker"
         calculated_prefill_replicas = _replica_count(
             planner.last_target_replicas, prefill_component
@@ -299,7 +285,6 @@ class TestReplicaCalculation:
         print(f"Expected prefill replicas: {expected_prefill_replicas}")
         print(f"Calculated prefill replicas: {calculated_prefill_replicas}")
 
-        # Allow for small differences due to min_endpoint constraints
         assert (
             max(expected_prefill_replicas, planner.config.min_endpoint)
             == calculated_prefill_replicas
@@ -310,52 +295,39 @@ class TestReplicaCalculation:
     @pytest.mark.performance
     def test_decode_replica_calculation_basic(self, planner):
         """Test basic decode replica calculation."""
-        # Setup test data
         next_num_req = 10
         next_osl = 150
-        decode_thpt_per_gpu = 10000  # tokens/s/gpu
+        engine_rps = 10000.0 / next_osl
 
-        # Mock the predictor outputs
         planner.num_req_predictor.predict_next.return_value = next_num_req
         planner.isl_predictor.predict_next.return_value = 3000
         planner.osl_predictor.predict_next.return_value = next_osl
 
-        # Mock interpolator outputs
-        planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = 40000
-        planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-            decode_thpt_per_gpu,
-            0.01,
-            0.5,
+        planner.ttft_regression.find_best_engine_prefill_rps.return_value = (
+            40000.0 / 3000.0,
+            75.0,
+        )
+        planner.itl_regression.find_best_engine_decode_rps.return_value = (
+            engine_rps,
+            9.5,
         )
 
-        # Calculate expected result manually
+        # Formula: ceil(num_req / interval / engine_rps)
         expected_decode_replicas = math.ceil(
-            next_num_req
-            * next_osl
-            / planner.config.throughput_adjustment_interval
-            / decode_thpt_per_gpu
-            / planner.config.decode_engine_num_gpu
+            next_num_req / planner.config.throughput_adjustment_interval / engine_rps
         )
 
-        # Set up valid metrics
         planner.last_metrics = Metrics(
             num_req=10, isl=3000, osl=150, ttft=80.0, itl=10.0, request_duration=100.0
         )
 
-        # Mock workers info
-        async def mock_get_workers_info():
-            return (["prefill1"], ["decode1"])
+        async def mock_get_workers_info(*args, **kwargs):
+            return (1, 1, True)
 
         planner.get_workers_info = mock_get_workers_info
 
-        # Mock interpolation calls for correction factor calculation
-        planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-        planner.decode_interpolator.interpolate_itl.return_value = 10.0
-
-        # Run the calculation
         asyncio.run(planner.make_adjustments())
 
-        # Check the results
         decode_component = "VllmDecodeWorker"
         calculated_decode_replicas = _replica_count(
             planner.last_target_replicas, decode_component
@@ -363,46 +335,43 @@ class TestReplicaCalculation:
         print(f"Expected decode replicas: {expected_decode_replicas}")
         print(f"Calculated decode replicas: {calculated_decode_replicas}")
 
-        # Allow for small differences due to min_endpoint constraints
         assert (
             max(expected_decode_replicas, planner.config.min_endpoint)
             == calculated_decode_replicas
         )
 
     @pytest.mark.parametrize(
-        "num_req,decode_thpt,expected_p,expected_d",
+        "num_req,decode_rps,expected_p,expected_d",
         [
-            (10, 10000, 1, 1),  # low_load_10_req_per_second
-            (500, 1000, 1, 2),  # high_load_500_req_per_second (lower decode throughput)
+            (10, 10000.0 / 150.0, 1, 1),  # low_load_10_req_per_second
+            (
+                500,
+                1000.0 / 150.0,
+                1,
+                2,
+            ),  # high_load_500_req_per_second (lower decode rps)
         ],
     )
     @pytest.mark.nightly
     @pytest.mark.gpu_2
     @pytest.mark.performance
     def test_scaling_scenario_low_to_high_load(
-        self, planner, num_req, decode_thpt, expected_p, expected_d
+        self, planner, num_req, decode_rps, expected_p, expected_d
     ):
         """Test scaling from low to high load scenarios."""
-        # Reset the planner state
-        planner.p_correction_factor = 1.0
-        planner.d_correction_factor = 1.0
-
-        # Mock predictor outputs for this case
         planner.num_req_predictor.predict_next.return_value = num_req
         planner.isl_predictor.predict_next.return_value = 3000
         planner.osl_predictor.predict_next.return_value = 150
 
-        # Mock interpolator outputs (based on H200 1P1D profiling data)
-        planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = (
-            40000  # tokens/s/gpu
+        planner.ttft_regression.find_best_engine_prefill_rps.return_value = (
+            40000.0 / 3000.0,
+            75.0,
         )
-        planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-            decode_thpt,
-            0.01,
-            0.5,
+        planner.itl_regression.find_best_engine_decode_rps.return_value = (
+            decode_rps,
+            9.5,
         )
 
-        # Set up metrics
         planner.last_metrics = Metrics(
             num_req=num_req,
             isl=3000,
@@ -412,23 +381,14 @@ class TestReplicaCalculation:
             request_duration=100.0,
         )
 
-        # Mock workers info
-        async def mock_get_workers_info():
-            return (["prefill1"], ["decode1"])
+        async def mock_get_workers_info(*args, **kwargs):
+            return (1, 1, True)
 
         planner.get_workers_info = mock_get_workers_info
-
-        # Mock interpolation calls for correction factor calculation
-        planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-        planner.decode_interpolator.interpolate_itl.return_value = 10.0
-
-        # Reset the mock
         planner.connector.reset_mock()
 
-        # Run calculation
         asyncio.run(planner.make_adjustments())
 
-        # Verify results
         prefill_replicas = _replica_count(
             planner.last_target_replicas, "VllmPrefillWorker"
         )
@@ -449,41 +409,32 @@ class TestReplicaCalculation:
     @pytest.mark.performance
     def test_gpu_budget_constraint(self, planner):
         """Test that GPU budget constraints are properly applied."""
-        # Set a low GPU budget
         planner.config.max_gpu_budget = 3
 
-        # Mock predictor outputs that would normally require more GPUs
-        planner.num_req_predictor.predict_next.return_value = 50  # High load
+        planner.num_req_predictor.predict_next.return_value = 50
         planner.isl_predictor.predict_next.return_value = 3000
         planner.osl_predictor.predict_next.return_value = 150
 
-        # Mock interpolator outputs
-        planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = 40000
-        planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-            10000,
-            0.01,
-            0.5,
+        planner.ttft_regression.find_best_engine_prefill_rps.return_value = (
+            40000.0 / 3000.0,
+            75.0,
+        )
+        planner.itl_regression.find_best_engine_decode_rps.return_value = (
+            10000.0 / 150.0,
+            9.5,
         )
 
-        # Set up metrics
         planner.last_metrics = Metrics(
             num_req=50, isl=3000, osl=150, ttft=80.0, itl=10.0, request_duration=100.0
         )
 
-        # Mock workers info
-        async def mock_get_workers_info():
-            return (["prefill1"], ["decode1"])
+        async def mock_get_workers_info(*args, **kwargs):
+            return (1, 1, True)
 
         planner.get_workers_info = mock_get_workers_info
 
-        # Mock interpolation calls
-        planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-        planner.decode_interpolator.interpolate_itl.return_value = 10.0
-
-        # Run calculation
         asyncio.run(planner.make_adjustments())
 
-        # Verify that total GPU usage doesn't exceed budget
         prefill_replicas = _replica_count(
             planner.last_target_replicas, "VllmPrefillWorker"
         )
@@ -510,38 +461,30 @@ class TestReplicaCalculation:
         """Test that minimum endpoint constraints are respected."""
         planner.config.min_endpoint = 2
 
-        # Mock predictor outputs that would normally require fewer workers
-        planner.num_req_predictor.predict_next.return_value = 1  # Very low load
+        planner.num_req_predictor.predict_next.return_value = 1
         planner.isl_predictor.predict_next.return_value = 100
         planner.osl_predictor.predict_next.return_value = 10
 
-        # Mock interpolator outputs
-        planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = 40000
-        planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-            10000,
-            0.01,
-            0.5,
+        planner.ttft_regression.find_best_engine_prefill_rps.return_value = (
+            40000.0 / 100.0,
+            75.0,
+        )
+        planner.itl_regression.find_best_engine_decode_rps.return_value = (
+            10000.0 / 10.0,
+            9.5,
         )
 
-        # Set up metrics
         planner.last_metrics = Metrics(
             num_req=1, isl=100, osl=10, ttft=80.0, itl=10.0, request_duration=100.0
         )
 
-        # Mock workers info
-        async def mock_get_workers_info():
-            return (["prefill1"], ["decode1"])
+        async def mock_get_workers_info(*args, **kwargs):
+            return (1, 1, True)
 
         planner.get_workers_info = mock_get_workers_info
 
-        # Mock interpolation calls
-        planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-        planner.decode_interpolator.interpolate_itl.return_value = 10.0
-
-        # Run calculation
         asyncio.run(planner.make_adjustments())
 
-        # Verify minimum constraints are respected
         prefill_replicas = _replica_count(
             planner.last_target_replicas, "VllmPrefillWorker"
         )
@@ -560,179 +503,44 @@ class TestReplicaCalculation:
     @pytest.mark.nightly
     @pytest.mark.gpu_2
     @pytest.mark.performance
-    def test_prefill_correction_factor_clamping(self, planner):
-        """Test that prefill correction factor > 1 is clamped to 1."""
-        # Set a high correction factor > 1
-        planner.p_correction_factor = 2.5
-        planner.d_correction_factor = 1.0
-
-        # Mock predictor outputs
-        planner.num_req_predictor.predict_next.return_value = 10
-        planner.isl_predictor.predict_next.return_value = 3000
-        planner.osl_predictor.predict_next.return_value = 150
-
-        # Mock interpolator outputs
-        planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = 40000
-        planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-            10000,
-            0.01,
-            0.5,
-        )
-
-        # Set up metrics
-        planner.last_metrics = Metrics(
-            num_req=10, isl=3000, osl=150, ttft=80.0, itl=10.0, request_duration=100.0
-        )
-
-        # Mock workers info
-        async def mock_get_workers_info():
-            return (["prefill1"], ["decode1"])
-
-        planner.get_workers_info = mock_get_workers_info
-
-        # Mock interpolation calls
-        planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-        planner.decode_interpolator.interpolate_itl.return_value = 10.0
-
-        # Calculate expected result manually with clamping
-        # Should use min(1, 2.5) = 1
-        pred_prefill_load_per_gpu = (
-            10
-            * 3000
-            / planner.config.throughput_adjustment_interval
-            * min(1, 2.5)  # Should be * 1
-        )
-        expected_prefill_replicas = math.ceil(
-            pred_prefill_load_per_gpu / 40000 / planner.config.prefill_engine_num_gpu
-        )
-
-        # Run calculation
-        asyncio.run(planner.make_adjustments())
-
-        # Verify that correction factor was effectively clamped
-        prefill_replicas = _replica_count(
-            planner.last_target_replicas, "VllmPrefillWorker"
-        )
-
-        print(
-            f"Correction factor clamping test: Expected={expected_prefill_replicas}, Got={prefill_replicas}"
-        )
-
-        assert prefill_replicas == max(
-            expected_prefill_replicas, planner.config.min_endpoint
-        ), "Prefill correction factor should be clamped to 1"
-
-    @pytest.mark.nightly
-    @pytest.mark.gpu_2
-    @pytest.mark.performance
-    def test_decode_correction_factor_zero_handling(self, planner):
-        """Test handling of d_correction_factor <= 0."""
-        # Test both 0 and negative values
-        for correction_factor in [0.0, -1.0]:
-            planner.p_correction_factor = 1.0
-            planner.d_correction_factor = correction_factor
-
-            # Mock predictor outputs
-            planner.num_req_predictor.predict_next.return_value = 10
-            planner.isl_predictor.predict_next.return_value = 3000
-            planner.osl_predictor.predict_next.return_value = 150
-
-            # Mock interpolator outputs
-            planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = 40000
-            planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-                10000,
-                0.01,
-                0.5,
-            )
-
-            # Set up metrics
-            planner.last_metrics = Metrics(
-                num_req=10,
-                isl=3000,
-                osl=150,
-                ttft=80.0,
-                itl=10.0,
-                request_duration=100.0,
-            )
-
-            # Mock workers info
-            async def mock_get_workers_info():
-                return (["prefill1"], ["decode1"])
-
-            planner.get_workers_info = mock_get_workers_info
-
-            # Mock interpolation calls
-            planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-            planner.decode_interpolator.interpolate_itl.return_value = 10.0
-
-            # Run calculation
-            asyncio.run(planner.make_adjustments())
-
-            # Should handle gracefully without crashing
-            # The code should use args.itl directly instead of dividing by 0
-            decode_replicas = _replica_count(
-                planner.last_target_replicas, "VllmDecodeWorker"
-            )
-
-            print(
-                f"Correction factor {correction_factor} test: Decode replicas={decode_replicas}"
-            )
-
-            # Should get a valid result (not crash)
-            assert (
-                decode_replicas >= 1
-            ), f"Should handle correction factor {correction_factor} gracefully"
-
-    @pytest.mark.nightly
-    @pytest.mark.gpu_2
-    @pytest.mark.performance
     def test_multi_gpu_engines(self, planner):
         """Test replica calculation with multi-GPU engines."""
-        # Set multi-GPU configuration
         planner.config.prefill_engine_num_gpu = 2
         planner.config.decode_engine_num_gpu = 4
 
-        # Mock predictor outputs
         planner.num_req_predictor.predict_next.return_value = 20
         planner.isl_predictor.predict_next.return_value = 3000
         planner.osl_predictor.predict_next.return_value = 150
 
-        # Mock interpolator outputs
-        planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = 40000
-        planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-            5000,
-            0.01,
-            0.5,
-        )  # Lower for scaling
+        # Engine-level request rate (already accounts for multi-GPU)
+        prefill_engine_rps = 40000.0 / 3000.0
+        decode_engine_rps = 5000.0 / 150.0
+        planner.ttft_regression.find_best_engine_prefill_rps.return_value = (
+            prefill_engine_rps,
+            75.0,
+        )
+        planner.itl_regression.find_best_engine_decode_rps.return_value = (
+            decode_engine_rps,
+            9.5,
+        )
 
-        # Set up metrics
         planner.last_metrics = Metrics(
             num_req=20, isl=3000, osl=150, ttft=80.0, itl=10.0, request_duration=100.0
         )
 
-        # Mock workers info
-        async def mock_get_workers_info():
-            return (["prefill1"], ["decode1"])
+        async def mock_get_workers_info(*args, **kwargs):
+            return (1, 1, True)
 
         planner.get_workers_info = mock_get_workers_info
 
-        # Mock interpolation calls
-        planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-        planner.decode_interpolator.interpolate_itl.return_value = 10.0
-
-        # Calculate expected results manually
-        pred_prefill_load_per_gpu = (
-            20 * 3000 / planner.config.throughput_adjustment_interval * 1.0
-        )
+        # No engine_num_gpu division — regression returns engine-level rps
         expected_prefill_replicas = math.ceil(
-            pred_prefill_load_per_gpu / 40000 / 2
-        )  # 2 GPUs per engine
-
+            20 / planner.config.throughput_adjustment_interval / prefill_engine_rps
+        )
         expected_decode_replicas = math.ceil(
-            20 * 150 / planner.config.throughput_adjustment_interval / 5000 / 4
-        )  # 4 GPUs per engine
+            20 / planner.config.throughput_adjustment_interval / decode_engine_rps
+        )
 
-        # Run calculation
         asyncio.run(planner.make_adjustments())
 
         prefill_replicas = _replica_count(
@@ -742,10 +550,10 @@ class TestReplicaCalculation:
             planner.last_target_replicas, "VllmDecodeWorker"
         )
         print(
-            f"Multi-GPU test: P={prefill_replicas} (expected ~{expected_prefill_replicas}), D={decode_replicas} (expected ~{expected_decode_replicas})"
+            f"Multi-GPU test: P={prefill_replicas} (expected ~{expected_prefill_replicas}), "
+            f"D={decode_replicas} (expected ~{expected_decode_replicas})"
         )
 
-        # Verify calculations account for multiple GPUs per engine
         assert prefill_replicas == max(
             expected_prefill_replicas, planner.config.min_endpoint
         )
@@ -757,42 +565,39 @@ class TestReplicaCalculation:
     @pytest.mark.gpu_2
     @pytest.mark.performance
     def test_complex_gpu_budget_scaling(self, planner):
-        """Test complex GPU budget scaling with proportional reduction and decode adjustment."""
-        # Set tight GPU budget that will trigger complex scaling
+        """Test complex GPU budget scaling with proportional reduction."""
         planner.config.max_gpu_budget = 5
         planner.config.prefill_engine_num_gpu = 2
         planner.config.decode_engine_num_gpu = 2
         planner.config.min_endpoint = 1
 
-        # High load that would normally require more GPUs
         planner.num_req_predictor.predict_next.return_value = 100
         planner.isl_predictor.predict_next.return_value = 3000
         planner.osl_predictor.predict_next.return_value = 150
 
-        # Lower throughput to trigger higher replica needs
-        planner.prefill_interpolator.interpolate_thpt_per_gpu.return_value = 10000
-        planner.decode_interpolator.find_best_throughput_per_gpu.return_value = (
-            1000,
-            0.01,
-            0.5,
+        planner.ttft_regression.find_best_engine_prefill_rps.return_value = (
+            10000.0 / 3000.0,
+            300.0,
+        )
+        planner.itl_regression.find_best_engine_decode_rps.return_value = (
+            1000.0 / 150.0,
+            9.5,
         )
 
-        # Set up metrics
         planner.last_metrics = Metrics(
-            num_req=100, isl=3000, osl=150, ttft=80.0, itl=10.0, request_duration=100.0
+            num_req=100,
+            isl=3000,
+            osl=150,
+            ttft=80.0,
+            itl=10.0,
+            request_duration=100.0,
         )
 
-        # Mock workers info
-        async def mock_get_workers_info():
-            return (["prefill1"], ["decode1"])
+        async def mock_get_workers_info(*args, **kwargs):
+            return (1, 1, True)
 
         planner.get_workers_info = mock_get_workers_info
 
-        # Mock interpolation calls
-        planner.prefill_interpolator.interpolate_ttft.return_value = 80.0
-        planner.decode_interpolator.interpolate_itl.return_value = 10.0
-
-        # Run calculation
         asyncio.run(planner.make_adjustments())
 
         prefill_replicas = _replica_count(
@@ -801,14 +606,14 @@ class TestReplicaCalculation:
         decode_replicas = _replica_count(
             planner.last_target_replicas, "VllmDecodeWorker"
         )
-        # Verify total GPU usage doesn't exceed budget
         total_gpus = (
             prefill_replicas * planner.config.prefill_engine_num_gpu
             + decode_replicas * planner.config.decode_engine_num_gpu
         )
 
         print(
-            f"Complex GPU budget test: P={prefill_replicas}, D={decode_replicas}, Total GPUs={total_gpus}"
+            f"Complex GPU budget test: P={prefill_replicas}, D={decode_replicas}, "
+            f"Total GPUs={total_gpus}"
         )
 
         assert (
@@ -820,6 +625,3 @@ class TestReplicaCalculation:
         assert (
             decode_replicas >= planner.config.min_endpoint
         ), "Should respect min_endpoint for decode"
-
-
-# No need for unittest.main() with pytest!
