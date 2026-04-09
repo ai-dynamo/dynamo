@@ -37,6 +37,8 @@ pub trait Worker: Send + Sync {
         device_layout_type: Option<LayoutType>,
         host_layout_type: Option<LayoutType>,
         disk_layout_type: Option<LayoutType>,
+        outer_dim: Option<usize>,
+        inner_dim: Option<usize>,
     ) -> anyhow::Result<()>;
 
     fn bind_connector_metadata(&mut self, metadata: Vec<u8>) -> anyhow::Result<()>;
@@ -132,6 +134,8 @@ impl Worker for KvConnectorWorker {
         device_layout_type: Option<LayoutType>,
         host_layout_type: Option<LayoutType>,
         disk_layout_type: Option<LayoutType>,
+        outer_dim: Option<usize>,
+        inner_dim: Option<usize>,
     ) -> anyhow::Result<()> {
         if self.kvbm_worker.get().is_some() {
             tracing::warn!("kvbm worker already registered");
@@ -194,7 +198,7 @@ impl Worker for KvConnectorWorker {
             }
         };
 
-        let config = KvbmWorkerConfig::builder()
+        let mut config_builder = KvbmWorkerConfig::builder()
             .cancel_token(get_current_cancel_token())
             .num_device_blocks(num_device_blocks)
             .page_size(page_size)
@@ -206,8 +210,14 @@ impl Worker for KvConnectorWorker {
             .host_layout_type(host_layout_type.unwrap_or(LayoutType::FullyContiguous))
             .disk_layout_type(disk_layout_type.unwrap_or(LayoutType::FullyContiguous))
             .leader_pub_url(get_leader_zmq_pub_url())
-            .leader_ack_url(get_leader_zmq_ack_url())
-            .build()?;
+            .leader_ack_url(get_leader_zmq_ack_url());
+        if let Some(od) = outer_dim {
+            config_builder = config_builder.outer_dim(Some(od));
+        }
+        if let Some(id) = inner_dim {
+            config_builder = config_builder.inner_dim(Some(id));
+        }
+        let config = config_builder.build()?;
 
         let worker = get_current_tokio_handle().block_on(async move {
             let worker = KvbmWorker::new(config, false).await?;
@@ -485,7 +495,7 @@ impl PyKvConnectorWorker {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
+    #[pyo3(signature = (num_device_blocks, page_size, device_id, dtype_width_bytes, kv_caches, raw_event_handles, device_layout_type=None, host_layout_type=None, disk_layout_type=None, outer_dim=None, inner_dim=None))]
     pub fn register_kv_caches(
         &mut self,
         num_device_blocks: usize,
@@ -497,6 +507,8 @@ impl PyKvConnectorWorker {
         device_layout_type: Option<PyLayoutType>,
         host_layout_type: Option<PyLayoutType>,
         disk_layout_type: Option<PyLayoutType>,
+        outer_dim: Option<usize>,
+        inner_dim: Option<usize>,
     ) -> PyResult<()> {
         // Convert Python tensors to Rust VllmTensor objects
         let mut rust_kv_caches = Vec::new();
@@ -516,6 +528,8 @@ impl PyKvConnectorWorker {
                 device_layout_type.map(|py_layout| py_layout.into()),
                 host_layout_type.map(|py_layout| py_layout.into()),
                 disk_layout_type.map(|py_layout| py_layout.into()),
+                outer_dim,
+                inner_dim,
             )
             .map_err(to_pyerr)
     }
