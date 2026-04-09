@@ -56,9 +56,6 @@ runs:
         # Setup test directories
         mkdir -p test-results
 
-        # Record job start time for overall elapsed reporting
-        echo "JOB_START_TIME=$(date +%s)" >> $GITHUB_ENV
-
         # Set platform architecture from input
         PLATFORM_ARCH="${{ inputs.platform_arch }}"
         if [[ -z "${PLATFORM_ARCH}" ]]; then
@@ -120,7 +117,6 @@ runs:
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
-        STEP_START_TIME=$(date +%s)
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
@@ -132,16 +128,16 @@ runs:
           # --durations=0: show ALL test/setup/teardown durations (0 = no limit)
           PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=0 -m \"${{ inputs.pytest_marks }}\""
 
-          # Set GPU flags based on device type
+          # Set device-specific docker flags
           GPU_FLAGS=""
+          DOCKER_EXTRA_FLAGS=()
+          DOCKER_MOUNT_FLAGS=()
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
-            GPU_FLAGS="--device /dev/dri:/dev/dri"
-            if [[ -e /dev/dri/renderD128 ]]; then
-              RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-              GPU_FLAGS+=" --group-add ${RENDER_GID}"
+            DOCKER_EXTRA_FLAGS=(--privileged)
+            if [[ -d /dev/dri ]]; then
+              DOCKER_MOUNT_FLAGS+=( -v "/dev/dri:/dev/dri" )
             fi
-            VLLM_TARGET_DEVICE="xpu"
           elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
@@ -159,20 +155,11 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-        DOCKER_ENV_FLAGS+=(--env "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}")
         DOCKER_ENV_FLAGS+=(--env "VLLM_LOGGING_LEVEL=DEBUG")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
-
-        DOCKER_MOUNT_FLAGS=()
-        if [[ "${{ inputs.device }}" == "xpu" ]]; then
-          DOCKER_EXTRA_FLAGS=(--privileged)
-          if [[ -d /dev/dri ]]; then
-            DOCKER_MOUNT_FLAGS+=( -v "/dev/dri:/dev/dri" )
-          fi
-        fi
 
         echo "🐳 Docker run command (runner v1):"
         echo "docker run ${GPU_FLAGS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --cpus=${NUM_CPUS} --network host ${DOCKER_ENV_FLAGS[@]} ${DOCKER_MOUNT_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
@@ -199,10 +186,6 @@ runs:
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
-        STEP_END_TIME=$(date +%s)
-        STEP_ELAPSED=$((STEP_END_TIME - STEP_START_TIME))
-        echo "⏱️  Runner v1 test step elapsed: $((STEP_ELAPSED / 60))m $((STEP_ELAPSED % 60))s"
-
         # Verify test results were written (only in normal mode)
         if [[ "${{ inputs.dry_run }}" != "true" ]]; then
           if [[ -f "${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}" ]]; then
@@ -226,7 +209,6 @@ runs:
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
-        STEP_START_TIME=$(date +%s)
 
         # /dev/shm sizing: NIXL uses UCX which allocates shared memory segments in /dev/shm
         # via shm_open(). Each NIXL agent with num_threads=8 creates 9 UCX workers, each needing
@@ -243,16 +225,16 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          # Set GPU flags based on device type
+          # Set device-specific docker flags
           GPU_FLAGS=""
+          DOCKER_EXTRA_FLAGS=()
+          DOCKER_MOUNT_FLAGS=()
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
-            GPU_FLAGS="--device /dev/dri:/dev/dri"
-            if [[ -e /dev/dri/renderD128 ]]; then
-              RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-              GPU_FLAGS+=" --group-add ${RENDER_GID}"
+            DOCKER_EXTRA_FLAGS=(--privileged)
+            if [[ -d /dev/dri ]]; then
+              DOCKER_MOUNT_FLAGS+=( -v "/dev/dri:/dev/dri" )
             fi
-            VLLM_TARGET_DEVICE="xpu"
           elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
@@ -292,25 +274,11 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-        DOCKER_ENV_FLAGS+=(--env "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE}")
         DOCKER_ENV_FLAGS+=(--env "VLLM_LOGGING_LEVEL=DEBUG")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
-
-        DOCKER_MOUNT_FLAGS=()
-        if [[ "${{ inputs.device }}" == "xpu" ]]; then
-          DOCKER_EXTRA_FLAGS=(--privileged)
-          if [[ -d /dev/dri ]]; then
-            DOCKER_MOUNT_FLAGS+=( -v "/dev/dri:/dev/dri" )
-          fi
-        fi
-
-        #if [[ "${VLLM_TARGET_DEVICE}" == "xpu" && "${{ inputs.dry_run }}" != "true" ]]; then
-        #  PREP_CMD='python -c "from tests.conftest import download_models; download_models(model_list=[\"Qwen/Qwen2-VL-2B-Instruct\",\"Qwen/Qwen2.5-VL-7B-Instruct\",\"TinyLlama/TinyLlama-1.1B-Chat-v1.0\",\"Qwen/Qwen3-0.6B\"])"'
-        #  PYTEST_CMD="${PREP_CMD} && ${PYTEST_CMD}"
-        #fi
 
         echo "🐳 Docker run command (dind sidecar):"
         echo "docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --network host ${DOCKER_ENV_FLAGS[@]} ${DOCKER_MOUNT_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
@@ -335,10 +303,6 @@ runs:
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
-        STEP_END_TIME=$(date +%s)
-        STEP_ELAPSED=$((STEP_END_TIME - STEP_START_TIME))
-        echo "⏱️  dind sidecar test step elapsed: $((STEP_ELAPSED / 60))m $((STEP_ELAPSED % 60))s"
-
         # Verify test results were written (only in normal mode)
         if [[ "${{ inputs.dry_run }}" != "true" ]]; then
           if [[ -f "${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}" ]]; then
@@ -354,15 +318,6 @@ runs:
     - name: Process Test Results
       shell: bash
       run: |
-        # Print overall job elapsed time
-        if [[ -n "${{ env.JOB_START_TIME }}" ]]; then
-          JOB_END_TIME=$(date +%s)
-          JOB_ELAPSED=$((JOB_END_TIME - ${{ env.JOB_START_TIME }}))
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "⏱️  Total job elapsed time: $((JOB_ELAPSED / 60))m $((JOB_ELAPSED % 60))s"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        fi
-
         # Sanitize test_type for filenames (always set this for artifact upload)
         # Remove commas and spaces from test_type for use in filenames
         STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
