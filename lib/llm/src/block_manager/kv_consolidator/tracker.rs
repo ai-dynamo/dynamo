@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use dynamo_kv_router::protocols::XXH3_SEED;
+use dynamo_kv_router::protocols::{StorageTier as RouterStorageTier, XXH3_SEED};
 
 /// LocalBlockHash type (content hash from tokens only)
 type LocalBlockHash = u64;
@@ -108,12 +108,7 @@ pub enum StorageTier {
 impl StorageTier {
     /// Parse from vLLM's medium string (e.g., "GPU", "CPU_TIER1", "CPU_TIER2")
     pub fn from_vllm_medium(s: &str) -> Option<Self> {
-        match s {
-            "GPU" => Some(StorageTier::Device),
-            "CPU_TIER1" => Some(StorageTier::HostPinned),
-            "CPU_TIER2" => Some(StorageTier::Disk),
-            _ => None,
-        }
+        RouterStorageTier::from_kv_medium(s).map(Into::into)
     }
 
     /// Convert to vLLM's medium string
@@ -131,6 +126,16 @@ impl StorageTier {
             StorageTier::Device => "device",
             StorageTier::HostPinned => "host_pinned",
             StorageTier::Disk => "disk",
+        }
+    }
+}
+
+impl From<RouterStorageTier> for StorageTier {
+    fn from(value: RouterStorageTier) -> Self {
+        match value {
+            RouterStorageTier::Device => Self::Device,
+            RouterStorageTier::HostPinned => Self::HostPinned,
+            RouterStorageTier::Disk | RouterStorageTier::External => Self::Disk,
         }
     }
 }

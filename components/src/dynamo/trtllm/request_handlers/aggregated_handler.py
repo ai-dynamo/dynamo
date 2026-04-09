@@ -5,7 +5,9 @@
 
 import logging
 from collections.abc import AsyncGenerator
-from typing import Optional
+from typing import Optional, Union
+
+import torch
 
 from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
@@ -40,7 +42,7 @@ class AggregatedHandler(HandlerBase):
         """Generate response, optionally using remote encoder for multimodal."""
         logging.debug(f"AggregatedHandler Request ID: {context.id()}")
 
-        embeddings = None
+        embeddings: Optional[Union[torch.Tensor, dict]] = None
         ep_disaggregated_params = None
         if self.multimodal_processor and self.encode_client:
             messages = request.get("extra_args", {}).get(
@@ -57,7 +59,7 @@ class AggregatedHandler(HandlerBase):
                     self._encoder_cache,
                 )
                 if isinstance(result, list):
-                    embeddings = result
+                    embeddings = result  # type: ignore[assignment]
                 else:
                     ep_disaggregated_params = result
 

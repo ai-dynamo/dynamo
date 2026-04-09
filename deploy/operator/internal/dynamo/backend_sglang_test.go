@@ -273,7 +273,7 @@ func TestSGLangBackend_ShellCommandInjection(t *testing.T) {
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialCommand:    []string{"sh", "-c"},
 			initialArgs:       []string{"python -m dynamo.sglang"},
-			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $LWS_LEADER_ADDRESS:29500 --nnodes 2 --node-rank 0"},
+			expectedArgs:      []string{"python -m dynamo.sglang --dist-init-addr $(LWS_LEADER_ADDRESS):29500 --nnodes 2 --node-rank 0"},
 			description:       "LWS shell commands should use LWS variables",
 		},
 		{
@@ -611,7 +611,6 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
 				}
 			}
-
 		})
 	}
 }

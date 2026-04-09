@@ -95,27 +95,21 @@ else
     echo "⚠️ SSH agent forwarding not configured - SSH_AUTH_SOCK is not set"
 fi
 
-echo -e "\n🔍 Running sanity check..."
-if show_and_run $WORKSPACE_DIR/deploy/sanity_check.py; then
-    SANITY_STATUS="✅ Sanity check passed"
-else
-    SANITY_STATUS="⚠️ Sanity check failed - review output above"
-fi
-
 cat <<EOF
 
 ========================================
-$SANITY_STATUS
 ✅ Pre-commit hooks configured
 
 Now build the project:
-  cargo build --locked --profile dev --features dynamo-llm/block-manager
-  cd lib/bindings/python && maturin develop --uv
+  cargo build --features dynamo-llm/block-manager
+  cd lib/bindings/python && maturin develop --uv && cd $WORKSPACE_DIR
+  uv pip install --no-deps -e $WORKSPACE_DIR
+
+Optional:
   uv pip install -e lib/gpu_memory_service  # GPU memory manager with C++ extension
-  DYNAMO_BIN_PATH=\$CARGO_TARGET_DIR/debug uv pip install -e .
+  cd lib/bindings/kvbm && maturin develop --uv  # For KVBM support
 
-Optional: cd lib/bindings/kvbm && maturin develop --uv  # For KVBM support
-
-If cargo build fails with a Cargo.lock error, try to update it with 'cargo update'
+Verify with:
+  $WORKSPACE_DIR/deploy/sanity_check.py
 ========================================
 EOF

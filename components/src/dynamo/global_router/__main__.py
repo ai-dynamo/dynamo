@@ -52,6 +52,9 @@ async def worker(runtime: DistributedRuntime):
     """Main worker function for the Global Router service."""
 
     config = parse_args()
+    # validate() ensures these are non-None; assert to narrow types for mypy
+    assert config.config_path is not None
+    assert config.model_name is not None
     logger.info("Starting Global Router Service")
     logger.info(f"Config: {config.config_path}")
     logger.info(f"Model name: {config.model_name}")

@@ -49,7 +49,7 @@ PodCliques and PodCliqueScalingGroups allow users to specify flexible gang-sched
 Supports pluggable horizontal auto-scaling solutions to scale PodCliqueSet, PodClique, and PodCliqueScalingGroup custom resources independently based on their specific metrics and requirements.
 
 ### Network Topology-Aware Scheduling
-Allows specifying network topology pack and spread constraints to optimize for both network performance and service availability, crucial for disaggregated systems where components need efficient inter-node communication.
+Allows specifying network topology pack and spread constraints to optimize for both network performance and service availability, crucial for disaggregated systems where components need efficient inter-node communication. Dynamo exposes this capability through the `topologyConstraint` field on DynamoGraphDeployment resources, so users can opt in to topology-aware placement without interacting with Grove internals. See the [Topology Aware Scheduling guide](./topology-aware-scheduling.md) for configuration details and examples.
 
 ### Custom Startup Dependencies
 Prescribes the order in which PodCliques must start in a declarative specification, with pod startup decoupled from pod creation or scheduling. This ensures proper initialization order for disaggregated components.

@@ -80,7 +80,7 @@ RUN mkdir -p /home/$USERNAME/.cache/ \
 
 {% if device == "xpu" %}
 SHELL ["bash", "-c"]
-CMD ["bash", "-c", "source /root/.bashrc && exec bash"]
+CMD ["bash", "-c", "source /home/$USERNAME/.bashrc && exec bash"]
 {% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

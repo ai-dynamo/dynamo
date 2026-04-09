@@ -132,6 +132,18 @@ These metrics can be used to:
 
 For more information on Dynamo metrics, see the [Metrics documentation](../observability/metrics.md).
 
+## Known Limitations
+
+### Guided Decoding (Structured Output)
+
+Request migration is **not supported** for requests that use guided decoding (structured output / JSON schema). When a worker fails mid-stream during a guided-decoding request, the error is propagated to the client instead of attempting migration.
+
+**Why:** Inference backends initialize the guided-decoding finite state machine (FSM) fresh for every new request and only advance it on newly-generated tokens, not on context/prompt tokens. When a partially-completed request is migrated to a new worker, the new worker replays the already-generated tokens as context but starts the FSM from the schema root. This mismatch between the token state and FSM state produces corrupted output — typically duplicated or nested JSON.
+
+This limitation applies equally to all backends (vLLM, SGLang, TRT-LLM).
+
+**Future path:** Supporting migration for guided-decoding requests would require serializing and restoring the FSM state across workers, or replaying prior output tokens through the FSM on the new worker. This is tracked as a future enhancement.
+
 ## Operational Impact
 
 Request migration fundamentally changes how the system handles failures, moving from a "fail-fast" approach to a "graceful degradation" model. This architectural shift enables higher availability and better resource utilization while maintaining the same external API contract for clients.

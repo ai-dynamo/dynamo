@@ -6,6 +6,7 @@
 import dataclasses
 import logging
 import os
+import time
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any, Dict, Optional
@@ -17,6 +18,7 @@ from tests.conftest import ServicePorts
 from tests.utils.client import send_request
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig, EngineProcess
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 DEFAULT_TIMEOUT = 10
 
@@ -51,6 +53,16 @@ def run_serve_deployment(
     if extra_env:
         merged_env.update(extra_env)
 
+    # Stagger engine startup under xdist to avoid vLLM profiling race
+    # (vLLM bug #10643: concurrent profilers miscount each other's memory).
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker_id.startswith("gw"):
+        worker_num = int(worker_id.removeprefix("gw"))
+        if worker_num > 0:
+            stagger_s = worker_num * 15
+            logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
+            time.sleep(stagger_s)
+
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
         dynamic_system_ports = [int(p) for p in ports.system_ports]
@@ -76,8 +88,13 @@ def run_serve_deployment(
             for idx, port in enumerate(dynamic_system_ports, start=1):
                 merged_env[f"DYN_SYSTEM_PORT{idx}"] = str(port)
 
+        # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
+        if ports.kv_event_port:
+            merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
+
         # Ensure EngineProcess health checks hit the correct frontend port.
         config = dataclasses.replace(config, frontend_port=dynamic_frontend_port)
+
     else:
         # Backward compat: infer from config/extra_env if no explicit ports are passed.
         dynamic_frontend_port = int(config.frontend_port)
@@ -93,76 +110,86 @@ def run_serve_deployment(
             int(merged_env.get("DYN_SYSTEM_PORT2") or DefaultPort.SYSTEM2.value),
         ]
 
-    with EngineProcess.from_script(
-        config, request, extra_env=merged_env
-    ) as server_process:
-        for _payload in config.request_payloads:
-            logger.info("TESTING: Payload: %s", _payload.__class__.__name__)
+    # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
+    disagg_bootstrap_port: int | None = None
+    if config.script_name and "disagg" in config.script_name:
+        disagg_bootstrap_port = allocate_port(12000)
+        merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
 
-            # Make a per-iteration copy so tests can safely override ports/fields
-            # without mutating shared config instances across parametrized cases.
-            payload = deepcopy(_payload)
-            # inject model
-            if hasattr(payload, "with_model"):
-                payload = payload.with_model(config.model)
+    try:
+        with EngineProcess.from_script(
+            config, request, extra_env=merged_env
+        ) as server_process:
+            for _payload in config.request_payloads:
+                logger.info("TESTING: Payload: %s", _payload.__class__.__name__)
 
-            # Default behavior: requests go to the frontend port, except metrics which target
-            # worker system ports (mapped from DefaultPort -> per-test ports).
-            if getattr(payload, "endpoint", "") == "/metrics":
-                if payload.port == DefaultPort.SYSTEM1.value:
-                    if len(dynamic_system_ports) < 1:
-                        raise RuntimeError(
-                            "Payload targets SYSTEM_PORT1 but no system ports were provided "
-                            f"(payload={payload.__class__.__name__})"
-                        )
-                    payload.port = dynamic_system_ports[0]
-                elif payload.port == DefaultPort.SYSTEM2.value:
-                    if len(dynamic_system_ports) < 2:
-                        raise RuntimeError(
-                            "Payload targets SYSTEM_PORT2 but only 1 system port was provided "
-                            f"(payload={payload.__class__.__name__})"
-                        )
-                    payload.port = dynamic_system_ports[1]
-            else:
-                payload.port = dynamic_frontend_port
+                # Make a per-iteration copy so tests can safely override ports/fields
+                # without mutating shared config instances across parametrized cases.
+                payload = deepcopy(_payload)
+                # inject model
+                if hasattr(payload, "with_model"):
+                    payload = payload.with_model(config.model)
 
-            # Optional extra system ports for specialized payloads (e.g. LoRA control-plane APIs).
-            # BasePayload always defines `system_ports` (usually empty); map defaults
-            # (SYSTEM_PORT1/2) to per-test system ports when present.
-            if payload.system_ports:
-                mapped_system_ports: list[int] = []
-                for p in payload.system_ports:
-                    if p == DefaultPort.SYSTEM1.value:
+                # Default behavior: requests go to the frontend port, except metrics which target
+                # worker system ports (mapped from DefaultPort -> per-test ports).
+                if getattr(payload, "endpoint", "") == "/metrics":
+                    if payload.port == DefaultPort.SYSTEM1.value:
                         if len(dynamic_system_ports) < 1:
                             raise RuntimeError(
-                                "Payload.system_ports includes SYSTEM_PORT1 but no system ports were provided "
+                                "Payload targets SYSTEM_PORT1 but no system ports were provided "
                                 f"(payload={payload.__class__.__name__})"
                             )
-                        mapped_system_ports.append(dynamic_system_ports[0])
-                    elif p == DefaultPort.SYSTEM2.value:
+                        payload.port = dynamic_system_ports[0]
+                    elif payload.port == DefaultPort.SYSTEM2.value:
                         if len(dynamic_system_ports) < 2:
                             raise RuntimeError(
-                                "Payload.system_ports includes SYSTEM_PORT2 but only 1 system port was provided "
+                                "Payload targets SYSTEM_PORT2 but only 1 system port was provided "
                                 f"(payload={payload.__class__.__name__})"
                             )
-                        mapped_system_ports.append(dynamic_system_ports[1])
-                    else:
-                        mapped_system_ports.append(p)
-                payload.system_ports = mapped_system_ports
+                        payload.port = dynamic_system_ports[1]
+                else:
+                    payload.port = dynamic_frontend_port
 
-            for _ in range(payload.repeat_count):
-                response = send_request(
-                    url=payload.url(),
-                    payload=payload.body,
-                    timeout=payload.timeout,
-                    method=payload.method,
-                    stream=payload.http_stream,
-                )
-                server_process.check_response(payload, response)
+                # Optional extra system ports for specialized payloads (e.g. LoRA control-plane APIs).
+                # BasePayload always defines `system_ports` (usually empty); map defaults
+                # (SYSTEM_PORT1/2) to per-test system ports when present.
+                if payload.system_ports:
+                    mapped_system_ports: list[int] = []
+                    for p in payload.system_ports:
+                        if p == DefaultPort.SYSTEM1.value:
+                            if len(dynamic_system_ports) < 1:
+                                raise RuntimeError(
+                                    "Payload.system_ports includes SYSTEM_PORT1 but no system ports were provided "
+                                    f"(payload={payload.__class__.__name__})"
+                                )
+                            mapped_system_ports.append(dynamic_system_ports[0])
+                        elif p == DefaultPort.SYSTEM2.value:
+                            if len(dynamic_system_ports) < 2:
+                                raise RuntimeError(
+                                    "Payload.system_ports includes SYSTEM_PORT2 but only 1 system port was provided "
+                                    f"(payload={payload.__class__.__name__})"
+                                )
+                            mapped_system_ports.append(dynamic_system_ports[1])
+                        else:
+                            mapped_system_ports.append(p)
+                    payload.system_ports = mapped_system_ports
 
-            # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
-            if hasattr(payload, "final_validation"):
-                payload.final_validation()
+                for _ in range(payload.repeat_count):
+                    response = send_request(
+                        url=payload.url(),
+                        payload=payload.body,
+                        timeout=payload.timeout,
+                        method=payload.method,
+                        stream=payload.http_stream,
+                    )
+                    server_process.check_response(payload, response)
+
+                # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
+                if hasattr(payload, "final_validation"):
+                    payload.final_validation()
+    finally:
+        if disagg_bootstrap_port is not None:
+            deallocate_port(disagg_bootstrap_port)
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):

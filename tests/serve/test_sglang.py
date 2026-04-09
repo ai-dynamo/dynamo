@@ -42,10 +42,16 @@ class SGLangConfig(EngineConfig):
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
+REMOTE_VIDEO_TEST_URI = (
+    "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
+)
 
 # SGLang test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~167s (2m 47s) total to run sequentially (with models pre-cached)
-# TODO: Parallelize these tests to reduce total execution time
+# TODO: Now that these tests use dynamic ports and each config has a profiled_vram_gib marker,
+# optimize the runtime by bin-packing multiple engine deployments in parallel on the same GPU.
+# A future collector/launcher can sum profiled_vram_gib values to decide how many tests fit
+# concurrently without exceeding available VRAM.
 sglang_configs = {
     "aggregated": SGLangConfig(
         # Uses backend agg.sh (with metrics enabled) for testing standard
@@ -55,8 +61,14 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(
+                3.7
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                96
+            ),  # KV cache cap (2x safety over min=48)
+            pytest.mark.timeout(195),  # profiled 33s on RTX 6000 Ada
             pytest.mark.pre_merge,
-            pytest.mark.timeout(240),  # 3x measured time (39s) + download time (120s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -75,9 +87,8 @@ sglang_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2265"),
-        ],
+            pytest.mark.pre_merge,
+        ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
         model="Qwen/Qwen3-0.6B",
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
@@ -97,8 +108,10 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.skip(reason="unstable"),
+            # TODO: profile to get max_vram and timeout (currently skipped)
         ],
         model="Qwen/Qwen3-0.6B",
+        delayed_start=30,
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -126,9 +139,8 @@ sglang_configs = {
         script_name="agg_router.sh",
         marks=[
             pytest.mark.gpu_2,
-            pytest.mark.post_merge,
-            pytest.mark.skip(reason="DYN-2265"),
-        ],
+            pytest.mark.pre_merge,
+        ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
         model="Qwen/Qwen3-0.6B",
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
@@ -137,7 +149,7 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(
                 expected_log=[
-                    r"ZMQ listener .* received batch with \d+ events \(seq=\d+(?:, [^)]*)?\)",
+                    r"ZMQ listener .* received batch with \d+ events \(engine_seq=\d+(?:, [^)]*)?\)",
                     r"Event processor for worker_id \d+ processing event: Stored\(",
                     r"Selected worker: worker_type=\w+, worker_id=\d+ dp_rank=.*?, logit: ",
                 ]
@@ -156,9 +168,10 @@ sglang_configs = {
         script_name="template_verifier.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(0.0),  # no GPU model load
+            pytest.mark.timeout(120),  # profiled 12s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(240),  # 3x measured time (20s) + download time (180s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={},
@@ -169,19 +182,26 @@ sglang_configs = {
             )
         ],
     ),
-    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
-    "multimodal_epd_qwen": SGLangConfig(
+    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements.
+    # NOTE: multimodal_epd.sh uses explicit --mem-fraction-static via DYN_ENCODE_GPU_MEM
+    # / DYN_WORKER_GPU_MEM env vars. The profiler override distributes proportionally
+    # but workers combined consistently use ~23.6 GiB regardless of fraction overrides.
+    "multimodal_e_pd_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
-        name="multimodal_epd_qwen",
+        name="multimodal_e_pd_qwen",
         directory=sglang_dir,
         script_name="multimodal_epd.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            # No profiled_vram_gib: uses hard-coded --mem-fraction-static via
+            # DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM, so VRAM scales with GPU size.
+            pytest.mark.timeout(210),  # profiled 35s on RTX 6000 Ada
+            pytest.mark.pre_merge,
+        ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
         timeout=360,
         env={
-            "DYN_ENCODE_WORKER_GPU": "0",
-            "DYN_WORKER_GPU": "0",
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
         },
@@ -207,6 +227,43 @@ sglang_configs = {
             )
         ],
     ),
+    "multimodal_disagg_qwen": SGLangConfig(
+        # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
+        name="multimodal_disagg_qwen",
+        directory=sglang_dir,
+        script_name="multimodal_disagg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(16.1),  # actual profiled peak
+            pytest.mark.requested_sglang_kv_tokens(
+                1024
+            ),  # KV cache cap (2x safety over min=512)
+            pytest.mark.timeout(222),  # profiled 37s on RTX 6000 Ada
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
+        timeout=360,
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
     "multimodal_agg_qwen": SGLangConfig(
         # Tests single-process aggregated multimodal inference using DecodeWorkerHandler
         # with in-process vision encoding (no separate encode worker)
@@ -215,9 +272,15 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(
+                19.1
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                768
+            ),  # KV cache cap (2x safety over min=384)
+            pytest.mark.timeout(182),  # profiled 30s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(300),
         ],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=[
@@ -247,15 +310,60 @@ sglang_configs = {
             )
         ],
     ),
+    "video_agg_qwen": SGLangConfig(
+        # Tests aggregated video inference using DecodeWorkerHandler
+        # with in-process vision encoding (no separate encode worker).
+        # Reuses agg_vision.sh because image and video share the same aggregated
+        # multimodal SGLang request path.
+        name="video_agg_qwen",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(13.3),  # same as multimodal_e_pd_qwen
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen2-VL-7B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen2-VL-7B-Instruct",
+            "--mem-fraction-static",
+            "0.8",
+        ],
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["guitar", "tablet", "draw"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
     "embedding_agg": SGLangConfig(
         name="embedding_agg",
         directory=sglang_dir,
         script_name="agg_embed.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(
+                9.8
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                128
+            ),  # KV cache cap (2x safety over min=64)
+            pytest.mark.timeout(147),  # profiled 24s on RTX 6000 Ada
             pytest.mark.pre_merge,
             pytest.mark.nightly,
-            pytest.mark.timeout(270),  # 3x measured time (29s) + download time (180s)
         ],
         model="Qwen/Qwen3-Embedding-4B",
         delayed_start=0,
@@ -290,10 +398,14 @@ sglang_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(
+                14.7
+            ),  # actual peak at recommended token count
+            pytest.mark.requested_sglang_kv_tokens(
+                64
+            ),  # KV cache cap (2x safety over min=32)
+            pytest.mark.timeout(341),  # profiled 57s on RTX 6000 Ada
             pytest.mark.post_merge,
-            pytest.mark.timeout(
-                420
-            ),  # Total test timeout: 2x measured average (79.36s) + download time (240s) for 7B model
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
@@ -315,6 +427,7 @@ sglang_configs = {
             pytest.mark.post_merge,
             pytest.mark.timeout(240),
             pytest.mark.skip(reason="DYN-2261"),
+            # TODO: profile once DYN-2261 is fixed (uses agg.sh, profiler works)
         ],
         model="Qwen/Qwen3-0.6B",
         env={"DYN_ENABLE_ANTHROPIC_API": "1"},

@@ -9,11 +9,27 @@ use std::time::Instant;
 #[cfg(feature = "metrics")]
 use axum::{extract::MatchedPath, http::Request, middleware::Next, response::Response};
 #[cfg(feature = "metrics")]
-use dynamo_runtime::metrics::prometheus_names::{kvindexer, name_prefix};
-#[cfg(feature = "metrics")]
 use prometheus::{
-    HistogramVec, IntCounterVec, IntGauge, Opts, exponential_buckets, histogram_opts,
+    HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts, exponential_buckets, histogram_opts,
 };
+
+#[cfg(feature = "metrics")]
+use super::registry::ListenerStatus;
+
+#[cfg(feature = "metrics")]
+const METRICS_PREFIX: &str = "dynamo_kvindexer";
+#[cfg(feature = "metrics")]
+const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
+#[cfg(feature = "metrics")]
+const REQUESTS_TOTAL: &str = "requests_total";
+#[cfg(feature = "metrics")]
+const ERRORS_TOTAL: &str = "errors_total";
+#[cfg(feature = "metrics")]
+const MODELS: &str = "models";
+#[cfg(feature = "metrics")]
+const WORKERS: &str = "workers";
+#[cfg(feature = "metrics")]
+const LISTENERS: &str = "listeners";
 
 #[cfg(feature = "metrics")]
 pub struct StandaloneIndexerMetrics {
@@ -22,48 +38,54 @@ pub struct StandaloneIndexerMetrics {
     pub errors_total: IntCounterVec,
     pub models: IntGauge,
     pub workers: IntGauge,
+    pub listeners: IntGaugeVec,
 }
 
 #[cfg(feature = "metrics")]
-static METRICS: LazyLock<StandaloneIndexerMetrics> = LazyLock::new(|| {
-    let prefix = name_prefix::KVINDEXER;
-    StandaloneIndexerMetrics {
-        request_duration: HistogramVec::new(
-            histogram_opts!(
-                format!("{prefix}_{}", kvindexer::REQUEST_DURATION_SECONDS),
-                "HTTP request latency",
-                exponential_buckets(0.0001, 2.0, 20).expect("valid bucket params")
-            ),
-            &["endpoint"],
-        )
-        .expect("valid histogram"),
-        requests_total: IntCounterVec::new(
-            Opts::new(
-                format!("{prefix}_{}", kvindexer::REQUESTS_TOTAL),
-                "Total HTTP requests",
-            ),
-            &["endpoint", "method"],
-        )
-        .expect("valid counter"),
-        errors_total: IntCounterVec::new(
-            Opts::new(
-                format!("{prefix}_{}", kvindexer::ERRORS_TOTAL),
-                "HTTP error responses (4xx/5xx)",
-            ),
-            &["endpoint", "status_class"],
-        )
-        .expect("valid counter"),
-        models: IntGauge::new(
-            format!("{prefix}_{}", kvindexer::MODELS),
-            "Number of active model+tenant indexers",
-        )
-        .expect("valid gauge"),
-        workers: IntGauge::new(
-            format!("{prefix}_{}", kvindexer::WORKERS),
-            "Number of registered worker instances",
-        )
-        .expect("valid gauge"),
-    }
+static METRICS: LazyLock<StandaloneIndexerMetrics> = LazyLock::new(|| StandaloneIndexerMetrics {
+    request_duration: HistogramVec::new(
+        histogram_opts!(
+            format!("{METRICS_PREFIX}_{REQUEST_DURATION_SECONDS}"),
+            "HTTP request latency",
+            exponential_buckets(0.0001, 2.0, 20).expect("valid bucket params")
+        ),
+        &["endpoint"],
+    )
+    .expect("valid histogram"),
+    requests_total: IntCounterVec::new(
+        Opts::new(
+            format!("{METRICS_PREFIX}_{REQUESTS_TOTAL}"),
+            "Total HTTP requests",
+        ),
+        &["endpoint", "method"],
+    )
+    .expect("valid counter"),
+    errors_total: IntCounterVec::new(
+        Opts::new(
+            format!("{METRICS_PREFIX}_{ERRORS_TOTAL}"),
+            "HTTP error responses (4xx/5xx)",
+        ),
+        &["endpoint", "status_class"],
+    )
+    .expect("valid counter"),
+    models: IntGauge::new(
+        format!("{METRICS_PREFIX}_{MODELS}"),
+        "Number of active model+tenant indexers",
+    )
+    .expect("valid gauge"),
+    workers: IntGauge::new(
+        format!("{METRICS_PREFIX}_{WORKERS}"),
+        "Number of registered worker instances",
+    )
+    .expect("valid gauge"),
+    listeners: IntGaugeVec::new(
+        Opts::new(
+            format!("{METRICS_PREFIX}_{LISTENERS}"),
+            "Number of ZMQ listeners by status",
+        ),
+        &["status"],
+    )
+    .expect("valid gauge"),
 });
 
 #[cfg(feature = "metrics")]
@@ -74,6 +96,7 @@ pub fn register(registry: &prometheus::Registry) -> Result<(), prometheus::Error
     registry.register(Box::new(m.errors_total.clone()))?;
     registry.register(Box::new(m.models.clone()))?;
     registry.register(Box::new(m.workers.clone()))?;
+    registry.register(Box::new(m.listeners.clone()))?;
     Ok(())
 }
 
@@ -106,28 +129,20 @@ pub async fn metrics_middleware(req: Request<axum::body::Body>, next: Next) -> R
 }
 
 #[cfg(feature = "metrics")]
-pub fn inc_models() {
-    METRICS.models.inc();
+pub fn set_worker_state(models: usize, workers: usize, listener_counts: [i64; 4]) {
+    METRICS.models.set(models as i64);
+    METRICS.workers.set(workers as i64);
+
+    for status in ListenerStatus::ALL {
+        METRICS
+            .listeners
+            .with_label_values(&[status.as_str()])
+            .set(listener_counts[status.metric_index()]);
+    }
 }
 
 #[cfg(not(feature = "metrics"))]
-pub fn inc_models() {}
-
-#[cfg(feature = "metrics")]
-pub fn inc_workers() {
-    METRICS.workers.inc();
-}
-
-#[cfg(not(feature = "metrics"))]
-pub fn inc_workers() {}
-
-#[cfg(feature = "metrics")]
-pub fn dec_workers() {
-    METRICS.workers.dec();
-}
-
-#[cfg(not(feature = "metrics"))]
-pub fn dec_workers() {}
+pub fn set_worker_state(_models: usize, _workers: usize, _listener_counts: [i64; 4]) {}
 
 #[cfg(all(test, feature = "metrics"))]
 mod tests {
@@ -139,10 +154,7 @@ mod tests {
         let registry = prometheus::Registry::new();
         register(&registry).expect("registration should succeed");
 
-        inc_models();
-        inc_workers();
-        inc_workers();
-        dec_workers();
+        set_worker_state(1, 2, [1, 1, 0, 0]);
 
         let encoder = prometheus::TextEncoder::new();
         let mut buf = Vec::new();
@@ -153,6 +165,8 @@ mod tests {
         assert!(output.contains("dynamo_kvindexer_requests_total"));
         assert!(output.contains("dynamo_kvindexer_errors_total"));
         assert!(output.contains("dynamo_kvindexer_models 1"));
-        assert!(output.contains("dynamo_kvindexer_workers 1"));
+        assert!(output.contains("dynamo_kvindexer_workers 2"));
+        assert!(output.contains("dynamo_kvindexer_listeners{status=\"pending\"} 1"));
+        assert!(output.contains("dynamo_kvindexer_listeners{status=\"active\"} 1"));
     }
 }

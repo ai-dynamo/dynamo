@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.17.1"
+VLLM_VER="0.19.0"
 VLLM_REF="v${VLLM_VER}"
 DEVICE="cuda"
 
@@ -25,8 +25,8 @@ INSTALLATION_DIR=/tmp
 TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to add 12.0+PTX
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
-FLASHINF_REF="v0.6.4"
-LMCACHE_REF="0.4.1"
+FLASHINF_REF="v0.6.6"
+LMCACHE_REF="0.4.2"
 VLLM_OMNI_REF="v0.16.0"
 
 while [[ $# -gt 0 ]]; do
@@ -141,9 +141,27 @@ cd vllm
 git checkout $VLLM_REF
 echo "✓ vLLM repository cloned"
 
+echo "\n=== Installing vLLM-Omni ==="
+# Install omni BEFORE vLLM. Its transitive dependencies can otherwise upgrade the
+# torch/transformers stack after vLLM is installed, which can leave vllm._C ABI-mismatched.
+# vLLM should remain the final owner of the runtime stack in this environment.
+if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
+    # Try PyPI first, fall back to building from source
+    if uv pip install vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
+        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
+    else
+        echo "⚠ PyPI install failed, building from source..."
+        git clone --depth 1 --branch ${VLLM_OMNI_REF} https://github.com/vllm-project/vllm-omni.git $INSTALLATION_DIR/vllm-omni
+        uv pip install $INSTALLATION_DIR/vllm-omni
+        rm -rf $INSTALLATION_DIR/vllm-omni
+        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source"
+    fi
+else
+    echo "⚠ Skipping vLLM-Omni (no ref provided or ARM64 not supported)"
+fi
+
 if [ "$DEVICE" = "xpu" ]; then
     echo "\n=== Installing vLLM ==="
-    git apply --ignore-whitespace /tmp/vllm-xpu.patch
     uv pip install -r requirements/xpu.txt --index-strategy unsafe-best-match
     uv pip install --verbose --no-build-isolation .
 fi
@@ -172,19 +190,19 @@ if [ "$DEVICE" = "cuda" ]; then
     #           does not prevent uv from resolving the cu12 variant)
     echo "Installing vLLM $VLLM_VER (torch backend: $TORCH_BACKEND)..."
     if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
-        if uv pip install "vllm[flashinfer,runai]==${VLLM_VER}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
+        if uv pip install "vllm[flashinfer,runai,otel]==${VLLM_VER}" ${EXTRA_PIP_ARGS} --torch-backend=${TORCH_BACKEND} 2>&1; then
             echo "✓ vLLM ${VLLM_VER} installed from PyPI"
         else
             echo "⚠ PyPI install failed, installing from GitHub release..."
             uv pip install ${EXTRA_PIP_ARGS} \
-                "${VLLM_GITHUB_URL}[flashinfer,runai]" \
+                "${VLLM_GITHUB_URL}[flashinfer,runai,otel]" \
                 --torch-backend=${TORCH_BACKEND}
             echo "✓ vLLM ${VLLM_VER} installed from GitHub"
         fi
     else
         echo "Installing vLLM from GitHub release (cu130 wheel not available on PyPI)..."
         uv pip install ${EXTRA_PIP_ARGS} \
-            "${VLLM_GITHUB_URL}[flashinfer,runai]" \
+            "${VLLM_GITHUB_URL}[flashinfer,runai,otel]" \
             --torch-backend=${TORCH_BACKEND}
         echo "✓ vLLM ${VLLM_VER} installed from GitHub"
     fi
@@ -239,29 +257,6 @@ elif [ "$DEVICE" = "xpu" ] && [ "$ARCH" = "amd64" ]; then
     echo "✓ LMCache ${LMCACHE_REF} installed from PyPI (XPU)"
 else
     echo "⚠ Skipping LMCache (ARM64 or CUDA 13 not supported)"
-fi
-
-
-echo "\n=== Installing vLLM-Omni ==="
-if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
-    # Save original vllm entrypoint before vllm-omni overwrites it
-    VLLM_BIN=$(which vllm)
-    cp "$VLLM_BIN" /tmp/vllm-entrypoint-backup
-    # Try PyPI first, fall back to building from source
-    if uv pip install vllm-omni==${VLLM_OMNI_REF#v} 2>&1; then
-        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
-    else
-        echo "⚠ PyPI install failed, building from source..."
-        git clone --depth 1 --branch ${VLLM_OMNI_REF} https://github.com/vllm-project/vllm-omni.git $INSTALLATION_DIR/vllm-omni
-        uv pip install $INSTALLATION_DIR/vllm-omni
-        rm -rf $INSTALLATION_DIR/vllm-omni
-        echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source"
-    fi
-    # Restore original vllm CLI entrypoint (vllm-omni replaces it with its own)
-    cp /tmp/vllm-entrypoint-backup "$VLLM_BIN"
-    echo "✓ Original vllm entrypoint preserved"
-else
-    echo "⚠ Skipping vLLM-Omni (no ref provided or ARM64 not supported)"
 fi
 
 if [ "$DEVICE" = "cuda" ]; then

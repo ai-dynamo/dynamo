@@ -11,18 +11,17 @@
 //! [`crate::kv_router::publisher::KvEventPublisher`], but is much simpler:
 //! no event transformation, no batching, no local indexer — just raw byte relay.
 
-use std::time::Duration;
-
 use anyhow::Result;
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
-use zeromq::{Socket, SocketRecv, SubSocket};
 
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
+use crate::utils::zmq::{connect_sub_socket, multipart_message};
+
 const FPM_TOPIC: &str = "forward-pass-metrics";
-const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
 /// A relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
 /// to the Dynamo event plane.
@@ -61,18 +60,15 @@ impl FpmEventRelay {
         publisher: EventPublisher,
         cancel: CancellationToken,
     ) {
-        let mut socket = SubSocket::new();
-        if let Err(e) = socket.subscribe("").await {
-            tracing::error!("FPM relay: failed to subscribe on ZMQ socket: {e}");
-            return;
-        }
-        if let Err(e) = socket.connect(&zmq_endpoint).await {
-            tracing::error!("FPM relay: failed to connect ZMQ SUB to {zmq_endpoint}: {e}");
-            return;
-        }
+        let socket = match connect_sub_socket(&zmq_endpoint, None).await {
+            Ok(socket) => socket,
+            Err(error) => {
+                tracing::error!(endpoint = %zmq_endpoint, error = %error, "FPM relay: failed to connect");
+                return;
+            }
+        };
+        let mut socket = socket;
         tracing::info!("FPM relay: connected to {zmq_endpoint}");
-
-        let mut consecutive_errors: u32 = 0;
 
         loop {
             tokio::select! {
@@ -81,16 +77,11 @@ impl FpmEventRelay {
                     tracing::info!("FPM relay: shutting down");
                     break;
                 }
-                result = socket.recv() => {
+                result = socket.next() => {
                     match result {
-                        Ok(msg) => {
-                            consecutive_errors = 0;
+                        Some(Ok(frames)) => {
+                            let mut frames = multipart_message(frames);
                             // ZMQ multipart: [topic, seq, payload]
-                            let mut frames: Vec<Vec<u8>> = msg
-                                .into_vec()
-                                .into_iter()
-                                .map(|f| f.to_vec())
-                                .collect();
                             if frames.len() == 3 {
                                 let payload = frames.swap_remove(2);
                                 if let Err(e) = publisher.publish_bytes(payload).await {
@@ -100,19 +91,16 @@ impl FpmEventRelay {
                                 tracing::warn!(
                                     "FPM relay: unexpected ZMQ frame count: expected 3, got {}",
                                     frames.len()
-                                );
+                            );
                             }
                         }
-                        Err(e) => {
-                            consecutive_errors += 1;
-                            tracing::warn!(
-                                "FPM relay: ZMQ recv error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}"
-                            );
-                            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                                tracing::error!("FPM relay: too many consecutive errors, exiting");
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        Some(Err(e)) => {
+                            tracing::error!("FPM relay: ZMQ recv failed: {e}");
+                            break;
+                        }
+                        None => {
+                            tracing::error!("FPM relay: ZMQ stream ended");
+                            break;
                         }
                     }
                 }

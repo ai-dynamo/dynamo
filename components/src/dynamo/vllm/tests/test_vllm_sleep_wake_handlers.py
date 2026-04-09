@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from dynamo.vllm.handlers import BaseWorkerHandler
+from dynamo.vllm.handlers import BaseWorkerHandler, VllmEngineQuiesceController
 
 pytestmark = [
     pytest.mark.unit,
@@ -34,8 +34,8 @@ def _make_handler() -> _TestWorkerHandler:
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._sleep_wake_lock = asyncio.Lock()
-    handler._engine_is_sleeping = False
+    handler._quiesce_controller = VllmEngineQuiesceController(handler.engine_client)
+    handler._quiesce_lock = asyncio.Lock()
     return handler
 
 
@@ -75,6 +75,36 @@ async def test_sleep_and_wake_are_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_quiesce_without_level_uses_vllm_default_sleep():
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=AsyncMock(),
+        resume_generation=AsyncMock(),
+    )
+    controller = VllmEngineQuiesceController(engine_client)
+
+    changed = await controller.quiesce(None)
+
+    assert changed is True
+    engine_client.pause_generation.assert_awaited_once()
+    engine_client.sleep.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_wake_up_passes_explicit_tags_from_request():
+    handler = _make_handler()
+    await handler._quiesce_controller.quiesce(1)
+
+    result = await handler.wake_up({"tags": ["weights"]})
+
+    assert result["status"] == "ok"
+    handler.engine_client.wake_up.assert_awaited_once_with(["weights"])
+    handler.engine_client.resume_generation.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sleep_returns_error_for_unregister_failure():
     handler = _make_handler()
     handler.generate_endpoint.unregister_endpoint_instance = AsyncMock(
@@ -91,7 +121,7 @@ async def test_sleep_returns_error_for_unregister_failure():
 @pytest.mark.asyncio
 async def test_wake_up_returns_error_for_register_failure():
     handler = _make_handler()
-    handler._engine_is_sleeping = True
+    await handler._quiesce_controller.quiesce(1)
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery write timeout")
     )
@@ -101,3 +131,4 @@ async def test_wake_up_returns_error_for_register_failure():
     assert result["status"] == "error"
     handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
+    assert handler._quiesce_controller.is_quiesced is True

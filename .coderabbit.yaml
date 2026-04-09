@@ -9,8 +9,7 @@ reviews:
   profile: "chill"
   request_changes_workflow: false
   high_level_summary: true
-  # John likes the poems, no messing
-  poem: true
+  poem: false
   review_status: false
   collapse_walkthrough: false
   auto_review:
@@ -28,11 +27,6 @@ reviews:
     unit_tests:
       enabled: false
   path_instructions:
-    - path: "**"
-      instructions: |
-        Flag PRs more than ~25 commits behind main. Recommend rebasing.
-        Exception: stacked PRs targeting another branch are exempt.
-        See .ai/pr-workflow-guidelines.md.
     - path: "**/*.py"
       instructions: "Review against .ai/python-guidelines.md"
     - path: "**/tests/**/*.py"

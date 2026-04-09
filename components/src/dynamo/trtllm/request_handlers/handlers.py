@@ -111,6 +111,8 @@ class PrefillHandler(HandlerBase):
             Encoder's embeddings tensor to be used by the prefill worker
         """
         # Get response with shape info and readable metadata
+        if self.encode_client is None:
+            raise RuntimeError("Encode client is not configured.")
         encode_response = None
         async for res in await self.encode_client.round_robin(request):
             encode_response = res.data()
@@ -119,6 +121,8 @@ class PrefillHandler(HandlerBase):
         if not encode_response:
             raise RuntimeError("Did not receive a response from the encode worker.")
 
+        if self.connector is None:
+            raise RuntimeError("Connector is not configured.")
         # Use utility function to handle NIXL reading and reconstruction
         return await EncodeHelper.read_embeddings_from_encode_response(
             encode_response, self.connector

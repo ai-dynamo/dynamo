@@ -5,7 +5,7 @@
 //! Used by both runtime (route, transport_roundtrip) and llm (preprocess, postprocess, tokenize, template, detokenize).
 
 use once_cell::sync::{Lazy, OnceCell};
-use prometheus::{Histogram, HistogramOpts, HistogramVec, Registry};
+use prometheus::{Counter, Histogram, HistogramOpts, HistogramVec, Opts, Registry};
 
 use super::prometheus_names::{frontend_perf, name_prefix};
 use crate::MetricsRegistry;
@@ -57,18 +57,23 @@ pub static TEMPLATE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     .expect("template_seconds histogram")
 });
 
-/// Per-token detokenization cost (microseconds).
-pub static DETOKENIZE_PER_TOKEN_US: Lazy<Histogram> = Lazy::new(|| {
-    Histogram::with_opts(
-        HistogramOpts::new(
-            frontend_metric_name(frontend_perf::DETOKENIZE_PER_TOKEN_US),
-            "Detokenization cost per token (microseconds)",
-        )
-        .buckets(vec![
-            1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0,
-        ]),
-    )
-    .expect("detokenize_per_token_us histogram")
+/// Cumulative detokenization time across all tokens (microseconds).
+/// Use `rate(total) / rate(count)` in Prometheus to derive per-token average.
+pub static DETOKENIZE_TOTAL_US: Lazy<Counter> = Lazy::new(|| {
+    Counter::with_opts(Opts::new(
+        frontend_metric_name(frontend_perf::DETOKENIZE_TOTAL_US),
+        "Cumulative detokenization time (microseconds)",
+    ))
+    .expect("detokenize_total_us counter")
+});
+
+/// Total number of tokens detokenized.
+pub static DETOKENIZE_TOKEN_COUNT: Lazy<Counter> = Lazy::new(|| {
+    Counter::with_opts(Opts::new(
+        frontend_metric_name(frontend_perf::DETOKENIZE_TOKEN_COUNT),
+        "Total tokens detokenized",
+    ))
+    .expect("detokenize_token_count counter")
 });
 
 /// Guards idempotency for the `MetricsRegistry` registration path.
@@ -88,7 +93,10 @@ pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
         registry.add_metric(Box::new(TOKENIZE_SECONDS.clone())).ok();
         registry.add_metric(Box::new(TEMPLATE_SECONDS.clone())).ok();
         registry
-            .add_metric(Box::new(DETOKENIZE_PER_TOKEN_US.clone()))
+            .add_metric(Box::new(DETOKENIZE_TOTAL_US.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))
             .ok();
     });
 }
@@ -104,7 +112,8 @@ pub fn ensure_frontend_perf_metrics_registered_prometheus(
     registry.register(Box::new(STAGE_DURATION_SECONDS.clone()))?;
     registry.register(Box::new(TOKENIZE_SECONDS.clone()))?;
     registry.register(Box::new(TEMPLATE_SECONDS.clone()))?;
-    registry.register(Box::new(DETOKENIZE_PER_TOKEN_US.clone()))?;
+    registry.register(Box::new(DETOKENIZE_TOTAL_US.clone()))?;
+    registry.register(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))?;
     let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }

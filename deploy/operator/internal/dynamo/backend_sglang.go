@@ -3,6 +3,7 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -68,7 +69,7 @@ func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 
 // getMultinodeFlags returns the multinode flags and whether shell interpretation is needed
 func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, serviceName string, multinodeDeployer MultinodeDeployer) (string, bool) {
-	distInitAddr := fmt.Sprintf("%s:%s", multinodeDeployer.GetLeaderHostname(serviceName), SglangPort)
+	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 
 	var nodeRank string
 	var needsShell bool
@@ -76,10 +77,28 @@ func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, servic
 	if role == RoleLeader {
 		nodeRank = "0"
 		needsShell = false
+		leaderHostname = convertIfShellVar(leaderHostname)
 	} else {
 		nodeRank, needsShell = multinodeDeployer.GetNodeRank()
 	}
+	distInitAddr := fmt.Sprintf("%s:%s", leaderHostname, SglangPort)
 
 	flags := fmt.Sprintf("--dist-init-addr %s --nnodes %d --node-rank %s", distInitAddr, numberOfNodes, nodeRank)
 	return flags, needsShell
+}
+
+// Match a string representing a shell variable, such as $ABC
+var shellVarRe = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)$`)
+
+// convertIfShellVar convert shell variable $ABC to $(ABC)
+func convertIfShellVar(s string) string {
+	if strings.HasPrefix(s, "$(") && strings.HasSuffix(s, ")") {
+		return s
+	}
+
+	if match := shellVarRe.FindStringSubmatch(s); len(match) > 1 {
+		return "$(" + match[1] + ")"
+	}
+
+	return s
 }

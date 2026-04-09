@@ -18,6 +18,7 @@ from dynamo.common.multimodal import (
     NixlReadEmbeddingSender,
     NixlWriteEmbeddingSender,
 )
+from dynamo.common.multimodal.embedding_transfer import AbstractEmbeddingSender
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import DistributedRuntime
@@ -85,6 +86,7 @@ class EncodeWorkerHandler:
         self._processed_requests = 0
         self.readables: list[Any] = []
         self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
+        self.embedding_sender: AbstractEmbeddingSender
         if embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_sender = LocalEmbeddingSender()
         elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
@@ -136,6 +138,9 @@ class EncodeWorkerHandler:
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
 
         request_id = request.request_id
+        assert (
+            request.multimodal_inputs is not None
+        ), "multimodal_inputs must not be None for encode worker"
 
         # The following steps encode the requested image and provided useful embeddings.
         # 1. Open the image from the provided URL.
@@ -157,12 +162,11 @@ class EncodeWorkerHandler:
                     request.multimodal_inputs
                 )
                 for idx in range(len(request.multimodal_inputs)):
-                    if not request.multimodal_inputs[idx].multimodal_input.image_url:
+                    group_input = request.multimodal_inputs[idx].multimodal_input
+                    if group_input is None or not group_input.image_url:
                         raise ValueError("image_url is required for the encode worker.")
 
-                    image_url = request.multimodal_inputs[
-                        idx
-                    ].multimodal_input.image_url
+                    image_url = group_input.image_url
                     # see if we have local cache
                     embedding_key = EmbeddingCache.generate_hash_key(image_url)
                     if (
@@ -189,7 +193,10 @@ class EncodeWorkerHandler:
                 image_tasks = []
                 image_to_load = []
                 for idx, _ in need_encode_indexes:
-                    url = request.multimodal_inputs[idx].multimodal_input.image_url
+                    group_mm_input = request.multimodal_inputs[idx].multimodal_input
+                    assert group_mm_input is not None
+                    assert group_mm_input.image_url is not None
+                    url: str = group_mm_input.image_url
                     image_tasks.append(
                         asyncio.create_task(self.image_loader.load_image(url))
                     )
@@ -305,16 +312,12 @@ class EncodeWorkerHandler:
                         f"{embedding_item.embeddings.shape} prepared for transfer."
                     )
                     # Update request for transfer metadata
-                    request.multimodal_inputs[idx].multimodal_input.image_url = None
-                    request.multimodal_inputs[
-                        idx
-                    ].image_grid_thw = embedding_item.image_grid_thw
-                    request.multimodal_inputs[idx].embeddings_shape = tuple(
-                        embedding_item.embeddings.shape
-                    )
-                    request.multimodal_inputs[
-                        idx
-                    ].serialized_request = transfer_request[0]
+                    group = request.multimodal_inputs[idx]
+                    assert group.multimodal_input is not None
+                    group.multimodal_input.image_url = None
+                    group.image_grid_thw = embedding_item.image_grid_thw
+                    group.embeddings_shape = tuple(embedding_item.embeddings.shape)  # type: ignore[assignment]
+                    group.serialized_request = transfer_request[0]
 
                     # Keep a reference of the embedding and only drop reference when the transfer is done
                     self.send_complete_queue.put_nowait(

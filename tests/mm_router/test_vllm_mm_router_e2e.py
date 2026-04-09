@@ -39,6 +39,7 @@ THREE_IMAGE_TOTAL_BLOCKS_RANGE = (180, 340)
 SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (60, 160)
 
 pytestmark = [
+    pytest.mark.pre_merge,  # all tests take <1 min to run finish on RTX 6000
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,
@@ -99,7 +100,7 @@ _COMMON_PROCESS_KWARGS: dict[str, Any] = {
 class VLLMWorkerProcess(ManagedProcess):
     """vLLM backend worker that emits KV events."""
 
-    def __init__(self, request, *, system_port: int):
+    def __init__(self, request, *, system_port: int, kv_event_port: int):
         super().__init__(
             command=[
                 "python3",
@@ -114,6 +115,12 @@ class VLLMWorkerProcess(ManagedProcess):
                 "8192",
                 "--served-model-name",
                 f"{VLLM_MM_MODEL}__internal",
+                "--kv-events-config",
+                (
+                    f'{{"publisher":"zmq","topic":"kv-events",'
+                    f'"endpoint":"tcp://*:{kv_event_port}",'
+                    f'"enable_kv_cache_events": true}}'
+                ),
             ],
             env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
             health_check_urls=[
@@ -203,9 +210,11 @@ def mm_runtime_services(request):
 def start_vllm_mm_services(
     request, mm_runtime_services
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
-    frontend_port, vllm_port, router_port = allocate_ports(count=3, start_port=10000)
+    frontend_port, vllm_port, router_port, kv_event_port = allocate_ports(
+        count=4, start_port=10000
+    )
 
-    with VLLMWorkerProcess(request, system_port=vllm_port):
+    with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
         time.sleep(10)
         with VLLMMMRouterWorkerProcess(request, system_port=router_port) as router_proc:
             time.sleep(3)
@@ -252,7 +261,7 @@ def _wait_for_new_routing_score(
     router_proc: ManagedProcess,
     start_offset: int,
     pre_request_routing_count: int,
-    timeout_s: float = 120.0,
+    timeout_s: float = 25.0,
 ) -> tuple[int, int, str]:
     deadline = time.time() + timeout_s
     last_segment = ""
@@ -297,15 +306,14 @@ def _send_request_get_overlap(
         router_proc=router_proc,
         start_offset=start_offset,
         pre_request_routing_count=pre_request_routing_count,
-        timeout_s=120,
+        timeout_s=25,
     )
     print(f"[MM_ROUTER_E2E] {label}: current={overlap}/{total}")
     time.sleep(1)
     return overlap, total, segment
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(300)
 def test_vllm_text_only_overlap_repeated_prompt(
     start_vllm_mm_services, predownload_models
 ):
@@ -350,8 +358,7 @@ def test_vllm_text_only_overlap_repeated_prompt(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_repeated_three_images(
     start_vllm_mm_services, predownload_models
 ):
@@ -391,8 +398,7 @@ def test_vllm_mm_overlap_repeated_three_images(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_repeated_single_image(
     start_vllm_mm_services, predownload_models
 ):
@@ -432,8 +438,7 @@ def test_vllm_mm_overlap_repeated_single_image(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_repeated_two_identical_images(
     start_vllm_mm_services, predownload_models
 ):
@@ -469,8 +474,7 @@ def test_vllm_mm_overlap_repeated_two_identical_images(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     start_vllm_mm_services, predownload_models
 ):
@@ -525,8 +529,7 @@ def test_vllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_diff_images_less_than_same(
     start_vllm_mm_services, predownload_models
 ):
@@ -580,8 +583,7 @@ def test_vllm_mm_overlap_diff_images_less_than_same(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
     start_vllm_mm_services, predownload_models
 ):
@@ -641,8 +643,7 @@ def test_vllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_swapped_order_less_than_same_order(
     start_vllm_mm_services, predownload_models
 ):
@@ -736,8 +737,7 @@ def http_image_server() -> Generator[list[str], None, None]:
     thread.join(timeout=5)
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_repeated_http_images(
     start_vllm_mm_services, predownload_models, http_image_server
 ):
@@ -778,8 +778,7 @@ def test_vllm_mm_overlap_repeated_http_images(
     )
 
 
-@pytest.mark.timeout(1800)
-@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_vllm_mm_overlap_http_vs_data_uri_same_image(
     start_vllm_mm_services, predownload_models, http_image_server
 ):

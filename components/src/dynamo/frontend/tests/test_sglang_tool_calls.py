@@ -20,6 +20,14 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo.frontend.sglang_prepost import SglangStreamingPostProcessor
 
+# Needs sglang packages (gpu_1 container).  No need for parallel marker.
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
+
 MODEL = "Qwen/Qwen3-0.6B"
 
 

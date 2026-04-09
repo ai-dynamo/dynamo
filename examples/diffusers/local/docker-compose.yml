@@ -8,6 +8,9 @@ x-backend-base: &backend-base
   build:
     context: ..
     dockerfile: Dockerfile
+    args:
+      TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-10.0 10.0a}
+      MAX_JOBS: ${MAX_JOBS:-4}
   image: dynamo-fastvideo-diffusers:latest
   restart: on-failure
   command: python worker.py
@@ -33,6 +36,9 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-10.0 10.0a}
+        MAX_JOBS: ${MAX_JOBS:-4}
     image: dynamo-fastvideo-diffusers:latest
     restart: on-failure
     command: >

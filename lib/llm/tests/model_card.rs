@@ -54,3 +54,40 @@ async fn test_missing_required_files() {
     // Should fail because config.json is missing
     assert!(err.contains("unable to extract"));
 }
+
+/// Models without tokenizer.json (e.g. Qwen3-Omni which ships vocab.json + merges.txt)
+/// should load successfully with tokenizer set to None. The frontend must use a
+/// non-Rust chat processor for these models (e.g. --dyn-chat-processor vllm).
+#[tokio::test]
+async fn test_model_loads_without_tokenizer_json() {
+    let path = "tests/data/sample-models/mock-no-tokenizer-json";
+    let mdc = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+    assert!(
+        mdc.tokenizer.is_none(),
+        "Expected tokenizer to be None for model without tokenizer.json"
+    );
+    assert!(!mdc.has_tokenizer(), "has_tokenizer() should be false");
+    // Model info should still be loaded
+    assert!(mdc.model_info.is_some());
+}
+
+/// chat_template.json should be picked up as a fallback when chat_template.jinja
+/// does not exist (e.g. Qwen3-Omni). The fixture's tokenizer_config.json has no
+/// inline chat_template, so this is the only template source.
+#[tokio::test]
+async fn test_chat_template_json_fallback() {
+    let path = "tests/data/sample-models/mock-no-tokenizer-json";
+    let mdc = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+    match &mdc.chat_template_file {
+        Some(PromptFormatterArtifact::HfChatTemplateJson { file, is_custom }) => {
+            assert!(!is_custom, "Should not be marked as custom template");
+            let p = file.path().expect("Should be a local path");
+            assert!(
+                p.ends_with("chat_template.json"),
+                "Expected chat_template.json, got {:?}",
+                p
+            );
+        }
+        other => panic!("Expected HfChatTemplateJson, got {:?}", other),
+    }
+}

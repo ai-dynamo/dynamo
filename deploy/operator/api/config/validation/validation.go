@@ -37,7 +37,6 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 	allErrs = append(allErrs, validateMPI(&config.MPI, field.NewPath("mpi"))...)
 	allErrs = append(allErrs, validateInfrastructure(&config.Infrastructure, field.NewPath("infrastructure"))...)
 	allErrs = append(allErrs, validateDiscovery(&config.Discovery, field.NewPath("discovery"))...)
-	allErrs = append(allErrs, validateCheckpoint(&config.Checkpoint, field.NewPath("checkpoint"))...)
 	allErrs = append(allErrs, validateRBAC(config)...)
 	allErrs = append(allErrs, validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators"))...)
 	allErrs = append(allErrs, validateIngress(&config.Ingress, field.NewPath("ingress"))...)
@@ -122,33 +121,6 @@ func validateDiscovery(discovery *configv1alpha1.DiscoveryConfiguration, fldPath
 
 	if discovery.Backend != configv1alpha1.DiscoveryBackendKubernetes && discovery.Backend != configv1alpha1.DiscoveryBackendEtcd {
 		allErrs = append(allErrs, field.NotSupported(fldPath.Child("backend"), discovery.Backend, []string{"kubernetes", "etcd"}))
-	}
-
-	return allErrs
-}
-
-func validateCheckpoint(checkpoint *configv1alpha1.CheckpointConfiguration, fldPath *field.Path) field.ErrorList {
-	allErrs := field.ErrorList{}
-
-	if !checkpoint.Enabled {
-		return allErrs
-	}
-
-	storagePath := fldPath.Child("storage")
-	switch checkpoint.Storage.Type {
-	case configv1alpha1.CheckpointStorageTypePVC:
-		// PVC is the default, no additional required fields
-	case configv1alpha1.CheckpointStorageTypeS3:
-		if checkpoint.Storage.S3.URI == "" {
-			allErrs = append(allErrs, field.Required(storagePath.Child("s3", "uri"), "S3 URI is required when storage type is s3"))
-		}
-	case configv1alpha1.CheckpointStorageTypeOCI:
-		if checkpoint.Storage.OCI.URI == "" {
-			allErrs = append(allErrs, field.Required(storagePath.Child("oci", "uri"), "OCI URI is required when storage type is oci"))
-		}
-	default:
-		allErrs = append(allErrs, field.NotSupported(storagePath.Child("type"), checkpoint.Storage.Type,
-			[]string{configv1alpha1.CheckpointStorageTypePVC, configv1alpha1.CheckpointStorageTypeS3, configv1alpha1.CheckpointStorageTypeOCI}))
 	}
 
 	return allErrs

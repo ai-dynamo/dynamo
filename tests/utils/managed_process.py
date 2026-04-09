@@ -68,7 +68,15 @@ def terminate_process_tree(
         return
 
     # 1. Snapshot children before signaling parent
-    children = parent.children(recursive=True)
+    try:
+        children = parent.children(recursive=True)
+    except (PermissionError, psutil.AccessDenied) as exc:
+        logger.warning(
+            "Unable to enumerate child processes for PID %s; falling back to parent-only termination: %s",
+            pid,
+            exc,
+        )
+        children = []
 
     # 2. Terminate parent first (graceful)
     terminate_process(parent, logger, immediate_kill=immediate_kill)
@@ -532,6 +540,12 @@ class ManagedProcess:
                         all_pgids.add(os.getpgid(child.pid))
                     except (ProcessLookupError, OSError):
                         pass
+            except (PermissionError, psutil.AccessDenied) as exc:
+                self._logger.warning(
+                    "Unable to enumerate child processes for PID %s; falling back to the main process group only: %s",
+                    self.proc.pid,
+                    exc,
+                )
             except psutil.NoSuchProcess:
                 pass
 
@@ -876,6 +890,13 @@ class ManagedProcess:
         try:
             parent = psutil.Process(self.proc.pid)
             return parent.children(recursive=True)
+        except (PermissionError, psutil.AccessDenied) as exc:
+            self._logger.warning(
+                "Unable to enumerate child processes for PID %s: %s",
+                self.proc.pid,
+                exc,
+            )
+            return []
         except psutil.NoSuchProcess:
             return []
 

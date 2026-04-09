@@ -32,7 +32,7 @@ impl NvCreateChatCompletionRequest {
             // For non-streaming requests (stream=false), enable usage by default
             if self.inner.stream_options.is_none() {
                 self.inner.stream_options =
-                    Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
+                    Some(dynamo_protocols::types::ChatCompletionStreamOptions {
                         include_usage: true,
                         continuous_usage_stats: false,
                     });
@@ -116,9 +116,9 @@ pub struct DeltaGenerator {
     /// Optional system fingerprint for version tracking.
     system_fingerprint: Option<String>,
     /// Optional service tier information for the response.
-    service_tier: Option<dynamo_async_openai::types::ServiceTierResponse>,
+    service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Tracks token usage for the completion request.
-    usage: dynamo_async_openai::types::CompletionUsage,
+    usage: dynamo_protocols::types::CompletionUsage,
     /// Counter tracking the number of messages issued.
     msg_counter: u64,
     /// Configuration options for response generation.
@@ -147,7 +147,7 @@ impl DeltaGenerator {
         // but this will not be an issue until 2106.
         let now: u32 = now.try_into().expect("timestamp exceeds u32::MAX");
 
-        let usage = dynamo_async_openai::types::CompletionUsage {
+        let usage = dynamo_protocols::types::CompletionUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
@@ -194,7 +194,7 @@ impl DeltaGenerator {
         token_ids: &[TokenIdType],
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
-    ) -> Option<dynamo_async_openai::types::ChatChoiceLogprobs> {
+    ) -> Option<dynamo_protocols::types::ChatChoiceLogprobs> {
         if !self.options.enable_logprobs || logprobs.is_none() {
             return None;
         }
@@ -216,7 +216,7 @@ impl DeltaGenerator {
                 .zip(top_logprobs)
                 .map(|(((t, tid), lp), top_lps)| {
                     let converted = convert_backend_top_logprobs(&top_lps, t, *tid, lp);
-                    dynamo_async_openai::types::ChatCompletionTokenLogprob {
+                    dynamo_protocols::types::ChatCompletionTokenLogprob {
                         token: t.clone(),
                         logprob: lp,
                         bytes: token_to_utf8_bytes(t),
@@ -226,7 +226,7 @@ impl DeltaGenerator {
                 .collect()
         });
 
-        Some(dynamo_async_openai::types::ChatChoiceLogprobs {
+        Some(dynamo_protocols::types::ChatChoiceLogprobs {
             content,
             refusal: None,
         })
@@ -242,22 +242,22 @@ impl DeltaGenerator {
     /// * `stop_reason` - Optional stop string or token that triggered the stop.
     ///
     /// # Returns
-    /// * An [`dynamo_async_openai::types::CreateChatCompletionStreamResponse`] instance representing the choice.
+    /// * An [`dynamo_protocols::types::CreateChatCompletionStreamResponse`] instance representing the choice.
     #[allow(deprecated)]
     pub fn create_choice(
         &mut self,
         index: u32,
         text: Option<String>,
-        finish_reason: Option<dynamo_async_openai::types::FinishReason>,
-        logprobs: Option<dynamo_async_openai::types::ChatChoiceLogprobs>,
-        stop_reason: Option<dynamo_async_openai::types::StopReason>,
+        finish_reason: Option<dynamo_protocols::types::FinishReason>,
+        logprobs: Option<dynamo_protocols::types::ChatChoiceLogprobs>,
+        stop_reason: Option<dynamo_protocols::types::StopReason>,
     ) -> NvCreateChatCompletionStreamResponse {
-        let delta = dynamo_async_openai::types::ChatCompletionStreamResponseDelta {
-            content: text.map(dynamo_async_openai::types::ChatCompletionMessageContent::Text),
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: text.map(dynamo_protocols::types::ChatCompletionMessageContent::Text),
             function_call: None,
             tool_calls: None,
             role: if self.msg_counter == 0 {
-                Some(dynamo_async_openai::types::Role::Assistant)
+                Some(dynamo_protocols::types::Role::Assistant)
             } else {
                 None
             },
@@ -265,7 +265,7 @@ impl DeltaGenerator {
             reasoning_content: None,
         };
 
-        let choice = dynamo_async_openai::types::ChatChoiceStream {
+        let choice = dynamo_protocols::types::ChatChoiceStream {
             index,
             delta,
             finish_reason,
@@ -278,19 +278,21 @@ impl DeltaGenerator {
         // According to OpenAI spec: when stream_options.include_usage is true,
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
-        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
-            choices,
-            usage: if self.options.enable_usage && self.options.continuous_usage_stats {
-                Some(self.get_usage())
-            } else {
-                None
+        NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: self.id.clone(),
+                object: self.object.clone(),
+                created: self.created,
+                model: self.model.clone(),
+                system_fingerprint: self.system_fingerprint.clone(),
+                choices,
+                usage: if self.options.enable_usage && self.options.continuous_usage_stats {
+                    Some(self.get_usage())
+                } else {
+                    None
+                },
+                service_tier: self.service_tier.clone(),
             },
-            service_tier: self.service_tier.clone(),
             nvext: None, // Will be populated by router layer if needed
         }
     }
@@ -303,15 +305,17 @@ impl DeltaGenerator {
     pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
         let usage = self.get_usage();
 
-        dynamo_async_openai::types::CreateChatCompletionStreamResponse {
-            id: self.id.clone(),
-            object: self.object.clone(),
-            created: self.created,
-            model: self.model.clone(),
-            system_fingerprint: self.system_fingerprint.clone(),
-            choices: vec![], // Empty choices for usage-only chunk
-            usage: Some(usage),
-            service_tier: self.service_tier.clone(),
+        NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: self.id.clone(),
+                object: self.object.clone(),
+                created: self.created,
+                model: self.model.clone(),
+                system_fingerprint: self.system_fingerprint.clone(),
+                choices: vec![], // Empty choices for usage-only chunk
+                usage: Some(usage),
+                service_tier: self.service_tier.clone(),
+            },
             nvext: None,
         }
     }
@@ -326,7 +330,7 @@ impl DeltaGenerator {
         self.options.continuous_usage_stats
     }
 
-    pub fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
+    pub fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
         let mut usage = self.usage.clone();
         usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
         usage
@@ -383,18 +387,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         // Map backend finish reasons to OpenAI's finish reasons.
         let finish_reason = match delta.finish_reason {
-            Some(common::FinishReason::EoS) => Some(dynamo_async_openai::types::FinishReason::Stop),
-            Some(common::FinishReason::Stop) => {
-                Some(dynamo_async_openai::types::FinishReason::Stop)
-            }
+            Some(common::FinishReason::EoS) => Some(dynamo_protocols::types::FinishReason::Stop),
+            Some(common::FinishReason::Stop) => Some(dynamo_protocols::types::FinishReason::Stop),
             Some(common::FinishReason::Length) => {
-                Some(dynamo_async_openai::types::FinishReason::Length)
+                Some(dynamo_protocols::types::FinishReason::Length)
             }
             Some(common::FinishReason::Cancelled) => {
-                Some(dynamo_async_openai::types::FinishReason::Stop)
+                Some(dynamo_protocols::types::FinishReason::Stop)
             }
             Some(common::FinishReason::ContentFilter) => {
-                Some(dynamo_async_openai::types::FinishReason::ContentFilter)
+                Some(dynamo_protocols::types::FinishReason::ContentFilter)
             }
             Some(common::FinishReason::Error(err_msg)) => {
                 return Err(anyhow::anyhow!(err_msg));
@@ -486,7 +488,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         DeltaGenerator::is_continuous_usage_enabled(self)
     }
 
-    fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
+    fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
         DeltaGenerator::get_usage(self)
     }
 
@@ -498,7 +500,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::{
+    use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
     };

@@ -13,6 +13,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use dynamo_bench::common::{ChatMessage, LatencyStats, fetch_model_name};
+use dynamo_mocker::loadgen::{
+    ArrivalSpec, DelaySpec, LengthSpec, SessionTrace, SyntheticTraceSpec, Trace,
+};
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::rngs::StdRng;
@@ -283,10 +286,10 @@ async fn run_user(
     model: String,
     args: Arc<Args>,
     user_id: usize,
+    session: SessionTrace,
     progress: ProgressBar,
 ) -> Vec<TurnResult> {
     let mut rng = StdRng::seed_from_u64(args.seed.wrapping_add(user_id as u64));
-    let mean_delay = args.mean_delay_ms as f64;
 
     let system_prompt = generate_system_prompt(user_id);
     let mut messages = vec![ChatMessage {
@@ -294,11 +297,10 @@ async fn run_user(
         content: system_prompt,
     }];
 
-    let mut results = Vec::with_capacity(args.num_turns);
+    let mut results = Vec::with_capacity(session.turns.len());
 
-    for turn in 0..args.num_turns {
-        // Generate user prompt
-        let user_text = generate_lorem(&mut rng, args.num_user_tokens);
+    for (turn, turn_spec) in session.turns.iter().enumerate() {
+        let user_text = generate_lorem(&mut rng, turn_spec.input_length);
         messages.push(ChatMessage {
             role: "user".to_string(),
             content: user_text,
@@ -307,7 +309,7 @@ async fn run_user(
         let body = MultiturnRequest {
             model: model.clone(),
             messages: messages.clone(),
-            max_completion_tokens: args.max_completion_tokens,
+            max_completion_tokens: turn_spec.max_output_tokens as u32,
             ignore_eos: if args.ignore_eos { Some(true) } else { None },
             stream: true,
             nvext: if args.speculative_prefill {
@@ -392,7 +394,7 @@ async fn run_user(
                 "  [user {}][turn {}/{}] ttft={:.1}ms  total={:.1}s  ok={}",
                 user_id,
                 turn + 1,
-                args.num_turns,
+                session.turns.len(),
                 result.ttft_us as f64 / 1000.0,
                 result.total_latency_us as f64 / 1_000_000.0,
                 result.success,
@@ -404,10 +406,13 @@ async fn run_user(
 
         // Exponential inter-turn delay (skip after last turn)
         // Exp(1/mean) = -mean * ln(U), U ~ Uniform(0,1)
-        if turn + 1 < args.num_turns {
-            let u: f64 = rng.random();
-            let delay_ms = (-mean_delay * u.ln()).max(0.0);
-            tokio::time::sleep(Duration::from_millis(delay_ms as u64)).await;
+        if let Some(next_turn) = session.turns.get(turn + 1)
+            && next_turn.delay_after_previous_ms > 0.0
+        {
+            tokio::time::sleep(Duration::from_secs_f64(
+                next_turn.delay_after_previous_ms / 1000.0,
+            ))
+            .await;
         }
     }
 
@@ -569,6 +574,32 @@ async fn main() -> Result<()> {
         .build()
         .context("Failed to create HTTP client")?;
 
+    let workload = Trace::synthetic(SyntheticTraceSpec {
+        block_size: 1,
+        num_sessions: args.num_users,
+        turns_per_session: args.num_turns,
+        input_tokens: LengthSpec {
+            mean: args.num_user_tokens,
+            stddev: 0.0,
+        },
+        output_tokens: LengthSpec {
+            mean: args.max_completion_tokens as usize,
+            stddev: 0.0,
+        },
+        shared_prefix_ratio: 0.0,
+        num_prefix_groups: 0,
+        first_turn_arrivals: ArrivalSpec::Burst,
+        inter_turn_delays: if args.mean_delay_ms == 0 {
+            DelaySpec::None
+        } else {
+            DelaySpec::ExponentialMs {
+                mean_ms: args.mean_delay_ms as f64,
+            }
+        },
+        seed: args.seed,
+    })?;
+    let sessions = workload.sessions;
+
     let args = Arc::new(args);
     let chat_url = format!("{}/v1/chat/completions", args.url);
 
@@ -592,14 +623,18 @@ async fn main() -> Result<()> {
         .progress_chars("#>-"),
     );
 
-    let handles: Vec<_> = (0..args.num_users)
-        .map(|user_id| {
+    let handles: Vec<_> = sessions
+        .into_iter()
+        .enumerate()
+        .map(|(user_id, session)| {
             let client = client.clone();
             let url = chat_url.clone();
             let model = model.clone();
             let args = args.clone();
             let progress = progress.clone();
-            tokio::spawn(async move { run_user(client, url, model, args, user_id, progress).await })
+            tokio::spawn(async move {
+                run_user(client, url, model, args, user_id, session, progress).await
+            })
         })
         .collect();
 

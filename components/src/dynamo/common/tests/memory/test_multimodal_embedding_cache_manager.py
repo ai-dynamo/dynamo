@@ -11,6 +11,13 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 
+# Total runtime ~0.67s — no need for parallel marker.
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
+
 
 class TestMultimodalEmbeddingCacheManagerBasicOperations:
     """Tests for basic get/set operations."""
@@ -57,6 +64,7 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         cache.set("key1", CachedEmbedding(tensor2))
 
         retrieved = cache.get("key1")
+        assert retrieved is not None
         assert torch.equal(retrieved.tensor, tensor2)
         assert cache.stats["entries"] == 1
 

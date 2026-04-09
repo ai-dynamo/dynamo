@@ -17,7 +17,6 @@ from .llm import DecodeWorkerHandler, DiffusionWorkerHandler, PrefillWorkerHandl
 from .multimodal import (
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
-    MultimodalProcessorHandler,
     MultimodalWorkerHandler,
 )
 
@@ -41,6 +40,5 @@ __all__ = [
     # Multimodal handlers
     "MultimodalEncodeWorkerHandler",
     "MultimodalPrefillWorkerHandler",
-    "MultimodalProcessorHandler",
     "MultimodalWorkerHandler",
 ]

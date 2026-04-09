@@ -3,7 +3,7 @@
 
 //! LoRA Allocation Algorithms - HRW and Random
 
-use crate::kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 use std::str::FromStr;
 
 pub mod hrw;

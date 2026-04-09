@@ -89,12 +89,15 @@ class VllmColorFormatter(logging.Formatter):
         else:
             target = record.module
         msg = record.getMessage()
-        return (
+        result = (
             f"{self._DIM}{ts}{self._RESET} "
             f"{color}{level:>5}{self._RESET} "
             f"{self._DIM}{target}{self._RESET}{self._DIM}:{self._RESET} "
             f"{msg}"
         )
+        if record.exc_info and record.exc_info[0] is not None:
+            result += "\n" + self.formatException(record.exc_info)
+        return result
 
 
 # Configure the Python logger to use the NimLogHandler
@@ -202,7 +205,12 @@ def configure_sglang_logging(dyn_level: int) -> None:
                 "handlers": ["dynamo"],
                 "level": sglang_level,
                 "propagate": False,
-            }
+            },
+            "gpu_memory_service": {
+                "handlers": ["dynamo"],
+                "level": sglang_level,
+                "propagate": False,
+            },
         },
         "version": 1,
         "disable_existing_loggers": False,
@@ -257,7 +265,12 @@ def configure_vllm_logging(dyn_level: int) -> None:
                 "handlers": ["vllm_stderr"],
                 "level": vllm_level,
                 "propagate": False,
-            }
+            },
+            "gpu_memory_service": {
+                "handlers": ["vllm_stderr"],
+                "level": vllm_level,
+                "propagate": False,
+            },
         },
         "version": 1,
         "disable_existing_loggers": False,

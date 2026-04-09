@@ -19,14 +19,15 @@
 
 # Storage configuration for checkpoints
 storage:
-  # Storage type: pvc (default), s3, or oci
+  # Storage type stays snapshot-owned for future backend expansion.
+  # Only pvc is implemented today.
   type: pvc
 
   # PVC configuration (when type=pvc)
   pvc:
     # Create a new PVC (set to false if using existing PVC)
     create: true
-    # PVC name - must match operator configuration
+    # PVC name used by the snapshot-agent checkpoint store
     name: snapshot-pvc
     # PVC size
     size: 1Ti
@@ -34,18 +35,16 @@ storage:
     storageClass: ""
     # Access mode - ReadWriteMany required for multi-pod access
     accessMode: ReadWriteMany
-    # Base path for checkpoints (mounted in pods)
+    # PVC mount path inside the snapshot-agent pod.
+    # Restore targets derive checkpoint paths from this mount.
     basePath: /checkpoints
 
-  # S3 configuration (when type=s3)
+  # Reserved for future snapshot-owned backends. Unsupported today.
   s3:
-    # S3 URI (e.g., s3://my-bucket/checkpoints)
     uri: ""
-    # Credentials are expected via IRSA or mounted secrets
 
-  # OCI configuration (when type=oci)
+  # Reserved for future snapshot-owned backends. Unsupported today.
   oci:
-    # OCI URI (e.g., oci://registry.io/repo/checkpoints)
     uri: ""
 
 # DaemonSet configuration for snapshot (checkpoint/restore) agent
@@ -123,17 +122,15 @@ rbac:
 # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
 config:
   overlay:
-    # Virtual FS dirs are COW artifacts in the overlay upperdir.
-    systemDirs:
+    # Rootfs diff tar exclusions. Absolute-looking paths are normalized
+    # relative to the tar root, and patterns starting with * are passed
+    # through as tar globs unchanged.
+    exclusions:
       - /proc
       - /sys
       - /dev
-    # Cache directories to exclude (reduces checkpoint size)
-    cacheDirs:
-      - /.cache/huggingface
-    # Python bytecode is already loaded in memory at restore time and
-    # regenerated automatically on cold start.
-    additionalExclusions:
+      - "*/.cache/huggingface"
+      - "*/.cache/vllm/torch_compile_cache"
       - "*/__pycache__"
       - "*.pyc"
 
@@ -157,7 +154,8 @@ config:
     # K8s-specific options (recommended defaults for containers)
     leaveRunning: true      # Keep process running after checkpoint
     shellJob: true          # Containers are often session leaders
-    tcpClose: true          # Pod IPs change on restore/migration
+    tcpClose: true          # Close non-listening TCP sockets on restore
+    tcpEstablished: false   # Preserve established TCP sockets during restore
     fileLocks: true         # Applications use file locks
     orphanPtsMaster: true   # Containers with TTYs
     extUnixSk: true         # External Unix sockets

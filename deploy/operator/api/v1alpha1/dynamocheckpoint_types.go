@@ -31,13 +31,15 @@ const (
 	DynamoCheckpointPhasePending DynamoCheckpointPhase = "Pending"
 	// DynamoCheckpointPhaseCreating indicates the checkpoint Job is running
 	DynamoCheckpointPhaseCreating DynamoCheckpointPhase = "Creating"
-	// DynamoCheckpointPhaseReady indicates the checkpoint tar file is available on the PVC
+	// DynamoCheckpointPhaseReady indicates the checkpoint artifact is available
 	DynamoCheckpointPhaseReady DynamoCheckpointPhase = "Ready"
 	// DynamoCheckpointPhaseFailed indicates the checkpoint creation failed
 	DynamoCheckpointPhaseFailed DynamoCheckpointPhase = "Failed"
 )
 
-// DynamoCheckpointStorageType defines the supported storage backends for checkpoints
+// Deprecated: StorageType is retained for compatibility with older
+// DynamoCheckpoint status consumers. The current checkpoint flow publishes
+// PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
 // +kubebuilder:validation:Enum=pvc;s3;oci
 type DynamoCheckpointStorageType string
 
@@ -93,19 +95,26 @@ type DynamoCheckpointJobConfig struct {
 	// +kubebuilder:validation:Required
 	PodTemplateSpec corev1.PodTemplateSpec `json:"podTemplateSpec"`
 
+	// SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.
+	// When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
+	// +optional
+	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
+
 	// ActiveDeadlineSeconds specifies the maximum time the Job can run
 	// +optional
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=3600
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 
-	// BackoffLimit specifies the number of retries before marking the Job failed
+	// Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry.
 	// +optional
-	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=0
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
-	// TTLSecondsAfterFinished specifies how long to keep the Job after completion
+	// Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
+	// 300 second TTL.
 	// +optional
-	// +kubebuilder:default=300
+	// +kubebuilder:validation:Minimum=0
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
@@ -124,9 +133,9 @@ type DynamoCheckpointSpec struct {
 type DynamoCheckpointConditionType string
 
 const (
-	// DynamoCheckpointConditionJobCreated indicates whether the checkpoint Job has been created
+	// DEPRECATED: DynamoCheckpointConditionJobCreated is deprecated. Use status.phase instead.
 	DynamoCheckpointConditionJobCreated DynamoCheckpointConditionType = "JobCreated"
-	// DynamoCheckpointConditionJobCompleted indicates whether the checkpoint Job has completed
+	// DEPRECATED: DynamoCheckpointConditionJobCompleted is deprecated. Use status.phase instead.
 	DynamoCheckpointConditionJobCompleted DynamoCheckpointConditionType = "JobCompleted"
 )
 
@@ -141,14 +150,13 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 
-	// Location is the full URI/path to the checkpoint in the storage backend
-	// For PVC: same as TarPath (e.g., /checkpoints/{hash}.tar)
-	// For S3: s3://bucket/prefix/{hash}.tar
-	// For OCI: oci://registry/repo:{hash}
+	// Deprecated: Location is ignored and no longer populated. It is retained
+	// only so older objects continue to validate.
 	// +optional
 	Location string `json:"location,omitempty"`
 
-	// StorageType indicates the storage backend type used for this checkpoint
+	// Deprecated: StorageType is ignored and no longer populated. It is retained
+	// only so older objects continue to validate.
 	// +optional
 	StorageType DynamoCheckpointStorageType `json:"storageType,omitempty"`
 
@@ -156,7 +164,7 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
-	// CreatedAt is the timestamp when the checkpoint tar was created
+	// CreatedAt is the timestamp when the checkpoint became ready
 	// +optional
 	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
 
@@ -164,7 +172,7 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// Conditions represent the latest available observations of the checkpoint's state
+	// DEPRECATED: Conditions are deprecated. Use status.phase instead.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }

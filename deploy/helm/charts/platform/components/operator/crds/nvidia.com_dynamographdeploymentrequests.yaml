@@ -131,7 +131,7 @@ spec:
                         WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
                         This image is used for both temporary DGDs created during online profiling and the final DGD.
                         If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
                       type: string
                   type: object
                 enableGpuDiscovery:
@@ -206,7 +206,7 @@ spec:
                       description: |-
                         ProfilerImage specifies the container image to use for profiling jobs.
                         This image contains the profiler code and dependencies needed for SLA-based profiling.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0"
                       type: string
                     resources:
                       description: |-
@@ -480,11 +480,9 @@ spec:
           type: string
         - jsonPath: .status.conditions[?(@.type=="Succeeded")].reason
           name: Reason
-          priority: 1
           type: string
         - jsonPath: .status.conditions[?(@.type=="Succeeded")].message
           name: Message
-          priority: 1
           type: string
         - jsonPath: .status.dgdName
           name: DGD
@@ -566,7 +564,7 @@ spec:
                     planner:
                       description: |-
                         Planner is the raw SLA planner configuration passed to the planner service.
-                        Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.
+                        Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
                         Go treats this as opaque bytes; the Planner service validates it at startup.
                         The presence of this field (non-null) enables the planner in the generated DGD.
                       type: object

@@ -68,7 +68,6 @@ Dynamo’s new agent hints extension was designed to bridge this gap. It allows 
   "tools": [...],
   "nvext": {
     "agent_hints": {
-      "latency_sensitivity": 0.9,
       "osl": 256,
       "speculative_prefill": true,
       "priority": 10
@@ -83,7 +82,7 @@ Dynamo’s new agent hints extension was designed to bridge this gap. It allows 
 
 The `agent_hints` fields:
 
-- **`latency_sensitivity`** and **`priority`** control scheduling at the router and engine respectively. We cover both in detail in the Priority Scheduling section below.
+- **`priority`** controls scheduling across both the router and engine. Higher values mean "more important" at the Dynamo API level; Dynamo translates that into router queue ordering and backend-specific engine priority.
 - **`osl`** (output sequence length) is the harness's estimate of how many tokens this request will generate. The router uses this to gauge how long a worker will be occupied, which improves load balancing. A harness can learn this over time by tracking average output lengths per tool call type.
 - **`speculative_prefill`** signals the orchestrator to begin caching this request's prefix on a likely worker before the full request is ready. This is useful when the harness knows a tool call is about to return and wants to warm the cache ahead of time.
 
@@ -99,17 +98,16 @@ Without cache-aware routing, turn 2 of a conversation has a ~1/N chance of landi
 
 ### Priority Scheduling
 
-Two fields in `agent_hints` control scheduling. They are separate knobs because they solve different problems at different layers:
+`priority` is the single user-facing scheduling knob. Higher values mean "more important" at the Dynamo API level. Dynamo uses that one hint at both layers:
 
-- **`latency_sensitivity`** (0.0-1.0) controls **how soon the request gets dispatched** from the router queue. It answers: "how urgently does this request need to reach a worker?" A user-facing interactive turn (e.g., a lead agent responding to the developer) needs low latency; a background subagent doing a code search does not. The harness knows the difference and sets accordingly.
+- At the **router**, higher-priority requests are shifted earlier in the queue when `--router-queue-threshold` is enabled.
+- At the **engine**, Dynamo normalizes backend-specific polarity and forwards the request for queue ordering, preemption, and KV cache eviction.
 
-- **`priority`** (integer) controls **how the engine treats the request once it arrives**: scheduling order within the engine's batch and KV cache eviction policy. It answers: "how important is this request's compute and cache relative to other active requests on this worker?" A long-running synthesis request whose KV cache should survive memory pressure gets a high priority; a short lookup whose cache is disposable gets a low one.
+At the router, incoming requests enter a `BinaryHeap<QueueEntry>` ordered by effective arrival time. A higher `priority` makes the request appear as if it arrived earlier, placing it ahead of lower-priority work. Requests only enter the queue when all workers exceed a configurable load threshold. Below that threshold, they bypass the queue entirely and go straight to worker selection. When capacity frees up (prefill completes or a request finishes), the queue drains highest-priority entries first.
 
-At the router, incoming requests enter a `BinaryHeap<QueueEntry>` ordered by effective arrival time. A higher `latency_sensitivity` makes the request appear as if it arrived earlier, placing it ahead of lower-priority work. Requests only enter the queue when all workers exceed a configurable load threshold. Below that threshold, they bypass the queue entirely and go straight to worker selection. When capacity frees up (prefill completes or a request finishes), the queue drains highest-priority entries first.
+Once dispatched, SGLang, vLLM, and TRT-LLM may interpret engine priority differently, so Dynamo normalizes the engine-facing value per backend. Engines like SGLang can also use priority-based radix cache eviction where lower-priority blocks are evicted first under memory pressure.
 
-Once dispatched, Dynamo passes `priority` through to the engine directly. SGLang, vLLM, and TRT-LLM all support priority-based request scheduling, and engines like SGLang support priority-based radix cache eviction where lower-priority blocks are evicted first under memory pressure.
-
-![How latency_sensitivity and priority flow from harness through router dispatch to engine treatment](./two-gates.svg)
+![How priority flows from harness through router dispatch to engine treatment](./two-gates.svg)
 
 ### Agentic Workload Routing Strategies
 
@@ -125,6 +123,7 @@ config = {"overlap_score_weight": 2.0} if len(token_ids) > 8192 else {}
 worker_id, dp_rank, overlap = await router.best_worker(
     token_ids,
     request_id="req-123",
+    update_indexer=True,
     router_config_override=config
 )
 

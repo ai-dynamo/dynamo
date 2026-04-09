@@ -9,26 +9,33 @@ from gpu_memory_service.common.types import (
     ServerState,
     StateSnapshot,
 )
-from gpu_memory_service.server.handler import MetadataEntry, RequestHandler
-from gpu_memory_service.server.locking import Connection, GMSLocalFSM
-from gpu_memory_service.server.memory_manager import (
+from gpu_memory_service.server.allocations import (
     AllocationInfo,
     AllocationNotFoundError,
-    GMSServerMemoryManager,
+    GMSAllocationManager,
 )
+from gpu_memory_service.server.gms import GMS, MetadataEntry
 from gpu_memory_service.server.rpc import GMSRPCServer
+from gpu_memory_service.server.session import (
+    Connection,
+    GMSSessionManager,
+    InvalidTransition,
+    OperationNotAllowed,
+)
 
 __all__ = [
     "GMSRPCServer",
-    "GMSServerMemoryManager",
+    "GMS",
+    "GMSSessionManager",
+    "GMSAllocationManager",
     "AllocationInfo",
     "AllocationNotFoundError",
     "MetadataEntry",
     "Connection",
     "GrantedLockType",
     "RequestedLockType",
-    "RequestHandler",
     "ServerState",
-    "GMSLocalFSM",
     "StateSnapshot",
+    "InvalidTransition",
+    "OperationNotAllowed",
 ]

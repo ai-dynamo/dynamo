@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
 use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
-use crate::kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
 use crate::kv_router::scheduler::KvScheduler;
 
 /// Time-series sample of LORA load

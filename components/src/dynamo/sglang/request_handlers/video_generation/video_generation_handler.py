@@ -13,6 +13,7 @@ import torch
 
 from dynamo._core import Context
 from dynamo.common.storage import upload_to_fs
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     CreateVideoRequest,
@@ -89,7 +90,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         start_time = time.time()
 
         # Get trace header for distributed tracing (for logging/observability)
-        trace_header = self._get_trace_header(context)
+        trace_header = build_trace_headers(context) if self.enable_trace else None
         if trace_header:
             logger.debug(f"Video generation request with trace: {trace_header}")
 
@@ -103,16 +104,22 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             )
 
             # Parse size
+            assert req.size is not None, "Size is required"
             width, height = self._parse_size(req.size)
 
             # Calculate num_frames if not explicitly provided
             num_frames = nvext.num_frames
+            assert nvext.fps is not None, "FPS is required"
             if num_frames is None:
+                assert req.seconds is not None, "Seconds is required"
                 num_frames = nvext.fps * req.seconds
 
             # Generate video
             context_id = context.id()
             assert context_id is not None
+            assert (
+                nvext.num_inference_steps is not None
+            ), "Num inference steps is required"
             video_bytes = await self._generate_video(
                 prompt=req.prompt,
                 width=width,
