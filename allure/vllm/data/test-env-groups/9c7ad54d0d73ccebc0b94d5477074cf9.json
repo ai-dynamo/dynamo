@@ -1,1 +1,1 @@
-{"id":"9c7ad54d0d73ccebc0b94d5477074cf9","fullName":"tests.serve.test_sglang#test_sglang_deployment","name":"test_sglang_deployment[disaggregated_same_gpu-2]","status":"passed","testResultsByEnv":{"default":"12ff69ffe07e5dd924ff1a9bed8a3aed","sglang-amd64":"c26cb906fab4815f9a6853c928a6bc34"}}
+{"id":"9c7ad54d0d73ccebc0b94d5477074cf9","fullName":"tests.serve.test_sglang#test_sglang_deployment","name":"test_sglang_deployment[aggregated-2]","status":"passed","testResultsByEnv":{"sglang-amd64":"6d0308d4a64b925073ef20ee702b02b2","default":"5acd2b2eec96ec1845d1c2f033138769"}}

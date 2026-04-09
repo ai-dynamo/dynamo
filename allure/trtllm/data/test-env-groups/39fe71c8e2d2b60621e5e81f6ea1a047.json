@@ -1,1 +1,1 @@
-{"id":"39fe71c8e2d2b60621e5e81f6ea1a047","fullName":"tests.serve.test_vllm#test_serve_deployment","name":"test_serve_deployment[multimodal_disagg_qwen]","status":"passed","testResultsByEnv":{"vllm-amd64":"7682af3aedb2b83cc94748268048dce6","default":"8684aa7fbb1ec0e170ce6ad9403215cf"}}
+{"id":"39fe71c8e2d2b60621e5e81f6ea1a047","fullName":"tests.serve.test_vllm#test_serve_deployment","name":"test_serve_deployment[multimodal_audio_disagg]","status":"passed","testResultsByEnv":{"default":"2cea5a5ac302e54b65178442fe6b18ef","vllm-amd64":"0cd5824dfc4a5dbcbe77729397cf88ba"}}

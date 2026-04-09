@@ -1,1 +1,1 @@
-{"id":"698ca68adaf39fff5e57c11a64786370","fullName":"components.src.dynamo.planner.tests.unit.test_load_based_scaling.TestAggRegressionModel#test_insufficient_data","name":"test_insufficient_data","status":"passed","testResultsByEnv":{"default":"1384daef0b808a48bf2ab1b537d8498e"}}
+{"id":"698ca68adaf39fff5e57c11a64786370","fullName":"components.src.dynamo.planner.tests.unit.test_load_based_scaling.TestAggRegressionModel#test_insufficient_data","name":"test_insufficient_data","status":"passed","testResultsByEnv":{"default":"6b3cf3c2098a59bf74c90d9f0ce05083"}}

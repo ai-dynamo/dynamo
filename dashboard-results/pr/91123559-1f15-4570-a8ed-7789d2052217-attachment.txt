@@ -1,4 +1,0 @@
-[2m2026-04-08T21:34:57.521267Z[0m [32m INFO[0m [2mprefill.load_plan_adjustment[0m[2m:[0m Prefill engine w1:dp0: estimated TTFT 10650.00ms (queued_prefill=10000, avg_isl=650.0)
-[2m2026-04-08T21:34:57.521790Z[0m [32m INFO[0m [2mprefill.load_plan_adjustment[0m[2m:[0m Prefill engine w2:dp0: estimated TTFT 8650.00ms (queued_prefill=8000, avg_isl=650.0)
-[2m2026-04-08T21:34:57.521855Z[0m [32m INFO[0m [2mbase._load_based_scaling_decision_from_estimates[0m[2m:[0m Load-based prefill TTFT: workers=2, sla=5.0ms, estimates=['10650.0', '8650.0']
-[2m2026-04-08T21:34:57.521902Z[0m [32m INFO[0m [2mbase._load_based_scaling_decision_from_estimates[0m[2m:[0m Load-based prefill TTFT: ALL engines above SLA (5.0ms), scaling up to 3
