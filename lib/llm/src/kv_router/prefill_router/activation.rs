@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use tokio::sync::oneshot;
@@ -41,6 +42,7 @@ impl PrefillRouter {
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
             is_eagle: false,
+            deactivated: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -71,6 +73,7 @@ impl PrefillRouter {
             model_name,
             namespace,
             is_eagle,
+            deactivated: std::sync::atomic::AtomicBool::new(false),
         });
 
         // Spawn background task to wait for activation
@@ -189,6 +192,50 @@ impl PrefillRouter {
             model_manager.get_worker_monitor_for_namespace(&self.model_name, &self.namespace)
         {
             monitor.set_prefill_client(client.clone());
+        }
+    }
+
+    // -- Prefill death handling --
+
+    /// Deactivate the prefill router. Called when all prefill workers are removed.
+    /// After deactivation, requests fall back to aggregated mode (or fail if enforce_disagg).
+    /// The inner router is preserved so that when workers rejoin (same endpoint/discovery),
+    /// the Client's discovery subscription picks them up automatically.
+    pub fn deactivate(&self) {
+        self.deactivated.store(true, Ordering::Release);
+        tracing::info!(
+            model_name = %self.model_name,
+            namespace = %self.namespace,
+            enforce_disagg = self.enforce_disagg,
+            "Prefill router deactivated (all prefill workers removed)"
+        );
+    }
+
+    /// Reactivate a deactivated router. Called when prefill workers rejoin.
+    /// The inner router's Client re-discovers workers via its discovery subscription.
+    pub fn reactivate(&self) {
+        self.deactivated.store(false, Ordering::Release);
+        tracing::info!(
+            model_name = %self.model_name,
+            namespace = %self.namespace,
+            "Prefill router reactivated (prefill workers rejoined)"
+        );
+    }
+
+    /// Whether this router is currently deactivated (prefill workers died).
+    pub fn is_deactivated(&self) -> bool {
+        self.deactivated.load(Ordering::Acquire)
+    }
+
+    /// Whether this router can serve requests in its current state.
+    /// - Not deactivated: true (passthrough, awaiting, or active)
+    /// - Deactivated + enforce_disagg: false (disagg required but prefill is dead)
+    /// - Deactivated + !enforce_disagg: true (fallback to aggregated mode)
+    pub fn can_serve_requests(&self) -> bool {
+        if self.is_deactivated() {
+            !self.enforce_disagg
+        } else {
+            true
         }
     }
 }
