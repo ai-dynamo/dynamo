@@ -138,7 +138,8 @@ struct Args {
     compare: Vec<String>,
 
     /// Number of OS threads for event processing in compare mode. Applies to
-    /// indexers that use a thread pool (nested-map, concurrent-radix-tree).
+    /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
+    /// concurrent-radix-tree-compressed).
     /// Ignored by radix-tree.
     #[clap(long, default_value = "16")]
     num_event_workers: usize,

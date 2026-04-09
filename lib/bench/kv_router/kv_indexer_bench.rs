@@ -674,6 +674,16 @@ async fn run_microbench_mode(args: MicrobenchArgs) {
         eprintln!("Error: size must be >= depth");
         std::process::exit(1);
     }
+    if matches!(
+        args.indexer_type,
+        IndexerType::Nested | IndexerType::Concurrent | IndexerType::All
+    ) && args.num_event_workers == 0
+    {
+        eprintln!(
+            "Error: num_event_workers must be > 0 when using Nested, Concurrent, or All indexer type"
+        );
+        std::process::exit(1);
+    }
 
     println!("KvIndexer Microbenchmark");
     println!("========================\n");
