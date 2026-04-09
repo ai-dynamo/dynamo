@@ -177,7 +177,7 @@ jobs:
   # ============================================================================
 
   vllm-build:
-    name: vllm Build
+    name: vllm # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
@@ -191,7 +191,7 @@ jobs:
     secrets: inherit
 
   sglang-build:
-    name: sglang Build
+    name: sglang # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
@@ -205,7 +205,7 @@ jobs:
     secrets: inherit
 
   trtllm-build:
-    name: trtllm Build
+    name: trtllm # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-build-image.yml
@@ -219,7 +219,7 @@ jobs:
     secrets: inherit
 
   planner-build:
-    name: planner Build
+    name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
     uses: ./.github/workflows/shared-build-image.yml
@@ -237,12 +237,13 @@ jobs:
   # ============================================================================
 
   vllm-test:
-    name: vllm Test
+    name: vllm # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
+      test_type: Single-GPU Test
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
@@ -254,12 +255,13 @@ jobs:
     secrets: inherit
 
   vllm-multi-gpu-test:
-    name: vllm Multi GPU Test
+    name: vllm # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
+      test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
@@ -270,12 +272,13 @@ jobs:
     secrets: inherit
 
   sglang-test:
-    name: sglang Test
+    name: sglang # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
+      test_type: Single-GPU Test
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
@@ -286,12 +289,13 @@ jobs:
     secrets: inherit
 
   sglang-multi-gpu-test:
-    name: sglang Multi GPU Test
+    name: sglang # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
+      test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
@@ -302,12 +306,13 @@ jobs:
     secrets: inherit
 
   trtllm-test:
-    name: trtllm Test
+    name: trtllm # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
+      test_type: Single-GPU Test
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
@@ -318,12 +323,13 @@ jobs:
     secrets: inherit
 
   trtllm-multi-gpu-test:
-    name: trtllm Multi GPU Test
+    name: trtllm # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
+      test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
@@ -334,12 +340,13 @@ jobs:
     secrets: inherit
 
   planner-test:
-    name: planner Test
+    name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
     uses: ./.github/workflows/shared-test.yml
     with:
       test_suite_name: planner
+      test_type: CPU Test
       amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
@@ -356,7 +363,7 @@ jobs:
   # ============================================================================
 
   vllm-compliance:
-    name: vllm Image Compliance
+    name: vllm # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-compliance.yml
@@ -369,7 +376,7 @@ jobs:
     secrets: inherit
 
   sglang-compliance:
-    name: sglang Image Compliance
+    name: sglang # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-compliance.yml
@@ -382,7 +389,7 @@ jobs:
     secrets: inherit
 
   trtllm-compliance:
-    name: trtllm Image Compliance
+    name: trtllm # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-compliance.yml
@@ -395,7 +402,7 @@ jobs:
     secrets: inherit
 
   planner-compliance:
-    name: planner Image Compliance
+    name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
     uses: ./.github/workflows/shared-compliance.yml
@@ -412,7 +419,7 @@ jobs:
   # ============================================================================
 
   vllm-copy-to-acr:
-    name: vllm Copy to ACR
+    name: vllm # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build, vllm-test]
     if: |
       always() &&
@@ -428,7 +435,7 @@ jobs:
     secrets: inherit
 
   sglang-copy-to-acr:
-    name: sglang Copy to ACR
+    name: sglang # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build, sglang-test]
     if: |
       always() &&
@@ -444,7 +451,7 @@ jobs:
     secrets: inherit
 
   trtllm-copy-to-acr:
-    name: trtllm Copy to ACR
+    name: trtllm # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build, trtllm-test]
     if: |
       always() &&

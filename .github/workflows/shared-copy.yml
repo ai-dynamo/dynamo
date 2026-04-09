@@ -42,7 +42,7 @@ jobs:
       fail-fast: false
       matrix:
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
-    name: cuda${{ matrix.cuda_version }}${{ inputs.override_arch != '' && format(', {0}', inputs.override_arch) || '' }}
+    name: Copy to ACR cuda${{ matrix.cuda_version }}${{ inputs.override_arch != '' && format(', {0}', inputs.override_arch) || '' }}
     runs-on: prod-default-small-v2
     steps:
       - name: Checkout repository

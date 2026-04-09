@@ -10,6 +10,10 @@ on:
         description: 'Test suite name (vllm, sglang, trtllm)'
         required: true
         type: string
+      test_type:
+        description: 'Test type (e.g. single-gpu, multi-gpu)'
+        required: true
+        type: string
       amd_runner:
         description: 'Runner to execute tests on (amd64 only)'
         required: true
@@ -81,7 +85,7 @@ jobs:
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
-    name: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
+    name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v1' }}
     steps:
       - name: Checkout repository
