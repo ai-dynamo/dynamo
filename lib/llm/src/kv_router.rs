@@ -11,8 +11,9 @@ use dynamo_kv_router::{
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, PrefillLoadHint, RouterEvent, RouterRequest,
-        RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        compute_block_hash_for_seq,
     },
 };
 use dynamo_runtime::{
@@ -77,6 +78,28 @@ pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent
 /// Each dp_rank has its own LocalKvIndexer and query endpoint to ensure per-dp_rank monotonicity.
 pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
     format!("worker_kv_indexer_query_dp{dp_rank}")
+}
+
+fn log_routing_input_hashes(
+    request_id: Option<&str>,
+    block_size: u32,
+    tokens: &[u32],
+    local_hashes: &[LocalBlockHash],
+) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+
+    let local_hash_ids: Vec<u64> = local_hashes.iter().map(|hash| hash.0).collect();
+
+    tracing::debug!(
+        request_id = request_id.unwrap_or(""),
+        isl_tokens = tokens.len(),
+        block_size,
+        num_blocks = local_hashes.len(),
+        local_hashes = ?local_hash_ids,
+        "[ROUTING_INPUT] request local hashes"
+    );
 }
 
 // for router discovery registration
@@ -277,6 +300,7 @@ where
 
         let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
             .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, hash_options));
+        log_routing_input_hashes(context_id, self.block_size, tokens, &block_hashes);
         let hash_elapsed = start.elapsed();
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
@@ -479,6 +503,7 @@ where
                 is_eagle: Some(self.is_eagle),
             },
         );
+        log_routing_input_hashes(None, self.block_size, tokens, &block_hashes);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
         Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
     }
