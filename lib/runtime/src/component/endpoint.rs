@@ -265,6 +265,7 @@ fn build_transport_type_inner(
             let tcp_port = std::env::var("DYN_TCP_RPC_ADVERTISE_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
+                .filter(|&p| p != 0)
                 .or_else(|| {
                     std::env::var("DYN_TCP_RPC_PORT")
                         .ok()
