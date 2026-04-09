@@ -423,12 +423,19 @@ impl KvIndexerInterface for KvIndexer {
                 "Failed to send match request: {:?}; the indexer maybe offline",
                 e
             );
-            return Err(KvRouterError::IndexerOffline);
+            return Ok(OverlapScores::new());
         }
 
-        let result = resp_rx
-            .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest);
+        let result = match resp_rx.await {
+            Ok(scores) => Ok(scores),
+            Err(e) => {
+                tracing::error!(
+                    "Indexer match response dropped: {:?}; the indexer maybe offline",
+                    e
+                );
+                Ok(OverlapScores::new())
+            }
+        };
 
         #[cfg(feature = "bench")]
         {

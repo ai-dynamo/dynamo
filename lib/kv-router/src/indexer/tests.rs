@@ -2454,4 +2454,32 @@ mod local_indexer_tests {
             "Phase 3: non-interleaved ordering should restore tree"
         );
     }
+
+    #[tokio::test]
+    async fn test_kv_indexer_returns_empty_scores_when_offline() {
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let token = CancellationToken::new();
+        let indexer = KvIndexer::new(token.clone(), 32, metrics.clone());
+
+        indexer.shutdown();
+
+        let scores = indexer.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
+        assert!(scores.scores.is_empty());
+        assert!(scores.frequencies.is_empty());
+        assert!(scores.tree_sizes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_kv_indexer_sharded_returns_empty_scores_when_offline() {
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let token = CancellationToken::new();
+        let indexer = KvIndexerSharded::new(token.clone(), 2, 32, metrics);
+
+        indexer.shutdown();
+
+        let scores = indexer.find_matches(vec![LocalBlockHash(1)]).await.unwrap();
+        assert!(scores.scores.is_empty());
+        assert!(scores.frequencies.is_empty());
+        assert!(scores.tree_sizes.is_empty());
+    }
 }
