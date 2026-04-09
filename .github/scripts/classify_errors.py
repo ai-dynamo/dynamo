@@ -75,9 +75,7 @@ def main():
             errors=[],
         )
         if args.workflow_type == "pr" and args.pr_number:
-            run_url = (
-                f"https://github.com/{args.repo}/actions/runs/{args.run_id}"
-            )
+            run_url = f"https://github.com/{args.repo}/actions/runs/{args.run_id}"
             post_pr_comment(
                 args.repo,
                 args.pr_number,
