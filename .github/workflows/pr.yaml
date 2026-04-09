@@ -365,7 +365,7 @@ jobs:
       needs.deploy-operator.result == 'success' &&
       needs.vllm-pipeline.result == 'success'
     needs: [changed-files, deploy-operator, vllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
@@ -382,7 +382,7 @@ jobs:
       needs.deploy-operator.result == 'success' &&
       needs.sglang-pipeline.result == 'success'
     needs: [changed-files, deploy-operator, sglang-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
@@ -399,7 +399,7 @@ jobs:
       needs.deploy-operator.result == 'success' &&
       needs.trtllm-pipeline.result == 'success'
     needs: [changed-files, deploy-operator, trtllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
@@ -422,6 +422,23 @@ jobs:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
         vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
         vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+
+  # ============================================================================
+  # ALLURE REPORT
+  # Generate Allure test report and deploy to GitHub Pages
+  # ============================================================================
+
+  allure-report:
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/generate-allure-report.yml
+    with:
+      run_id: ${{ github.run_id }}
+      subdir: pr
+      workflow_label: PR
+    permissions:
+      contents: write
+      actions: read
 
   # ============================================================================
   # CLEANUP JOBS

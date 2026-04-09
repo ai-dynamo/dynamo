@@ -77,6 +77,11 @@ on:
         required: false
         type: boolean
         default: false
+      extra_build_args:
+        description: 'Extra build args to pass to docker build (newline-separated)'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -117,6 +122,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -257,7 +264,7 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          PLAIN_TAG="${{ steps.calculate-target-tag.outputs.plain_tag }}"
+          PLAIN_TAG="${{ steps.calculate-target-tag.outputs.target_tag_plain }}"
           CACHE_TAG="test-${PLAIN_TAG}-cache"
           CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"
           CACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"
@@ -292,11 +299,11 @@ jobs:
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}
         run: |
-          echo "### 🐳 ${{ inputs.framework }}-${{ steps.calculate-target-tag.outputs.plain_tag }} Default Image" >> $GITHUB_STEP_SUMMARY
+          echo "### 🐳 ${{ steps.calculate-target-tag.outputs.target_tag_plain }} Default Image" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| \`${{ steps.calculate-target-tag.outputs.default_target_image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`${{ steps.calculate-target-tag.outputs.image_uri }}\` |" >> $GITHUB_STEP_SUMMARY
           EXTRA_TAGS="${{ steps.extra-tags.outputs.tags }}"
           if [ -n "$EXTRA_TAGS" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY

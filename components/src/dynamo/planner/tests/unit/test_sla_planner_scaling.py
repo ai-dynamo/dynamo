@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import math
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -15,7 +14,6 @@ from dynamo.planner.core.decode import DecodePlanner
 from dynamo.planner.core.prefill import PrefillPlanner
 from dynamo.planner.core.state import PlannerSharedState
 from dynamo.planner.errors import DeploymentValidationError
-from dynamo.planner.offline.dryrun import run_sla_planner_dryrun
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -23,6 +21,10 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.planner,
 ]
+
+PREFILL_ENGINE_RPS = 10.0
+DECODE_ENGINE_RPS = 5.0
+DECODE_ACTUAL_ITL_MS = 40.0
 
 
 @pytest.fixture(autouse=True)
@@ -43,7 +45,6 @@ def _build_config():
         itl=50.0,
         backend="vllm",
         no_operation=True,
-        no_correction=True,
         metric_pulling_prometheus_endpoint="http://localhost:9090",
         metric_reporting_prometheus_port=0,
         load_predictor="constant",
@@ -90,6 +91,20 @@ def _build_planners(config, prometheus_client):
     prefill_planner.model_name = "test-model"
     decode_planner.model_name = "test-model"
 
+    prefill_planner.ttft_regression = MagicMock()
+    prefill_planner.ttft_regression.find_best_engine_prefill_rps.return_value = (
+        PREFILL_ENGINE_RPS,
+        75.0,
+    )
+    prefill_planner.ttft_regression.has_sufficient_data.return_value = True
+
+    decode_planner.itl_regression = MagicMock()
+    decode_planner.itl_regression.find_best_engine_decode_rps.return_value = (
+        DECODE_ENGINE_RPS,
+        DECODE_ACTUAL_ITL_MS,
+    )
+    decode_planner.itl_regression.has_sufficient_data.return_value = True
+
     async def mock_get_workers_info(require_prefill=True, require_decode=True):
         return (
             1 if require_prefill else 0,
@@ -103,32 +118,20 @@ def _build_planners(config, prometheus_client):
 
 
 def _expected_prefill(config, prefill_planner, sample):
-    pred_prefill_throughput = (
-        sample["num_req"] * sample["isl"] / config.throughput_adjustment_interval
+    demand_rps = sample["num_req"] / config.throughput_adjustment_interval
+    engine_rps, _ = prefill_planner.ttft_regression.find_best_engine_prefill_rps(
+        ttft_sla=config.ttft, isl=sample["isl"]
     )
-    thpt_per_gpu = prefill_planner.prefill_interpolator.interpolate_thpt_per_gpu(
-        sample["isl"]
-    )
-    expected = math.ceil(
-        pred_prefill_throughput / thpt_per_gpu / config.prefill_engine_num_gpu
-    )
+    expected = math.ceil(demand_rps / engine_rps)
     return max(expected, config.min_endpoint)
 
 
 def _expected_decode(config, decode_planner, sample):
-    (
-        pred_decode_thpt_per_gpu,
-        _,
-        _,
-    ) = decode_planner.decode_interpolator.find_best_throughput_per_gpu(
+    demand_rps = sample["num_req"] / config.throughput_adjustment_interval
+    engine_rps, _ = decode_planner.itl_regression.find_best_engine_decode_rps(
         itl=config.itl, context_length=sample["isl"] + sample["osl"] / 2
     )
-    pred_decode_throughput = (
-        sample["num_req"] * sample["osl"] / config.throughput_adjustment_interval
-    )
-    expected = math.ceil(
-        pred_decode_throughput / pred_decode_thpt_per_gpu / config.decode_engine_num_gpu
-    )
+    expected = math.ceil(demand_rps / engine_rps)
     return max(expected, config.min_endpoint)
 
 
@@ -210,128 +213,114 @@ def test_disagg_scale_down():
     assert low_d < high_d
 
 
-# Tests for _initialize_gpu_counts
 class TestInitializeGpuCounts:
+    @staticmethod
+    def _make_config(**overrides):
+        defaults = dict(prefill_engine_num_gpu=None, decode_engine_num_gpu=None)
+        defaults.update(overrides)
+        return PlannerConfig.model_construct(**defaults)
+
     def test_kubernetes_mode_reads_from_dgd(self):
         """Test that GPU counts are read from DGD in Kubernetes mode"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = None
-        args.decode_engine_num_gpu = None
+        config = self._make_config()
 
         connector = Mock()
         connector.get_gpu_counts = Mock(return_value=(2, 4))
 
         _initialize_gpu_counts(
-            args, connector, require_prefill=True, require_decode=True
+            config, connector, require_prefill=True, require_decode=True
         )
 
-        assert args.prefill_engine_num_gpu == 2
-        assert args.decode_engine_num_gpu == 4
+        assert config.prefill_engine_num_gpu == 2
+        assert config.decode_engine_num_gpu == 4
         connector.get_gpu_counts.assert_called_once_with(
             require_prefill=True, require_decode=True
         )
 
     def test_kubernetes_mode_prefill_only(self):
         """Test GPU count initialization for prefill-only mode"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = None
-        args.decode_engine_num_gpu = None
+        config = self._make_config()
 
         connector = Mock()
         connector.get_gpu_counts = Mock(return_value=(2, 0))
 
         _initialize_gpu_counts(
-            args, connector, require_prefill=True, require_decode=False
+            config, connector, require_prefill=True, require_decode=False
         )
 
-        assert args.prefill_engine_num_gpu == 2
-        assert args.decode_engine_num_gpu == 0
+        assert config.prefill_engine_num_gpu == 2
+        assert config.decode_engine_num_gpu == 0
         connector.get_gpu_counts.assert_called_once_with(
             require_prefill=True, require_decode=False
         )
 
     def test_virtual_mode_uses_cli_args(self):
-        """Test that GPU counts come from CLI args in virtual mode"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = 2
-        args.decode_engine_num_gpu = 4
+        """Test that GPU counts come from config in virtual mode"""
+        config = self._make_config(prefill_engine_num_gpu=2, decode_engine_num_gpu=4)
 
-        # Virtual connector doesn't have get_gpu_counts method
         connector = Mock(spec=[])
 
         _initialize_gpu_counts(
-            args, connector, require_prefill=True, require_decode=True
+            config, connector, require_prefill=True, require_decode=True
         )
 
-        # Values should remain unchanged
-        assert args.prefill_engine_num_gpu == 2
-        assert args.decode_engine_num_gpu == 4
+        assert config.prefill_engine_num_gpu == 2
+        assert config.decode_engine_num_gpu == 4
 
     def test_virtual_mode_missing_prefill_raises_error(self):
-        """Test that missing prefill GPU flag raises error in virtual mode"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = None
-        args.decode_engine_num_gpu = 4
+        """Test that missing prefill GPU config raises error in virtual mode"""
+        config = self._make_config(decode_engine_num_gpu=4)
 
         connector = Mock(spec=[])
 
         with pytest.raises(DeploymentValidationError) as exc_info:
             _initialize_gpu_counts(
-                args, connector, require_prefill=True, require_decode=True
+                config, connector, require_prefill=True, require_decode=True
             )
 
         assert "prefill_engine_num_gpu" in str(exc_info.value)
 
     def test_virtual_mode_missing_decode_raises_error(self):
-        """Test that missing decode GPU flag raises error in virtual mode"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = 2
-        args.decode_engine_num_gpu = None
+        """Test that missing decode GPU config raises error in virtual mode"""
+        config = self._make_config(prefill_engine_num_gpu=2)
 
         connector = Mock(spec=[])
 
         with pytest.raises(DeploymentValidationError) as exc_info:
             _initialize_gpu_counts(
-                args, connector, require_prefill=True, require_decode=True
+                config, connector, require_prefill=True, require_decode=True
             )
 
         assert "decode_engine_num_gpu" in str(exc_info.value)
 
     def test_virtual_mode_missing_both_raises_error_with_both_messages(self):
-        """Test that missing both GPU flags shows both error messages"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = None
-        args.decode_engine_num_gpu = None
+        """Test that missing both GPU configs shows both error messages"""
+        config = self._make_config()
 
         connector = Mock(spec=[])
 
         with pytest.raises(DeploymentValidationError) as exc_info:
             _initialize_gpu_counts(
-                args, connector, require_prefill=True, require_decode=True
+                config, connector, require_prefill=True, require_decode=True
             )
 
         assert len(exc_info.value.errors) == 2
 
     def test_virtual_mode_decode_only_no_prefill_error(self):
-        """Test decode-only mode doesn't require prefill GPU flag"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = None
-        args.decode_engine_num_gpu = 4
+        """Test decode-only mode doesn't require prefill GPU config"""
+        config = self._make_config(decode_engine_num_gpu=4)
 
         connector = Mock(spec=[])
 
-        # Should not raise - prefill not required
         _initialize_gpu_counts(
-            args, connector, require_prefill=False, require_decode=True
+            config, connector, require_prefill=False, require_decode=True
         )
 
-        assert args.decode_engine_num_gpu == 4
+        assert config.decode_engine_num_gpu == 4
 
     def test_kubernetes_mode_fallback_to_cli_on_dgd_error(self):
-        """Test that K8s mode falls back to CLI flags when DGD parsing fails"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = 2
-        args.decode_engine_num_gpu = 4
+        """Test that K8s mode falls back to config when DGD parsing fails"""
+        config = self._make_config(prefill_engine_num_gpu=2, decode_engine_num_gpu=4)
 
         connector = Mock()
         connector.get_gpu_counts = Mock(
@@ -339,18 +328,15 @@ class TestInitializeGpuCounts:
         )
 
         _initialize_gpu_counts(
-            args, connector, require_prefill=True, require_decode=True
+            config, connector, require_prefill=True, require_decode=True
         )
 
-        # Should use CLI flag values after fallback
-        assert args.prefill_engine_num_gpu == 2
-        assert args.decode_engine_num_gpu == 4
+        assert config.prefill_engine_num_gpu == 2
+        assert config.decode_engine_num_gpu == 4
 
     def test_kubernetes_mode_fallback_missing_cli_flags_raises_error(self):
-        """Test that K8s fallback raises error when CLI flags are also missing"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = None
-        args.decode_engine_num_gpu = None
+        """Test that K8s fallback raises error when config also missing"""
+        config = self._make_config()
 
         connector = Mock()
         connector.get_gpu_counts = Mock(
@@ -359,16 +345,14 @@ class TestInitializeGpuCounts:
 
         with pytest.raises(DeploymentValidationError) as exc_info:
             _initialize_gpu_counts(
-                args, connector, require_prefill=True, require_decode=True
+                config, connector, require_prefill=True, require_decode=True
             )
 
         assert len(exc_info.value.errors) == 2
 
     def test_kubernetes_mode_fallback_partial_cli_flags(self):
-        """Test K8s fallback with only one CLI flag provided"""
-        args = argparse.Namespace()
-        args.prefill_engine_num_gpu = 2
-        args.decode_engine_num_gpu = None
+        """Test K8s fallback with only one config value provided"""
+        config = self._make_config(prefill_engine_num_gpu=2)
 
         connector = Mock()
         connector.get_gpu_counts = Mock(
@@ -377,73 +361,7 @@ class TestInitializeGpuCounts:
 
         with pytest.raises(DeploymentValidationError) as exc_info:
             _initialize_gpu_counts(
-                args, connector, require_prefill=True, require_decode=True
+                config, connector, require_prefill=True, require_decode=True
             )
 
         assert "decode_engine_num_gpu" in str(exc_info.value)
-
-
-# Tests for dryrun GPU defaults
-class TestDryrunGpuDefaults:
-    @staticmethod
-    def _build_dryrun_config(**overrides) -> PlannerConfig:
-        defaults = dict(
-            throughput_adjustment_interval=60,
-            prefill_engine_num_gpu=1,
-            decode_engine_num_gpu=1,
-            min_endpoint=1,
-            max_gpu_budget=-1,
-            ttft=500.0,
-            itl=50.0,
-            backend="vllm",
-            no_operation=True,
-            no_correction=True,
-            metric_pulling_prometheus_endpoint="http://localhost:9090",
-            metric_reporting_prometheus_port=0,
-            load_predictor="constant",
-            load_predictor_warmup_trace=None,
-            load_predictor_log1p=False,
-            profile_results_dir=os.path.join(
-                os.path.dirname(__file__),
-                "..",
-                "data",
-                "profiling_results",
-                "H200_TP1P_TP1D",
-            ),
-            environment="kubernetes",
-            namespace="test-namespace",
-            mode="disagg",
-            enable_throughput_scaling=True,
-            enable_load_scaling=False,
-        )
-        defaults.update(overrides)
-        return PlannerConfig.model_construct(**defaults)
-
-    def test_dryrun_defaults_gpu_counts_when_none(self):
-        """Test that dryrun sets default GPU counts of 1 when None"""
-        config = self._build_dryrun_config(
-            prefill_engine_num_gpu=None, decode_engine_num_gpu=None
-        )
-
-        try:
-            run_sla_planner_dryrun(config, dataset="nonexistent.jsonl")
-        except (FileNotFoundError, ValueError):
-            pass
-
-        assert config.prefill_engine_num_gpu == 1
-        assert config.decode_engine_num_gpu == 1
-
-    def test_dryrun_preserves_cli_gpu_counts(self):
-        """Test that dryrun preserves GPU counts provided via config"""
-
-        config = self._build_dryrun_config(
-            prefill_engine_num_gpu=2, decode_engine_num_gpu=4
-        )
-
-        try:
-            run_sla_planner_dryrun(config, dataset="nonexistent.jsonl")
-        except (FileNotFoundError, ValueError):
-            pass
-
-        assert config.prefill_engine_num_gpu == 2
-        assert config.decode_engine_num_gpu == 4

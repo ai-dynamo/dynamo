@@ -22,7 +22,6 @@ jobs:
   # ============================================================================
   changed-files:
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       core: ${{ steps.changes.outputs.core }}
       planner: ${{ steps.changes.outputs.planner }}
@@ -190,6 +189,20 @@ jobs:
       build_timeout_minutes: 60
     secrets: inherit
 
+  vllm-dev-build:
+    name: vllm Dev Build
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: dev
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
   sglang-build:
     name: sglang # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files]
@@ -204,6 +217,20 @@ jobs:
       build_timeout_minutes: 60
     secrets: inherit
 
+  sglang-dev-build:
+    name: sglang Dev Build
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: dev
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
   trtllm-build:
     name: trtllm # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files]
@@ -212,6 +239,20 @@ jobs:
     with:
       framework: trtllm
       target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-dev-build:
+    name: trtllm Dev Build
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: dev
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
@@ -595,3 +636,37 @@ jobs:
         shell: bash
         run: |
           docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true
+
+  # ============================================================================
+  # ALLURE REPORT
+  # Generate Allure test report and deploy to GitHub Pages
+  # ============================================================================
+
+  allure-report:
+    needs:
+      - changed-files
+      - operator
+      - vllm-build
+      - vllm-test
+      - vllm-multi-gpu-test
+      - vllm-copy-to-acr
+      - sglang-build
+      - sglang-test
+      - sglang-multi-gpu-test
+      - sglang-copy-to-acr
+      - trtllm-build
+      - trtllm-test
+      - trtllm-multi-gpu-test
+      - trtllm-copy-to-acr
+      - deploy-test-vllm
+      - deploy-test-sglang
+      - deploy-test-trtllm
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/generate-allure-report.yml
+    with:
+      run_id: ${{ github.run_id }}
+      subdir: pr
+      workflow_label: PR
+    permissions:
+      contents: write
+      actions: read

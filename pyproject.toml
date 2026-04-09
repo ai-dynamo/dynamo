@@ -50,11 +50,11 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu12]<=0.10.1",
-    "vllm[flashinfer,runai,otel]==0.18.0",
-    # vllm-omni 0.18.0 is now on PyPI; install only future rc builds from source in container builds
-    # (see container/deps/vllm/install_vllm.sh). pip install ai-dynamo[vllm] will
-    # not include vllm-omni — install it separately from source if needed.
-    "vllm-omni==0.18.0",
+    "vllm[flashinfer,runai,otel]==0.19.0",
+    # vllm-omni is installed separately in container builds (see
+    # container/deps/vllm/install_vllm.sh). Do not add it to ai-dynamo[vllm]:
+    # pip/uv dependency resolution for omni can override the vLLM torch stack.
+    # "vllm-omni==...",
     "blake3>=1.0.0,<2.0.0",
     "soundfile>=0.13.1",
     "librosa>=0.10.0",

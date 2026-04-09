@@ -36,14 +36,6 @@ class PlannerPrometheusMetrics:
             f"{prefix}:observed_osl", "Observed output sequence length"
         )
 
-        # Correction factors
-        self.p_correction_factor = Gauge(
-            f"{prefix}:p_correction_factor", "Prefill correction factor"
-        )
-        self.d_correction_factor = Gauge(
-            f"{prefix}:d_correction_factor", "Decode correction factor"
-        )
-
         # Predicted metrics
         self.predicted_request_rate = Gauge(
             f"{prefix}:predicted_request_rate", "Predicted request rate (req/s)"
