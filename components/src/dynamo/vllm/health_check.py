@@ -39,7 +39,9 @@ def _get_bos_token_id_from_engine(engine_client) -> int:
             if tokenizer:
                 bos_token_id = getattr(tokenizer, "bos_token_id", None)
                 if bos_token_id is not None:
-                    logger.info(f"Using model's BOS token ID for health check: {bos_token_id}")
+                    logger.info(
+                        f"Using model's BOS token ID for health check: {bos_token_id}"
+                    )
                     return int(bos_token_id)
     except Exception as e:
         logger.debug(f"Failed to get BOS token from engine: {e}")
@@ -48,7 +50,9 @@ def _get_bos_token_id_from_engine(engine_client) -> int:
     return 1
 
 
-def _make_default_payload(engine_client: Optional["AsyncLLM"], use_text_input: bool) -> dict:
+def _make_default_payload(
+    engine_client: Optional["AsyncLLM"], use_text_input: bool
+) -> dict:
     sampling_options = {
         "temperature": 0.0,
     }
@@ -135,7 +139,9 @@ async def get_bos_token_from_omni(async_omni: "AsyncOmni") -> int:
         if tokenizer and hasattr(tokenizer, "bos_token_id"):
             bos_token_id = tokenizer.bos_token_id
             if bos_token_id is not None:
-                logger.info(f"Using model's BOS token ID for Omni health check: {bos_token_id}")
+                logger.info(
+                    f"Using model's BOS token ID for Omni health check: {bos_token_id}"
+                )
                 return int(bos_token_id)
     except Exception as e:
         logger.debug(f"Failed to get BOS token from AsyncOmni: {e}")
