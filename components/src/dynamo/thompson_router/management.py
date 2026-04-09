@@ -24,7 +24,7 @@ from dynamo.thompson_router.router import (
 
 logger = logging.getLogger(__name__)
 
-MAX_DECISION_HISTORY = 200
+MAX_DECISION_HISTORY = 50_000
 
 
 class RouterManagementServer:
@@ -53,6 +53,7 @@ class RouterManagementServer:
                 "iat": hints.get("iat", 0),
                 "reuse_budget": hints.get("reuse_budget", 0),
                 "tokens_in": hints.get("tokens_in", 0),
+                "latency_sensitivity": hints.get("latency_sensitivity", 2.0),
                 "tokens_out": tokens_out,
                 "elapsed_ms": round(elapsed_ms, 1),
                 "workers": decision.worker_details,
@@ -97,7 +98,6 @@ class RouterManagementServer:
         return web.json_response(
             {
                 "beta_learner": r.beta_learner.to_dict(),
-                "lints_learner": r.lints_learner.to_dict(),
             }
         )
 
@@ -106,49 +106,32 @@ class RouterManagementServer:
         data = await request.json()
         if "beta_learner" in data:
             r.beta_learner.load_state(data["beta_learner"])
-        if "lints_learner" in data:
-            r.lints_learner.load_state(data["lints_learner"])
         logger.info("Learner state loaded via HTTP")
         return web.json_response({"status": "loaded"})
 
     async def _reset_state(self, _request: web.Request) -> web.Response:
         r = self._router
         r.beta_learner.reset_all()
-        r.lints_learner.reset_all()
         r.latency_tracker.reset()
-        logger.info("Learner state reset to pristine via HTTP")
+        self._decisions.clear()
+        logger.info("Learner state reset to pristine via HTTP (decisions cleared)")
         return web.json_response({"status": "reset"})
 
     async def _get_config(self, _request: web.Request) -> web.Response:
         r = self._router
         return web.json_response(
             {
-                "ts_weight": r.ts_weight,
-                "temperature": r.temperature,
-                "cold_start_threshold": r.cold_start_threshold,
-                "idle_boost": r.idle_boost,
+                "lambda_ranking": r.lambda_ranking,
+                "lambda_stickiness": r.lambda_stickiness,
+                "w_cache": r.w_cache,
+                "w_queue": r.w_queue,
+                "w_osl_load": r.w_osl_load,
+                "w_sensitivity": r.w_sensitivity,
+                "alpha_reuse": r.alpha_reuse,
+                "sticky_bonus": r.sticky_bonus,
+                "stickiness_overlap_cap": r.stickiness_overlap_cap,
+                "epsilon": r.epsilon,
                 "beta_decay": r.beta_learner.decay,
-                "lints_v": r.lints_learner.v,
-                "lints_forget_rate": r.lints_learner.forget_rate,
-                "queue_penalty_weight": r.queue_penalty_weight,
-                "lints_weight": r.lints_weight,
-                "switch_cost_weight": r.switch_cost_weight,
-                "physics_cache_weight": r.physics_cache_weight,
-                "physics_compute_weight": r.physics_compute_weight,
-                "physics_queue_weight": r.physics_queue_weight,
-                "physics_memory_weight": r.physics_memory_weight,
-                "enable_beta_ts": r.enable_beta_ts,
-                "enable_lints": r.enable_lints,
-                "enable_switching_cost": r.enable_switching_cost,
-                "enable_affinity": r.enable_affinity,
-                "enable_softmax": r.enable_softmax,
-                "enable_cold_start": r.enable_cold_start,
-                "enable_idle_boost": r.enable_idle_boost,
-                "enable_load_mod_floor": r.enable_load_mod_floor,
-                "enable_adaptive_temp": r.enable_adaptive_temp,
-                "enable_adaptive_explore": r.enable_adaptive_explore,
-                "enable_sticky_floor": r.enable_sticky_floor,
-                "enable_adaptive_v": r.enable_adaptive_v,
             }
         )
 
@@ -158,69 +141,28 @@ class RouterManagementServer:
         r = self._router
         applied = {}
 
-        if "ts_weight" in data:
-            r.ts_weight = float(data["ts_weight"])
-            applied["ts_weight"] = r.ts_weight
-        if "temperature" in data:
-            r.temperature = float(data["temperature"])
-            applied["temperature"] = r.temperature
-        if "cold_start_threshold" in data:
-            r.cold_start_threshold = float(data["cold_start_threshold"])
-            applied["cold_start_threshold"] = r.cold_start_threshold
-        if "idle_boost" in data:
-            r.idle_boost = float(data["idle_boost"])
-            applied["idle_boost"] = r.idle_boost
+        # All 9 tunable params + beta_decay
+        param_map = {
+            "lambda_ranking": "lambda_ranking",
+            "lambda_stickiness": "lambda_stickiness",
+            "w_cache": "w_cache",
+            "w_queue": "w_queue",
+            "w_osl_load": "w_osl_load",
+            "w_sensitivity": "w_sensitivity",
+            "alpha_reuse": "alpha_reuse",
+            "sticky_bonus": "sticky_bonus",
+            "stickiness_overlap_cap": "stickiness_overlap_cap",
+            "epsilon": "epsilon",
+        }
+        for key, attr in param_map.items():
+            if key in data:
+                val = float(data[key])
+                setattr(r, attr, val)
+                applied[key] = val
+
         if "beta_decay" in data:
             r.beta_learner.decay = float(data["beta_decay"])
             applied["beta_decay"] = r.beta_learner.decay
-        if "lints_v" in data:
-            r.lints_learner.v = float(data["lints_v"])
-            applied["lints_v"] = r.lints_learner.v
-        if "lints_forget_rate" in data:
-            r.lints_learner.forget_rate = float(data["lints_forget_rate"])
-            applied["lints_forget_rate"] = r.lints_learner.forget_rate
-        if "queue_penalty_weight" in data:
-            r.queue_penalty_weight = float(data["queue_penalty_weight"])
-            applied["queue_penalty_weight"] = r.queue_penalty_weight
-        if "lints_weight" in data:
-            r.lints_weight = float(data["lints_weight"])
-            applied["lints_weight"] = r.lints_weight
-        if "switch_cost_weight" in data:
-            r.switch_cost_weight = float(data["switch_cost_weight"])
-            applied["switch_cost_weight"] = r.switch_cost_weight
-        if "physics_cache_weight" in data:
-            r.physics_cache_weight = float(data["physics_cache_weight"])
-            applied["physics_cache_weight"] = r.physics_cache_weight
-        if "physics_compute_weight" in data:
-            r.physics_compute_weight = float(data["physics_compute_weight"])
-            applied["physics_compute_weight"] = r.physics_compute_weight
-        if "physics_queue_weight" in data:
-            r.physics_queue_weight = float(data["physics_queue_weight"])
-            applied["physics_queue_weight"] = r.physics_queue_weight
-        if "physics_memory_weight" in data:
-            r.physics_memory_weight = float(data["physics_memory_weight"])
-            applied["physics_memory_weight"] = r.physics_memory_weight
-
-        # Boolean feature toggles
-        enable_keys = [
-            "enable_beta_ts",
-            "enable_lints",
-            "enable_switching_cost",
-            "enable_affinity",
-            "enable_softmax",
-            "enable_cold_start",
-            "enable_idle_boost",
-            "enable_load_mod_floor",
-            "enable_adaptive_temp",
-            "enable_adaptive_explore",
-            "enable_sticky_floor",
-            "enable_adaptive_v",
-        ]
-        for key in enable_keys:
-            if key in data:
-                val = bool(data[key])
-                setattr(r, key, val)
-                applied[key] = val
 
         logger.info("Router config hot-reloaded via HTTP: %s", applied)
         return web.json_response({"status": "applied", "params": applied})
@@ -232,15 +174,7 @@ class RouterManagementServer:
         return web.json_response({"count": len(recent), "decisions": recent})
 
     async def _get_metrics(self, _request: web.Request) -> web.Response:
-        """Return rolling instrumentation stats for the two-tower router.
-
-        Includes:
-          - Physics tower accuracy (MSE, RMSE, mean error)
-          - Residual distribution (mean, variance — informs v^2 calibration)
-          - Learner contribution (are LinTS/Beta corrections meaningful?)
-          - Baseline bucket coverage (how often do we have type-specific baselines?)
-          - Monitor availability (how often does the physics tower use fallback?)
-        """
+        """Return rolling instrumentation stats."""
         return web.json_response(self._router.stats.snapshot())
 
     async def _reset_metrics(self, _request: web.Request) -> web.Response:

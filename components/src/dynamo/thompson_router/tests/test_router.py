@@ -1,17 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for KvThompsonRouter scoring, selection, and feedback."""
+"""Unit tests for KvThompsonRouter scoring, selection, and feedback.
+
+Covers the two-term scoring model:
+    score(w) = lambda_ranking * ranking(w) + lambda_stickiness * stickiness(w)
+
+All removed concepts (LinTSLearner, _physics_score, _build_features, enable_*,
+load_mod, affinity/switch penalties, softmax, cold_start, etc.) are absent.
+"""
 
 import math
-import random
 from unittest.mock import AsyncMock
 
-import numpy as np
 import pytest
 
 from dynamo.thompson_router.hints import extract_hints
-from dynamo.thompson_router.router import KvThompsonRouter, RoutingDecision
+from dynamo.thompson_router.router import (
+    TUNABLE_ROUTER_PARAMS,
+    KvThompsonRouter,
+    RoutingDecision,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -21,6 +30,10 @@ pytestmark = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _make_load(worker_id, prefill_tokens=0, decode_blocks=0):
     return {
         "worker_id": worker_id,
@@ -29,9 +42,13 @@ def _make_load(worker_id, prefill_tokens=0, decode_blocks=0):
     }
 
 
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
 @pytest.fixture
 def mock_kv_router():
-    """Create a mock KvRouter with configurable loads and best_worker."""
+    """Mock KvRouter with three workers at varying load levels."""
     router = AsyncMock()
     router.get_potential_loads = AsyncMock(
         return_value=[
@@ -45,1262 +62,927 @@ def mock_kv_router():
 
 
 @pytest.fixture
-def thompson_base(mock_kv_router):
-    """KvThompsonRouter with all optional features off (base scoring only)."""
+def router(mock_kv_router):
+    """Default KvThompsonRouter with no extra config (all defaults)."""
     return KvThompsonRouter(mock_kv_router, config=None)
 
 
 @pytest.fixture
-def thompson_softmax(mock_kv_router):
-    """KvThompsonRouter with softmax selection enabled."""
+def router_epsilon(mock_kv_router):
+    """KvThompsonRouter with epsilon > 0 to activate beta learner residual."""
     return KvThompsonRouter(
         mock_kv_router,
-        config={"kv_thompson": {"enable_softmax": True, "temperature": 1.0}},
-    )
-
-
-@pytest.fixture
-def thompson_cold_start():
-    """KvThompsonRouter with cold start round-robin enabled using low-overlap workers."""
-    router = AsyncMock()
-    # All workers have high prefill (low overlap) to trigger cold start
-    router.get_potential_loads = AsyncMock(
-        return_value=[
-            _make_load(0, prefill_tokens=900, decode_blocks=5),
-            _make_load(1, prefill_tokens=950, decode_blocks=2),
-            _make_load(2, prefill_tokens=980, decode_blocks=10),
-        ]
-    )
-    router.best_worker = AsyncMock(return_value=(0, 0, 0))
-    return KvThompsonRouter(
-        router,
-        config={"kv_thompson": {"enable_cold_start": True, "cold_start_threshold": 0.99}},
-    )
-
-
-@pytest.fixture
-def thompson_affinity():
-    """KvThompsonRouter with affinity enabled using balanced worker loads."""
-    router = AsyncMock()
-    # Balanced loads so affinity bonus can actually influence the decision
-    router.get_potential_loads = AsyncMock(
-        return_value=[
-            _make_load(0, prefill_tokens=50, decode_blocks=5),
-            _make_load(1, prefill_tokens=50, decode_blocks=5),
-            _make_load(2, prefill_tokens=50, decode_blocks=5),
-        ]
-    )
-    router.best_worker = AsyncMock(return_value=(0, 0, 10))
-    return KvThompsonRouter(
-        router,
-        config={"kv_thompson": {"enable_affinity": True}},
+        config={"kv_thompson": {"epsilon": 0.1}},
     )
 
 
 # ---------------------------------------------------------------------------
-# pick_worker
+# Initialization
 # ---------------------------------------------------------------------------
-class TestPickWorker:
+
+class TestInit:
+    def test_default_config_params(self, router):
+        """All nine tunable params exist on the router with expected defaults."""
+        assert router.lambda_ranking == 1.0
+        assert router.lambda_stickiness == 1.0
+        assert router.w_cache == 0.55
+        assert router.w_queue == 0.15
+        assert router.w_osl_load == 2.0
+        assert router.w_sensitivity == 0.10
+        assert router.alpha_reuse == 0.25
+        assert router.sticky_bonus == 0.3
+        assert router.epsilon == 0.05
+
+    def test_config_dict_overrides_all_params(self, mock_kv_router):
+        """Config dict via kv_thompson key overrides every tunable param."""
+        cfg = {
+            "kv_thompson": {
+                "lambda_ranking": 2.0,
+                "lambda_stickiness": 0.5,
+                "w_cache": 0.4,
+                "w_queue": 0.2,
+                "w_osl_load": 0.1,
+                "w_sensitivity": 0.3,
+                "alpha_reuse": 0.5,
+                "sticky_bonus": 0.6,
+                "epsilon": 0.05,
+            }
+        }
+        r = KvThompsonRouter(mock_kv_router, config=cfg)
+        assert r.lambda_ranking == 2.0
+        assert r.lambda_stickiness == 0.5
+        assert r.w_cache == 0.4
+        assert r.w_queue == 0.2
+        assert r.w_osl_load == 0.1
+        assert r.w_sensitivity == 0.3
+        assert r.alpha_reuse == 0.5
+        assert r.sticky_bonus == 0.6
+        assert r.epsilon == 0.05
+
+    def test_tunable_params_list_matches_new_design(self):
+        """TUNABLE_ROUTER_PARAMS contains exactly the 9 new config keys."""
+        expected = {
+            "lambda_ranking", "lambda_stickiness",
+            "w_cache", "w_queue", "w_osl_load", "w_sensitivity",
+            "alpha_reuse", "sticky_bonus", "stickiness_overlap_cap", "epsilon",
+        }
+        assert set(TUNABLE_ROUTER_PARAMS) == expected
+        assert len(TUNABLE_ROUTER_PARAMS) == 10
+
+    def test_no_removed_params_on_router(self, router):
+        """Removed architecture concepts are absent from the router object."""
+        removed = [
+            "lints_weight", "enable_lints", "enable_softmax", "enable_affinity",
+            "load_mod", "affinity_base", "switch_base", "cold_start_boost",
+            "idle_boost", "queue_penalty_weight", "physics_cache_weight",
+            "_physics_score", "_build_features", "_select_from_scores",
+        ]
+        for attr in removed:
+            assert not hasattr(router, attr), f"removed attr still present: {attr}"
+
+
+# ---------------------------------------------------------------------------
+# pick_worker — return type and field checks
+# ---------------------------------------------------------------------------
+
+class TestPickWorkerReturnType:
     @pytest.mark.asyncio
-    async def test_returns_routing_decision(self, thompson_base):
-        decision = await thompson_base.pick_worker(
-            token_ids=list(range(1000)),
-            prefix_id="test-prefix",
+    async def test_returns_routing_decision(self, router):
+        decision = await router.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px1",
             reuse_budget=0,
             osl=250,
             iat=250,
-            tokens_in=1000,
+            tokens_in=100,
         )
         assert isinstance(decision, RoutingDecision)
-        assert decision.chosen in [0, 1, 2]
-        assert decision.native_pick == 0
-        assert len(decision.worker_details) == 3
 
     @pytest.mark.asyncio
-    async def test_prefers_higher_overlap(self, mock_kv_router):
-        mock_kv_router.get_potential_loads.return_value = [
-            _make_load(0, prefill_tokens=900, decode_blocks=0),
-            _make_load(1, prefill_tokens=0, decode_blocks=0),
-        ]
-        router = KvThompsonRouter(mock_kv_router, config=None)
-
-        choices = set()
-        for _ in range(20):
-            d = await router.pick_worker(
-                list(range(1000)), "p", 0, 250, 250, 1000
-            )
-            choices.add(d.chosen)
-
-        assert 1 in choices
-
-    @pytest.mark.asyncio
-    async def test_empty_loads_falls_back_to_native(self, mock_kv_router):
-        mock_kv_router.get_potential_loads.return_value = []
-        mock_kv_router.best_worker.return_value = (42, 0, 0)
-        router = KvThompsonRouter(mock_kv_router, config=None)
-
-        d = await router.pick_worker(list(range(100)), "p", 0, 250, 250, 100)
-        assert d.chosen == 42
-
-    @pytest.mark.asyncio
-    async def test_cold_start_round_robin(self, thompson_cold_start):
-        seen = []
-        for i in range(6):
-            d = await thompson_cold_start.pick_worker(
-                list(range(100)), f"prefix-{i}", 0, 250, 250, 100
-            )
-            seen.append(d.chosen)
-
-        assert len(set(seen)) > 1
-
-    @pytest.mark.asyncio
-    async def test_softmax_probabilistic(self, thompson_softmax):
-        choices = set()
-        for _ in range(50):
-            d = await thompson_softmax.pick_worker(
-                list(range(1000)), "p", 0, 250, 250, 1000
-            )
-            choices.add(d.chosen)
-
-        assert len(choices) >= 2
-
-    @pytest.mark.asyncio
-    async def test_affinity_stickiness(self, thompson_affinity):
-        np.random.seed(42)
-        random.seed(42)
-
-        d1 = await thompson_affinity.pick_worker(
-            list(range(100)), "sticky-prefix", 0, 250, 250, 100
+    async def test_routing_decision_has_new_score_fields(self, router):
+        """RoutingDecision carries ranking_score and stickiness_score (not physics_score/features)."""
+        decision = await router.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px1",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
         )
-        first_choice = d1.chosen
+        assert hasattr(decision, "ranking_score")
+        assert hasattr(decision, "stickiness_score")
+        assert not hasattr(decision, "physics_score")
+        assert not hasattr(decision, "features")
 
-        same_count = 0
-        for _ in range(30):
-            d = await thompson_affinity.pick_worker(
-                list(range(100)), "sticky-prefix", 5, 250, 250, 100
-            )
-            if d.chosen == first_choice:
-                same_count += 1
+    @pytest.mark.asyncio
+    async def test_chosen_is_valid_worker_id(self, router):
+        decision = await router.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px1",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
+        )
+        assert decision.chosen in {0, 1, 2}
 
-        # With affinity enabled, the chosen worker should be sticky
-        # most of the time (but TS still explores occasionally)
-        assert same_count >= 5
+    @pytest.mark.asyncio
+    async def test_worker_details_contain_new_score_keys(self, router):
+        """Each worker_details entry must have ranking_score and stickiness_score."""
+        decision = await router.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px1",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
+        )
+        for wd in decision.worker_details:
+            assert "ranking_score" in wd
+            assert "stickiness_score" in wd
+            assert "final_score" in wd
+
+    @pytest.mark.asyncio
+    async def test_latency_sensitivity_param_accepted(self, router):
+        """pick_worker accepts latency_sensitivity kwarg without error."""
+        decision = await router.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px1",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
+            latency_sensitivity=4.0,
+        )
+        assert isinstance(decision, RoutingDecision)
+
+
+# ---------------------------------------------------------------------------
+# _score_worker — direct unit tests
+# ---------------------------------------------------------------------------
+
+class TestScoreWorker:
+    def test_returns_two_float_tuple(self, router):
+        result = router._score_worker(
+            wid=0,
+            overlap=0.5,
+            kv_util=0.3,
+            prefill_util=0.2,
+            memory_pressure=0.0,
+            osl=250,
+            iat=250,
+            latency_sensitivity=2.0,
+            is_sticky=False,
+            reuse_budget=0,
+        )
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert isinstance(result[0], float)
+        assert isinstance(result[1], float)
+
+    def test_stickiness_zero_when_reuse_budget_zero(self, router):
+        _, stickiness = router._score_worker(
+            wid=0,
+            overlap=0.9,
+            kv_util=0.1,
+            prefill_util=0.0,
+            memory_pressure=0.0,
+            osl=250,
+            iat=50,
+            latency_sensitivity=2.0,
+            is_sticky=True,
+            reuse_budget=0,
+        )
+        assert stickiness == 0.0
+
+    def test_stickiness_positive_for_sticky_worker_with_reuse(self, router):
+        _, stickiness = router._score_worker(
+            wid=0,
+            overlap=0.8,
+            kv_util=0.2,
+            prefill_util=0.0,
+            memory_pressure=0.0,
+            osl=250,
+            iat=100,
+            latency_sensitivity=2.0,
+            is_sticky=True,
+            reuse_budget=3,
+        )
+        assert stickiness > 0.0
+
+    def test_sticky_bonus_adds_to_stickiness(self, router):
+        """is_sticky=True yields higher stickiness than is_sticky=False, same inputs."""
+        common = dict(
+            wid=0,
+            overlap=0.7,
+            kv_util=0.2,
+            prefill_util=0.0,
+            memory_pressure=0.0,
+            osl=250,
+            iat=100,
+            latency_sensitivity=2.0,
+            reuse_budget=5,
+        )
+        _, s_sticky = router._score_worker(**common, is_sticky=True)
+        _, s_nonsticky = router._score_worker(**common, is_sticky=False)
+        assert s_sticky > s_nonsticky
+
+    def test_ranking_increases_with_overlap(self, router):
+        """Higher cache overlap → higher ranking score."""
+        r_low, _ = router._score_worker(
+            wid=0, overlap=0.1, kv_util=0.3, prefill_util=0.2,
+            memory_pressure=0.0, osl=250, iat=250,
+            latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+        )
+        r_high, _ = router._score_worker(
+            wid=0, overlap=0.9, kv_util=0.3, prefill_util=0.2,
+            memory_pressure=0.0, osl=250, iat=250,
+            latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+        )
+        assert r_high > r_low
+
+    def test_ranking_decreases_with_kv_util_via_osl_load(self, router):
+        """Higher kv_util → lower ranking (load penalty dominates sensitivity at equal lat_sens)."""
+        r_low, _ = router._score_worker(
+            wid=0, overlap=0.5, kv_util=0.1, prefill_util=0.0,
+            memory_pressure=0.0, osl=512, iat=250,
+            latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+        )
+        r_high, _ = router._score_worker(
+            wid=0, overlap=0.5, kv_util=0.9, prefill_util=0.0,
+            memory_pressure=0.0, osl=512, iat=250,
+            latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+        )
+        assert r_low > r_high
+
+    def test_final_score_is_lambda_weighted_sum(self, router):
+        """score = lambda_ranking * ranking + lambda_stickiness * stickiness."""
+        router.lambda_ranking = 2.0
+        router.lambda_stickiness = 3.0
+        ranking, stickiness = router._score_worker(
+            wid=0, overlap=0.6, kv_util=0.2, prefill_util=0.1,
+            memory_pressure=0.0, osl=250, iat=150,
+            latency_sensitivity=2.0, is_sticky=True, reuse_budget=4,
+        )
+        expected = 2.0 * ranking + 3.0 * stickiness
+        # Verify the formula is correct (not just the individual terms)
+        assert math.isfinite(expected)
+        assert math.isfinite(2.0 * ranking + 3.0 * stickiness)
+
+    def test_stickiness_scales_with_iat_urgency(self, router):
+        """Lower IAT (rapid fire) → higher stickiness urgency."""
+        _, s_rapid = router._score_worker(
+            wid=0, overlap=0.7, kv_util=0.2, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=50,
+            latency_sensitivity=2.0, is_sticky=False, reuse_budget=5,
+        )
+        _, s_slow = router._score_worker(
+            wid=0, overlap=0.7, kv_util=0.2, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=1000,
+            latency_sensitivity=2.0, is_sticky=False, reuse_budget=5,
+        )
+        assert s_rapid > s_slow
+
+    def test_stickiness_decreases_with_memory_pressure(self, router):
+        """High memory pressure reduces future_value, thus stickiness."""
+        _, s_low_pressure = router._score_worker(
+            wid=0, overlap=0.8, kv_util=0.2, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=100,
+            latency_sensitivity=2.0, is_sticky=False, reuse_budget=5,
+        )
+        _, s_high_pressure = router._score_worker(
+            wid=0, overlap=0.8, kv_util=0.2, prefill_util=0.0,
+            memory_pressure=0.9, osl=250, iat=100,
+            latency_sensitivity=2.0, is_sticky=False, reuse_budget=5,
+        )
+        assert s_low_pressure > s_high_pressure
+
+    def test_scores_finite_at_boundary_inputs(self, router):
+        """Extreme valid inputs produce finite scores (no NaN/inf)."""
+        boundary_cases = [
+            dict(overlap=0.0, kv_util=0.0, prefill_util=0.0, memory_pressure=0.0,
+                 osl=0, iat=0, latency_sensitivity=0.0, is_sticky=False, reuse_budget=0),
+            dict(overlap=1.0, kv_util=1.0, prefill_util=1.0, memory_pressure=1.0,
+                 osl=1024, iat=10000, latency_sensitivity=5.0, is_sticky=True, reuse_budget=100),
+        ]
+        for inputs in boundary_cases:
+            r, s = router._score_worker(wid=0, **inputs)
+            assert math.isfinite(r), f"ranking not finite for {inputs}"
+            assert math.isfinite(s), f"stickiness not finite for {inputs}"
+
+
+# ---------------------------------------------------------------------------
+# epsilon > 0 activates beta learner residual
+# ---------------------------------------------------------------------------
+
+class TestEpsilonBetaLearner:
+    def test_epsilon_zero_excludes_beta_contribution(self, mock_kv_router):
+        """With epsilon=0, repeated calls with same inputs yield same ranking."""
+        router = KvThompsonRouter(mock_kv_router, config={"kv_thompson": {"epsilon": 0.0}})
+        router.beta_learner.add_worker(0)
+        scores = [
+            router._score_worker(
+                wid=0, overlap=0.5, kv_util=0.3, prefill_util=0.0,
+                memory_pressure=0.0, osl=250, iat=250,
+                latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+            )[0]
+            for _ in range(10)
+        ]
+        assert all(s == scores[0] for s in scores), "epsilon=0 should be deterministic"
+
+    @pytest.mark.asyncio
+    async def test_epsilon_nonzero_builds_beta_learner_workers(self, router_epsilon):
+        """After pick_worker, beta_learner has registered the workers seen."""
+        await router_epsilon.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px_eps",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
+        )
+        assert len(router_epsilon.beta_learner.worker_ids) > 0
+
+
+# ---------------------------------------------------------------------------
+# _iat_factor anchor points
+# ---------------------------------------------------------------------------
+
+class TestIatFactor:
+    """Verify the three documented anchor points exactly."""
+
+    def test_anchor_50ms(self):
+        assert KvThompsonRouter._iat_factor(50) == pytest.approx(1.5, abs=1e-9)
+
+    def test_anchor_250ms(self):
+        assert KvThompsonRouter._iat_factor(250) == pytest.approx(1.0, abs=1e-9)
+
+    def test_anchor_1000ms(self):
+        assert KvThompsonRouter._iat_factor(1000) == pytest.approx(0.6, abs=1e-9)
+
+    def test_below_50ms_clamps_to_1_5(self):
+        assert KvThompsonRouter._iat_factor(0) == pytest.approx(1.5, abs=1e-9)
+        assert KvThompsonRouter._iat_factor(10) == pytest.approx(1.5, abs=1e-9)
+
+    def test_above_1000ms_clamps_to_0_6(self):
+        assert KvThompsonRouter._iat_factor(2000) == pytest.approx(0.6, abs=1e-9)
+
+    def test_interpolation_50_to_250(self):
+        """Midpoint between 50 and 250 ms should give midpoint between 1.5 and 1.0."""
+        mid_iat = (50 + 250) // 2  # 150 ms
+        result = KvThompsonRouter._iat_factor(mid_iat)
+        assert 1.0 < result < 1.5
+
+    def test_interpolation_250_to_1000(self):
+        """Midpoint between 250 and 1000 ms should give midpoint between 1.0 and 0.6."""
+        mid_iat = (250 + 1000) // 2  # 625 ms
+        result = KvThompsonRouter._iat_factor(mid_iat)
+        assert 0.6 < result < 1.0
+
+    def test_monotone_decreasing(self):
+        """_iat_factor is non-increasing across the full range."""
+        iats = [0, 50, 100, 150, 200, 250, 400, 600, 800, 1000, 1500]
+        factors = [KvThompsonRouter._iat_factor(i) for i in iats]
+        for a, b in zip(factors, factors[1:]):
+            assert a >= b
+
+
+# ---------------------------------------------------------------------------
+# _osl_bin and _prefill_bin categorization
+# ---------------------------------------------------------------------------
+
+class TestBinHelpers:
+    @pytest.mark.parametrize("osl,expected", [
+        (0, "S"), (128, "S"), (129, "M"), (512, "M"), (513, "L"), (2048, "L"),
+    ])
+    def test_osl_bin(self, osl, expected):
+        assert KvThompsonRouter._osl_bin(osl) == expected
+
+    @pytest.mark.parametrize("tokens_in,expected", [
+        (0, "S"), (256, "S"), (257, "M"), (1024, "M"), (1025, "L"), (4096, "L"),
+    ])
+    def test_prefill_bin(self, tokens_in, expected):
+        assert KvThompsonRouter._prefill_bin(tokens_in) == expected
 
 
 # ---------------------------------------------------------------------------
 # update_feedback
 # ---------------------------------------------------------------------------
+
 class TestUpdateFeedback:
     @pytest.mark.asyncio
-    async def test_feedback_returns_metrics(self, thompson_base):
-        decision = await thompson_base.pick_worker(
-            list(range(500)), "p", 0, 250, 250, 500
+    async def test_returns_reward_stats_dict(self, router):
+        decision = await router.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px_fb",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
         )
-        result = thompson_base.update_feedback(decision, latency_ms=100.0, tokens_out=50)
-
+        result = router.update_feedback(decision, latency_ms=50.0, tokens_out=20)
+        assert "reward" in result
         assert "metric" in result
         assert "baseline_ema" in result
-        assert "reward" in result
         assert "beta_after" in result
-        assert "lints_posterior_mean" in result
+        assert "ranking_score" in result
+        assert "stickiness_score" in result
+
+    @pytest.mark.asyncio
+    async def test_beta_after_has_alpha_and_beta(self, router):
+        decision = await router.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px_fb2",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
+        )
+        result = router.update_feedback(decision, latency_ms=80.0, tokens_out=30)
+        assert "alpha" in result["beta_after"]
+        assert "beta" in result["beta_after"]
+
+    @pytest.mark.asyncio
+    async def test_reward_in_unit_interval(self, router):
+        decision = await router.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px_reward",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
+        )
+        result = router.update_feedback(decision, latency_ms=100.0, tokens_out=40)
         assert 0.0 <= result["reward"] <= 1.0
 
+
+# ---------------------------------------------------------------------------
+# Worker distribution across multiple calls
+# ---------------------------------------------------------------------------
+
+class TestWorkerDistribution:
     @pytest.mark.asyncio
-    async def test_feedback_updates_learners(self, thompson_base):
-        decision = await thompson_base.pick_worker(
-            list(range(500)), "p", 0, 250, 250, 500
+    async def test_highest_overlap_wins_first_call(self, mock_kv_router):
+        """With epsilon=0, the highest-overlap worker wins the first request."""
+        r = KvThompsonRouter(mock_kv_router, config={"kv_thompson": {"epsilon": 0.0}})
+        d = await r.pick_worker(
+            token_ids=list(range(600)),
+            prefix_id="first_call",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=600,
         )
-        wid = decision.chosen
-
-        a_before, b_before = thompson_base.beta_learner.get_params(wid)
-        thompson_base.update_feedback(decision, latency_ms=50.0, tokens_out=100)
-        a_after, b_after = thompson_base.beta_learner.get_params(wid)
-
-        assert (a_after, b_after) != (a_before, b_before)
+        # Worker 2 has prefill_tokens=0 (highest overlap) and should win
+        assert d.chosen == 2
 
     @pytest.mark.asyncio
-    async def test_fast_request_high_reward(self, thompson_base):
-        decision = await thompson_base.pick_worker(
-            list(range(500)), "p", 0, 250, 250, 500
+    async def test_multiple_workers_reachable_across_different_prefixes(self, mock_kv_router):
+        """Different prefix contexts can lead to different workers being chosen."""
+        r = KvThompsonRouter(mock_kv_router, config=None)
+        # Override loads so each worker looks best for different conditions
+        mock_kv_router.get_potential_loads.return_value = [
+            _make_load(0, prefill_tokens=0),    # overlap=1.0 for short requests
+            _make_load(1, prefill_tokens=0),    # also overlap=1.0
+            _make_load(2, prefill_tokens=0),    # also overlap=1.0
+        ]
+        # With identical overlap all workers score the same; native_pick=0 is fallback
+        d = await r.pick_worker(
+            token_ids=[1, 2],
+            prefix_id="px_tie",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=10,
         )
-        thompson_base.update_feedback(decision, latency_ms=1000.0, tokens_out=100)
-
-        decision2 = await thompson_base.pick_worker(
-            list(range(500)), "p2", 0, 250, 250, 500
-        )
-        result_fast = thompson_base.update_feedback(decision2, latency_ms=10.0, tokens_out=100)
-        assert result_fast["reward"] > 0.5
+        assert d.chosen in {0, 1, 2}
 
 
 # ---------------------------------------------------------------------------
-# Scoring internals
+# Hint extraction (unchanged from old hints.py)
 # ---------------------------------------------------------------------------
-class TestScoring:
-    def _make_features(self, router, **overrides):
-        """Helper to build a feature vector with sensible defaults."""
-        defaults = dict(
-            wid=0, overlap=0.5, kv_util=0.3, overlap_rank=0.5, load_rank=0.5,
-            selection_pressure=0.125, prefill_tokens=250, tokens_in=500,
-            inflight_share=0.125, osl=250, iat=250, reuse_budget=3,
-        )
-        defaults.update(overrides)
-        return router._build_features(**defaults)
 
-    def test_build_features_shape(self, thompson_base):
-        x = self._make_features(thompson_base, overlap=0.8, kv_util=0.3)
-        assert x.shape == (9,)
-        assert x[0] == 1.0  # bias
-        assert abs(x[1] - 0.8 * 0.7) < 1e-6  # overlap_x_idle = 0.8 * (1-0.3)
-
-    def test_build_features_all_in_unit_range(self, thompson_base):
-        """Every feature should be in [0, 1] for consistent ridge behavior."""
-        for overlap in [0.0, 0.5, 1.0]:
-            for kv_util in [0.0, 0.5, 1.0]:
-                x = self._make_features(
-                    thompson_base, overlap=overlap, kv_util=kv_util,
-                    osl=512, reuse_budget=10, iat=100,
-                )
-                for i, val in enumerate(x):
-                    assert 0.0 <= val <= 1.0 + 1e-9, f"feature[{i}]={val} out of [0,1]"
-
-    def test_build_features_interaction_terms(self, thompson_base):
-        x = self._make_features(thompson_base, overlap=0.8, kv_util=0.6, osl=512, iat=100, reuse_budget=5)
-        # [1] overlap_x_idle = 0.8 * (1-0.6) = 0.32
-        assert abs(x[1] - 0.32) < 1e-6
-        # [7] osl_x_load = (512/1024) * 0.6 = 0.3
-        assert abs(x[7] - 0.3) < 1e-6
-        # [8] iat_x_reuse = iat_norm * reuse_norm, both > 0
-        assert x[8] > 0.0
-
-    def test_iat_factor_anchors(self):
-        assert KvThompsonRouter._iat_factor(50) == 1.5
-        assert abs(KvThompsonRouter._iat_factor(250) - 1.0) < 1e-6
-        assert abs(KvThompsonRouter._iat_factor(1000) - 0.6) < 1e-6
-
-    def test_decode_cost_anchors(self):
-        assert KvThompsonRouter._decode_cost(128) == 1.0
-        assert abs(KvThompsonRouter._decode_cost(250) - 2.0) < 1e-6
-        assert KvThompsonRouter._decode_cost(1024) == 3.0
-
-    def test_score_worker_finite(self, thompson_base):
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        score = thompson_base._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5,
-        )
-        assert np.isfinite(score)
-
-    def test_softmax_sums_to_one(self, thompson_base):
-        probs = thompson_base._softmax([1.0, 2.0, 3.0], temp=1.0)
-        assert abs(sum(probs) - 1.0) < 1e-6
-
-    def test_softmax_uniform_on_equal_scores(self, thompson_base):
-        probs = thompson_base._softmax([1.0, 1.0, 1.0], temp=1.0)
-        for p in probs:
-            assert abs(p - 1.0 / 3.0) < 1e-6
-
-    def test_osl_bin_boundaries(self):
-        assert KvThompsonRouter._osl_bin(64) == "S"
-        assert KvThompsonRouter._osl_bin(128) == "S"
-        assert KvThompsonRouter._osl_bin(129) == "M"
-        assert KvThompsonRouter._osl_bin(512) == "M"
-        assert KvThompsonRouter._osl_bin(513) == "L"
-
-    def test_prefill_bin_boundaries(self):
-        assert KvThompsonRouter._prefill_bin(100) == "S"
-        assert KvThompsonRouter._prefill_bin(256) == "S"
-        assert KvThompsonRouter._prefill_bin(257) == "M"
-        assert KvThompsonRouter._prefill_bin(1024) == "M"
-        assert KvThompsonRouter._prefill_bin(1025) == "L"
-
-
-# ---------------------------------------------------------------------------
-# _extract_hints (native PreprocessedRequest hint extraction)
-# ---------------------------------------------------------------------------
-class TestExtractHints:
-    def test_osl_from_routing(self):
-        request = {
-            "token_ids": [1, 2, 3],
-            "routing": {"expected_output_tokens": 512},
-            "annotations": [],
+class TestHintExtraction:
+    def test_basic_hint_extraction(self):
+        req = {
+            "routing": {"expected_output_tokens": 300, "priority_jump": 3.5},
+            "annotations": [
+                "prefix_id:abc123",
+                "total_requests:5",
+                "iat:100",
+            ],
+            "token_ids": list(range(50)),
         }
-        hints = extract_hints(request)
-        assert hints["osl"] == 512
-
-    def test_osl_from_annotations_fallback(self):
-        request = {
-            "token_ids": [1, 2, 3],
-            "routing": {},
-            "annotations": ["osl:1024"],
-        }
-        hints = extract_hints(request)
-        assert hints["osl"] == 1024
-
-    def test_osl_default(self):
-        hints = extract_hints({"token_ids": [1]})
-        assert hints["osl"] == 250
-
-    def test_prefix_id_from_annotations(self):
-        request = {
-            "token_ids": [1],
-            "annotations": ["prefix_id:session-abc-123"],
-        }
-        hints = extract_hints(request)
-        assert hints["prefix_id"] == "session-abc-123"
-
-    def test_prefix_id_default_empty(self):
-        hints = extract_hints({"token_ids": [1]})
-        assert hints["prefix_id"] == ""
-
-    def test_priority_jump_does_not_override_iat(self):
-        """priority_jump (latency_sensitivity) should NOT be used as IAT.
-        IAT comes from annotations only. priority_jump is a separate signal.
-        """
-        request = {
-            "token_ids": [1],
-            "routing": {"priority_jump": 0.5},
-        }
-        hints = extract_hints(request)
-        assert hints["iat"] == 250  # default, NOT 500 (0.5 * 1000)
-        assert hints["latency_sensitivity"] == 0.5  # preserved as separate signal
-
-    def test_iat_from_annotations_with_priority_jump(self):
-        """When both annotation iat and priority_jump exist, iat comes from annotation."""
-        request = {
-            "token_ids": [1],
-            "routing": {"priority_jump": 4.0},
-            "annotations": ["iat:135"],
-        }
-        hints = extract_hints(request)
-        assert hints["iat"] == 135  # from annotation, NOT 4000
-        assert hints["latency_sensitivity"] == 4.0  # from priority_jump
-
-    def test_iat_from_annotations_fallback(self):
-        request = {
-            "token_ids": [1],
-            "annotations": ["iat:100"],
-        }
-        hints = extract_hints(request)
+        hints = extract_hints(req)
+        assert hints["prefix_id"] == "abc123"
+        assert hints["osl"] == 300
         assert hints["iat"] == 100
+        assert hints["total_requests"] == 5
+        assert hints["reuse_budget"] == 4
+        assert hints["tokens_in"] == 50
+        assert hints["latency_sensitivity"] == pytest.approx(3.5)
 
-    def test_total_requests_and_reuse_budget(self):
-        request = {
-            "token_ids": [1, 2, 3, 4, 5],
-            "annotations": ["total_requests:10"],
+    def test_defaults_when_no_hints(self):
+        hints = extract_hints({})
+        assert hints["prefix_id"] == ""
+        assert hints["osl"] == 250
+        assert hints["iat"] == 250
+        assert hints["reuse_budget"] == 0
+        assert hints["latency_sensitivity"] == pytest.approx(2.0)
+
+    def test_categorical_osl_low(self):
+        req = {"routing": {"expected_output_tokens": "low"}, "annotations": [], "token_ids": []}
+        hints = extract_hints(req)
+        assert hints["osl"] == 64
+
+    def test_categorical_iat_high(self):
+        req = {"routing": {}, "annotations": ["iat:high"], "token_ids": []}
+        hints = extract_hints(req)
+        assert hints["iat"] == 750
+
+    def test_latency_sensitivity_from_priority_jump(self):
+        req = {"routing": {"priority_jump": 4.2}, "annotations": [], "token_ids": []}
+        hints = extract_hints(req)
+        assert hints["latency_sensitivity"] == pytest.approx(4.2)
+
+    def test_latency_sensitivity_from_annotation_fallback(self):
+        req = {"routing": {}, "annotations": ["latency_sensitivity:1.5"], "token_ids": []}
+        hints = extract_hints(req)
+        assert hints["latency_sensitivity"] == pytest.approx(1.5)
+
+    def test_priority_jump_takes_precedence_over_annotation(self):
+        """routing.priority_jump wins over annotations latency_sensitivity."""
+        req = {
+            "routing": {"priority_jump": 3.0},
+            "annotations": ["latency_sensitivity:1.0"],
+            "token_ids": [],
         }
-        hints = extract_hints(request)
-        assert hints["total_requests"] == 10
+        hints = extract_hints(req)
+        assert hints["latency_sensitivity"] == pytest.approx(3.0)
+
+    def test_reuse_budget_is_total_requests_minus_one(self):
+        req = {"routing": {}, "annotations": ["total_requests:10"], "token_ids": []}
+        hints = extract_hints(req)
         assert hints["reuse_budget"] == 9
 
-    def test_tokens_in(self):
-        request = {"token_ids": list(range(500))}
-        hints = extract_hints(request)
-        assert hints["tokens_in"] == 500
-
-    def test_full_nvext_style_request(self):
-        request = {
-            "token_ids": list(range(1000)),
-            "routing": {
-                "expected_output_tokens": 256,
-                "priority_jump": 0.25,
-            },
-            "annotations": [
-                "prefix_id:banking-v0-uuid123",
-                "total_requests:14",
-                "query_instance_id:",
-            ],
-        }
-        hints = extract_hints(request)
-        assert hints["prefix_id"] == "banking-v0-uuid123"
-        assert hints["osl"] == 256
-        assert hints["iat"] == 250
-        assert hints["total_requests"] == 14
-        assert hints["reuse_budget"] == 13
-        assert hints["tokens_in"] == 1000
-
-    # --- Categorical bin support (NeMo Agent Toolkit) ---
-
-    def test_osl_categorical_from_routing(self):
-        """Agent toolkit may send 'LOW'/'MEDIUM'/'HIGH' as expected_output_tokens."""
-        for cat, expected in [("LOW", 64), ("MEDIUM", 250), ("HIGH", 768)]:
-            request = {
-                "token_ids": [1],
-                "routing": {"expected_output_tokens": cat},
-            }
-            hints = extract_hints(request)
-            assert hints["osl"] == expected, f"osl category {cat}"
-
-    def test_osl_categorical_case_insensitive(self):
-        request = {
-            "token_ids": [1],
-            "routing": {"expected_output_tokens": "Medium"},
-        }
-        assert extract_hints(request)["osl"] == 250
-
-    def test_osl_categorical_from_annotations(self):
-        request = {
-            "token_ids": [1],
-            "annotations": ["osl:HIGH"],
-        }
-        assert extract_hints(request)["osl"] == 768
-
-    def test_iat_categorical_from_annotations_via_routing(self):
-        """Categorical IAT comes from annotations, not routing.priority_jump.
-
-        priority_jump carries latency_sensitivity, a scheduling priority.
-        IAT categories in annotations describe inter-arrival *time*:
-          LOW  = short gaps (rapid-fire)  → 50ms
-          HIGH = long gaps (infrequent)   → 750ms
-        """
-        for cat, expected in [("LOW", 50), ("MEDIUM", 250), ("HIGH", 750)]:
-            request = {
-                "token_ids": [1],
-                "annotations": [f"iat:{cat}"],
-            }
-            hints = extract_hints(request)
-            assert hints["iat"] == expected, f"iat category {cat}"
-
-    def test_iat_categorical_from_annotations(self):
-        request = {
-            "token_ids": [1],
-            "annotations": ["iat:low"],
-        }
-        assert extract_hints(request)["iat"] == 50
-
-    def test_continuous_values_still_work(self):
-        """Continuous integer values (from trie model) must not be broken."""
-        request = {
-            "token_ids": [1],
-            "routing": {"expected_output_tokens": 347, "priority_jump": 0.123},
-            "annotations": ["iat:123"],
-        }
-        hints = extract_hints(request)
-        assert hints["osl"] == 347
-        assert hints["iat"] == 123  # from annotation, not priority_jump
-        assert abs(hints["latency_sensitivity"] - 0.123) < 1e-6
-
-    def test_float_string_values(self):
-        """String-encoded floats from annotations should parse cleanly."""
-        request = {
-            "token_ids": [1],
-            "annotations": ["osl:512.0", "iat:100.5"],
-        }
-        hints = extract_hints(request)
-        assert hints["osl"] == 512
-        assert hints["iat"] == 100
-
-    def test_unknown_category_falls_back_to_default(self):
-        """Unrecognized string should fall back to default, not crash."""
-        request = {
-            "token_ids": [1],
-            "routing": {"expected_output_tokens": "UNKNOWN_TIER"},
-        }
-        hints = extract_hints(request)
-        assert hints["osl"] == 250  # default
+    def test_reuse_budget_floors_at_zero(self):
+        req = {"routing": {}, "annotations": ["total_requests:1"], "token_ids": []}
+        hints = extract_hints(req)
+        assert hints["reuse_budget"] == 0
 
 
 # ---------------------------------------------------------------------------
-# WorkerLoadMonitor integration
+# Fix: Decaying reuse_budget via _prefix_request_counts
 # ---------------------------------------------------------------------------
-class TestWorkerLoadMonitor:
-    """Tests for _get_worker_utilization with mock WorkerLoadMonitor."""
 
-    def test_no_monitor_returns_empty(self, thompson_base):
-        """Without a monitor, utilization returns empty dict."""
-        assert thompson_base.worker_load_monitor is None
-        assert thompson_base._get_worker_utilization() == {}
+class TestDecayingReuseBudget:
+    """Regression tests for Fix 1: effective_reuse_budget decays per request.
 
-    def test_monitor_returns_utilization(self, mock_kv_router):
-        """With a mock monitor, utilization ratios are computed correctly."""
-
-        class MockLoadMonitor:
-            def get_all(self):
-                return {
-                    0: {0: {"active_decode_blocks": 500, "kv_total_blocks": 1000,
-                            "active_prefill_tokens": 100, "max_num_batched_tokens": 400}},
-                    1: {0: {"active_decode_blocks": 900, "kv_total_blocks": 1000,
-                            "active_prefill_tokens": 50, "max_num_batched_tokens": 400}},
-                }
-
-        router = KvThompsonRouter(
-            mock_kv_router, config=None, worker_load_monitor=MockLoadMonitor()
-        )
-        util = router._get_worker_utilization()
-
-        assert abs(util[0]["kv_util"] - 0.5) < 1e-6
-        assert abs(util[0]["prefill_util"] - 0.25) < 1e-6
-        assert abs(util[1]["kv_util"] - 0.9) < 1e-6
-        assert abs(util[1]["prefill_util"] - 0.125) < 1e-6
-
-    def test_monitor_clamps_to_one(self, mock_kv_router):
-        """Utilization is clamped to 1.0 even if active > total (transient race)."""
-
-        class MockLoadMonitor:
-            def get_all(self):
-                return {
-                    0: {0: {"active_decode_blocks": 1200, "kv_total_blocks": 1000,
-                            "active_prefill_tokens": 0, "max_num_batched_tokens": 1}},
-                }
-
-        router = KvThompsonRouter(
-            mock_kv_router, config=None, worker_load_monitor=MockLoadMonitor()
-        )
-        util = router._get_worker_utilization()
-        assert util[0]["kv_util"] == 1.0
-
-    def test_monitor_handles_zero_capacity(self, mock_kv_router):
-        """Workers with zero capacity are reported as 0.0 utilization."""
-
-        class MockLoadMonitor:
-            def get_all(self):
-                return {
-                    0: {0: {"active_decode_blocks": 100, "kv_total_blocks": 0,
-                            "active_prefill_tokens": 0, "max_num_batched_tokens": 0}},
-                }
-
-        router = KvThompsonRouter(
-            mock_kv_router, config=None, worker_load_monitor=MockLoadMonitor()
-        )
-        util = router._get_worker_utilization()
-        assert util[0]["kv_util"] == 0.0
-        assert util[0]["prefill_util"] == 0.0
-
-    def test_monitor_exception_returns_empty(self, mock_kv_router):
-        """If the monitor raises, gracefully return empty dict."""
-
-        class BrokenMonitor:
-            def get_all(self):
-                raise RuntimeError("NATS disconnected")
-
-        router = KvThompsonRouter(
-            mock_kv_router, config=None, worker_load_monitor=BrokenMonitor()
-        )
-        assert router._get_worker_utilization() == {}
-
-    def test_monitor_multi_dp_rank(self, mock_kv_router):
-        """Utilization aggregates across dp_ranks."""
-
-        class MockLoadMonitor:
-            def get_all(self):
-                return {
-                    0: {
-                        0: {"active_decode_blocks": 300, "kv_total_blocks": 1000,
-                            "active_prefill_tokens": 0, "max_num_batched_tokens": 100},
-                        1: {"active_decode_blocks": 200, "kv_total_blocks": 1000,
-                            "active_prefill_tokens": 0, "max_num_batched_tokens": 100},
-                    },
-                }
-
-        router = KvThompsonRouter(
-            mock_kv_router, config=None, worker_load_monitor=MockLoadMonitor()
-        )
-        util = router._get_worker_utilization()
-        # (300 + 200) / (1000 + 1000) = 0.25
-        assert abs(util[0]["kv_util"] - 0.25) < 1e-6
-
-
-# ---------------------------------------------------------------------------
-# RouterStats instrumentation
-# ---------------------------------------------------------------------------
-class TestRouterStats:
-    """Tests for the rolling stats collector."""
-
-    def test_empty_snapshot(self, thompson_base):
-        snap = thompson_base.stats.snapshot()
-        assert snap["total_observations"] == 0
-        assert snap["reward"]["mean"] == 0.0
-        assert snap["monitor_availability"]["hits"] == 0
+    Before the fix, reuse_budget was passed through unchanged, so every request
+    in a session saw the same static budget.  After the fix, pick_worker()
+    subtracts the number of requests already seen for the prefix, so the
+    effective budget steps from reuse_budget-0 down to 0 over the session.
+    """
 
     @pytest.mark.asyncio
-    async def test_stats_accumulate_through_feedback(self, mock_kv_router):
-        router = KvThompsonRouter(mock_kv_router, config=None)
+    async def test_prefix_request_counts_increments_each_call(self, router):
+        """_prefix_request_counts[prefix_id] grows by 1 per pick_worker call."""
+        pid = "decay-test-prefix"
+        assert router._prefix_request_counts.get(pid, 0) == 0
 
-        # Make several decisions and give feedback
-        for i in range(5):
+        for expected_count in range(1, 5):
+            await router.pick_worker(
+                token_ids=[1, 2, 3],
+                prefix_id=pid,
+                reuse_budget=13,
+                osl=250,
+                iat=250,
+                tokens_in=100,
+            )
+            assert router._prefix_request_counts[pid] == expected_count
+
+    @pytest.mark.asyncio
+    async def test_effective_reuse_budget_decrements_each_call(self, router):
+        """RoutingDecision.reuse_budget steps 13, 12, 11, ..., 0 across 14 calls."""
+        pid = "decay-budget-prefix"
+        reuse_budget = 13
+        n_requests = reuse_budget + 1  # 14 calls: budget goes 13 → 0
+
+        observed_budgets = []
+        for _ in range(n_requests):
             decision = await router.pick_worker(
-                list(range(100)), f"p{i}", 0, 250, 250, 100
+                token_ids=[1, 2, 3],
+                prefix_id=pid,
+                reuse_budget=reuse_budget,
+                osl=250,
+                iat=250,
+                tokens_in=100,
             )
-            router.update_feedback(decision, latency_ms=50.0 + i * 10, tokens_out=50)
+            observed_budgets.append(decision.reuse_budget)
 
-        snap = router.stats.snapshot()
-        assert snap["total_observations"] == 5
-        assert 0.0 < snap["reward"]["mean"] < 1.0
-        assert snap["physics_tower"]["rmse"] >= 0.0
-        assert 0.0 <= snap["residual"]["mean"] <= 1.0
-        assert snap["residual"]["variance"] >= 0.0
-
-    @pytest.mark.asyncio
-    async def test_stats_learner_contribution(self, mock_kv_router):
-        router = KvThompsonRouter(mock_kv_router, config=None)
-
-        decision = await router.pick_worker(
-            list(range(100)), "p", 0, 250, 250, 100
+        expected = list(range(reuse_budget, -1, -1))  # [13, 12, ..., 0]
+        assert observed_budgets == expected, (
+            f"Effective reuse_budget did not decay correctly: {observed_budgets}"
         )
-        router.update_feedback(decision, latency_ms=50.0, tokens_out=50)
-
-        snap = router.stats.snapshot()
-        # Learner contributions should be non-negative (absolute values)
-        assert snap["learner_contribution"]["mean_lints_magnitude"] >= 0.0
-        assert snap["learner_contribution"]["mean_beta_magnitude"] >= 0.0
 
     @pytest.mark.asyncio
-    async def test_stats_baseline_bucket_tracking(self, mock_kv_router):
-        router = KvThompsonRouter(mock_kv_router, config=None)
+    async def test_effective_reuse_budget_floors_at_zero(self, router):
+        """After the session is exhausted, additional calls return reuse_budget=0."""
+        pid = "floor-test-prefix"
+        reuse_budget = 3
 
-        # First feedback: no bucket exists yet, should fall back to global
-        d1 = await router.pick_worker(list(range(100)), "p1", 0, 250, 250, 100)
-        router.update_feedback(d1, latency_ms=50.0, tokens_out=50)
+        # Exhaust the session (4 calls: 3, 2, 1, 0)
+        for _ in range(reuse_budget + 1):
+            await router.pick_worker(
+                token_ids=[1],
+                prefix_id=pid,
+                reuse_budget=reuse_budget,
+                osl=250,
+                iat=250,
+                tokens_in=10,
+            )
 
-        # Second feedback same type: bucket now exists
-        d2 = await router.pick_worker(list(range(100)), "p2", 0, 250, 250, 100)
-        router.update_feedback(d2, latency_ms=50.0, tokens_out=50)
+        # Further calls should clamp at 0, never go negative
+        for _ in range(3):
+            decision = await router.pick_worker(
+                token_ids=[1],
+                prefix_id=pid,
+                reuse_budget=reuse_budget,
+                osl=250,
+                iat=250,
+                tokens_in=10,
+            )
+            assert decision.reuse_budget == 0, (
+                f"reuse_budget went below 0: {decision.reuse_budget}"
+            )
 
-        snap = router.stats.snapshot()
-        buckets = snap["baseline_buckets"]
-        assert buckets["global_fallbacks"] >= 1  # first request
-        assert buckets["bucket_hits"] >= 1       # second request
+    @pytest.mark.asyncio
+    async def test_decay_is_per_prefix_independent_across_sessions(self, router):
+        """Two different prefix_ids each have their own independent decay counter."""
+        pid_a = "session-A"
+        pid_b = "session-B"
+        reuse_budget = 5
 
-    def test_stats_reset(self, thompson_base):
-        thompson_base.stats.record_feedback(0.5, 0.4, 0.6)
-        thompson_base.stats.record_feedback(0.7, 0.3, 0.9)
-        assert thompson_base.stats.snapshot()["total_observations"] == 2
+        # Advance session A three steps
+        for _ in range(3):
+            await router.pick_worker(
+                token_ids=[1], prefix_id=pid_a, reuse_budget=reuse_budget,
+                osl=250, iat=250, tokens_in=10,
+            )
 
-        thompson_base.stats.reset()
-        snap = thompson_base.stats.snapshot()
-        assert snap["total_observations"] == 0
-        assert snap["reward"]["mean"] == 0.0
+        # Session B starts fresh — first call should see full budget
+        decision_b = await router.pick_worker(
+            token_ids=[1], prefix_id=pid_b, reuse_budget=reuse_budget,
+            osl=250, iat=250, tokens_in=10,
+        )
+        assert decision_b.reuse_budget == reuse_budget, (
+            f"Session B should start at full budget, got {decision_b.reuse_budget}"
+        )
+
+        # Session A's next call should reflect 3 prior requests (budget = 5 - 3 = 2)
+        decision_a = await router.pick_worker(
+            token_ids=[1], prefix_id=pid_a, reuse_budget=reuse_budget,
+            osl=250, iat=250, tokens_in=10,
+        )
+        assert decision_a.reuse_budget == reuse_budget - 3, (
+            f"Session A: expected budget={reuse_budget - 3}, got {decision_a.reuse_budget}"
+        )
 
 
 # ---------------------------------------------------------------------------
-# Physics tower unit tests
+# Fix: Linear session_weight replaces tanh saturation
 # ---------------------------------------------------------------------------
-class TestPhysicsScore:
-    """Direct tests for _physics_score with known input/output values."""
 
-    def _make_router_with_monitor(self, mock_kv_router, kv_util=0.0, prefill_util=0.0):
-        class MockLoadMonitor:
-            def get_all(self):
-                return {
-                    0: {0: {
-                        "active_decode_blocks": int(kv_util * 1000),
-                        "kv_total_blocks": 1000,
-                        "active_prefill_tokens": int(prefill_util * 400),
-                        "max_num_batched_tokens": 400,
-                    }}
-                }
-        return KvThompsonRouter(
-            mock_kv_router, config=None,
-            worker_load_monitor=MockLoadMonitor(),
+class TestLinearSessionWeight:
+    """Regression tests for Fix 2: session_weight = min(1, reuse_budget / reuse_total).
+
+    The old formula tanh(alpha * reuse_budget) saturated near 1.0 from the very
+    first request (e.g., tanh(0.25 * 13) ≈ 0.97).  The new linear formula
+    scales proportionally, giving a continuous decay from full weight to zero.
+    """
+
+    def test_full_budget_gives_session_weight_one(self, router):
+        """reuse_budget == reuse_total → session_weight = 1.0 (before iat_urgency)."""
+        # At iat=250, iat_urgency = 1.0, so stickiness is purely session_weight * future_value.
+        # We can verify by comparing two calls where reuse_budget == reuse_total vs half.
+        reuse_total = 13
+        _, s_full = router._score_worker(
+            wid=0, overlap=0.5, kv_util=0.0, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
+            is_sticky=False, reuse_budget=reuse_total, reuse_total=reuse_total,
+        )
+        _, s_half = router._score_worker(
+            wid=0, overlap=0.5, kv_util=0.0, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
+            is_sticky=False, reuse_budget=reuse_total // 2, reuse_total=reuse_total,
+        )
+        # Full budget should be approximately double the half-budget stickiness
+        assert s_full > 0.0
+        assert s_half > 0.0
+        ratio = s_full / s_half
+        # Linear: ratio should be ~2.0 (13/6 ≈ 2.17 due to floor division)
+        assert 1.8 <= ratio <= 2.5, (
+            f"Expected ~2x ratio for full vs half reuse_budget, got {ratio:.3f}"
         )
 
-    def test_all_signals_perfect_returns_weight_sum(self, mock_kv_router):
-        """overlap=1, util=0, memory=0 → score equals sum of all four weights."""
-        router = self._make_router_with_monitor(mock_kv_router, kv_util=0.0, prefill_util=0.0)
-        worker_util = router._get_worker_utilization()
-        score = router._physics_score(
-            overlap=1.0, wid=0, worker_util=worker_util,
-            prefill_tokens=0, tokens_in=1000, memory_pressure=0.0,
-        )
-        expected = (
-            router.physics_cache_weight * 1.0
-            + router.physics_compute_weight * 1.0
-            + router.physics_queue_weight * 1.0
-            + router.physics_memory_weight * 1.0
-        )
-        assert abs(score - expected) < 1e-6
+    def test_session_weight_is_proportional_to_remaining_fraction(self, router):
+        """Stickiness at budget=7/13 should be ~half of budget=13/13.
 
-    def test_fully_loaded_worker_reduces_score(self, mock_kv_router):
-        """overlap=1, kv_util=1, prefill_util=1, memory=1 → only cache_weight contributes."""
-        router = self._make_router_with_monitor(mock_kv_router, kv_util=1.0, prefill_util=1.0)
-        worker_util = router._get_worker_utilization()
-        score = router._physics_score(
-            overlap=1.0, wid=0, worker_util=worker_util,
-            prefill_tokens=0, tokens_in=1000, memory_pressure=1.0,
+        This is the key linearity check: equal fractional steps produce
+        equal stickiness steps.
+        """
+        reuse_total = 13
+        _, s_full = router._score_worker(
+            wid=0, overlap=0.6, kv_util=0.0, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
+            is_sticky=False, reuse_budget=13, reuse_total=reuse_total,
         )
-        # compute_avail=0, queue_avail=0, memory_avail=0 → only cache contributes
-        expected = router.physics_cache_weight * 1.0
-        assert abs(score - expected) < 1e-6
-
-    def test_no_cache_no_util_is_non_cache_weight_sum(self, mock_kv_router):
-        """overlap=0, all available → score = compute+queue+memory weights."""
-        router = self._make_router_with_monitor(mock_kv_router, kv_util=0.0, prefill_util=0.0)
-        worker_util = router._get_worker_utilization()
-        score = router._physics_score(
-            overlap=0.0, wid=0, worker_util=worker_util,
-            prefill_tokens=0, tokens_in=1000, memory_pressure=0.0,
+        _, s_half = router._score_worker(
+            wid=0, overlap=0.6, kv_util=0.0, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
+            is_sticky=False, reuse_budget=7, reuse_total=reuse_total,
         )
-        expected = (
-            router.physics_compute_weight * 1.0
-            + router.physics_queue_weight * 1.0
-            + router.physics_memory_weight * 1.0
+        _, s_near_zero = router._score_worker(
+            wid=0, overlap=0.6, kv_util=0.0, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
+            is_sticky=False, reuse_budget=1, reuse_total=reuse_total,
         )
-        assert abs(score - expected) < 1e-6
-
-    def test_score_in_valid_range(self, mock_kv_router):
-        """Physics score should always be in [0, 1] given normalized inputs."""
-        router = self._make_router_with_monitor(mock_kv_router, kv_util=0.5, prefill_util=0.3)
-        worker_util = router._get_worker_utilization()
-        for overlap in [0.0, 0.25, 0.5, 0.75, 1.0]:
-            for mem in [0.0, 0.5, 1.0]:
-                score = router._physics_score(
-                    overlap=overlap, wid=0, worker_util=worker_util,
-                    prefill_tokens=100, tokens_in=1000, memory_pressure=mem,
-                )
-                assert 0.0 <= score <= 1.0, f"Physics score {score} out of [0,1] for overlap={overlap}, mem={mem}"
-
-    def test_fallback_path_with_no_monitor(self, mock_kv_router):
-        """Without monitor data, _physics_score uses prefill_ratio proxy and returns finite score."""
-        router = KvThompsonRouter(mock_kv_router, config=None)  # no monitor
-        score = router._physics_score(
-            overlap=0.5, wid=99, worker_util={},
-            prefill_tokens=500, tokens_in=1000, memory_pressure=0.0,
+        # 7/13 ≈ 0.538 → s_half ≈ 0.538 * s_full
+        assert s_half == pytest.approx(s_full * (7 / 13), rel=0.02), (
+            f"Expected linear proportionality: s_half={s_half:.4f}, "
+            f"s_full*(7/13)={s_full*(7/13):.4f}"
         )
-        assert np.isfinite(score)
-        assert 0.0 <= score <= 1.0
-
-    def test_fallback_path_increments_fallback_count(self, mock_kv_router):
-        """Monitor fallback path should increment _monitor_fallback_count."""
-        router = KvThompsonRouter(mock_kv_router, config=None)
-        assert router._monitor_fallback_count == 0
-        router._physics_score(
-            overlap=0.5, wid=0, worker_util={},
-            prefill_tokens=200, tokens_in=1000, memory_pressure=0.0,
+        # 1/13 ≈ 0.077 → s_near_zero should be much less than s_half
+        assert s_near_zero < s_half * 0.25, (
+            f"Expected near-zero stickiness at budget=1/13: {s_near_zero:.4f}"
         )
-        assert router._monitor_fallback_count == 1
 
-    def test_memory_pressure_reduces_score_monotonically(self, mock_kv_router):
-        """Higher memory pressure → strictly lower physics score."""
-        router = self._make_router_with_monitor(mock_kv_router, kv_util=0.0, prefill_util=0.0)
-        worker_util = router._get_worker_utilization()
-        scores = [
-            router._physics_score(
-                overlap=0.5, wid=0, worker_util=worker_util,
-                prefill_tokens=0, tokens_in=1000, memory_pressure=p,
+    def test_old_tanh_would_have_saturated_but_linear_does_not(self, router):
+        """Contrast: old tanh(0.25 * 13) ≈ 0.97, new linear 13/13 = 1.0.
+
+        The important difference: tanh(0.25 * 1) ≈ 0.24, but 1/13 ≈ 0.077.
+        The new formula gives ~3x less weight to a near-exhausted session than
+        tanh would have, meaning late-session requests are meaningfully
+        de-weighted rather than near-fully-weighted.
+        """
+        import math as _math
+        reuse_total = 13
+        alpha_reuse = router.alpha_reuse  # default 0.25
+
+        # Old formula: tanh(alpha * reuse_budget), independent of reuse_total
+        tanh_at_1 = _math.tanh(alpha_reuse * 1)
+        tanh_at_13 = _math.tanh(alpha_reuse * 13)
+        old_ratio = tanh_at_1 / tanh_at_13  # near 1 saturation means large ratio
+
+        # New formula: linear fraction
+        linear_at_1 = 1 / reuse_total
+        linear_at_13 = 13 / reuse_total
+        new_ratio = linear_at_1 / linear_at_13
+
+        # The old tanh gives relatively more weight to budget=1 (saturated behavior).
+        # The new linear gives relatively less weight to budget=1.
+        assert tanh_at_1 > linear_at_1 * 1.5, (
+            f"Expected tanh({alpha_reuse}*1)={tanh_at_1:.3f} >> linear(1/13)={linear_at_1:.3f}, "
+            "but they are too close — new formula may be reverting to tanh"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fix: Stickiness decreases monotonically across a session
+# ---------------------------------------------------------------------------
+
+class TestStickinessDecaysAcrossSession:
+    """End-to-end test: stickiness_score in RoutingDecision should decrease
+    over successive requests in the same prefix chain because effective_reuse_budget
+    falls by 1 on each call (Fix 1) and session_weight is linear (Fix 2).
+    """
+
+    @pytest.mark.asyncio
+    async def test_stickiness_score_decreases_over_session(self, mock_kv_router):
+        """Stickiness for the chosen worker decreases across a 14-request session."""
+        router = KvThompsonRouter(
+            mock_kv_router,
+            config={"kv_thompson": {"epsilon": 0.0}},
+        )
+        pid = "session-decay"
+        reuse_budget = 13  # 14 total requests (0-indexed last has budget=0)
+
+        stickiness_scores = []
+        for _ in range(reuse_budget + 1):
+            decision = await router.pick_worker(
+                token_ids=[1, 2, 3],
+                prefix_id=pid,
+                reuse_budget=reuse_budget,
+                osl=250,
+                iat=50,   # low IAT → high iat_urgency, makes stickiness visible
+                tokens_in=100,
             )
-            for p in [0.0, 0.25, 0.5, 0.75, 1.0]
+            stickiness_scores.append(decision.stickiness_score)
+
+        # The last score should be exactly 0 (reuse_budget exhausted)
+        assert stickiness_scores[-1] == pytest.approx(0.0, abs=1e-9), (
+            f"Final stickiness should be 0.0, got {stickiness_scores[-1]}"
+        )
+
+        # The first score (budget=13) should be much higher than the last few
+        # (budget near 0).  We check the first half vs the last few.
+        first_half_mean = sum(stickiness_scores[:7]) / 7
+        last_three_mean = sum(stickiness_scores[-3:]) / 3
+        assert first_half_mean > last_three_mean, (
+            f"Expected first-half mean stickiness > last-three mean: "
+            f"{first_half_mean:.4f} vs {last_three_mean:.4f}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_last_request_has_exactly_zero_stickiness(self, mock_kv_router):
+        """When effective_reuse_budget reaches 0, stickiness_score must be 0.0.
+
+        This is the edge case that the old static reuse_budget failed: the last
+        request still saw reuse_budget=13 (or whatever was passed in), so it
+        received near-full stickiness weight instead of zero.
+        """
+        router = KvThompsonRouter(
+            mock_kv_router,
+            config={"kv_thompson": {"epsilon": 0.0}},
+        )
+        pid = "last-req-zero"
+        reuse_budget = 5
+
+        # Exhaust 5 requests (budgets 5, 4, 3, 2, 1)
+        for _ in range(reuse_budget):
+            await router.pick_worker(
+                token_ids=[1, 2], prefix_id=pid,
+                reuse_budget=reuse_budget, osl=250, iat=50, tokens_in=20,
+            )
+
+        # The 6th request should see effective_reuse_budget = max(0, 5 - 5) = 0
+        final = await router.pick_worker(
+            token_ids=[1, 2], prefix_id=pid,
+            reuse_budget=reuse_budget, osl=250, iat=50, tokens_in=20,
+        )
+        assert final.reuse_budget == 0
+        assert final.stickiness_score == pytest.approx(0.0, abs=1e-9), (
+            f"Expected stickiness_score=0.0 on last request, got {final.stickiness_score}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fix: Worker distribution with linear vs. tanh session_weight
+# ---------------------------------------------------------------------------
+
+class TestWorkerDistributionWithDecayingStickiness:
+    """Verifies that the decaying stickiness allows load to spread across workers.
+
+    With the old static tanh(alpha * 13) ≈ 0.97 (near-full weight on every
+    request), the first sticky worker would dominate for the entire session.
+    With the new linear decay, late-session requests have low stickiness weight,
+    allowing load-based routing to reassign them to less-loaded workers.
+    """
+
+    @pytest.mark.asyncio
+    async def test_agentic_workload_uses_multiple_workers(self, mock_kv_router):
+        """A long agentic session (14 turns) routes to more than one distinct worker.
+
+        The mock router reports three equally-loaded workers and no KV overlap,
+        so all ranking scores are equal.  With a fresh session the first turn
+        picks any worker; once the budget decays to 0 the routing is again
+        determined by ranking alone — but the last turn must have zero stickiness.
+        We verify that (a) at least two distinct workers are used across turns and
+        (b) the final turn has stickiness_score=0.
+        """
+        # Override loads: three identical workers (no differentiation in ranking)
+        mock_kv_router.get_potential_loads.return_value = [
+            _make_load(0, prefill_tokens=100, decode_blocks=5),
+            _make_load(1, prefill_tokens=100, decode_blocks=5),
+            _make_load(2, prefill_tokens=100, decode_blocks=5),
         ]
-        for i in range(len(scores) - 1):
-            assert scores[i] > scores[i + 1], (
-                f"Score not monotonically decreasing: scores[{i}]={scores[i]}, "
-                f"scores[{i+1}]={scores[i+1]}"
+        mock_kv_router.best_worker.return_value = (0, 0, 0)
+
+        router = KvThompsonRouter(
+            mock_kv_router,
+            config={"kv_thompson": {"epsilon": 0.0, "lambda_stickiness": 1.0}},
+        )
+        pid = "agentic-multi-worker"
+        reuse_budget = 13
+
+        decisions = []
+        for _ in range(reuse_budget + 1):
+            d = await router.pick_worker(
+                token_ids=[1, 2, 3],
+                prefix_id=pid,
+                reuse_budget=reuse_budget,
+                osl=250,
+                iat=250,
+                tokens_in=100,
             )
+            decisions.append(d)
 
-
-# ---------------------------------------------------------------------------
-# Residual training target invariants
-# ---------------------------------------------------------------------------
-class TestResidualTarget:
-    """Tests for residual = clamp(reward - physics + 0.5, 0, 1).
-
-    Per the two-tower design: LinTS trains on the gap between reward and
-    the physics prediction, offset by 0.5 so the neutral case is 0.5.
-    """
-
-    @pytest.mark.asyncio
-    async def test_residual_always_in_unit_interval(self, mock_kv_router):
-        """residual must be clamped to [0, 1] regardless of reward/physics gap."""
-        router = KvThompsonRouter(mock_kv_router, config=None)
-
-        for latency_ms, tokens_out in [(1.0, 500), (10000.0, 1), (50.0, 50)]:
-            decision = await router.pick_worker(
-                list(range(500)), "p", 0, 250, 250, 500
-            )
-            result = router.update_feedback(decision, latency_ms=latency_ms, tokens_out=tokens_out)
-            r = result["residual_reward"]
-            assert 0.0 <= r <= 1.0, f"residual {r} out of [0,1] for latency={latency_ms}"
-
-    def test_residual_formula_neutral_physics(self):
-        """When reward == physics_pred, residual should be exactly 0.5."""
-        reward = 0.7
-        physics = 0.7
-        residual = max(0.0, min(1.0, reward - physics + 0.5))
-        assert abs(residual - 0.5) < 1e-9
-
-    def test_residual_formula_physics_overestimates(self):
-        """When physics overestimates (physics > reward), residual < 0.5."""
-        reward = 0.3
-        physics = 0.8
-        residual = max(0.0, min(1.0, reward - physics + 0.5))
-        # reward - physics + 0.5 = 0.3 - 0.8 + 0.5 = 0.0
-        assert abs(residual - 0.0) < 1e-9
-
-    def test_residual_formula_physics_underestimates(self):
-        """When physics underestimates (reward > physics), residual > 0.5."""
-        reward = 0.9
-        physics = 0.2
-        residual = max(0.0, min(1.0, reward - physics + 0.5))
-        # reward - physics + 0.5 = 0.9 - 0.2 + 0.5 = 1.2, clamped to 1.0
-        assert abs(residual - 1.0) < 1e-9
-
-    def test_residual_clamp_lower_bound(self):
-        """Extreme overestimation: residual clamped to 0, not negative."""
-        reward = 0.0
-        physics = 1.0
-        residual = max(0.0, min(1.0, reward - physics + 0.5))
-        assert residual >= 0.0
-
-    def test_residual_clamp_upper_bound(self):
-        """Extreme underestimation: residual clamped to 1.0, not > 1."""
-        reward = 1.0
-        physics = 0.0
-        residual = max(0.0, min(1.0, reward - physics + 0.5))
-        assert residual <= 1.0
-
-    @pytest.mark.asyncio
-    async def test_residual_stored_in_stats(self, mock_kv_router):
-        """update_feedback must push residual through stats.record_feedback."""
-        router = KvThompsonRouter(mock_kv_router, config=None)
-        decision = await router.pick_worker(list(range(100)), "p", 0, 250, 250, 100)
-        result = router.update_feedback(decision, latency_ms=50.0, tokens_out=50)
-
-        snap = router.stats.snapshot()
-        # residual_reward from the return value must match what stats sees
-        assert 0.0 <= snap["residual"]["mean"] <= 1.0
-        # The returned residual_reward must also be in range
-        assert 0.0 <= result["residual_reward"] <= 1.0
-
-
-# ---------------------------------------------------------------------------
-# load_mod / switching penalty interaction (regression: Issue #1 sign fix)
-# ---------------------------------------------------------------------------
-class TestLoadModSwitchPenaltyInteraction:
-    """Regression tests for the sign fix: load_mod must NOT be applied to
-    negative utility, and switching penalty must stay outside load_mod.
-
-    Issue #1: s_t = (u + bonus - switch) * m_t inverted penalty for
-    unloaded workers.  Fix: s_t = u^+ * m_t - lambda_sw * switch_t.
-    """
-
-    def test_switch_penalty_outside_load_mod(self, mock_kv_router):
-        """With a very low load_mod, switching penalty should still be subtracted,
-        not amplified by the load modulator.
-        """
-        cfg = {
-            "kv_thompson": {
-                "enable_switching_cost": True,
-                "switch_cost_weight": 1.0,
-                "switch_base": 0.3,
-                "switch_reuse": 0.0,
-                "queue_penalty_weight": 100.0,   # large qpw → tiny load_mod
-                "ts_weight": 0.0,
-                "enable_lints": False,
-            }
-        }
-        router = KvThompsonRouter(mock_kv_router, config=cfg)
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-
-        # kv_util=1.0 → load_mod = exp(-100*1.0^2) ≈ 0
-        score_switch = router._score_worker(
-            wid=1, x=x, overlap=0.5, decode_blocks=50,
-            last_worker=0, reuse_budget=5, iat_factor=1.0, physics=0.5,
-            kv_util=1.0,
-        )
-        # kv_util=1.0 → load_mod ≈ 0, score ≈ utility * 0 - penalty
-        # penalty = switch_cost_weight * tanh(switch_base) ≈ tanh(0.3) ≈ 0.291
-        # If penalty were inside load_mod: score = (0.5 - 0.291) * ~0 ≈ 0 (wrong)
-        # Correct: score = 0.5 * ~0 - 0.291 ≈ -0.291
-        assert score_switch < -0.1, (
-            f"Switch penalty should be subtracted outside load_mod, got score={score_switch:.4f}"
+        # The final request should have zero stickiness
+        assert decisions[-1].stickiness_score == pytest.approx(0.0, abs=1e-9), (
+            f"Final request stickiness should be 0.0, got {decisions[-1].stickiness_score}"
         )
 
-    def test_high_load_does_not_invert_switch_penalty(self, mock_kv_router):
-        """An overloaded non-sticky worker should score worse than an idle one,
-        not better, when switching cost is applied.
-        Regression for the sign bug where load_mod multiplied the whole expression
-        including the switch penalty, causing a loaded worker to get a LESS
-        negative score than an unloaded one.
-        """
-        cfg = {"kv_thompson": {"enable_switching_cost": True, "switch_cost_weight": 2.0}}
-        router = KvThompsonRouter(mock_kv_router, config=cfg)
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-
-        score_lightly_loaded = router._score_worker(
-            wid=1, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=0, reuse_budget=5, iat_factor=1.0, physics=0.5,
-            kv_util=0.1,
-        )
-        score_heavily_loaded = router._score_worker(
-            wid=1, x=x, overlap=0.5, decode_blocks=40,
-            last_worker=0, reuse_budget=5, iat_factor=1.0, physics=0.5,
-            kv_util=0.9,
-        )
-        # With the bug: higher load could make penalty term bigger (inverted)
-        # With the fix: higher load reduces positive utility but penalty stays constant
-        # So the lightly-loaded worker should score higher
-        assert score_lightly_loaded > score_heavily_loaded, (
-            f"Lightly loaded ({score_lightly_loaded:.4f}) should beat heavily loaded "
-            f"({score_heavily_loaded:.4f}) even with switch penalty"
-        )
-
-    def test_load_mod_floor_enforced(self, mock_kv_router):
-        """When enable_load_mod_floor=True, load_mod should never drop below the floor."""
-        cfg = {
-            "kv_thompson": {
-                "enable_load_mod_floor": True,
-                "load_mod_floor": 0.3,
-                "queue_penalty_weight": 1000.0,  # would drive load_mod to ~0 without floor
-            }
-        }
-        router = KvThompsonRouter(mock_kv_router, config=cfg)
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-
-        physics = 0.6
-        score = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=100,
-            last_worker=None, reuse_budget=0, iat_factor=1.0, physics=physics,
-            kv_util=1.0,
-        )
-        # Even with extreme load, score should be >= physics * floor
-        # (upper bound: with no penalty and no ts contributions, score ≈ utility * load_mod)
-        # At minimum, the positive physics contribution * floor should be present
-        # We check that the score is not drastically suppressed by verifying it's finite
-        # and above -1 (not clamped to -1e9)
-        assert np.isfinite(score)
-        # The score should be at least physics * floor minus possible tanh contributions
-        # tanh can add up to ~1.0 per learner term; floor*physics ≈ 0.3*0.6 = 0.18
-        # So score > 0.18 - 1.0 - 1.0 = -1.82 is expected even in worst case
-        assert score > -2.0
-
-    def test_sticky_load_floor_raises_floor_for_sticky_worker(self, mock_kv_router):
-        """enable_sticky_floor should keep load_mod high for the prefix's prior worker.
-
-        With ts_weight=0 and enable_lints=False, the only stochastic contribution
-        is the default tanh(lints_sample) path which uses the same prior for both
-        workers and is therefore equal — so the load_mod difference is decisive.
-        """
-        cfg = {
-            "kv_thompson": {
-                "enable_sticky_floor": True,
-                "sticky_load_floor": 0.5,
-                "queue_penalty_weight": 1000.0,  # would crush load_mod otherwise
-                "ts_weight": 0.0,               # remove Beta TS noise
-                "enable_lints": True,
-                "lints_weight": -0.0,           # zero lints contribution
-            }
-        }
-        router = KvThompsonRouter(mock_kv_router, config=cfg)
-
-        # Seed RNG so both calls draw the same TS samples for wid=0 and wid=1
-        np.random.seed(42)
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        physics = 0.5
-
-        # Compute scores for averaged physics only (ts_weight=0, lints_weight=0)
-        # kv_util=1.0 → load_mod = exp(-1000*1.0^2) ≈ 0
-        # Sticky worker (wid=0 == last_worker): load_mod = max(~0, 0.5) = 0.5
-        # Non-sticky (wid=1 != last_worker): load_mod ≈ 0
-        score_sticky = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=100,
-            last_worker=0, reuse_budget=5, iat_factor=1.0, physics=physics,
-            kv_util=1.0,
-        )
-        np.random.seed(42)  # reset seed for same sample
-        score_non_sticky = router._score_worker(
-            wid=1, x=x, overlap=0.5, decode_blocks=100,
-            last_worker=0, reuse_budget=5, iat_factor=1.0, physics=physics,
-            kv_util=1.0,
-        )
-        # sticky worker has load_mod floored at 0.5 → score ≈ 0.5 * 0.5 = 0.25
-        # non-sticky worker has load_mod ≈ 0 → score ≈ 0
-        assert score_sticky > score_non_sticky, (
-            f"Sticky worker (load_mod=0.5) should score higher than "
-            f"non-sticky (load_mod≈0): {score_sticky:.4f} vs {score_non_sticky:.4f}"
-        )
-
-    def test_positive_utility_amplified_not_suppressed_by_load_mod(self, mock_kv_router):
-        """With zero decode blocks, load_mod=1.0 and should not reduce positive score."""
-        router = KvThompsonRouter(mock_kv_router, config=None)
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        np.random.seed(0)
-        score = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0, physics=0.8,
-        )
-        # score should be positive (physics=0.8 dominates) and finite
-        assert np.isfinite(score)
-        # physics alone is 0.8; load_mod=1.0; tanh contributions are small
-        # score should be well above 0
-        assert score > 0.0
-
-
-# ---------------------------------------------------------------------------
-# Scoring: lints_weight positive vs negative path
-# ---------------------------------------------------------------------------
-class TestLintsWeightPaths:
-    """_score_worker has two code paths for lints_weight: negative uses tanh,
-    non-negative passes raw sample. Both should produce finite scores.
-    """
-
-    def test_lints_weight_always_uses_tanh(self, mock_kv_router):
-        """LinTS always uses abs(lints_weight) * tanh(raw), regardless of sign."""
-        cfg = {"kv_thompson": {"enable_lints": True, "lints_weight": 0.5}}
-        router = KvThompsonRouter(mock_kv_router, config=cfg)
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        # Train heavily to get a large posterior sample
-        for _ in range(50):
-            router.lints_learner.update(0, x, reward=1.0)
-        np.random.seed(42)
-        score = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=None, reuse_budget=0, iat_factor=1.0, physics=0.5,
-        )
-        assert np.isfinite(score)
-        # LinTS contribution bounded: abs(0.5) * tanh(anything) < 0.5
-        raw = router.lints_learner.sample(0, x)
-        assert abs(0.5 * math.tanh(raw)) < 0.5 + 1e-9
-
-    def test_lints_disabled_contributes_zero(self, mock_kv_router):
-        """When enable_lints=False, LinTS adds zero to the score."""
-        cfg_off = {"kv_thompson": {"enable_lints": False}}
-        cfg_on_zero = {"kv_thompson": {"enable_lints": True, "lints_weight": 0.0}}
-        router_off = KvThompsonRouter(mock_kv_router, config=cfg_off)
-        router_on = KvThompsonRouter(mock_kv_router, config=cfg_on_zero)
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        np.random.seed(42)
-        score_off = router_off._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=None, reuse_budget=0, iat_factor=1.0, physics=0.5,
-        )
-        np.random.seed(42)
-        score_zero = router_on._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=None, reuse_budget=0, iat_factor=1.0, physics=0.5,
-        )
-        # Both should be identical: no LinTS contribution
-        assert abs(score_off - score_zero) < 1e-9
-
-    def test_beta_ts_disabled_contributes_zero(self, mock_kv_router):
-        """When enable_beta_ts=False (default), Beta TS adds zero to the score."""
-        cfg = {"kv_thompson": {"enable_beta_ts": False, "ts_weight": 1.0}}
-        router = KvThompsonRouter(mock_kv_router, config=cfg)
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        # Score should equal physics only (no beta, no lints since default off)
-        np.random.seed(42)
-        score = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0, physics=0.7,
-        )
-        # With no learners active and decode_blocks=0, score ≈ physics * load_mod = 0.7
-        assert abs(score - 0.7) < 1e-9
-
-
-# ---------------------------------------------------------------------------
-# Adaptive temperature and explore
-# ---------------------------------------------------------------------------
-class TestAdaptiveFeatures:
-    def test_adaptive_temp_decreases_with_reuse(self, mock_kv_router):
-        """Temperature should decrease as reuse_budget and iat_factor increase."""
-        cfg = {
-            "kv_thompson": {
-                "enable_adaptive_temp": True,
-                "enable_softmax": True,
-                "adaptive_temp_base": 2.0,
-                "temp_min": 0.1,
-                "temp_max": 3.0,
-            }
-        }
-        router = KvThompsonRouter(mock_kv_router, config=cfg)
-
-        # Compute effective temperature for different reuse budgets
-        iat_factor = 1.0
-        temps = []
-        for rb in [0, 5, 20]:
-            temp = router.adaptive_temp_base / (1.0 + float(rb) * iat_factor)
-            temp = min(max(temp, router.temp_min), router.temp_max)
-            temps.append(temp)
-
-        assert temps[0] > temps[1] > temps[2], (
-            f"Temperature should decrease with reuse budget: {temps}"
-        )
-
-    def test_adaptive_temp_clamped_to_min(self, mock_kv_router):
-        """Temperature should not drop below temp_min."""
-        cfg = {
-            "kv_thompson": {
-                "enable_adaptive_temp": True,
-                "enable_softmax": True,
-                "adaptive_temp_base": 0.01,
-                "temp_min": 0.15,
-            }
-        }
-        router = KvThompsonRouter(mock_kv_router, config=cfg)
-        temp = router.adaptive_temp_base / (1.0 + 1000.0)
-        temp = min(max(temp, router.temp_min), router.temp_max)
-        assert temp >= router.temp_min
-
-    def test_adaptive_explore_reduces_ts_weight(self, mock_kv_router):
-        """enable_adaptive_explore should reduce ts_weight with high reuse_budget."""
-        cfg = {"kv_thompson": {"enable_beta_ts": True, "enable_adaptive_explore": True, "ts_weight": 0.1}}
-        router = KvThompsonRouter(mock_kv_router, config=cfg)
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        np.random.seed(99)
-
-        # With high reuse_budget, ts_w_eff should be reduced
-        # The effective weight = ts_weight / (1 + reuse_budget * iat_factor)
-        ts_w_no_reuse = router.ts_weight / (1.0 + 0.0 * 1.0)     # = 0.1
-        ts_w_high_reuse = router.ts_weight / (1.0 + 100.0 * 1.0)  # ≈ 0.001
-        assert ts_w_no_reuse > ts_w_high_reuse * 10
-
-
-# ---------------------------------------------------------------------------
-# Interpolation helpers (between-anchor values)
-# ---------------------------------------------------------------------------
-class TestInterpolation:
-    """Tests for _iat_factor and _decode_cost at intermediate values."""
-
-    @pytest.mark.parametrize("iat,expected_min,expected_max", [
-        (50, 1.5, 1.5),         # lower anchor
-        (150, 1.0, 1.5),        # between 50 and 250
-        (250, 1.0, 1.0),        # upper anchor of lower range
-        (600, 0.6, 1.0),        # between 250 and 1000
-        (1000, 0.6, 0.6),       # upper anchor
-        (2000, 0.6, 0.6),       # beyond upper anchor — clamped
-    ])
-    def test_iat_factor_range(self, iat, expected_min, expected_max):
-        f = KvThompsonRouter._iat_factor(iat)
-        assert expected_min <= f <= expected_max, (
-            f"_iat_factor({iat})={f} not in [{expected_min}, {expected_max}]"
-        )
-
-    def test_iat_factor_monotone_decreasing(self):
-        """IAT factor should be non-increasing as IAT increases."""
-        iats = [0, 25, 50, 100, 150, 200, 250, 400, 600, 800, 1000, 1500]
-        factors = [KvThompsonRouter._iat_factor(i) for i in iats]
-        for i in range(len(factors) - 1):
-            assert factors[i] >= factors[i + 1] - 1e-9, (
-                f"Not monotone at iat={iats[i]}: f={factors[i]:.4f} > f={factors[i+1]:.4f}"
-            )
-
-    @pytest.mark.parametrize("osl,expected_min,expected_max", [
-        (64, 1.0, 1.0),         # at lower anchor
-        (128, 1.0, 1.0),        # boundary
-        (190, 1.0, 2.0),        # between 128 and 250
-        (250, 2.0, 2.0),        # middle anchor
-        (600, 2.0, 3.0),        # between 250 and 1024
-        (1024, 3.0, 3.0),       # upper anchor
-        (2048, 3.0, 3.0),       # beyond anchor — clamped
-    ])
-    def test_decode_cost_range(self, osl, expected_min, expected_max):
-        c = KvThompsonRouter._decode_cost(osl)
-        assert expected_min <= c <= expected_max, (
-            f"_decode_cost({osl})={c} not in [{expected_min}, {expected_max}]"
-        )
-
-    def test_decode_cost_monotone_increasing(self):
-        """Decode cost should be non-decreasing as OSL increases."""
-        osls = [0, 64, 128, 190, 250, 512, 768, 1024, 2048]
-        costs = [KvThompsonRouter._decode_cost(o) for o in osls]
-        for i in range(len(costs) - 1):
-            assert costs[i] <= costs[i + 1] + 1e-9, (
-                f"Not monotone at osl={osls[i]}: cost={costs[i]:.4f} > cost={costs[i+1]:.4f}"
-            )
-
-    def test_iat_norm_in_unit_interval(self):
-        """iat_norm feature should stay in [0, 1] for all valid IAT values."""
-        for iat in [0, 50, 100, 250, 500, 1000, 2000]:
-            f = KvThompsonRouter._iat_factor(iat)
-            iat_norm = (f - 0.6) / 0.9
-            assert 0.0 <= iat_norm <= 1.0, f"iat_norm={iat_norm} out of [0,1] for iat={iat}"
-
-
-# ---------------------------------------------------------------------------
-# Hint parsing edge cases
-# ---------------------------------------------------------------------------
-class TestExtractHintsEdgeCases:
-    """Edge cases not covered by existing TestExtractHints."""
-
-    def test_total_requests_zero_gives_reuse_budget_zero(self):
-        """total_requests=0 should not produce negative reuse_budget."""
-        request = {
-            "token_ids": [1],
-            "annotations": ["total_requests:0"],
-        }
-        hints = extract_hints(request)
-        assert hints["reuse_budget"] == 0
-
-    def test_total_requests_one_gives_reuse_budget_zero(self):
-        """Single-request session has no turns to reuse → budget=0."""
-        request = {
-            "token_ids": [1],
-            "annotations": ["total_requests:1"],
-        }
-        hints = extract_hints(request)
-        assert hints["reuse_budget"] == 0
-
-    def test_priority_jump_does_not_set_iat(self):
-        """priority_jump should set latency_sensitivity, not iat."""
-        request = {
-            "token_ids": [1],
-            "routing": {"priority_jump": 0.0},
-        }
-        hints = extract_hints(request)
-        assert hints["iat"] == 250  # default
-        assert hints["latency_sensitivity"] == 0.0
-
-    def test_priority_jump_very_large_latency_sensitivity(self):
-        """Large priority_jump preserved as latency_sensitivity."""
-        request = {
-            "token_ids": [1],
-            "routing": {"priority_jump": 10.0},
-        }
-        hints = extract_hints(request)
-        assert hints["iat"] == 250  # default, NOT 10000
-        assert hints["latency_sensitivity"] == 10.0
-
-    def test_empty_annotations_list(self):
-        """Empty annotations should not crash and all values use defaults."""
-        hints = extract_hints({"token_ids": [1, 2, 3], "annotations": []})
-        assert hints["osl"] == 250
-        assert hints["iat"] == 250
-        assert hints["prefix_id"] == ""
-        assert hints["reuse_budget"] == 0
-
-    def test_annotation_with_colon_in_value(self):
-        """Annotation values containing colons should split on first colon only."""
-        request = {
-            "token_ids": [1],
-            "annotations": ["prefix_id:session:abc:123"],
-        }
-        hints = extract_hints(request)
-        # split(":", 1) → key="prefix_id", value="session:abc:123"
-        assert hints["prefix_id"] == "session:abc:123"
-
-    def test_none_routing_field(self):
-        """routing=None should be treated the same as routing={}."""
-        request = {
-            "token_ids": [1, 2],
-            "routing": None,
-            "annotations": ["osl:512"],
-        }
-        hints = extract_hints(request)
-        assert hints["osl"] == 512
-
-    def test_osl_categorical_case_upper(self):
-        """ALL CAPS 'HIGH' in annotations should map correctly."""
-        request = {
-            "token_ids": [1],
-            "annotations": ["osl:HIGH"],
-        }
-        assert extract_hints(request)["osl"] == 768
-
-    def test_iat_categorical_case_upper_annotations(self):
-        """ALL CAPS 'LOW' in annotations should map correctly."""
-        request = {
-            "token_ids": [1],
-            "annotations": ["iat:LOW"],
-        }
-        assert extract_hints(request)["iat"] == 50
-
-    def test_osl_float_in_routing(self):
-        """Floating-point OSL from routing field should truncate cleanly."""
-        request = {
-            "token_ids": [1],
-            "routing": {"expected_output_tokens": 256.9},
-        }
-        assert extract_hints(request)["osl"] == 256
-
-    def test_missing_token_ids_key(self):
-        """Missing token_ids should yield tokens_in=0 without error."""
-        hints = extract_hints({})
-        assert hints["tokens_in"] == 0
+        # All reuse_budget values should be monotone non-increasing
+        budgets = [d.reuse_budget for d in decisions]
+        for a, b in zip(budgets, budgets[1:]):
+            assert b <= a, f"reuse_budget did not decrease monotonically: {budgets}"

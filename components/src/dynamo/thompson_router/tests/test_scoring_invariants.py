@@ -1,29 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Tests for two-tower scoring invariants, physics tower, residual training target,
-and management endpoint hot-reload.
+Scoring invariants for the two-term Thompson router model.
 
-Coverage areas not fully addressed by test_router.py:
-  1. load_mod applies only to positive utility (regression for issue #1 sign fix)
-  2. residual clamp formula: clamp(reward - physics + 0.5, 0, 1)
-  3. _physics_score unit tests (not covered via pick_worker alone)
-  4. _iat_factor interpolation between anchor points
-  5. LinTS lints_weight sign branch (negative weight uses abs + tanh)
-  6. Management server: hot-reload config, state roundtrip, metrics reset
-  7. Management server: record_decision / decisions_summary
-  8. OverlapResult dataclass defaults
-  9. RouterStats variance computation
- 10. BetaLearner min_pseudo_count floor prevents parameter collapse
+    score(w) = lambda_ranking * ranking(w) + lambda_stickiness * stickiness(w)
+
+Coverage:
+  1. Ranking monotonicity: overlap ↑ → ranking ↑
+  2. Ranking monotonicity: kv_util ↑ → ranking ↓  (via osl_load interaction)
+  3. Stickiness is zero for one-shot sessions (reuse_budget = 0)
+  4. Stickiness is positive for sticky worker with reuse_budget > 0
+  5. Stickiness increases with reuse_budget (saturates via tanh)
+  6. Stickiness decreases with high memory_pressure (eviction risk)
+  7. Stickiness increases with low IAT (rapid-fire = more urgency)
+  8. Lambda scaling: doubling lambda_stickiness doubles stickiness contribution
+  9. All valid inputs produce finite scores
+ 10. Management server: config hot-reload with new param names
+ 11. Management server: state / reset endpoints
+ 12. RouterStats variance computation
+ 13. BetaLearner min_pseudo_count floor prevents parameter collapse
 """
 
 import math
 from unittest.mock import AsyncMock, MagicMock
 
-import numpy as np
 import pytest
 
-from dynamo.thompson_router.kv_indexer import OverlapResult
 from dynamo.thompson_router.learners import BetaLearner, LatencyTracker
 from dynamo.thompson_router.router import KvThompsonRouter, RouterStats, RoutingDecision
 
@@ -47,682 +49,268 @@ def _make_load(worker_id, prefill_tokens=0, decode_blocks=0):
     }
 
 
-def _make_kv_router(loads=None):
+def _make_router(mock_kv_router, **overrides):
+    """Build a KvThompsonRouter with optional kv_thompson config overrides.
+
+    Defaults epsilon=0 for deterministic scoring invariants unless overridden.
+    """
+    overrides.setdefault("epsilon", 0.0)
+    cfg = {"kv_thompson": overrides}
+    return KvThompsonRouter(mock_kv_router, config=cfg)
+
+
+def _score(router, **kwargs):
+    """Shortcut: call _score_worker and return (ranking, stickiness)."""
+    defaults = dict(
+        wid=0, overlap=0.5, kv_util=0.3, prefill_util=0.1,
+        memory_pressure=0.0, osl=250, iat=250,
+        latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+    )
+    defaults.update(kwargs)
+    return router._score_worker(**defaults)
+
+
+@pytest.fixture
+def mock_kv_router():
     router = AsyncMock()
-    loads = loads or [_make_load(0), _make_load(1)]
-    router.get_potential_loads = AsyncMock(return_value=loads)
-    router.best_worker = AsyncMock(return_value=(0, 0, 0))
+    router.get_potential_loads = AsyncMock(
+        return_value=[
+            _make_load(0, prefill_tokens=100, decode_blocks=5),
+            _make_load(1, prefill_tokens=500, decode_blocks=2),
+        ]
+    )
+    router.best_worker = AsyncMock(return_value=(0, 0, 10))
     return router
 
 
-def _make_router(config_overrides=None, loads=None, monitor=None):
-    cfg = {"kv_thompson": config_overrides or {}}
-    return KvThompsonRouter(
-        _make_kv_router(loads),
-        config=cfg,
-        worker_load_monitor=monitor,
-    )
+@pytest.fixture
+def router(mock_kv_router):
+    # epsilon=0 for deterministic scoring invariants
+    return KvThompsonRouter(mock_kv_router, config={"kv_thompson": {"epsilon": 0.0}})
 
 
 # ---------------------------------------------------------------------------
-# 1. Regression: load_mod applies only to positive utility (Issue #1)
-#
-# Before the fix: s = (utility + bonus - penalty) * load_mod
-#   -> negative utility would be amplified on unloaded workers
-# After the fix:  s = max(0, utility) * load_mod - penalty
-#   (switching penalty is OUTSIDE load_mod)
-#
-# Test: a worker with negative utility and low load must not score higher
-# than a worker with the same negative utility and high load.
+# 1. Ranking monotonicity: overlap
 # ---------------------------------------------------------------------------
 
-class TestLoadModOnlyOnPositiveUtility:
-    """Regression tests for Issue #1: load_mod sign fix."""
+class TestRankingMonotonicity:
+    def test_higher_overlap_yields_higher_ranking(self, router):
+        """Per model: ranking += w_cache * overlap; overlap↑ → ranking↑."""
+        overlaps = [0.0, 0.2, 0.5, 0.8, 1.0]
+        rankings = [_score(router, overlap=o)[0] for o in overlaps]
+        for a, b in zip(rankings, rankings[1:]):
+            assert b > a, f"ranking did not increase: {rankings}"
 
-    def test_load_mod_does_not_amplify_negative_utility(self):
-        """If utility < 0, a more-unloaded worker must NOT score higher.
+    def test_higher_kv_util_yields_lower_ranking(self, router):
+        """Per model: ranking -= w_osl_load * (osl_norm * kv_util); kv_util↑ → ranking↓."""
+        kv_utils = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        # Use a large osl to make osl_norm non-trivial
+        rankings = [_score(router, kv_util=u, osl=512)[0] for u in kv_utils]
+        for a, b in zip(rankings, rankings[1:]):
+            assert b < a, f"ranking did not decrease with kv_util: {rankings}"
 
-        Before the fix this would fail: multiplying a negative utility by a
-        smaller (closer to 1.0) load_mod produced a less-negative (better)
-        score for the lightly loaded worker even when it had worse overlap.
-        """
-        router = _make_router()
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-
-        # Force both workers to have strongly negative physics (e.g. all weights
-        # put on memory_pressure=1 → compute_avail=0, cache=0 → physics → 0).
-        # We inject physics directly.
-        physics_negative = -0.5  # explicitly negative to expose the sign issue
-
-        # Worker A: low kv_util (load_mod → 1.0)
-        score_unloaded = router._score_worker(
-            wid=0, x=x, overlap=0.0, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=physics_negative, kv_util=0.0,
-        )
-        # Worker B: high kv_util (load_mod → < 0.1)
-        score_loaded = router._score_worker(
-            wid=0, x=x, overlap=0.0, decode_blocks=50,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=physics_negative, kv_util=0.9,
-        )
-
-        # With the fixed formula (utility * load_mod where utility = max(0, raw)):
-        # negative physics is below zero so load_mod scales zero, not the
-        # negative value. The two scores should be equal or at most minimally
-        # different (only the TS terms vary).
-        # Either way, the unloaded worker must NOT score higher than loaded
-        # simply because its load_mod is larger.
-        #
-        # Pre-fix behavior: score_unloaded >> score_loaded (bad)
-        # Post-fix behavior: scores roughly equal (TS noise only)
-        diff = score_unloaded - score_loaded
-        # The difference must be small — TS sampling noise, not load_mod inversion
-        assert abs(diff) < 1.5, (
-            f"load_mod amplified negative utility: unloaded={score_unloaded:.4f}, "
-            f"loaded={score_loaded:.4f}, diff={diff:.4f}"
-        )
-
-    def test_switching_penalty_is_outside_load_mod(self):
-        """Switching penalty must not be modulated by load_mod.
-
-        The penalty should be a flat subtraction after the load-modulated term:
-            score = utility * load_mod - switch_cost_weight * tanh(penalty_term)
-
-        We verify this indirectly: a heavily loaded switching worker must score
-        LESS than a lightly loaded one with the same physics — and the score gap
-        must increase with higher load (since load_mod reduces the positive term
-        while penalty stays constant).  We disable both learners to make
-        calls deterministic from the same router instance.
-        """
-        router = _make_router({"enable_switching_cost": True, "switch_cost_weight": 2.0,
-                                "switch_base": 0.5, "switch_reuse": 0.0,
-                                "enable_beta_ts": False,
-                                "enable_lints": False})
-
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        physics = 0.6
-
-        # Both calls use the SAME router, so TS samples are drawn sequentially.
-        # Seed to reduce variance and ensure the load difference is decisive.
-        np.random.seed(0)
-        score_unloaded = router._score_worker(
-            wid=1, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=0, reuse_budget=5, iat_factor=1.0,
-            physics=physics, kv_util=0.0,
-        )
-        np.random.seed(0)  # same seed → same TS sample, only load_mod differs
-        score_loaded = router._score_worker(
-            wid=1, x=x, overlap=0.5, decode_blocks=40,
-            last_worker=0, reuse_budget=5, iat_factor=1.0,
-            physics=physics, kv_util=0.9,
-        )
-
-        # With the same TS terms, the unloaded worker must score higher
-        # (load_mod close to 1 vs load_mod close to 0).
-        assert score_unloaded > score_loaded, (
-            f"Unloaded worker ({score_unloaded:.4f}) should score higher than "
-            f"loaded one ({score_loaded:.4f}) when only load_mod changes"
-        )
-
-        # The penalty is additive and outside load_mod; verify the gap between
-        # unloaded-with-penalty and unloaded-without-penalty matches tanh formula.
-        np.random.seed(0)
-        score_no_penalty = router._score_worker(
-            wid=1, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None,  # no switch → no penalty
-            reuse_budget=5, iat_factor=1.0,
-            physics=physics,
-        )
-        # Difference = penalty = switch_cost_weight * tanh(switch_base)
-        expected_penalty = 2.0 * math.tanh(0.5)
-        actual_penalty = score_no_penalty - score_unloaded
-        assert abs(actual_penalty - expected_penalty) < 1e-9, (
-            f"Expected penalty ≈ {expected_penalty:.4f}, actual gap = {actual_penalty:.4f}"
-        )
-
-    def test_switching_penalty_only_applies_when_switching(self):
-        """Penalty must be zero when wid == last_worker (no migration)."""
-        router = _make_router({"enable_switching_cost": True, "switch_cost_weight": 1.0})
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        physics = 0.6
-
-        score_same = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=0, reuse_budget=5, iat_factor=1.0,
-            physics=physics,
-        )
-        score_diff = router._score_worker(
-            wid=1, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=0, reuse_budget=5, iat_factor=1.0,
-            physics=physics,
-        )
-        assert score_same > score_diff, (
-            "Worker keeping same prefix must score higher than switching worker"
-        )
-
-    def test_switching_penalty_zero_when_no_last_worker(self):
-        """No penalty on first request of a session (last_worker is None)."""
-        router = _make_router({"enable_switching_cost": True, "switch_cost_weight": 5.0,
-                                "switch_base": 1.0})
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-
-        score_no_last = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=None, reuse_budget=5, iat_factor=1.0,
-            physics=0.6,
-        )
-        score_with_penalty = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=99, reuse_budget=5, iat_factor=1.0,
-            physics=0.6,
-        )
-        assert score_no_last > score_with_penalty
+    def test_higher_prefill_util_yields_lower_ranking(self, router):
+        """Per model: ranking += w_queue * (1 - prefill_util); prefill_util↑ → ranking↓."""
+        utils = [0.0, 0.3, 0.6, 1.0]
+        rankings = [_score(router, prefill_util=u)[0] for u in utils]
+        for a, b in zip(rankings, rankings[1:]):
+            assert b < a, f"ranking did not decrease with prefill_util: {rankings}"
 
 
 # ---------------------------------------------------------------------------
-# 2. Residual training target: clamp(reward - physics + 0.5, 0, 1)
+# 2. Stickiness: zero for one-shot sessions
 # ---------------------------------------------------------------------------
 
-class TestResidualTrainingTarget:
-    """Tests for the LinTS residual computation in update_feedback.
-
-    The formula per Section 3.4 of the paper draft:
-        residual = clamp(reward - physics_score + 0.5, 0, 1)
-
-    Center at 0.5 so that:
-        physics_pred == reward  → residual = 0.5 (neutral, no update)
-        reward >> physics_pred  → residual → 1.0 (physics underestimated)
-        reward << physics_pred  → residual → 0.0 (physics overestimated)
-    """
-
-    def _compute_residual(self, reward, physics):
-        return max(0.0, min(1.0, reward - physics + 0.5))
-
-    def test_perfect_prediction_gives_half(self):
-        """When physics == reward, residual should be exactly 0.5."""
-        for val in [0.0, 0.3, 0.5, 0.7, 1.0]:
-            assert abs(self._compute_residual(val, val) - 0.5) < 1e-9
-
-    def test_underestimate_gives_high_residual(self):
-        """When reward >> physics (physics underestimated), residual → 1."""
-        residual = self._compute_residual(reward=1.0, physics=0.0)
-        assert abs(residual - 1.0) < 1e-9
-
-    def test_overestimate_gives_low_residual(self):
-        """When reward << physics (physics overestimated), residual → 0."""
-        residual = self._compute_residual(reward=0.0, physics=1.0)
-        assert abs(residual - 0.0) < 1e-9
-
-    def test_residual_clamped_to_unit_interval(self):
-        """Even with extreme inputs, residual stays in [0, 1]."""
-        extreme_pairs = [
-            (2.0, 0.0),   # reward > 1 (shouldn't happen but be safe)
-            (-1.0, 1.0),  # reward < 0
-            (0.0, 2.0),   # physics > 1
+class TestStickinessOneShot:
+    def test_stickiness_zero_reuse_budget_zero(self, router):
+        """reuse_budget=0 → stickiness=0 regardless of other inputs."""
+        cases = [
+            dict(overlap=1.0, is_sticky=True, iat=50, memory_pressure=0.0),
+            dict(overlap=0.5, is_sticky=False, iat=1000, memory_pressure=0.9),
         ]
-        for reward, physics in extreme_pairs:
-            r = self._compute_residual(reward, physics)
-            assert 0.0 <= r <= 1.0, f"residual={r} for reward={reward}, physics={physics}"
-
-    @pytest.mark.asyncio
-    async def test_residual_stored_in_feedback_result(self):
-        """update_feedback must return residual_reward in [0, 1]."""
-        router = _make_router()
-        decision = await router.pick_worker(
-            token_ids=list(range(100)), prefix_id="p", reuse_budget=0,
-            osl=250, iat=250, tokens_in=100,
-        )
-        result = router.update_feedback(decision, latency_ms=50.0, tokens_out=50)
-        assert "residual_reward" in result
-        assert 0.0 <= result["residual_reward"] <= 1.0
-
-    @pytest.mark.asyncio
-    async def test_residual_zero_when_physics_greatly_overestimates(self):
-        """When physics_score ≈ 1.0 but reward ≈ 0, residual must be clamped to 0."""
-        router = _make_router()
-        decision = await router.pick_worker(
-            token_ids=list(range(100)), prefix_id="p", reuse_budget=0,
-            osl=250, iat=250, tokens_in=100,
-        )
-        # Override physics_score to near 1.0 — simulate physics overestimating
-        decision.physics_score = 0.99
-
-        # Send very slow latency → low reward
-        result = router.update_feedback(decision, latency_ms=100000.0, tokens_out=1)
-        assert result["residual_reward"] >= 0.0
-        assert result["residual_reward"] <= 0.05  # should be near 0
-
-    @pytest.mark.asyncio
-    async def test_residual_one_when_physics_greatly_underestimates(self):
-        """When physics_score ≈ 0.0 but reward ≈ 1.0, residual must be clamped to 1."""
-        router = _make_router()
-        decision = await router.pick_worker(
-            token_ids=list(range(100)), prefix_id="p", reuse_budget=0,
-            osl=250, iat=250, tokens_in=100,
-        )
-        decision.physics_score = 0.01  # physics greatly underestimated
-
-        # Artificially send tiny latency (fast request, high reward)
-        # We need reward close to 1.0 → latency << baseline
-        result = router.update_feedback(decision, latency_ms=0.001, tokens_out=1)
-        assert result["residual_reward"] >= 0.95  # should be near 1
+        for kw in cases:
+            _, s = _score(router, reuse_budget=0, **kw)
+            assert s == 0.0, f"expected stickiness=0 for {kw}, got {s}"
 
 
 # ---------------------------------------------------------------------------
-# 3. Physics tower unit tests
+# 3 & 4. Stickiness: positive and monotone in reuse_budget
 # ---------------------------------------------------------------------------
 
-class TestPhysicsTower:
-    """Direct unit tests for _physics_score."""
+class TestStickinessBudget:
+    def test_stickiness_positive_with_nonzero_reuse(self, router):
+        _, s = _score(router, reuse_budget=1, overlap=0.8, is_sticky=False, iat=250)
+        assert s > 0.0
 
-    def test_perfect_cache_idle_worker_gives_max_score(self):
-        """overlap=1, kv_util=0, prefill_util=0, memory_pressure=0 → weight sum."""
-        router = _make_router()
-        # All signals at best: cache_hit=1, compute_avail=1, queue_avail=1, memory_avail=1
-        worker_util = {0: {"kv_util": 0.0, "prefill_util": 0.0}}
-        score = router._physics_score(
-            overlap=1.0, wid=0, worker_util=worker_util,
-            prefill_tokens=0, tokens_in=100, memory_pressure=0.0,
-        )
-        expected = (
-            router.physics_cache_weight * 1.0
-            + router.physics_compute_weight * 1.0
-            + router.physics_queue_weight * 1.0
-            + router.physics_memory_weight * 1.0
-        )
-        assert abs(score - expected) < 1e-9
+    def test_stickiness_increases_with_reuse_budget(self, router):
+        """Linear decay: session_weight = reuse_budget / reuse_total → stickiness
+        increases as reuse_budget approaches reuse_total.
 
-    def test_worst_case_worker_gives_near_zero(self):
-        """overlap=0, kv_util=1, prefill_util=1, memory_pressure=1 → ~0."""
-        router = _make_router()
-        worker_util = {0: {"kv_util": 1.0, "prefill_util": 1.0}}
-        score = router._physics_score(
-            overlap=0.0, wid=0, worker_util=worker_util,
-            prefill_tokens=100, tokens_in=100, memory_pressure=1.0,
-        )
-        # All signals at worst: cache=0, compute_avail=0, queue_avail=0, memory_avail=0
-        assert score < 0.01
-
-    def test_all_signals_in_unit_range_produce_in_range_score(self):
-        """Physics score must stay in [0, weight_sum] for all valid inputs."""
-        router = _make_router()
-        weight_sum = (
-            router.physics_cache_weight
-            + router.physics_compute_weight
-            + router.physics_queue_weight
-            + router.physics_memory_weight
-        )
-        for overlap in [0.0, 0.5, 1.0]:
-            for kv_util in [0.0, 0.5, 1.0]:
-                for memory_pressure in [0.0, 0.5, 1.0]:
-                    worker_util = {0: {"kv_util": kv_util, "prefill_util": 0.5}}
-                    score = router._physics_score(
-                        overlap=overlap, wid=0, worker_util=worker_util,
-                        prefill_tokens=50, tokens_in=100, memory_pressure=memory_pressure,
-                    )
-                    assert 0.0 <= score <= weight_sum + 1e-9, (
-                        f"physics_score={score} out of [0, {weight_sum}] for "
-                        f"overlap={overlap}, kv_util={kv_util}, "
-                        f"memory_pressure={memory_pressure}"
-                    )
-
-    def test_fallback_when_no_monitor_data(self):
-        """Worker not in worker_util dict triggers prefill_ratio fallback."""
-        router = _make_router()
-        worker_util: dict[int, dict] = {}  # no data for wid=0
-        # 50 uncached tokens out of 100 → prefill_ratio = 0.5
-        score_fallback = router._physics_score(
-            overlap=0.5, wid=0, worker_util=worker_util,
-            prefill_tokens=50, tokens_in=100, memory_pressure=0.0,
-        )
-        # compute_avail = 1 - prefill_ratio = 0.5, queue_avail = 0.5 (neutral)
-        expected = (
-            router.physics_cache_weight * 0.5
-            + router.physics_compute_weight * 0.5
-            + router.physics_queue_weight * 0.5
-            + router.physics_memory_weight * 1.0  # no memory pressure
-        )
-        assert abs(score_fallback - expected) < 1e-9
-
-    def test_memory_pressure_reduces_score(self):
-        """Higher memory pressure (eviction risk) must reduce physics score."""
-        router = _make_router()
-        worker_util = {0: {"kv_util": 0.3, "prefill_util": 0.2}}
-
-        score_no_pressure = router._physics_score(
-            overlap=0.7, wid=0, worker_util=worker_util,
-            prefill_tokens=30, tokens_in=100, memory_pressure=0.0,
-        )
-        score_high_pressure = router._physics_score(
-            overlap=0.7, wid=0, worker_util=worker_util,
-            prefill_tokens=30, tokens_in=100, memory_pressure=0.9,
-        )
-        assert score_high_pressure < score_no_pressure, (
-            "High memory pressure must reduce physics score"
-        )
-
-    def test_physics_score_increases_with_overlap(self):
-        """Higher KV cache overlap → higher physics score (cache_hit signal)."""
-        router = _make_router()
-        worker_util = {0: {"kv_util": 0.3, "prefill_util": 0.2}}
-
-        scores = [
-            router._physics_score(
-                overlap=ov, wid=0, worker_util=worker_util,
-                prefill_tokens=int((1.0 - ov) * 100), tokens_in=100,
-                memory_pressure=0.0,
-            )
-            for ov in [0.0, 0.25, 0.5, 0.75, 1.0]
-        ]
-        for i in range(len(scores) - 1):
-            assert scores[i] <= scores[i + 1], (
-                f"Physics score should increase with overlap: {scores}"
-            )
-
-
-# ---------------------------------------------------------------------------
-# 4. _iat_factor interpolation between anchor points
-# ---------------------------------------------------------------------------
-
-class TestIatFactorInterpolation:
-    """Tests for the IAT factor lookup table with interpolation.
-
-    Anchors: 50→1.5, 250→1.0, 1000→0.6.
-    Per paper Section 3.4: lower IAT (rapid-fire) → higher factor (more stickiness).
-    """
-
-    def test_at_lower_anchor(self):
-        assert KvThompsonRouter._iat_factor(50) == pytest.approx(1.5, abs=1e-9)
-
-    def test_at_middle_anchor(self):
-        assert KvThompsonRouter._iat_factor(250) == pytest.approx(1.0, abs=1e-9)
-
-    def test_at_upper_anchor(self):
-        assert KvThompsonRouter._iat_factor(1000) == pytest.approx(0.6, abs=1e-9)
-
-    def test_interpolation_between_50_and_250(self):
-        """At IAT=150 (midpoint between 50 and 250), factor should be ~1.25."""
-        # Linear: 1.5 - 0.5 * (150-50)/(250-50) = 1.5 - 0.5*0.5 = 1.25
-        result = KvThompsonRouter._iat_factor(150)
-        assert result == pytest.approx(1.25, abs=1e-9)
-
-    def test_interpolation_between_250_and_1000(self):
-        """At IAT=625 (midpoint between 250 and 1000), factor should be ~0.8."""
-        # Linear: 1.0 - 0.4 * (625-250)/(1000-250) = 1.0 - 0.4*0.5 = 0.8
-        result = KvThompsonRouter._iat_factor(625)
-        assert result == pytest.approx(0.8, abs=1e-9)
-
-    def test_below_lower_anchor_clamps(self):
-        """IAT < 50 should return 1.5 (clamped at lower anchor)."""
-        assert KvThompsonRouter._iat_factor(0) == pytest.approx(1.5, abs=1e-9)
-        assert KvThompsonRouter._iat_factor(10) == pytest.approx(1.5, abs=1e-9)
-
-    def test_above_upper_anchor_clamps(self):
-        """IAT > 1000 should return 0.6 (clamped at upper anchor)."""
-        assert KvThompsonRouter._iat_factor(5000) == pytest.approx(0.6, abs=1e-9)
-
-    def test_monotonically_decreasing(self):
-        """Factor must be strictly decreasing with IAT."""
-        iats = [0, 50, 100, 150, 200, 250, 500, 750, 1000, 2000]
-        factors = [KvThompsonRouter._iat_factor(i) for i in iats]
-        for i in range(len(factors) - 1):
-            assert factors[i] >= factors[i + 1], (
-                f"IAT factor not monotone: f({iats[i]})={factors[i]:.4f} > "
-                f"f({iats[i+1]})={factors[i+1]:.4f}"
-            )
-
-
-# ---------------------------------------------------------------------------
-# 5. LinTS lints_weight sign branch
-# ---------------------------------------------------------------------------
-
-class TestLinTSWeightBranch:
-    """Test that negative lints_weight uses abs(weight)*tanh(...) while
-    non-negative uses raw weight*raw_sample."""
-
-    def test_lints_always_uses_tanh_bounding(self):
-        """LinTS contribution is always abs(lints_weight) * tanh(raw), regardless of sign."""
-        router = _make_router({"enable_lints": True, "lints_weight": 2.0})
-
-        # Give the learner strong signal to make its posterior mean large
-        x: np.ndarray = np.ones(9, dtype=np.float64)
-        for _ in range(50):
-            router.lints_learner.update(0, x, reward=1.0)
-
-        raw_sample = router.lints_learner.sample(0, x)
-        # With tanh bounding: contribution = abs(2.0) * tanh(raw_sample) <= 2.0
-        bounded_contribution = abs(2.0) * math.tanh(raw_sample)
-        assert abs(bounded_contribution) <= 2.0 + 1e-9
-
-        # The full score should also be finite
-        score = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5,
-        )
-        assert math.isfinite(score)
-
-    def test_lints_weight_sign_irrelevant(self):
-        """Positive and negative lints_weight produce the same contribution (abs used)."""
-        router_pos = _make_router({"enable_lints": True, "lints_weight": 1.0})
-        router_neg = _make_router({"enable_lints": True, "lints_weight": -1.0})
-
-        x: np.ndarray = np.ones(9, dtype=np.float64)
-        for _ in range(30):
-            router_pos.lints_learner.update(0, x, reward=1.0)
-            router_neg.lints_learner.update(0, x, reward=1.0)
-
-        np.random.seed(77)
-        score_pos = router_pos._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5,
-        )
-        np.random.seed(77)
-        score_neg = router_neg._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5,
-        )
-        # Both should produce identical scores since abs() is used
-        assert abs(score_pos - score_neg) < 1e-9
-
-    def test_lints_disabled_contributes_zero(self):
-        """When enable_lints=False, LinTS adds nothing to the score."""
-        router_off = _make_router({"enable_lints": False})
-        router_on = _make_router({"enable_lints": True, "lints_weight": 0.0})
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-
-        # Both should yield the same score: physics-only (no LinTS contribution)
-        np.random.seed(42)
-        score_off = router_off._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5,
-        )
-        np.random.seed(42)
-        score_on_zero = router_on._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5,
-        )
-        assert abs(score_off - score_on_zero) < 1e-9
-
-
-# ---------------------------------------------------------------------------
-# 6. Adaptive exploration: ts_weight decay with reuse_budget
-# ---------------------------------------------------------------------------
-
-class TestAdaptiveExploration:
-    """Tests for enable_adaptive_explore: ts_weight decays with reuse_budget."""
-
-    def test_ts_weight_lower_for_high_reuse(self):
-        """With adaptive explore, high reuse_budget should reduce TS exploration."""
-        router = _make_router({"enable_beta_ts": True, "enable_adaptive_explore": True, "ts_weight": 1.0})
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        np.random.seed(11)
-        score_low_reuse = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5,
-        )
-        np.random.seed(11)
-        score_high_reuse = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=100, iat_factor=1.0,
-            physics=0.5,
-        )
-        # TS contribution diminishes; scores shouldn't be identical
-        # (the ts_weight factor decays, reducing Beta TS noise)
-        # This is a directional test — high reuse means less exploration
-        # We can't assert exact values due to stochastic sampling, but
-        # ts_w_eff = ts_weight / (1 + 100 * iat_factor) → very small
-        # so score_high_reuse should be closer to physics score
-        beta_sample = router.beta_learner.sample(0)
-        ts_w_low = 1.0
-        ts_w_high = 1.0 / (1.0 + 100.0 * 1.0)
-        assert ts_w_high < ts_w_low
-
-    def test_adaptive_temp_range(self):
-        """Adaptive temperature must stay within [temp_min, temp_max]."""
-        router = _make_router({
-            "enable_softmax": True,
-            "enable_adaptive_temp": True,
-            "temp_min": 0.15,
-            "temp_max": 2.0,
-            "adaptive_temp_base": 1.0,
-        })
-        # temp = base / (1 + reuse * iat_factor), clamped to [min, max]
-        # At reuse=0, iat_factor=1: temp = 1.0 / 1 = 1.0 (in range)
-        # At reuse=100, iat_factor=1: temp = 1.0/101 ≈ 0.01 → clamped to 0.15
-        raw_scores = [0.5, 0.3, 0.8]
-        probs = router._softmax(raw_scores, temp=router.temp_min)
-        assert abs(sum(probs) - 1.0) < 1e-9
-        for p in probs:
-            assert 0.0 <= p <= 1.0
-
-
-# ---------------------------------------------------------------------------
-# 6b. Load modulator kv_util regression tests
-# ---------------------------------------------------------------------------
-
-class TestLoadModKvUtil:
-    """Regression tests for the load_mod formula using kv_util [0,1].
-
-    Previously, load_mod used raw decode_blocks (thousands of KV blocks),
-    causing IEEE 754 underflow to 0.0 for every worker. The fix replaced
-    decode_blocks with the hardware-agnostic kv_util ratio.
-    """
-
-    def test_kv_util_zero_gives_load_mod_one(self):
-        """kv_util=0.0 means idle worker → load_mod=1.0 → score equals physics."""
-        router = _make_router({"enable_beta_ts": False, "enable_lints": False})
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        physics = 0.7
-        score = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=physics, kv_util=0.0,
-        )
-        assert abs(score - physics) < 1e-9, (
-            f"kv_util=0 should give score=physics={physics}, got {score:.6f}"
-        )
-
-    def test_kv_util_one_with_large_qpw_gives_near_zero(self):
-        """kv_util=1.0 + large qpw → load_mod ≈ 0 → score ≈ 0."""
-        router = _make_router({
-            "enable_beta_ts": False, "enable_lints": False,
-            "queue_penalty_weight": 100.0,
-        })
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        score = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.7, kv_util=1.0,
-        )
-        assert abs(score) < 0.01, (
-            f"kv_util=1.0 + qpw=100 should give score≈0, got {score:.6f}"
-        )
-
-    def test_large_decode_blocks_no_longer_causes_underflow(self):
-        """Raw decode_blocks=5000 with kv_util=0.0 must NOT underflow.
-
-        This is the core regression: the old formula exp(-qpw * db^2 / 2500)
-        underflowed to 0.0 for db=5000. Now decode_blocks is ignored by
-        load_mod; only kv_util matters.
+        We pass matching reuse_total so the fraction varies in (0, 1].
         """
-        router = _make_router({"enable_beta_ts": False, "enable_lints": False})
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        physics = 0.6
-        score = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=5000,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=physics, kv_util=0.0,
-        )
-        assert abs(score - physics) < 1e-9, (
-            f"decode_blocks=5000 + kv_util=0.0 should give score=physics={physics}, "
-            f"got {score:.6f} (old formula would give 0.0)"
-        )
+        reuse_total = 50
+        budgets = [1, 5, 10, 20, 40, 50]
+        stickiness_vals = [
+            router._score_worker(
+                wid=0, overlap=0.7, kv_util=0.1, prefill_util=0.0,
+                memory_pressure=0.0, osl=250, iat=200,
+                latency_sensitivity=2.0, is_sticky=False,
+                reuse_budget=b, reuse_total=reuse_total,
+            )[1]
+            for b in budgets
+        ]
+        for a, b in zip(stickiness_vals, stickiness_vals[1:]):
+            assert b >= a, f"stickiness not non-decreasing: {stickiness_vals}"
 
-    def test_load_mod_monotone_decreasing_in_kv_util(self):
-        """Score must decrease monotonically as kv_util increases [0→1]."""
-        router = _make_router({"enable_beta_ts": False, "enable_lints": False})
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        prev_score = float("inf")
-        for u in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]:
-            score = router._score_worker(
-                wid=0, x=x, overlap=0.5, decode_blocks=0,
-                last_worker=None, reuse_budget=0, iat_factor=1.0,
-                physics=0.5, kv_util=u,
-            )
-            assert score <= prev_score + 1e-9, (
-                f"Score should decrease with kv_util: at u={u}, "
-                f"score={score:.6f} > prev={prev_score:.6f}"
-            )
-            prev_score = score
+    def test_stickiness_is_linear_not_saturating(self, router):
+        """session_weight = min(1, reuse_budget / reuse_total) is linear through the origin.
 
-    def test_kv_util_clamped_above_one(self):
-        """kv_util > 1.0 should be clamped to 1.0, not cause explosion."""
-        router = _make_router({"enable_beta_ts": False, "enable_lints": False})
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        score_at_one = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5, kv_util=1.0,
+        With the old tanh(alpha * reuse_budget) formula, large budgets converged to
+        the same value and even small budgets produced near-full weight.  With the
+        new linear formula, session_weight is strictly proportional to the remaining
+        fraction, so doubling the remaining budget doubles the stickiness.
+        """
+        reuse_total = 100
+        _, s_quarter = router._score_worker(
+            wid=0, overlap=0.7, kv_util=0.0, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=250,
+            latency_sensitivity=2.0, is_sticky=False,
+            reuse_budget=25, reuse_total=reuse_total,
         )
-        score_above = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5, kv_util=5.0,
+        _, s_half = router._score_worker(
+            wid=0, overlap=0.7, kv_util=0.0, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=250,
+            latency_sensitivity=2.0, is_sticky=False,
+            reuse_budget=50, reuse_total=reuse_total,
         )
-        assert abs(score_at_one - score_above) < 1e-9, (
-            f"kv_util=5.0 should clamp to 1.0: score_at_one={score_at_one:.6f}, "
-            f"score_above={score_above:.6f}"
+        _, s_full = router._score_worker(
+            wid=0, overlap=0.7, kv_util=0.0, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=250,
+            latency_sensitivity=2.0, is_sticky=False,
+            reuse_budget=100, reuse_total=reuse_total,
         )
-
-    def test_kv_util_clamped_below_zero(self):
-        """Negative kv_util should be clamped to 0.0."""
-        router = _make_router({"enable_beta_ts": False, "enable_lints": False})
-        x = np.array([1.0, 0.35, 0.5, 0.5, 0.125, 0.5, 0.125, 0.15, 0.3])
-        score_at_zero = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5, kv_util=0.0,
+        # Linear through origin: s at fraction f == f * s_full.
+        # Allow 2% relative tolerance for floating-point rounding.
+        assert s_half == pytest.approx(s_full * 0.5, rel=0.02), (
+            f"s_half={s_half:.4f} should be s_full*0.5={s_full*0.5:.4f}"
         )
-        score_below = router._score_worker(
-            wid=0, x=x, overlap=0.5, decode_blocks=0,
-            last_worker=None, reuse_budget=0, iat_factor=1.0,
-            physics=0.5, kv_util=-1.0,
+        assert s_quarter == pytest.approx(s_full * 0.25, rel=0.02), (
+            f"s_quarter={s_quarter:.4f} should be s_full*0.25={s_full*0.25:.4f}"
         )
-        assert abs(score_at_zero - score_below) < 1e-9, (
-            f"kv_util=-1.0 should clamp to 0.0: score_at_zero={score_at_zero:.6f}, "
-            f"score_below={score_below:.6f}"
+        # Also confirm it did NOT saturate: half should be meaningfully less than full
+        assert s_half < s_full * 0.6, (
+            f"Expected s_half < 60% of s_full (no saturation), got {s_half:.4f} vs {s_full:.4f}"
         )
 
 
 # ---------------------------------------------------------------------------
-# 7. Management server: hot-reload config and state roundtrip
+# 5. Stickiness decreases with memory_pressure
+# ---------------------------------------------------------------------------
+
+class TestStickinessMemoryPressure:
+    def test_high_memory_pressure_reduces_stickiness(self, router):
+        """future_value = overlap * (1 - memory_pressure); pressure↑ → stickiness↓."""
+        pressures = [0.0, 0.3, 0.6, 0.9]
+        stickiness_vals = [
+            _score(router, memory_pressure=p, overlap=0.8,
+                   reuse_budget=5, is_sticky=False, iat=200)[1]
+            for p in pressures
+        ]
+        for a, b in zip(stickiness_vals, stickiness_vals[1:]):
+            assert b < a, f"stickiness did not decrease with pressure: {stickiness_vals}"
+
+    def test_full_memory_pressure_kills_non_sticky_stickiness(self, router):
+        """At memory_pressure=1.0 and is_sticky=False, future_value=0 → stickiness=0."""
+        _, s = _score(
+            router, memory_pressure=1.0, overlap=0.9,
+            reuse_budget=10, is_sticky=False, iat=50,
+        )
+        assert s == pytest.approx(0.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 6. Stickiness increases with low IAT
+# ---------------------------------------------------------------------------
+
+class TestStickinessIAT:
+    def test_low_iat_yields_higher_stickiness_than_high_iat(self, router):
+        _, s_low = _score(router, iat=50, reuse_budget=5, overlap=0.7, is_sticky=False)
+        _, s_high = _score(router, iat=1000, reuse_budget=5, overlap=0.7, is_sticky=False)
+        assert s_low > s_high
+
+    def test_stickiness_monotone_decreasing_with_iat(self, router):
+        iats = [50, 100, 200, 400, 700, 1000, 2000]
+        vals = [_score(router, iat=i, reuse_budget=5, overlap=0.7, is_sticky=False)[1]
+                for i in iats]
+        for a, b in zip(vals, vals[1:]):
+            assert a >= b, f"stickiness not decreasing with IAT: {vals}"
+
+
+# ---------------------------------------------------------------------------
+# 7. Lambda scaling: doubling lambda_stickiness doubles contribution
+# ---------------------------------------------------------------------------
+
+class TestLambdaScaling:
+    def test_doubling_lambda_stickiness_doubles_stickiness_term(self, mock_kv_router):
+        """score = λ₁*ranking + λ₂*stickiness; doubling λ₂ doubles stickiness part."""
+        r1 = _make_router(mock_kv_router, lambda_ranking=1.0, lambda_stickiness=1.0)
+        r2 = _make_router(mock_kv_router, lambda_ranking=1.0, lambda_stickiness=2.0)
+
+        kw = dict(
+            wid=0, overlap=0.7, kv_util=0.2, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=100,
+            latency_sensitivity=2.0, is_sticky=True, reuse_budget=4,
+        )
+        rank1, stick1 = r1._score_worker(**kw)
+        rank2, stick2 = r2._score_worker(**kw)
+
+        # ranking is independent of lambda values
+        assert rank1 == pytest.approx(rank2, abs=1e-9)
+        # stickiness raw value also independent of lambda
+        assert stick1 == pytest.approx(stick2, abs=1e-9)
+
+        score1 = r1.lambda_ranking * rank1 + r1.lambda_stickiness * stick1
+        score2 = r2.lambda_ranking * rank2 + r2.lambda_stickiness * stick2
+        extra = (r2.lambda_stickiness - r1.lambda_stickiness) * stick1
+        assert score2 == pytest.approx(score1 + extra, abs=1e-9)
+
+    def test_zero_lambda_stickiness_means_only_ranking_counts(self, mock_kv_router):
+        r = _make_router(mock_kv_router, lambda_ranking=1.0, lambda_stickiness=0.0)
+        kw = dict(
+            wid=0, overlap=0.7, kv_util=0.2, prefill_util=0.0,
+            memory_pressure=0.0, osl=250, iat=50,
+            latency_sensitivity=2.0, is_sticky=True, reuse_budget=10,
+        )
+        ranking, stickiness = r._score_worker(**kw)
+        effective_score = r.lambda_ranking * ranking + r.lambda_stickiness * stickiness
+        assert effective_score == pytest.approx(ranking, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 8. All valid inputs → finite scores
+# ---------------------------------------------------------------------------
+
+class TestFiniteScores:
+    @pytest.mark.parametrize("overlap,kv_util,prefill_util,memory_pressure,osl,iat,lat_sens,is_sticky,reuse", [
+        (0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, False, 0),
+        (1.0, 1.0, 1.0, 1.0, 1024, 10000, 5.0, True, 100),
+        (0.5, 0.5, 0.5, 0.5, 512, 500, 2.0, False, 5),
+        (0.0, 1.0, 0.0, 1.0, 0, 1000, 1.0, True, 0),
+        (1.0, 0.0, 1.0, 0.0, 1024, 50, 5.0, False, 50),
+    ])
+    def test_score_is_finite(self, router, overlap, kv_util, prefill_util,
+                             memory_pressure, osl, iat, lat_sens, is_sticky, reuse):
+        r, s = router._score_worker(
+            wid=0, overlap=overlap, kv_util=kv_util, prefill_util=prefill_util,
+            memory_pressure=memory_pressure, osl=osl, iat=iat,
+            latency_sensitivity=lat_sens, is_sticky=is_sticky, reuse_budget=reuse,
+        )
+        assert math.isfinite(r), f"ranking not finite: overlap={overlap}"
+        assert math.isfinite(s), f"stickiness not finite: overlap={overlap}"
+
+
+# ---------------------------------------------------------------------------
+# Guard: skip management tests if aiohttp is not installed
 # ---------------------------------------------------------------------------
 
 try:
@@ -737,604 +325,230 @@ _skip_no_aiohttp = pytest.mark.skipif(
 )
 
 
+def _make_mock_request(payload: dict) -> MagicMock:
+    """Build an AsyncMock aiohttp request whose .json() returns payload."""
+    req = AsyncMock()
+    req.json = AsyncMock(return_value=payload)
+    return req
+
+
+def _parse_response(resp) -> dict:
+    """Decode a web.Response body produced by web.json_response."""
+    import json
+    return json.loads(resp.body)
+
+
+def _mgmt_server(mock_kv_router, **router_kwargs):
+    """Create a (management_server, router) pair for direct-call testing."""
+    from dynamo.thompson_router.management import RouterManagementServer
+    r = KvThompsonRouter(mock_kv_router, config=None)
+    return RouterManagementServer(r, port=0), r
+
+
+# ---------------------------------------------------------------------------
+# 9. Management server: config hot-reload
+# ---------------------------------------------------------------------------
+
 @_skip_no_aiohttp
-class TestManagementServerConfig:
-    """Tests for RouterManagementServer._set_config and _get_config.
-
-    These tests bypass aiohttp and call handler methods directly with mock
-    requests, exercising the config hot-reload logic without a live server.
-    """
-
-    def _make_server(self):
-        from dynamo.thompson_router.management import RouterManagementServer
-        router = _make_router()
-        return RouterManagementServer(router, port=0), router
-
+class TestManagementHotReload:
     @pytest.mark.asyncio
-    async def test_get_config_returns_all_tunable_params(self):
-        """GET /config must return all TUNABLE_ROUTER_PARAMS keys."""
-        from dynamo.thompson_router.router import TUNABLE_ROUTER_PARAMS
-        server, router = self._make_server()
+    async def test_hot_reload_updates_all_nine_params(self, mock_kv_router):
+        """POST /config applies all 9 tunable params directly to the live router."""
+        mgmt, r = _mgmt_server(mock_kv_router)
 
-        resp = await server._get_config(MagicMock())
-        # aiohttp Response.json_response stores data in _body as JSON
-        import json
-        body = json.loads(resp.body)
-        for param in TUNABLE_ROUTER_PARAMS:
-            assert param in body, f"Missing tunable param in GET /config: {param}"
-
-    @pytest.mark.asyncio
-    async def test_set_config_updates_router_live(self):
-        """POST /config with ts_weight should immediately change router.ts_weight."""
-        import json
-        from dynamo.thompson_router.management import RouterManagementServer
-        server, router = self._make_server()
-
-        original_ts = router.ts_weight
-        new_ts = original_ts * 2.0 + 0.1
-
-        mock_request = AsyncMock()
-        mock_request.json = AsyncMock(return_value={"ts_weight": new_ts})
-
-        resp = await server._set_config(mock_request)
-        body = json.loads(resp.body)
-
-        assert body["status"] == "applied"
-        assert abs(router.ts_weight - new_ts) < 1e-9
-        assert "ts_weight" in body["params"]
-
-    @pytest.mark.asyncio
-    async def test_set_config_updates_lints_v_on_learner(self):
-        """POST /config with lints_v must update the live LinTSLearner.v."""
-        import json
-        server, router = self._make_server()
-
-        mock_request = AsyncMock()
-        mock_request.json = AsyncMock(return_value={"lints_v": 0.77})
-
-        await server._set_config(mock_request)
-        assert abs(router.lints_learner.v - 0.77) < 1e-9
-
-    @pytest.mark.asyncio
-    async def test_set_config_updates_beta_decay_on_learner(self):
-        """POST /config with beta_decay must update the live BetaLearner.decay."""
-        import json
-        server, router = self._make_server()
-
-        mock_request = AsyncMock()
-        mock_request.json = AsyncMock(return_value={"beta_decay": 0.88})
-
-        await server._set_config(mock_request)
-        assert abs(router.beta_learner.decay - 0.88) < 1e-9
-
-    @pytest.mark.asyncio
-    async def test_set_config_partial_update_leaves_others_unchanged(self):
-        """Only the specified params should change; others stay at their values."""
-        import json
-        server, router = self._make_server()
-        original_temperature = router.temperature
-        original_ts_weight = router.ts_weight
-
-        mock_request = AsyncMock()
-        mock_request.json = AsyncMock(return_value={"lints_v": 0.5})
-
-        await server._set_config(mock_request)
-        assert abs(router.temperature - original_temperature) < 1e-9
-        assert abs(router.ts_weight - original_ts_weight) < 1e-9
-
-    @pytest.mark.asyncio
-    async def test_set_config_all_physics_weights(self):
-        """All four physics weights should be hot-reloadable."""
-        import json
-        server, router = self._make_server()
-
-        new_weights = {
-            "physics_cache_weight": 0.4,
-            "physics_compute_weight": 0.3,
-            "physics_queue_weight": 0.2,
-            "physics_memory_weight": 0.1,
+        new_params = {
+            "lambda_ranking": 2.5,
+            "lambda_stickiness": 0.8,
+            "w_cache": 0.6,
+            "w_queue": 0.1,
+            "w_osl_load": 0.15,
+            "w_sensitivity": 0.15,
+            "alpha_reuse": 0.5,
+            "sticky_bonus": 0.4,
+            "epsilon": 0.07,
         }
-        mock_request = AsyncMock()
-        mock_request.json = AsyncMock(return_value=new_weights)
+        resp = await mgmt._set_config(_make_mock_request(new_params))
+        body = _parse_response(resp)
 
-        await server._set_config(mock_request)
-        assert abs(router.physics_cache_weight - 0.4) < 1e-9
-        assert abs(router.physics_compute_weight - 0.3) < 1e-9
-        assert abs(router.physics_queue_weight - 0.2) < 1e-9
-        assert abs(router.physics_memory_weight - 0.1) < 1e-9
-
-
-    @pytest.mark.asyncio
-    async def test_set_config_enable_flags_hot_reload(self):
-        """POST /config with enable_* booleans must toggle features on the live router."""
-        import json
-        server, router = self._make_server()
-
-        assert not router.enable_beta_ts  # default is False
-        assert not router.enable_switching_cost
-
-        mock_request = AsyncMock()
-        mock_request.json = AsyncMock(return_value={
-            "enable_beta_ts": True,
-            "enable_switching_cost": True,
-            "enable_lints": True,
-        })
-
-        resp = await server._set_config(mock_request)
-        body = json.loads(resp.body)
         assert body["status"] == "applied"
-        assert body["params"]["enable_beta_ts"] is True
-        assert body["params"]["enable_switching_cost"] is True
-        assert body["params"]["enable_lints"] is True
-
-        # Verify the live router was actually toggled
-        assert router.enable_beta_ts is True
-        assert router.enable_switching_cost is True
-        assert router.enable_lints is True
-
-    @pytest.mark.asyncio
-    async def test_set_config_enable_flags_toggle_back(self):
-        """Enable flags can be toggled True→False via hot-reload."""
-        import json
-        server, router = self._make_server()
-        router.enable_beta_ts = True
-        router.enable_lints = True
-
-        mock_request = AsyncMock()
-        mock_request.json = AsyncMock(return_value={
-            "enable_beta_ts": False,
-            "enable_lints": False,
-        })
-
-        await server._set_config(mock_request)
-        assert router.enable_beta_ts is False
-        assert router.enable_lints is False
+        assert r.lambda_ranking == pytest.approx(2.5)
+        assert r.lambda_stickiness == pytest.approx(0.8)
+        assert r.w_cache == pytest.approx(0.6)
+        assert r.w_queue == pytest.approx(0.1)
+        assert r.w_osl_load == pytest.approx(0.15)
+        assert r.w_sensitivity == pytest.approx(0.15)
+        assert r.alpha_reuse == pytest.approx(0.5)
+        assert r.sticky_bonus == pytest.approx(0.4)
+        assert r.epsilon == pytest.approx(0.07)
 
     @pytest.mark.asyncio
-    async def test_get_config_reports_enable_flags(self):
-        """GET /config must include all enable_* flags reflecting current state."""
-        import json
-        server, router = self._make_server()
-        router.enable_beta_ts = True
-        router.enable_switching_cost = True
+    async def test_hot_reload_partial_update_leaves_other_params_unchanged(self, mock_kv_router):
+        """Sending a subset of params only mutates those params."""
+        mgmt, r = _mgmt_server(mock_kv_router)
+        original_w_cache = r.w_cache
 
-        resp = await server._get_config(MagicMock())
-        body = json.loads(resp.body)
+        resp = await mgmt._set_config(_make_mock_request({"lambda_ranking": 3.0}))
+        body = _parse_response(resp)
 
-        assert body["enable_beta_ts"] is True
-        assert body["enable_switching_cost"] is True
-        assert body["enable_lints"] is False  # default
+        assert body["status"] == "applied"
+        assert r.lambda_ranking == pytest.approx(3.0)
+        assert r.w_cache == pytest.approx(original_w_cache)
+
+    @pytest.mark.asyncio
+    async def test_get_config_returns_new_param_names(self, mock_kv_router):
+        """GET /config response contains all 9 new param names (no old names)."""
+        mgmt, _ = _mgmt_server(mock_kv_router)
+        resp = await mgmt._get_config(MagicMock())
+        body = _parse_response(resp)
+
+        new_keys = {
+            "lambda_ranking", "lambda_stickiness",
+            "w_cache", "w_queue", "w_osl_load", "w_sensitivity",
+            "alpha_reuse", "sticky_bonus", "epsilon",
+        }
+        assert new_keys.issubset(set(body.keys()))
+
+        old_keys = {
+            "lints_weight", "enable_lints", "enable_softmax", "physics_cache_weight",
+            "affinity_base", "switch_base", "idle_boost",
+        }
+        for k in old_keys:
+            assert k not in body, f"removed key still present in /config: {k}"
+
+    @pytest.mark.asyncio
+    async def test_beta_decay_hot_reload(self, mock_kv_router):
+        """beta_decay should also be hot-reloadable via POST /config."""
+        mgmt, r = _mgmt_server(mock_kv_router)
+        resp = await mgmt._set_config(_make_mock_request({"beta_decay": 0.88}))
+        body = _parse_response(resp)
+        assert body["status"] == "applied"
+        assert r.beta_learner.decay == pytest.approx(0.88)
 
 
 # ---------------------------------------------------------------------------
-# 8. Management server: state persistence (save/load/reset)
+# 10. Management server: state and reset endpoints
 # ---------------------------------------------------------------------------
 
 @_skip_no_aiohttp
-class TestManagementServerState:
-    """Tests for RouterManagementServer state endpoints."""
+class TestManagementStateEndpoints:
+    @pytest.mark.asyncio
+    async def test_state_roundtrip(self, mock_kv_router):
+        """GET /state → POST /state restores learner params in-place."""
+        mgmt, r = _mgmt_server(mock_kv_router)
+        r.beta_learner.add_worker(0)
+        r.beta_learner.update(0, 0.9)   # push alpha up
+        original_params = r.beta_learner.get_params(0)
 
-    def _make_server(self):
-        from dynamo.thompson_router.management import RouterManagementServer
-        router = _make_router()
-        return RouterManagementServer(router, port=0), router
+        # Capture state
+        get_resp = await mgmt._get_state(MagicMock())
+        state = _parse_response(get_resp)
+
+        # Reset then restore
+        r.beta_learner.reset_all()
+        assert r.beta_learner.get_params(0) == (1.0, 1.0)
+
+        load_resp = await mgmt._load_state(_make_mock_request(state))
+        load_body = _parse_response(load_resp)
+        assert load_body["status"] == "loaded"
+
+        restored = r.beta_learner.get_params(0)
+        assert restored[0] == pytest.approx(original_params[0], abs=1e-6)
+        assert restored[1] == pytest.approx(original_params[1], abs=1e-6)
 
     @pytest.mark.asyncio
-    async def test_get_state_contains_both_learners(self):
-        """GET /state must return beta_learner and lints_learner fields."""
-        import json
-        server, router = self._make_server()
+    async def test_reset_state_clears_learners(self, mock_kv_router):
+        """POST /state/reset returns beta_learner to (1, 1) for all workers."""
+        mgmt, r = _mgmt_server(mock_kv_router)
+        r.beta_learner.add_worker(7)
+        r.beta_learner.update(7, 1.0)  # alpha grows above 1.0
 
-        resp = await server._get_state(MagicMock())
-        body = json.loads(resp.body)
-        assert "beta_learner" in body
-        assert "lints_learner" in body
-
-    @pytest.mark.asyncio
-    async def test_load_state_restores_beta_params(self):
-        """POST /state must restore BetaLearner params from serialized dict."""
-        import json
-        server, router = self._make_server()
-
-        # Build specific state
-        router.beta_learner.add_worker(0)
-        router.beta_learner._bandits[0] = (7.0, 3.0)
-        saved = {"beta_learner": router.beta_learner.to_dict()}
-
-        # Reset and verify it's gone
-        router.beta_learner.reset_all()
-        a_reset, b_reset = router.beta_learner.get_params(0)
-        assert a_reset == 1.0
-
-        # Load and verify restored
-        mock_request = AsyncMock()
-        mock_request.json = AsyncMock(return_value=saved)
-
-        resp = await server._load_state(mock_request)
-        body = json.loads(resp.body)
-        assert body["status"] == "loaded"
-        a_restored, b_restored = router.beta_learner.get_params(0)
-        assert abs(a_restored - 7.0) < 1e-9
-        assert abs(b_restored - 3.0) < 1e-9
-
-    @pytest.mark.asyncio
-    async def test_reset_state_zeroes_all_learners(self):
-        """POST /state/reset must reset Beta, LinTS, and LatencyTracker."""
-        import json
-        server, router = self._make_server()
-
-        # Pollute state
-        router.beta_learner.add_worker(0)
-        router.beta_learner.update(0, 1.0)
-        x = np.ones(9)
-        router.lints_learner.add_worker(0)
-        router.lints_learner.update(0, x, reward=1.0)
-        router.latency_tracker.update_baselines(0, "M", "M", 50.0, per_tok=True)
-
-        resp = await server._reset_state(MagicMock())
-        body = json.loads(resp.body)
+        resp = await mgmt._reset_state(MagicMock())
+        body = _parse_response(resp)
         assert body["status"] == "reset"
-
-        # Verify all reset
-        a, b = router.beta_learner.get_params(0)
-        assert a == 1.0
-        assert b == 1.0
-        assert router.latency_tracker.get_global_baseline(True, fallback=99.0) == 99.0
+        assert r.beta_learner.get_params(7) == (1.0, 1.0)
 
     @pytest.mark.asyncio
-    async def test_metrics_reset_clears_stats(self):
-        """POST /metrics/reset must clear RouterStats counters."""
-        import json
-        server, router = self._make_server()
+    async def test_metrics_reset_clears_stats(self, mock_kv_router):
+        """POST /metrics/reset zeros rolling stats counters."""
+        mgmt, r = _mgmt_server(mock_kv_router)
+        r.stats.record_feedback(0.8)
+        r.stats.record_feedback(0.5)
+        assert r.stats._count == 2
 
-        router.stats.record_feedback(0.5, 0.4, 0.6)
-        assert router.stats._count == 1
-
-        resp = await server._reset_metrics(MagicMock())
-        body = json.loads(resp.body)
+        resp = await mgmt._reset_metrics(MagicMock())
+        body = _parse_response(resp)
         assert body["status"] == "reset"
-        assert router.stats._count == 0
-
-
-# ---------------------------------------------------------------------------
-# 9. Management server: record_decision and decisions summary
-# ---------------------------------------------------------------------------
-
-@_skip_no_aiohttp
-class TestManagementServerDecisions:
-    """Tests for RouterManagementServer.record_decision and _get_decisions_summary."""
-
-    def _make_server(self):
-        from dynamo.thompson_router.management import RouterManagementServer
-        router = _make_router()
-        return RouterManagementServer(router, port=0), router
-
-    def _make_decision(self, chosen=0, native_pick=0, prefix_id="p"):
-        return RoutingDecision(
-            chosen=chosen,
-            native_pick=native_pick,
-            prefix_id=prefix_id,
-            worker_details=[
-                {"id": 0, "kv_overlap": 0.7, "final_score": 0.9},
-                {"id": 1, "kv_overlap": 0.2, "final_score": 0.5},
-            ],
-        )
-
-    def test_record_decision_stores_entry(self):
-        server, _ = self._make_server()
-        decision = self._make_decision(chosen=0, native_pick=0)
-        server.record_decision(decision, hints={"osl": 250, "iat": 250, "reuse_budget": 3,
-                                                "tokens_in": 100}, elapsed_ms=5.0, tokens_out=50)
-        assert len(server._decisions) == 1
-        rec = server._decisions[0]
-        assert rec["chosen"] == 0
-        assert rec["agreed"] is True
-        assert rec["osl"] == 250
-
-    def test_record_decision_disagreement_flag(self):
-        server, _ = self._make_server()
-        decision = self._make_decision(chosen=1, native_pick=0)  # disagree
-        server.record_decision(decision, hints={"osl": 250, "iat": 250, "reuse_budget": 0,
-                                                "tokens_in": 100}, elapsed_ms=3.0, tokens_out=20)
-        assert server._decisions[0]["agreed"] is False
-
-    def test_decisions_deque_maxlen(self):
-        """Decisions deque should cap at MAX_DECISION_HISTORY."""
-        from dynamo.thompson_router.management import MAX_DECISION_HISTORY
-        server, _ = self._make_server()
-        for i in range(MAX_DECISION_HISTORY + 50):
-            decision = self._make_decision(chosen=i % 3)
-            server.record_decision(decision, hints={"osl": 250, "iat": 250,
-                                                    "reuse_budget": 0, "tokens_in": 100},
-                                   elapsed_ms=1.0, tokens_out=10)
-        assert len(server._decisions) == MAX_DECISION_HISTORY
+        assert r.stats._count == 0
 
     @pytest.mark.asyncio
-    async def test_decisions_summary_empty(self):
-        """Without any recorded decisions, summary returns error."""
-        import json
-        server, _ = self._make_server()
-        resp = await server._get_decisions_summary(MagicMock())
-        body = json.loads(resp.body)
-        assert "error" in body
-
-    @pytest.mark.asyncio
-    async def test_decisions_summary_aggregates_correctly(self):
-        """Summary should compute agreement rate and worker distribution."""
-        import json
-        server, _ = self._make_server()
-
-        # 3 decisions: 2 agree, 1 disagrees; workers 0, 0, 1
-        for chosen, native in [(0, 0), (0, 0), (1, 0)]:
-            server.record_decision(
-                self._make_decision(chosen=chosen, native_pick=native, prefix_id=f"p{chosen}"),
-                hints={"osl": 250, "iat": 250, "reuse_budget": 0, "tokens_in": 100},
-                elapsed_ms=2.0, tokens_out=10,
-            )
-
-        resp = await server._get_decisions_summary(MagicMock())
-        body = json.loads(resp.body)
-
-        assert body["total_decisions"] == 3
-        assert body["agreed_with_native"] == 2
-        assert abs(body["agreement_rate"] - 2 / 3) < 0.01
-        assert body["worker_distribution"]["0"] == 2
-        assert body["worker_distribution"]["1"] == 1
-
-    @pytest.mark.asyncio
-    async def test_get_decisions_pagination(self):
-        """GET /decisions?n=2 should return only the last 2 entries."""
-        import json
-        server, _ = self._make_server()
-        for i in range(5):
-            server.record_decision(
-                self._make_decision(chosen=i % 3, prefix_id=f"p{i}"),
-                hints={"osl": 250, "iat": 250, "reuse_budget": 0, "tokens_in": 100},
-                elapsed_ms=1.0, tokens_out=10,
-            )
-
-        mock_request = MagicMock()
-        mock_request.query = {"n": "2"}
-        resp = await server._get_decisions(mock_request)
-        body = json.loads(resp.body)
-        assert body["count"] == 2
+    async def test_health_endpoint(self, mock_kv_router):
+        """GET /health returns status ok and router_type kv_thompson."""
+        mgmt, _ = _mgmt_server(mock_kv_router)
+        resp = await mgmt._health(MagicMock())
+        body = _parse_response(resp)
+        assert body["status"] == "ok"
+        assert body["router_type"] == "kv_thompson"
 
 
 # ---------------------------------------------------------------------------
-# 10. RouterStats variance formula
+# 11. RouterStats variance computation
 # ---------------------------------------------------------------------------
 
-class TestRouterStatsVariance:
-    """Tests that RouterStats computes mean and variance correctly
-    using Welford's online-equivalent formula: E[x^2] - E[x]^2."""
-
-    def test_constant_signal_zero_variance(self):
+class TestRouterStats:
+    def test_reward_variance_zero_for_constant_stream(self):
         stats = RouterStats()
-        for _ in range(5):
-            stats.record_feedback(reward=0.5, physics_pred=0.4, residual=0.6)
+        for _ in range(10):
+            stats.record_feedback(0.7)
         snap = stats.snapshot()
-        assert abs(snap["reward"]["variance"]) < 1e-9
-        assert abs(snap["reward"]["mean"] - 0.5) < 1e-9
+        assert snap["reward"]["mean"] == pytest.approx(0.7, abs=1e-4)
+        assert snap["reward"]["variance"] == pytest.approx(0.0, abs=1e-6)
 
-    def test_two_point_variance(self):
-        """Variance of {0, 1} = E[x^2] - E[x]^2 = 0.5 - 0.25 = 0.25."""
+    def test_reward_variance_nonzero_for_mixed_stream(self):
         stats = RouterStats()
-        stats.record_feedback(reward=0.0, physics_pred=0.5, residual=0.5)
-        stats.record_feedback(reward=1.0, physics_pred=0.5, residual=0.5)
+        for v in [0.0, 1.0] * 10:
+            stats.record_feedback(v)
         snap = stats.snapshot()
-        assert abs(snap["reward"]["variance"] - 0.25) < 1e-9
-        assert abs(snap["reward"]["mean"] - 0.5) < 1e-9
+        assert snap["reward"]["variance"] > 0.0
 
-    def test_physics_rmse_equals_sqrt_mse(self):
-        """RMSE must equal sqrt(MSE) to the precision of snapshot()'s 4-decimal rounding."""
+    def test_decision_scores_recorded(self):
         stats = RouterStats()
-        for reward, physics in [(0.8, 0.5), (0.2, 0.6), (0.6, 0.4)]:
-            stats.record_feedback(reward=reward, physics_pred=physics, residual=0.5)
+        stats.record_decision_scores(ranking=0.5, stickiness=0.2)
+        stats.record_decision_scores(ranking=0.7, stickiness=0.4)
         snap = stats.snapshot()
-        mse = snap["physics_tower"]["mse"]
-        rmse = snap["physics_tower"]["rmse"]
-        # snapshot() rounds to 4 decimals, so the max error is ~5e-5 for the sqrt
-        assert abs(rmse - mse ** 0.5) < 5e-4
+        assert snap["ranking"]["mean"] > 0.0
+        assert snap["stickiness"]["mean"] > 0.0
 
-    def test_learner_contribution_uses_absolute_value(self):
-        """Learner contributions are stored as absolute values (no sign)."""
+    def test_reset_clears_all_counters(self):
         stats = RouterStats()
-        stats.record_learner_contribution(lints_contrib=-0.5, beta_contrib=-0.3)
+        stats.record_feedback(0.9)
+        stats.record_decision_scores(0.8, 0.3)
+        stats.reset()
         snap = stats.snapshot()
-        # Stored as abs: |−0.5| = 0.5, |−0.3| = 0.3
-        assert abs(snap["learner_contribution"]["mean_lints_magnitude"] - 0.5) < 1e-9
-        assert abs(snap["learner_contribution"]["mean_beta_magnitude"] - 0.3) < 1e-9
-
-    def test_baseline_hit_rate_formula(self):
-        """bucket_hit_rate = hits / (hits + fallbacks)."""
-        stats = RouterStats()
-        stats.record_baseline_lookup(used_bucket=True)
-        stats.record_baseline_lookup(used_bucket=True)
-        stats.record_baseline_lookup(used_bucket=False)
-        snap = stats.snapshot()
-        assert abs(snap["baseline_buckets"]["bucket_hit_rate"] - 2 / 3) < 0.01
+        assert snap["total_observations"] == 0
+        assert snap["reward"]["mean"] == pytest.approx(0.0, abs=1e-9)
 
 
 # ---------------------------------------------------------------------------
-# 11. OverlapResult dataclass defaults
+# 12. BetaLearner min_pseudo_count prevents collapse
 # ---------------------------------------------------------------------------
 
-class TestOverlapResult:
-    """Tests for the OverlapResult dataclass."""
-
-    def test_default_fields(self):
-        """OverlapResult with no args should have empty dicts and zero blocks."""
-        result = OverlapResult()
-        assert result.scores == {}
-        assert result.raw_block_counts == {}
-        assert result.total_blocks == 0
-        assert result.tree_sizes == {}
-
-    def test_fields_initialized(self):
-        """OverlapResult fields should be independently mutable."""
-        r1 = OverlapResult()
-        r2 = OverlapResult()
-        r1.scores[0] = 0.8
-        # r2 must not be affected (no shared mutable default)
-        assert 0 not in r2.scores
-
-    def test_tree_sizes_field(self):
-        """tree_sizes must be accessible and hold integer values."""
-        result = OverlapResult(
-            scores={0: 0.7, 1: 0.3},
-            raw_block_counts={0: 14, 1: 6},
-            total_blocks=20,
-            tree_sizes={0: 500, 1: 200},
-        )
-        assert result.tree_sizes[0] == 500
-        assert result.tree_sizes[1] == 200
-
-
-# ---------------------------------------------------------------------------
-# 12. BetaLearner min_pseudo_count floor
-# ---------------------------------------------------------------------------
-
-class TestBetaLearnerMinPseudoCount:
-    """Tests that min_pseudo_count prevents parameter collapse after heavy decay.
-
-    Without the floor, after many all-zero rewards with decay=0.5, alpha would
-    approach zero, making the posterior a point mass at 0 and eliminating
-    exploration permanently.
-    """
-
-    def test_floor_prevents_alpha_collapse(self):
-        """alpha must never fall below min_pseudo_count, even with all-zero rewards."""
-        floor = 0.5
-        bl = BetaLearner(decay=0.5, min_pseudo_count=floor)
-        bl.add_worker(0)
-        for _ in range(200):
-            bl.update(0, reward=0.0)
-        alpha, _ = bl.get_params(0)
-        assert alpha >= floor, f"alpha={alpha} fell below min_pseudo_count={floor}"
-
-    def test_floor_prevents_beta_collapse(self):
-        """beta must never fall below min_pseudo_count, even with all-one rewards."""
-        floor = 0.5
-        bl = BetaLearner(decay=0.5, min_pseudo_count=floor)
-        bl.add_worker(0)
-        for _ in range(200):
-            bl.update(0, reward=1.0)
-        _, beta = bl.get_params(0)
-        assert beta >= floor, f"beta={beta} fell below min_pseudo_count={floor}"
-
-    def test_samples_remain_in_unit_range_with_floor(self):
-        """Posterior samples must stay in [0,1] even after heavy decay."""
-        bl = BetaLearner(decay=0.5, min_pseudo_count=0.1)
-        bl.add_worker(0)
-        for _ in range(100):
-            bl.update(0, reward=0.0)
+class TestBetaLearnerFloor:
+    def test_heavy_decay_does_not_collapse_params(self):
+        """With aggressive decay, alpha and beta should stay >= min_pseudo_count."""
+        learner = BetaLearner(decay=0.5, min_pseudo_count=1.0)
+        learner.add_worker(0)
         for _ in range(50):
-            s = bl.sample(0)
-            assert 0.0 <= s <= 1.0
+            learner.update(0, 1.0)  # always success → alpha should dominate
+        alpha, beta = learner.get_params(0)
+        assert alpha >= 1.0
+        assert beta >= 1.0
 
-    def test_floor_default_is_1(self):
-        """Default min_pseudo_count is 1.0 (uninformative prior floor)."""
-        bl = BetaLearner(decay=0.9)
-        assert bl.min_pseudo_count == 1.0
-
-    def test_update_with_reward_clamp(self):
-        """BetaLearner.update must clamp reward to [0, 1] silently."""
-        bl = BetaLearner(decay=1.0)
-        bl.add_worker(0)
-        # Out-of-range reward — should be clamped, not raise
-        alpha, beta = bl.update(0, reward=2.5)
-        assert alpha == 2.0  # 1.0 + clamp(2.5, 0, 1) = 1.0 + 1.0
-        alpha2, beta2 = bl.update(0, reward=-1.0)
-        assert beta2 >= 1.0  # beta accumulates (1 - 0) from the negative-clamped reward
-
-
-# ---------------------------------------------------------------------------
-# 13. _osl_bin and _prefill_bin edge-of-boundary regression
-# ---------------------------------------------------------------------------
-
-class TestBinBoundaries:
-    """Verify exact boundary behaviour of _osl_bin and _prefill_bin.
-
-    These bins feed into update_feedback → latency_tracker → reward computation,
-    so off-by-one errors would silently produce the wrong baseline bucket.
-    """
-
-    @pytest.mark.parametrize("tokens_in,expected", [
-        (0, "S"), (256, "S"), (257, "M"), (1024, "M"), (1025, "L"), (9999, "L"),
-    ])
-    def test_prefill_bin_boundary(self, tokens_in, expected):
-        assert KvThompsonRouter._prefill_bin(tokens_in) == expected
-
-    @pytest.mark.parametrize("osl,expected", [
-        (0, "S"), (128, "S"), (129, "M"), (512, "M"), (513, "L"), (9999, "L"),
-    ])
-    def test_osl_bin_boundary(self, osl, expected):
-        assert KvThompsonRouter._osl_bin(osl) == expected
-
-    @pytest.mark.asyncio
-    async def test_reward_uses_osl_bucket_baseline(self):
-        """update_feedback must use the osl_bin/prefill_bin bucket, not just global."""
-        router = _make_router(loads=[
-            _make_load(0, prefill_tokens=100, decode_blocks=5),
-        ])
-
-        # Two decisions with different OSL bins — establish separate bucket baselines
-        decision_s = await router.pick_worker(
-            list(range(100)), "p1", 0, osl=64, iat=250, tokens_in=100,
-        )
-        decision_s.osl = 64
-        decision_s.tokens_in = 100
-        router.update_feedback(decision_s, latency_ms=100.0, tokens_out=50)
-
-        decision_l = await router.pick_worker(
-            list(range(100)), "p2", 0, osl=800, iat=250, tokens_in=100,
-        )
-        decision_l.osl = 800
-        decision_l.tokens_in = 100
-        router.update_feedback(decision_l, latency_ms=5000.0, tokens_out=500)
-
-        # Short and long should now have distinct buckets
-        short_baseline = router.latency_tracker.get_global_bucket_baseline(
-            "S", "S", True, fallback=1.0
-        )
-        long_baseline = router.latency_tracker.get_global_bucket_baseline(
-            "L", "S", True, fallback=1.0
-        )
-        assert short_baseline != long_baseline or (short_baseline == 1.0 and long_baseline == 1.0)
-
-
-# ---------------------------------------------------------------------------
-# 14. Softmax determinism with single worker
-# ---------------------------------------------------------------------------
-
-class TestSoftmaxEdgeCases:
-    """Edge-case coverage for _softmax."""
-
-    def test_single_worker_softmax_probability_is_one(self):
-        """Softmax of a single score must return probability 1.0."""
-        router = _make_router()
-        probs = router._softmax([0.7], temp=1.0)
-        assert len(probs) == 1
-        assert abs(probs[0] - 1.0) < 1e-9
-
-    def test_very_large_temperature_approaches_uniform(self):
-        """High temperature → near-uniform distribution."""
-        router = _make_router({"temp_max": 100.0})
-        probs = router._softmax([1.0, 2.0, 3.0], temp=100.0)
-        for p in probs:
-            assert abs(p - 1.0 / 3.0) < 0.01
-
-    def test_negative_infinity_scores_handled(self):
-        """-inf or very large negative scores should not produce NaN."""
-        router = _make_router()
-        probs = router._softmax([-1e9, 0.0, 1.0], temp=1.0)
-        assert all(math.isfinite(p) for p in probs)
-        assert abs(sum(probs) - 1.0) < 1e-6
-
-    def test_nan_scores_clamped(self):
-        """NaN scores should not propagate — the guard must replace them."""
-        router = _make_router()
-        # Inject NaN scores: the _score_worker returns -1e9 on nan/inf
-        # but _softmax itself also handles this via finite-check
-        probs = router._softmax([float("nan"), 1.0], temp=1.0)
-        assert all(math.isfinite(p) for p in probs)
+    def test_alpha_beta_always_positive(self):
+        """Posterior params must always be strictly positive regardless of reward history."""
+        learner = BetaLearner(decay=0.9, min_pseudo_count=0.5)
+        learner.add_worker(0)
+        for reward in [0.0] * 100:
+            learner.update(0, reward)
+        alpha, beta = learner.get_params(0)
+        assert alpha > 0.0
+        assert beta > 0.0

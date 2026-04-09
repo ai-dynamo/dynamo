@@ -121,6 +121,7 @@ class ThompsonRouterHandler:
             osl=hints["osl"],
             iat=hints["iat"],
             tokens_in=hints["tokens_in"],
+            latency_sensitivity=hints.get("latency_sensitivity", 2.0),
         )
 
         logger.debug(
