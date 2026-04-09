@@ -59,23 +59,16 @@ class GlobalRouterHandler:
             assert self.config.decode_pool_dynamo_namespaces is not None
             self.prefill_namespace_to_idx: Dict[str, int] = {
                 ns: idx
-                for idx, ns in enumerate(
-                    self.config.prefill_pool_dynamo_namespaces
-                )
+                for idx, ns in enumerate(self.config.prefill_pool_dynamo_namespaces)
             }
             self.decode_namespace_to_idx: Dict[str, int] = {
                 ns: idx
-                for idx, ns in enumerate(
-                    self.config.decode_pool_dynamo_namespaces
-                )
+                for idx, ns in enumerate(self.config.decode_pool_dynamo_namespaces)
             }
         elif self.config.mode == "agg":
             assert self.config.agg_pool_dynamo_namespaces is not None
             self.agg_namespace_to_idx: Dict[str, int] = {
-                ns: idx
-                for idx, ns in enumerate(
-                    self.config.agg_pool_dynamo_namespaces
-                )
+                ns: idx for idx, ns in enumerate(self.config.agg_pool_dynamo_namespaces)
             }
 
     async def initialize(self) -> None:
@@ -85,9 +78,7 @@ class GlobalRouterHandler:
         This connects to the local router in each pool's namespace.
         Local routers are expected at: {namespace}.router.generate
         """
-        logger.info(
-            f"Initializing Global Router Handler (mode={self.config.mode})..."
-        )
+        logger.info(f"Initializing Global Router Handler (mode={self.config.mode})...")
 
         if self.config.mode == "disagg":
             await self._initialize_disagg()
@@ -100,13 +91,9 @@ class GlobalRouterHandler:
         assert self.config.decode_pool_dynamo_namespaces is not None
 
         # Connect to prefill pool local routers
-        for idx, namespace in enumerate(
-            self.config.prefill_pool_dynamo_namespaces
-        ):
+        for idx, namespace in enumerate(self.config.prefill_pool_dynamo_namespaces):
             try:
-                endpoint = self.runtime.endpoint(
-                    f"{namespace}.router.generate"
-                )
+                endpoint = self.runtime.endpoint(f"{namespace}.router.generate")
                 client = await endpoint.client()
                 self.prefill_clients[namespace] = client
                 logger.info(
@@ -119,13 +106,9 @@ class GlobalRouterHandler:
                 raise
 
         # Connect to decode pool local routers
-        for idx, namespace in enumerate(
-            self.config.decode_pool_dynamo_namespaces
-        ):
+        for idx, namespace in enumerate(self.config.decode_pool_dynamo_namespaces):
             try:
-                endpoint = self.runtime.endpoint(
-                    f"{namespace}.router.generate"
-                )
+                endpoint = self.runtime.endpoint(f"{namespace}.router.generate")
                 client = await endpoint.client()
                 self.decode_clients[namespace] = client
                 logger.info(
@@ -146,27 +129,17 @@ class GlobalRouterHandler:
         """Initialize agg mode clients to unified pools."""
         assert self.config.agg_pool_dynamo_namespaces is not None
 
-        for idx, namespace in enumerate(
-            self.config.agg_pool_dynamo_namespaces
-        ):
+        for idx, namespace in enumerate(self.config.agg_pool_dynamo_namespaces):
             try:
-                endpoint = self.runtime.endpoint(
-                    f"{namespace}.router.generate"
-                )
+                endpoint = self.runtime.endpoint(f"{namespace}.router.generate")
                 client = await endpoint.client()
                 self.agg_clients[namespace] = client
-                logger.info(
-                    f"Connected to agg pool {idx}: {namespace}.router.generate"
-                )
+                logger.info(f"Connected to agg pool {idx}: {namespace}.router.generate")
             except Exception as e:
-                logger.error(
-                    f"Failed to connect to agg pool {idx} ({namespace}): {e}"
-                )
+                logger.error(f"Failed to connect to agg pool {idx} ({namespace}): {e}")
                 raise
 
-        logger.info(
-            f"Global Router initialized (agg): {len(self.agg_clients)} pools"
-        )
+        logger.info(f"Global Router initialized (agg): {len(self.agg_clients)} pools")
 
     async def handle_prefill(
         self, request: Dict[str, Any]
@@ -213,9 +186,7 @@ class GlobalRouterHandler:
                 data = output.data() if hasattr(output, "data") else output
                 yield data
         except Exception as e:
-            logger.error(
-                f"Error forwarding prefill request to {namespace}: {e}"
-            )
+            logger.error(f"Error forwarding prefill request to {namespace}: {e}")
             raise
 
     async def handle_decode(
@@ -268,9 +239,7 @@ class GlobalRouterHandler:
                 data = output.data() if hasattr(output, "data") else output
                 yield data
         except Exception as e:
-            logger.error(
-                f"Error forwarding decode request to {namespace}: {e}"
-            )
+            logger.error(f"Error forwarding decode request to {namespace}: {e}")
             raise
 
     async def handle_generate(
@@ -314,9 +283,7 @@ class GlobalRouterHandler:
                 data = output.data() if hasattr(output, "data") else output
                 yield data
         except Exception as e:
-            logger.error(
-                f"Error forwarding agg request to {namespace}: {e}"
-            )
+            logger.error(f"Error forwarding agg request to {namespace}: {e}")
             raise
 
     def get_pool_info(self) -> Dict[str, Any]:

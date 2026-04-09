@@ -296,9 +296,7 @@ class GlobalRouterConfig:
         elif self.mode == "agg":
             self._validate_agg()
         else:
-            raise ValueError(
-                f"Unknown mode '{self.mode}', must be 'disagg' or 'agg'"
-            )
+            raise ValueError(f"Unknown mode '{self.mode}', must be 'disagg' or 'agg'")
 
     def _validate_disagg(self) -> None:
         """Validate disagg mode configuration."""
@@ -307,21 +305,13 @@ class GlobalRouterConfig:
         if self.num_decode_pools is None:
             raise ValueError("num_decode_pools required for disagg mode")
         if self.prefill_pool_dynamo_namespaces is None:
-            raise ValueError(
-                "prefill_pool_dynamo_namespaces required for disagg mode"
-            )
+            raise ValueError("prefill_pool_dynamo_namespaces required for disagg mode")
         if self.decode_pool_dynamo_namespaces is None:
-            raise ValueError(
-                "decode_pool_dynamo_namespaces required for disagg mode"
-            )
+            raise ValueError("decode_pool_dynamo_namespaces required for disagg mode")
         if self.prefill_pool_selection_strategy is None:
-            raise ValueError(
-                "prefill_pool_selection_strategy required for disagg mode"
-            )
+            raise ValueError("prefill_pool_selection_strategy required for disagg mode")
         if self.decode_pool_selection_strategy is None:
-            raise ValueError(
-                "decode_pool_selection_strategy required for disagg mode"
-            )
+            raise ValueError("decode_pool_selection_strategy required for disagg mode")
 
         if len(self.prefill_pool_dynamo_namespaces) != self.num_prefill_pools:
             raise ValueError(
@@ -459,13 +449,9 @@ class GlobalRouterConfig:
         if self.num_agg_pools is None:
             raise ValueError("num_agg_pools required for agg mode")
         if self.agg_pool_dynamo_namespaces is None:
-            raise ValueError(
-                "agg_pool_dynamo_namespaces required for agg mode"
-            )
+            raise ValueError("agg_pool_dynamo_namespaces required for agg mode")
         if self.agg_pool_selection_strategy is None:
-            raise ValueError(
-                "agg_pool_selection_strategy required for agg mode"
-            )
+            raise ValueError("agg_pool_selection_strategy required for agg mode")
 
         if len(self.agg_pool_dynamo_namespaces) != self.num_agg_pools:
             raise ValueError(
@@ -520,10 +506,7 @@ class GlobalRouterConfig:
                     f"({override.min_priority}) must be <= max_priority "
                     f"({override.max_priority})"
                 )
-            if (
-                override.target_pool < 0
-                or override.target_pool >= self.num_agg_pools
-            ):
+            if override.target_pool < 0 or override.target_pool >= self.num_agg_pools:
                 raise ValueError(
                     f"Agg priority_overrides[{i}]: invalid target_pool "
                     f"{override.target_pool} (must be 0 to {self.num_agg_pools - 1})"
