@@ -20,224 +20,182 @@ pytestmark = [
     pytest.mark.integration,
 ]
 
-
-def _make_endpoint():
-    """Create a mock Endpoint that captures the registered callback."""
-    endpoint = MagicMock()
-    endpoint.metrics.register_prometheus_expfmt_callback = MagicMock()
-    return endpoint
-
-
-def _get_callback(endpoint):
-    """Extract the registered callback from the mock endpoint."""
-    endpoint.metrics.register_prometheus_expfmt_callback.assert_called_once()
-    return endpoint.metrics.register_prometheus_expfmt_callback.call_args[0][0]
+# All metric names emitted by register_embedding_cache_metrics
+_METRIC_NAMES = [
+    "dynamo_component_embedding_cache_hits_total",
+    "dynamo_component_embedding_cache_misses_total",
+    "dynamo_component_embedding_cache_evictions_total",
+    "dynamo_component_embedding_cache_utilization",
+    "dynamo_component_embedding_cache_current_bytes",
+    "dynamo_component_embedding_cache_entries",
+    "dynamo_component_embedding_cache_capacity_bytes",
+]
 
 
 def _parse_metric(text: str, name: str) -> float | None:
     """Parse a metric value from Prometheus expfmt text."""
     for line in text.split("\n"):
         if line.startswith(name + "{") or line.startswith(name + " "):
-            # Extract the numeric value after the last space
             parts = line.rsplit(" ", 1)
             if len(parts) == 2:
                 return float(parts[1])
     return None
 
 
-class TestEmbeddingCacheMetricsRegistration:
-    """Tests for register_embedding_cache_metrics setup."""
-
-    def test_registers_callback(self):
-        """Callback is registered on the endpoint."""
-        endpoint = _make_endpoint()
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024)
-        register_embedding_cache_metrics(endpoint, cache, "test-model", "encoder")
-        endpoint.metrics.register_prometheus_expfmt_callback.assert_called_once()
-
-    def test_capacity_set_at_registration(self):
-        """Capacity gauge is set immediately at registration time."""
-        endpoint = _make_endpoint()
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=2 * 1024**3)
-        register_embedding_cache_metrics(endpoint, cache, "test-model", "encoder")
-
-        callback = _get_callback(endpoint)
-        text = callback()
-        cap = _parse_metric(text, "dynamo_component_embedding_cache_capacity_bytes")
-        assert cap == 2 * 1024**3
+@pytest.fixture()
+def cache_env():
+    """Set up endpoint mock, cache, register metrics, return (cache, callback)."""
+    endpoint = MagicMock()
+    endpoint.metrics.register_prometheus_expfmt_callback = MagicMock()
+    cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
+    register_embedding_cache_metrics(endpoint, cache, "test-model", "encoder")
+    endpoint.metrics.register_prometheus_expfmt_callback.assert_called_once()
+    callback = endpoint.metrics.register_prometheus_expfmt_callback.call_args[0][0]
+    return cache, callback
 
 
-class TestEmbeddingCacheMetricsDeltaCounters:
-    """Tests for delta-based counter increments across scrapes."""
+class TestCounters:
+    """Delta-based counter increments across scrapes."""
 
-    def test_first_scrape_shows_misses(self):
-        """First scrape after cache misses shows correct counter value."""
-        endpoint = _make_endpoint()
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
-        register_embedding_cache_metrics(endpoint, cache, "m", "c")
-        callback = _get_callback(endpoint)
+    def test_accumulation_and_noop(self, cache_env):
+        """Counters accumulate across scrapes and stay flat with no activity."""
+        cache, callback = cache_env
 
-        # Generate misses
-        cache.get("miss1")
-        cache.get("miss2")
-
-        text = callback()
-        misses = _parse_metric(text, "dynamo_component_embedding_cache_misses_total")
-        assert misses == 2.0
-
-    def test_second_scrape_accumulates(self):
-        """Counter accumulates across multiple scrapes."""
-        endpoint = _make_endpoint()
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
-        register_embedding_cache_metrics(endpoint, cache, "m", "c")
-        callback = _get_callback(endpoint)
-
-        # First batch of misses
         cache.get("miss1")
         text1 = callback()
-        misses1 = _parse_metric(text1, "dynamo_component_embedding_cache_misses_total")
-        assert misses1 == 1.0
+        assert (
+            _parse_metric(text1, "dynamo_component_embedding_cache_misses_total") == 1.0
+        )
 
-        # Second batch
+        # No-op scrape: counter unchanged
+        assert (
+            _parse_metric(callback(), "dynamo_component_embedding_cache_misses_total")
+            == 1.0
+        )
+
+        # More misses: counter accumulates
         cache.get("miss2")
         cache.get("miss3")
-        text2 = callback()
-        misses2 = _parse_metric(text2, "dynamo_component_embedding_cache_misses_total")
-        assert misses2 == 3.0  # Accumulated, not reset
-
-    def test_noop_scrape_no_change(self):
-        """Scrape with no new activity returns same counter values."""
-        endpoint = _make_endpoint()
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
-        register_embedding_cache_metrics(endpoint, cache, "m", "c")
-        callback = _get_callback(endpoint)
-
-        cache.get("miss1")
-        text1 = callback()
-        text2 = callback()  # No new activity
-
-        misses1 = _parse_metric(text1, "dynamo_component_embedding_cache_misses_total")
-        misses2 = _parse_metric(text2, "dynamo_component_embedding_cache_misses_total")
-        assert misses1 == misses2 == 1.0
-
-    def test_hits_after_cache_population(self):
-        """Hits counter increments when cached items are re-accessed."""
-        endpoint = _make_endpoint()
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
-        register_embedding_cache_metrics(endpoint, cache, "m", "c")
-        callback = _get_callback(endpoint)
-
-        tensor = torch.randn(10, 10)
-        cache.set("key1", CachedEmbedding(tensor))
-
-        # First access: miss (before set, we already missed above? No — set doesn't call get)
-        # Access the cached item
-        cache.get("key1")  # hit
-        cache.get("key1")  # hit
-        cache.get("nonexistent")  # miss
-
-        text = callback()
-        hits = _parse_metric(text, "dynamo_component_embedding_cache_hits_total")
-        misses = _parse_metric(text, "dynamo_component_embedding_cache_misses_total")
-        assert hits == 2.0
-        assert misses == 1.0
-
-    def test_evictions_counter(self):
-        """Evictions counter increments when LRU entries are evicted."""
-        endpoint = _make_endpoint()
-        # Tiny cache: ~400 bytes (one float32 100-element tensor)
-        tensor_size = 100 * 4  # float32 = 4 bytes
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=tensor_size + 10)
-        register_embedding_cache_metrics(endpoint, cache, "m", "c")
-        callback = _get_callback(endpoint)
-
-        t1 = torch.zeros(100, dtype=torch.float32)
-        t2 = torch.zeros(100, dtype=torch.float32)
-
-        cache.set("key1", CachedEmbedding(t1))
-        cache.set("key2", CachedEmbedding(t2))  # Should evict key1
-
-        text = callback()
-        evictions = _parse_metric(
-            text, "dynamo_component_embedding_cache_evictions_total"
+        text3 = callback()
+        assert (
+            _parse_metric(text3, "dynamo_component_embedding_cache_misses_total") == 3.0
         )
-        assert evictions == 1.0
 
+    def test_hits_and_misses(self, cache_env):
+        """Hits and misses counted correctly after population."""
+        cache, callback = cache_env
 
-class TestEmbeddingCacheMetricsGauges:
-    """Tests for gauge snapshot values."""
+        cache.set("k", CachedEmbedding(torch.randn(10, 10)))
+        cache.get("k")  # hit
+        cache.get("k")  # hit
+        cache.get("absent")  # miss
 
-    def test_gauges_reflect_cache_state(self):
-        """Gauges show current cache state at scrape time."""
-        endpoint = _make_endpoint()
-        capacity = 1024 * 1024
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=capacity)
-        register_embedding_cache_metrics(endpoint, cache, "m", "c")
-        callback = _get_callback(endpoint)
+        text = callback()
+        assert _parse_metric(text, "dynamo_component_embedding_cache_hits_total") == 2.0
+        assert (
+            _parse_metric(text, "dynamo_component_embedding_cache_misses_total") == 1.0
+        )
 
-        tensor = torch.zeros(100, dtype=torch.float32)
+    def test_evictions(self):
+        """Eviction counter increments when LRU entry is displaced."""
+        endpoint = MagicMock()
+        endpoint.metrics.register_prometheus_expfmt_callback = MagicMock()
         tensor_bytes = 100 * 4
-        cache.set("key1", CachedEmbedding(tensor))
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=tensor_bytes + 10)
+        register_embedding_cache_metrics(endpoint, cache, "m", "c")
+        callback = endpoint.metrics.register_prometheus_expfmt_callback.call_args[0][0]
+
+        cache.set("a", CachedEmbedding(torch.zeros(100, dtype=torch.float32)))
+        cache.set("b", CachedEmbedding(torch.zeros(100, dtype=torch.float32)))
 
         text = callback()
-        entries = _parse_metric(text, "dynamo_component_embedding_cache_entries")
-        cur_bytes = _parse_metric(
-            text, "dynamo_component_embedding_cache_current_bytes"
+        assert (
+            _parse_metric(text, "dynamo_component_embedding_cache_evictions_total")
+            == 1.0
         )
-        util = _parse_metric(text, "dynamo_component_embedding_cache_utilization")
 
-        assert entries == 1.0
-        assert cur_bytes == tensor_bytes
-        assert abs(util - tensor_bytes / capacity) < 1e-6
 
-    def test_gauges_update_on_subsequent_scrape(self):
-        """Gauges reflect new state after more items are added."""
-        endpoint = _make_endpoint()
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
-        register_embedding_cache_metrics(endpoint, cache, "m", "c")
-        callback = _get_callback(endpoint)
+class TestGauges:
+    """Snapshot gauge values."""
 
-        t1 = torch.zeros(50, dtype=torch.float32)
-        cache.set("key1", CachedEmbedding(t1))
+    def test_empty_then_populated(self, cache_env):
+        """Gauges start at zero, then reflect state after insertions."""
+        cache, callback = cache_env
+
+        # Empty cache
+        text0 = callback()
+        assert _parse_metric(text0, "dynamo_component_embedding_cache_entries") == 0.0
+        assert (
+            _parse_metric(text0, "dynamo_component_embedding_cache_current_bytes")
+            == 0.0
+        )
+        assert (
+            _parse_metric(text0, "dynamo_component_embedding_cache_utilization") == 0.0
+        )
+
+        # Add one entry
+        t = torch.zeros(100, dtype=torch.float32)
+        t_bytes = 100 * 4
+        cache.set("k1", CachedEmbedding(t))
         text1 = callback()
-        entries1 = _parse_metric(text1, "dynamo_component_embedding_cache_entries")
-        assert entries1 == 1.0
+        assert _parse_metric(text1, "dynamo_component_embedding_cache_entries") == 1.0
+        assert (
+            _parse_metric(text1, "dynamo_component_embedding_cache_current_bytes")
+            == t_bytes
+        )
+        assert (
+            abs(
+                _parse_metric(text1, "dynamo_component_embedding_cache_utilization")
+                - t_bytes / (1024 * 1024)
+            )
+            < 1e-6
+        )
 
-        t2 = torch.zeros(50, dtype=torch.float32)
-        cache.set("key2", CachedEmbedding(t2))
+        # Add a second entry
+        cache.set("k2", CachedEmbedding(torch.zeros(50, dtype=torch.float32)))
         text2 = callback()
-        entries2 = _parse_metric(text2, "dynamo_component_embedding_cache_entries")
-        assert entries2 == 2.0
+        assert _parse_metric(text2, "dynamo_component_embedding_cache_entries") == 2.0
 
-    def test_empty_cache_gauges(self):
-        """Empty cache returns zero gauges."""
-        endpoint = _make_endpoint()
-        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024)
-        register_embedding_cache_metrics(endpoint, cache, "m", "c")
-        callback = _get_callback(endpoint)
+    def test_capacity_immutable_after_registration(self, cache_env):
+        """Capacity gauge stays constant even after mutations."""
+        cache, callback = cache_env
+        cap_name = "dynamo_component_embedding_cache_capacity_bytes"
 
-        text = callback()
-        assert _parse_metric(text, "dynamo_component_embedding_cache_entries") == 0.0
-        assert (
-            _parse_metric(text, "dynamo_component_embedding_cache_current_bytes") == 0.0
-        )
-        assert (
-            _parse_metric(text, "dynamo_component_embedding_cache_utilization") == 0.0
-        )
+        cache.set("k", CachedEmbedding(torch.zeros(10, dtype=torch.float32)))
+        cap1 = _parse_metric(callback(), cap_name)
+
+        cache.set("k2", CachedEmbedding(torch.zeros(10, dtype=torch.float32)))
+        cap2 = _parse_metric(callback(), cap_name)
+
+        assert cap1 == cap2 == 1024 * 1024
 
 
-class TestEmbeddingCacheMetricsLabels:
-    """Tests for label correctness."""
+class TestLabelsAndCompleteness:
+    """Label correctness and metric name completeness."""
 
-    def test_labels_present_in_output(self):
-        """Model and component labels appear in metric output."""
-        endpoint = _make_endpoint()
+    def test_labels_present(self):
+        """Model and component labels appear in output."""
+        endpoint = MagicMock()
+        endpoint.metrics.register_prometheus_expfmt_callback = MagicMock()
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024)
         register_embedding_cache_metrics(
             endpoint, cache, "Qwen/Qwen2.5-VL-3B", "encoder"
         )
-        callback = _get_callback(endpoint)
+        callback = endpoint.metrics.register_prometheus_expfmt_callback.call_args[0][0]
 
         text = callback()
         assert 'model="Qwen/Qwen2.5-VL-3B"' in text
         assert 'dynamo_component="encoder"' in text
+
+    def test_all_metric_names_present(self, cache_env):
+        """Every expected metric name appears in the scrape output."""
+        cache, callback = cache_env
+        # Generate at least one event so counters appear
+        cache.set("k", CachedEmbedding(torch.zeros(10, dtype=torch.float32)))
+        cache.get("k")
+        cache.get("absent")
+        text = callback()
+        for name in _METRIC_NAMES:
+            assert (
+                _parse_metric(text, name) is not None
+            ), f"metric {name} missing from output"

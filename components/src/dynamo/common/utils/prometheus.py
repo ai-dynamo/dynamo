@@ -453,8 +453,12 @@ def register_embedding_cache_metrics(
         registry=registry,
     )
 
-    # Set capacity once (it never changes after init)
+    # Initialize all labeled metrics so they appear in output from the first scrape,
+    # even before any cache activity (Prometheus best practice: export zeros, not absent).
     capacity_bytes_gauge.labels(**label_values).set(cache.stats["capacity_bytes"])
+    hits_counter.labels(**label_values)
+    misses_counter.labels(**label_values)
+    evictions_counter.labels(**label_values)
 
     lock = threading.Lock()
     prev_state = {"hits": 0, "misses": 0, "evictions": 0}
