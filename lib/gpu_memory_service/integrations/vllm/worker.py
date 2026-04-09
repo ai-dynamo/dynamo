@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import gc
 import logging
 import sys
 from contextlib import nullcontext
@@ -240,6 +241,9 @@ class GMSWorker(Worker):
             logger.info(
                 "[GMS] No kv_cache manager (shadow mode), skipping kv_cache sleep"
             )
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
         free_bytes_after, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after - free_bytes_before
