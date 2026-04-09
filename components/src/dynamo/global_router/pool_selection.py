@@ -274,7 +274,7 @@ class GlobalRouterConfig:
     - "agg": unified pools handling both prefill and decode
     """
 
-    mode: str  # "disagg" or "agg"
+    mode: str = "disagg"  # "disagg" or "agg"
 
     # --- disagg-only fields (required when mode="disagg") ---
     num_prefill_pools: Optional[int] = None

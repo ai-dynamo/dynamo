@@ -255,10 +255,15 @@ class GlobalRouterHandler:
         assert self.config.agg_pool_selection_strategy is not None
         assert self.config.agg_pool_dynamo_namespaces is not None
 
-        # Extract SLA targets from extra_args, fallback to CLI defaults
+        # Extract SLA targets from extra_args, fallback to CLI defaults.
+        # Use `is None` checks to preserve explicit 0 values.
         extra_args = request.get("extra_args") or {}
-        ttft_target = extra_args.get("ttft_target") or self.default_ttft_target
-        itl_target = extra_args.get("itl_target") or self.default_itl_target
+        ttft_target = extra_args.get("ttft_target")
+        if ttft_target is None:
+            ttft_target = self.default_ttft_target
+        itl_target = extra_args.get("itl_target")
+        if itl_target is None:
+            itl_target = self.default_itl_target
 
         # Extract priority from routing hints (set by nvext.agent_hints.priority)
         routing = request.get("routing") or {}
