@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::Duration;
 
-use futures::StreamExt;
 use rmp_serde as rmps;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -12,7 +12,19 @@ use tokio_util::sync::CancellationToken;
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
 
-use crate::utils::zmq::{connect_sub_socket, multipart_message};
+use crate::utils::zmq::{connect_sub_socket_with_retry, recv_multipart};
+
+const INITIAL_BACKOFF_MS: u64 = 10;
+const MAX_BACKOFF_MS: u64 = 5000;
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+const MAX_BACKOFF_EXPONENT: u32 = 8;
+
+fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
+    std::cmp::min(
+        INITIAL_BACKOFF_MS * 2_u64.pow(consecutive_errors.min(MAX_BACKOFF_EXPONENT)),
+        MAX_BACKOFF_MS,
+    )
+}
 
 pub(super) async fn start_zmq_listener(
     zmq_endpoint: String,
@@ -30,40 +42,64 @@ pub(super) async fn start_zmq_listener(
     );
 
     let warning_count = Arc::new(AtomicU32::new(0));
-    let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
-        Ok(socket) => socket,
-        Err(error) => {
-            tracing::error!(endpoint = %zmq_endpoint, topic = %zmq_topic, error = %error, "ZMQ listener failed to connect");
-            return;
-        }
-    };
-    let mut socket = socket;
-
-    if cancellation_token.is_cancelled() {
+    let Some(mut socket) = connect_sub_socket_with_retry(
+        &zmq_endpoint,
+        Some(&zmq_topic),
+        &cancellation_token,
+        "ZMQ listener",
+    )
+    .await
+    else {
         return;
-    }
+    };
 
+    let mut consecutive_errors = 0u32;
     let mut messages_processed = 0u64;
-
-    let exit_reason = 'main: loop {
+    #[expect(unused_assignments)]
+    let mut exit_reason = "unknown";
+    'main: loop {
         tokio::select! {
             biased;
 
             _ = cancellation_token.cancelled() => {
                 tracing::debug!("ZMQ listener received cancellation signal");
-                break 'main String::from("cancellation token cancelled");
+                exit_reason = "cancellation token cancelled";
+                break 'main;
             }
 
-            msg_result = socket.next() => {
-                let frames = match msg_result {
-                    Some(Ok(frames)) => multipart_message(frames),
-                    Some(Err(error)) => {
-                        tracing::error!(endpoint = %zmq_endpoint, error = %error, "ZMQ listener recv failed");
-                        break 'main format!("ZMQ recv failed: {error}");
+            msg_result = recv_multipart(&mut socket) => {
+                let mut frames = match msg_result {
+                    Ok(frames) => {
+                        consecutive_errors = 0;
+                        frames
                     }
-                    None => break 'main String::from("ZMQ stream ended"),
+                    Err(error) => {
+                        consecutive_errors += 1;
+
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            tracing::error!(
+                                endpoint = %zmq_endpoint,
+                                error = %error,
+                                consecutive_errors = consecutive_errors,
+                                "Too many consecutive ZMQ errors, terminating listener"
+                            );
+                            exit_reason = "too many consecutive errors";
+                            break 'main;
+                        }
+
+                        let backoff_ms = calculate_backoff_ms(consecutive_errors);
+                        tracing::warn!(
+                            endpoint = %zmq_endpoint,
+                            error = %error,
+                            consecutive_errors = consecutive_errors,
+                            backoff_ms = backoff_ms,
+                            "Error reading from ZMQ socket, applying exponential backoff"
+                        );
+
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        continue;
+                    }
                 };
-                let mut frames = frames;
 
                 if frames.len() != 3 {
                     tracing::warn!(
@@ -109,13 +145,14 @@ pub(super) async fn start_zmq_listener(
                         convert_event(raw_event, event_id, kv_block_size, worker, &warning_count);
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
-                        break 'main String::from("channel receiver dropped");
+                        exit_reason = "channel receiver dropped";
+                        break 'main;
                     }
                     messages_processed += 1;
                 }
             }
         }
-    };
+    }
 
     tracing::debug!(
         "ZMQ listener exiting, reason: {}, messages processed: {}",
