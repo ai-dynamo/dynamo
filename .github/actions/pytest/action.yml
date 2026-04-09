@@ -131,13 +131,11 @@ runs:
           # Set device-specific docker flags
           GPU_FLAGS=""
           DOCKER_EXTRA_FLAGS=()
-          DOCKER_MOUNT_FLAGS=()
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
-            DOCKER_EXTRA_FLAGS=(--privileged)
-            if [[ -d /dev/dri ]]; then
-              DOCKER_MOUNT_FLAGS+=( -v "/dev/dri:/dev/dri" )
-            fi
+            RENDER_GID=$(stat -c '%g' "${RENDER_DEVICE}")
+            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
+            DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri")
           elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
@@ -162,7 +160,7 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
         echo "🐳 Docker run command (runner v1):"
-        echo "docker run ${GPU_FLAGS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --cpus=${NUM_CPUS} --network host ${DOCKER_ENV_FLAGS[@]} ${DOCKER_MOUNT_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
+        echo "docker run ${GPU_FLAGS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --cpus=${NUM_CPUS} --network host ${DOCKER_ENV_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         # Pre-cleanup: remove any leftover containers with the same name
@@ -176,7 +174,6 @@ runs:
           --shm-size=200m \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
-          "${DOCKER_MOUNT_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -228,13 +225,11 @@ runs:
           # Set device-specific docker flags
           GPU_FLAGS=""
           DOCKER_EXTRA_FLAGS=()
-          DOCKER_MOUNT_FLAGS=()
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
-            DOCKER_EXTRA_FLAGS=(--privileged)
-            if [[ -d /dev/dri ]]; then
-              DOCKER_MOUNT_FLAGS+=( -v "/dev/dri:/dev/dri" )
-            fi
+            RENDER_GID=$(stat -c '%g' "${RENDER_DEVICE}")
+            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
+            DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri")
           elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
@@ -281,7 +276,7 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
         echo "🐳 Docker run command (dind sidecar):"
-        echo "docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --network host ${DOCKER_ENV_FLAGS[@]} ${DOCKER_MOUNT_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
+        echo "docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --network host ${DOCKER_ENV_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         # Pre-cleanup: remove any leftover containers with the same name
@@ -293,7 +288,6 @@ runs:
           --rm -w /workspace \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
-          "${DOCKER_MOUNT_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
