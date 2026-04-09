@@ -195,11 +195,22 @@ impl SchedulerState {
     }
 }
 
+/// A request waiting for an async G2→G1 swap-in transfer to complete.
+/// Mirrors vLLM's `RequestStatus.WAITING_FOR_REMOTE_KVS` state.
+#[cfg(feature = "kvbm")]
+struct PendingSwapIn {
+    uuid: Uuid,
+    handle: crate::kv_manager::kvbm_offload::SwapInHandle,
+}
+
 pub(crate) struct VllmCore {
     args: MockEngineArgs,
     pub(super) state: SchedulerState,
     pub(super) kv_manager: KvManager,
     kv_event_buffer: Option<CapturedRouterEventBuffer>,
+    /// Requests waiting for G2→G1 swap-in to complete before joining a pass.
+    #[cfg(feature = "kvbm")]
+    pending_swap_ins: Vec<PendingSwapIn>,
 }
 
 impl VllmCore {
@@ -242,6 +253,8 @@ impl VllmCore {
             args,
             state: SchedulerState::default(),
             kv_event_buffer,
+            #[cfg(feature = "kvbm")]
+            pending_swap_ins: Vec::new(),
         }
     }
 
@@ -296,6 +309,20 @@ impl VllmCore {
         now_ms: f64,
         admission_tx: Option<&mpsc::UnboundedSender<AdmissionEvent>>,
     ) -> EnginePassResult {
+        // Poll pending swap-ins: completed transfers promote the request
+        // back to the front of the waiting queue (like vLLM's
+        // _try_promote_blocked_waiting_request).
+        #[cfg(feature = "kvbm")]
+        self.pending_swap_ins.retain_mut(|pending| {
+            if pending.handle.is_complete() {
+                tracing::debug!(uuid = %pending.uuid, "KVBM: swap-in complete, request re-queued");
+                self.state.prepend_waiting(pending.uuid);
+                false // remove from pending
+            } else {
+                true // keep waiting
+            }
+        });
+
         let requests_before = self.state.requests.len();
         self.state.compact_running();
         let mut token_budget = self.args.max_num_batched_tokens.unwrap_or(usize::MAX);
@@ -538,6 +565,30 @@ impl VllmCore {
                 _ => unreachable!(),
             };
             let allocated = self.kv_manager.process(&signal);
+
+            // If process() started an async swap-in (G2 hit), defer the
+            // request — it won't join this forward pass. Mirrors vLLM's
+            // `request.status = WAITING_FOR_REMOTE_KVS`.
+            #[cfg(feature = "kvbm")]
+            if let Some(handle) = self.kv_manager.swap_in_pending.take() {
+                // Commit what we allocated so far.
+                if let Some(request) = self.state.requests.get_mut(&uuid) {
+                    let prev_blocks = prev_allocated_tokens
+                        .div_ceil(request.sequence.block_size())
+                        .min(request.sequence.unique_blocks().len());
+                    let committed = (prev_blocks + allocated) * request.sequence.block_size();
+                    request
+                        .sequence
+                        .commit_allocation(committed.min(allocation_target));
+                    request.num_computed_tokens = actual_computed_after.min(committed);
+                }
+                // Remove from waiting and park until swap-in completes.
+                self.state.waiting_members.remove(&uuid);
+                self.pending_swap_ins.push(PendingSwapIn { uuid, handle });
+                tracing::debug!(%uuid, "KVBM: request deferred for swap-in");
+                return ScheduleOutcome::Blocked;
+            }
+
             let (_committed_tokens, current_computed_tokens) = {
                 let Some(request) = self.state.requests.get_mut(&uuid) else {
                     return ScheduleOutcome::Blocked;

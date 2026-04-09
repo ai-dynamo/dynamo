@@ -95,6 +95,9 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
         sglang=_build_sglang_args(args),
         preemption_mode=getattr(args, "preemption_mode", "lifo"),
+        num_g2_blocks=getattr(args, "num_g2_blocks", 0),
+        kvbm_offload_batch_size=getattr(args, "kvbm_offload_batch_size", 32),
+        kvbm_bandwidth_g1_g2=getattr(args, "kvbm_bandwidth_g1_g2", 14.0),
     )
 
 

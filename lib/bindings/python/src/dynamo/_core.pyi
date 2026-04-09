@@ -1310,6 +1310,9 @@ class MockEngineArgs:
         zmq_replay_port: Optional[int] = None,
         preemption_mode: str = "lifo",
         router_queue_policy: Optional[str] = None,
+        num_g2_blocks: int = 0,
+        kvbm_offload_batch_size: int = 32,
+        kvbm_bandwidth_g1_g2: float = 14.0,
         sglang: Optional[SglangArgs] = None,
     ) -> None:
         ...
