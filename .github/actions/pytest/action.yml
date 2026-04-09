@@ -133,7 +133,7 @@ runs:
           DOCKER_EXTRA_FLAGS=()
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
-            RENDER_GID=$(stat -c '%g' "${RENDER_DEVICE}")
+            RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
             GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
             DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri")
           elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
@@ -227,7 +227,7 @@ runs:
           DOCKER_EXTRA_FLAGS=()
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
-            RENDER_GID=$(stat -c '%g' "${RENDER_DEVICE}")
+            RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
             GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
             DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri")
           elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
