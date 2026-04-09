@@ -32,14 +32,37 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
+from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.llm.exceptions import EngineShutdown
+from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
+from dynamo.nixl_connect import Connector
+from dynamo.runtime import DistributedRuntime
+from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
+from dynamo.trtllm.metrics import AdditionalMetricsCollector
+from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
+from dynamo.trtllm.publisher import Publisher
+from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
+from dynamo.trtllm.utils.disagg_utils import (
+    DisaggregatedParams,
+    DisaggregatedParamsCodec,
+)
+
+if TYPE_CHECKING:
+    # tensorrt_llm may use a different version that doesn't have MetricsCollector,
+    # so guard this import inside TYPE_CHECKING to avoid runtime import errors.
+    from tensorrt_llm.metrics import MetricsCollector
+
+configure_dynamo_logging()
 
 
 class _Abortable(Protocol):
     """Structural type for objects that support abort(). Satisfied by both
     GenerationResult and _DeferredAbort."""
 
-    def abort(self) -> None:
-        ...
+    def abort(self) -> None: ...
 
 
 class _DeferredAbort:
@@ -79,32 +102,6 @@ class _DeferredAbort:
             pass
         self._generation_result.abort()
         logging.debug("Deferred abort: background task completed, abort fired")
-
-
-from dynamo.common.utils.otel_tracing import build_trace_headers
-from dynamo.llm.exceptions import EngineShutdown
-from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
-from dynamo.nixl_connect import Connector
-from dynamo.runtime import DistributedRuntime
-from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.trtllm.constants import DisaggregationMode
-from dynamo.trtllm.engine import TensorRTLLMEngine
-from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
-from dynamo.trtllm.metrics import AdditionalMetricsCollector
-from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
-from dynamo.trtllm.publisher import Publisher
-from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
-from dynamo.trtllm.utils.disagg_utils import (
-    DisaggregatedParams,
-    DisaggregatedParamsCodec,
-)
-
-if TYPE_CHECKING:
-    # tensorrt_llm may use a different version that doesn't have MetricsCollector,
-    # so guard this import inside TYPE_CHECKING to avoid runtime import errors.
-    from tensorrt_llm.metrics import MetricsCollector
-
-configure_dynamo_logging()
 
 
 @dataclass
