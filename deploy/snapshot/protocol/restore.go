@@ -61,9 +61,6 @@ func PrepareRestorePodSpec(
 	if isCheckpointReady {
 		container.Command = []string{"sleep", "infinity"}
 		container.Args = nil
-		container.StartupProbe = nil
-		container.LivenessProbe = nil
-		container.ReadinessProbe = nil
 	}
 }
 
