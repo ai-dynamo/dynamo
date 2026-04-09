@@ -9,6 +9,9 @@ import (
 )
 
 func TestNewRestorePod(t *testing.T) {
+	readinessProbe := &corev1.Probe{PeriodSeconds: 7, TimeoutSeconds: 3}
+	livenessProbe := &corev1.Probe{InitialDelaySeconds: 11}
+	startupProbe := &corev1.Probe{FailureThreshold: 120}
 	restorePod := NewRestorePod(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "worker",
@@ -22,9 +25,9 @@ func TestNewRestorePod(t *testing.T) {
 				Image:          "test:latest",
 				Command:        []string{"python3", "-m", "dynamo.vllm"},
 				Args:           []string{"--model", "Qwen"},
-				ReadinessProbe: &corev1.Probe{},
-				LivenessProbe:  &corev1.Probe{},
-				StartupProbe:   &corev1.Probe{},
+				ReadinessProbe: readinessProbe.DeepCopy(),
+				LivenessProbe:  livenessProbe.DeepCopy(),
+				StartupProbe:   startupProbe.DeepCopy(),
 			}},
 		},
 	}, PodOptions{
@@ -63,11 +66,20 @@ func TestNewRestorePod(t *testing.T) {
 	if restorePod.Spec.Containers[0].ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
 	}
+	if got := restorePod.Spec.Containers[0].ReadinessProbe.PeriodSeconds; got != readinessProbe.PeriodSeconds {
+		t.Fatalf("expected readiness probe period %d, got %d", readinessProbe.PeriodSeconds, got)
+	}
 	if restorePod.Spec.Containers[0].LivenessProbe == nil {
 		t.Fatalf("expected liveness probe to be preserved")
 	}
+	if got := restorePod.Spec.Containers[0].LivenessProbe.InitialDelaySeconds; got != livenessProbe.InitialDelaySeconds {
+		t.Fatalf("expected liveness initial delay %d, got %d", livenessProbe.InitialDelaySeconds, got)
+	}
 	if restorePod.Spec.Containers[0].StartupProbe == nil {
 		t.Fatalf("expected startup probe to be preserved")
+	}
+	if got := restorePod.Spec.Containers[0].StartupProbe.FailureThreshold; got != startupProbe.FailureThreshold {
+		t.Fatalf("expected startup failure threshold %d, got %d", startupProbe.FailureThreshold, got)
 	}
 	if restorePod.Spec.SecurityContext == nil || restorePod.Spec.SecurityContext.SeccompProfile == nil {
 		t.Fatalf("expected seccomp profile to be injected: %#v", restorePod.Spec.SecurityContext)
@@ -82,12 +94,15 @@ func TestNewRestorePod(t *testing.T) {
 
 func TestPrepareRestorePodSpec(t *testing.T) {
 	podSpec := corev1.PodSpec{}
+	readinessProbe := &corev1.Probe{PeriodSeconds: 13, SuccessThreshold: 1}
+	livenessProbe := &corev1.Probe{TimeoutSeconds: 5}
+	startupProbe := &corev1.Probe{FailureThreshold: 60}
 	container := corev1.Container{
 		Command:        []string{"python3", "-m", "dynamo.vllm"},
 		Args:           []string{"--model", "Qwen"},
-		ReadinessProbe: &corev1.Probe{},
-		LivenessProbe:  &corev1.Probe{},
-		StartupProbe:   &corev1.Probe{},
+		ReadinessProbe: readinessProbe.DeepCopy(),
+		LivenessProbe:  livenessProbe.DeepCopy(),
+		StartupProbe:   startupProbe.DeepCopy(),
 	}
 
 	storage := Storage{
@@ -115,6 +130,15 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 	}
 	if container.ReadinessProbe == nil || container.LivenessProbe == nil || container.StartupProbe == nil {
 		t.Fatalf("expected probes to be preserved: %#v %#v %#v", container.ReadinessProbe, container.LivenessProbe, container.StartupProbe)
+	}
+	if got := container.ReadinessProbe.PeriodSeconds; got != readinessProbe.PeriodSeconds {
+		t.Fatalf("expected readiness probe period %d, got %d", readinessProbe.PeriodSeconds, got)
+	}
+	if got := container.LivenessProbe.TimeoutSeconds; got != livenessProbe.TimeoutSeconds {
+		t.Fatalf("expected liveness timeout %d, got %d", livenessProbe.TimeoutSeconds, got)
+	}
+	if got := container.StartupProbe.FailureThreshold; got != startupProbe.FailureThreshold {
+		t.Fatalf("expected startup failure threshold %d, got %d", startupProbe.FailureThreshold, got)
 	}
 }
 
