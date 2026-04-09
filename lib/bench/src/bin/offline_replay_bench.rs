@@ -49,8 +49,12 @@ struct Args {
     #[arg(long, default_value_t = 4.0)]
     arrival_speedup_ratio: f64,
 
-    /// Mocker block size; defaults to 512 for Mooncake traces
+    /// Trace hash block size used to expand hash_ids into tokens
     #[arg(long, default_value_t = 512)]
+    trace_block_size: usize,
+
+    /// Engine/router block size used for replay hashing and mock execution
+    #[arg(long, default_value_t = 64)]
     block_size: usize,
 
     /// Override max running requests per worker
@@ -115,7 +119,9 @@ fn main() -> Result<()> {
         last_report = Some(simulate_trace_file_with_router_mode(
             engine_args.clone(),
             None,
+            None,
             &args.trace_file,
+            args.trace_block_size,
             args.num_workers,
             args.arrival_speedup_ratio,
             args.router_mode.into(),

@@ -6,8 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from .config import SweepConfig, input_file_tag, resolve_repo_root
-from .runner import run_aiperf_single, run_concurrency_sweep
+from .config import BenchmarkConfig, SweepConfig, input_file_tag, resolve_repo_root
+from .runner import run_aiperf_single
 from .server import ServerManager
 
 
@@ -28,13 +28,13 @@ def run_sweep(
     config: SweepConfig,
     repo_root: Optional[Path] = None,
 ) -> None:
-    """Execute the full benchmark sweep: for each input file x benchmark config."""
+    """Execute the full benchmark sweep: for each config x input file x sweep value."""
     if repo_root is None:
         repo_root = resolve_repo_root()
 
     output_base = Path(config.output_dir)
-
-    restart = config.restart_server_every_benchmark
+    sweep_mode = config.sweep_mode
+    sweep_values = config.sweep_values
 
     _print_banner("Multimodal Benchmark Sweep")
     print(f"  Model:         {config.model}")
@@ -43,10 +43,13 @@ def run_sweep(
         print(f"                   {f}")
     labels = [c.label for c in config.configs]
     print(f"  Configs:       {labels}")
-    print(f"  Concurrencies: {config.concurrencies}")
+    print(f"  Sweep mode:    {sweep_mode}")
+    print(f"  Sweep values:  {sweep_values}")
     print(f"  OSL:           {config.osl}")
-    print(f"  Requests:      {config.request_count} per concurrency")
-    print(f"  Restart every: {restart}")
+    print(f"  Requests:      {config.request_count} per {sweep_mode}")
+    print(
+        f"  Restart:       {'every run' if config.restart_server_every_benchmark else 'per config'}"
+    )
     print(f"  Output:        {output_base}")
     print(flush=True)
 
@@ -54,52 +57,23 @@ def run_sweep(
     env_overrides = dict(config.env) if config.env else {}
 
     try:
-        for input_file in config.input_files:
-            file_tag = input_file_tag(input_file)
-            file_output_dir = output_base / file_tag
+        for bench_cfg in config.configs:
+            _run_config(
+                bench_cfg=bench_cfg,
+                config=config,
+                server=server,
+                output_base=output_base,
+                sweep_mode=sweep_mode,
+                sweep_values=sweep_values,
+                env_overrides=env_overrides,
+                repo_root=repo_root,
+            )
 
-            _print_banner(f"Input: {Path(input_file).name}  ({file_tag})", char="#")
-
-            for bench_cfg in config.configs:
-                _print_banner(f"[{file_tag}] Config: {bench_cfg.label}", char="-")
-
-                workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
-                sweep_dir = file_output_dir / bench_cfg.label
-
-                if restart:
-                    _sweep_with_restart(
-                        server=server,
-                        workflow_script=workflow_abs,
-                        config=config,
-                        bench_cfg=bench_cfg,
-                        env_overrides=env_overrides,
-                        input_file=input_file,
-                        output_dir=sweep_dir,
-                    )
-                else:
-                    server.start(
-                        workflow_script=workflow_abs,
-                        model=config.model,
-                        extra_args=bench_cfg.extra_args,
-                        env_overrides=env_overrides,
-                    )
-                    try:
-                        run_concurrency_sweep(
-                            model=config.model,
-                            port=config.port,
-                            concurrencies=config.concurrencies,
-                            request_count=config.request_count,
-                            warmup_count=config.warmup_count,
-                            input_file=input_file,
-                            osl=config.osl,
-                            output_dir=sweep_dir,
-                        )
-                    finally:
-                        server.stop()
-
-            if not config.skip_plots:
+        if not config.skip_plots:
+            for input_file in config.input_files:
+                file_tag = input_file_tag(input_file)
                 _generate_plots_for_file(
-                    file_output_dir,
+                    output_base / file_tag,
                     [c.label for c in config.configs],
                 )
     finally:
@@ -109,40 +83,83 @@ def run_sweep(
     _print_summary(config, output_base)
 
 
-def _sweep_with_restart(
-    server: ServerManager,
-    workflow_script: str,
+def _run_config(
+    bench_cfg: BenchmarkConfig,
     config: SweepConfig,
-    bench_cfg,
+    server: ServerManager,
+    output_base: Path,
+    sweep_mode: str,
+    sweep_values: List[int],
     env_overrides: dict,
-    input_file: str,
-    output_dir: Path,
+    repo_root: Path,
 ) -> None:
-    """Run each concurrency level with a fresh server to avoid warm-cache effects."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+    """Run all sweep values for a single benchmark config."""
+    workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
+    _print_banner(f"Config: {bench_cfg.label}", char="#")
 
-    for c in sorted(config.concurrencies):
+    # Collect pending runs, skipping those with existing results.
+    pending_runs: List[tuple[str, str, int, Path]] = []
+    for input_file in config.input_files:
+        file_tag = input_file_tag(input_file)
+        sweep_dir = output_base / file_tag / bench_cfg.label
+
+        for value in sorted(sweep_values):
+            artifact_dir = sweep_dir / f"{sweep_mode}{value}"
+
+            if (artifact_dir / "profile_export_aiperf.json").exists():
+                print(
+                    f"  SKIP {bench_cfg.label} {sweep_mode}={value} "
+                    f"(results exist in {artifact_dir})",
+                    flush=True,
+                )
+            else:
+                pending_runs.append((input_file, file_tag, value, artifact_dir))
+
+    if not pending_runs:
+        print(f"  All runs skipped for {bench_cfg.label}", flush=True)
+        return
+
+    if not config.restart_server_every_benchmark:
         server.start(
-            workflow_script=workflow_script,
+            workflow_script=workflow_abs,
             model=config.model,
             extra_args=bench_cfg.extra_args,
             env_overrides=env_overrides,
         )
-        try:
-            run_aiperf_single(
-                model=config.model,
-                port=config.port,
-                concurrency=c,
-                request_count=config.request_count,
-                warmup_count=config.warmup_count,
-                input_file=input_file,
-                osl=config.osl,
-                artifact_dir=output_dir / f"c{c}",
-            )
-        finally:
-            server.stop()
 
-    print(f"Sweep complete. Results in {output_dir}", flush=True)
+    try:
+        for input_file, file_tag, value, artifact_dir in pending_runs:
+            _print_banner(
+                f"[{file_tag}] Config: {bench_cfg.label}  " f"{sweep_mode}={value}",
+                char="-",
+            )
+
+            if config.restart_server_every_benchmark:
+                server.start(
+                    workflow_script=workflow_abs,
+                    model=config.model,
+                    extra_args=bench_cfg.extra_args,
+                    env_overrides=env_overrides,
+                )
+
+            try:
+                run_aiperf_single(
+                    model=config.model,
+                    port=config.port,
+                    sweep_mode=sweep_mode,
+                    sweep_value=value,
+                    request_count=config.request_count,
+                    warmup_count=config.warmup_count,
+                    input_file=input_file,
+                    osl=config.osl,
+                    artifact_dir=artifact_dir,
+                )
+            finally:
+                if config.restart_server_every_benchmark:
+                    server.stop()
+    finally:
+        if not config.restart_server_every_benchmark:
+            server.stop()
 
 
 def _generate_plots_for_file(

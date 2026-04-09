@@ -55,8 +55,9 @@ pub async fn completion_response_stream(
     // [WIP] from request id.
     let request_id = get_or_create_request_id(request.inner.user.as_deref());
     let streaming = request.inner.stream.unwrap_or(false);
+    let model_name = request.inner.model.clone();
     let cancellation_labels = CancellationLabels {
-        model: request.inner.model.clone(),
+        model: model_name.clone(),
         endpoint: "grpc_completions".to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -101,10 +102,16 @@ pub async fn completion_response_stream(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| Status::internal(format!("Failed to generate completions: {}", e)))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        if crate::http::service::metrics::request_was_rejected(e.as_ref()) {
+            state.metrics_clone().inc_rejection(
+                &model_name,
+                crate::http::service::metrics::Endpoint::Completions,
+            );
+            return Status::resource_exhausted(e.to_string());
+        }
+        Status::internal(format!("Failed to generate completions: {}", e))
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();

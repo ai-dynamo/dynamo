@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
+use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_runtime::{
     pipeline::{
         AsyncEngineContextProvider, ManyOut, Operator, RouterMode, ServerStreamingEngine, SingleIn,
@@ -47,6 +48,7 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
     /// Namespace used to look up the correct WorkerSet's worker monitor
@@ -139,14 +141,14 @@ impl
 
                 let routing = prefill_req.routing_mut();
                 routing.prefill_worker_id = Some(worker_id);
-                routing.dp_rank = Some(dp_rank);
+                routing.dp_rank = dp_rank;
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
                 let prefill_context =
                     link_child_context(&engine_ctx, prefill_req, request_id.as_str());
 
                 // Pass the phase barrier to the spawned task. It is released after routing
-                // completes so `record_worker_full` finishes before phase changes to Decode.
+                // completes so worker recording finishes before phase changes to Decode.
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
 
                 Ok(PrefillOutcome::Bootstrap(bootstrap_info))

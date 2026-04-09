@@ -28,7 +28,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --num-workers 4 \
     --replay-mode offline \
     --router-mode round_robin \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --report-json /tmp/replay-report.json
 ```
 
@@ -99,13 +100,17 @@ Example:
 {"session_id":"session-b","delay_ms":50,"input_length":1536,"output_length":64,"hash_ids":[9,10,11]}
 ```
 
-The mocker synthesizes token blocks from `hash_ids` using the configured mocker `block_size`, so the
-replay block size must match the block size used when the trace was generated. Public Mooncake
-traces are commonly block-level hashes at `512` tokens per hash ID, so replaying them with the
-default mocker `block_size=64` will fail once `input_length > len(hash_ids) * 64`. Set that
-through `--extra-engine-args '{"block_size":512}'`. For `engine_type=sglang`, replay still uses
-canonical `block_size` internally; `sglang.page_size` is accepted as a compatibility alias and is
-normalized into `block_size` before replay starts.
+Replay uses two different block-size concepts for trace files:
+
+- `--trace-block-size`: how many tokens each `hash_id` in the dataset represents
+- engine `block_size`: the block size used by the replay engine and router when they re-chunk the
+  synthesized tokens into sequence hashes
+
+Public Mooncake/toolagent traces use `512` tokens per `hash_id`, so replaying them should normally
+use `--trace-block-size 512`. The engine `block_size` can still be smaller, for example the live
+vLLM benchmark setup uses `block_size=64`. For `engine_type=sglang`, replay still uses canonical
+`block_size` internally; `sglang.page_size` is accepted as a compatibility alias and is normalized
+into `block_size` before replay starts.
 
 ## Replay Surfaces
 
@@ -122,6 +127,7 @@ The dedicated replay CLI exposes:
 - `--replay-concurrency`
 - `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
+- `--trace-block-size`
 - `--turns-per-session`
 - `--shared-prefix-ratio`
 - `--num-prefix-groups`
@@ -130,6 +136,11 @@ The dedicated replay CLI exposes:
 - `--prefill-engine-args` (JSON string)
 - `--decode-engine-args` (JSON string)
 - `--router-config` (JSON string)
+- `--aic-backend`
+- `--aic-system`
+- `--aic-backend-version`
+- `--aic-tp-size`
+- `--aic-model-path`
 - `--report-json`
 
 Defaults:
@@ -145,7 +156,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --router-mode kv_router \
     --num-workers 4 \
     --arrival-speedup-ratio 10 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"fcfs","router_temperature":0.0}' \
     --report-json /tmp/replay-report.json
 ```
@@ -165,8 +177,15 @@ SGLang replay uses the same CLI surface. A minimal extra-engine-args file can us
 
 Both `--extra-engine-args` and `--router-config` accept partial JSON objects. Engine settings such
 as `block_size`, `engine_type`, `dp_size`, `speedup_ratio`, and `decode_speedup_ratio` belong in
-`--extra-engine-args`, not as top-level replay CLI flags. Unspecified fields fall back to the same
-defaults used by `MockEngineArgs::default()` and `KvRouterConfig::default()`.
+`--extra-engine-args`, not as top-level replay CLI flags. `--trace-block-size` is separate and is
+used only for trace-file replay. Unspecified fields fall back to the same defaults used by
+`MockEngineArgs::default()` and `KvRouterConfig::default()`.
+
+Replay has two independent AIC surfaces:
+
+- engine timing AIC via `--extra-engine-args` / staged engine JSON
+- router-side prompt-load AIC via top-level `--aic-*` flags together with
+  `router_prefill_load_model: "aic"` in `--router-config`
 
 Offline disagg replay uses staged engine args instead of `--extra-engine-args`:
 
@@ -179,7 +198,8 @@ For offline disagg replay, the staged JSON must set `worker_type` explicitly:
 - `--prefill-engine-args` must use `worker_type: "prefill"`
 - `--decode-engine-args` must use `worker_type: "decode"`
 
-The staged configs must also use the same `block_size`.
+The staged configs must also use the same engine `block_size`. `--trace-block-size` remains a
+separate trace-file input knob.
 
 ### Synthetic Replay
 
@@ -223,7 +243,8 @@ those timestamps:
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512}'
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}'
 ```
 
 This is the right mode when you want deterministic replay of the original arrival pattern.
@@ -261,7 +282,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --router-mode kv_router \
     --num-workers 4 \
     --arrival-speedup-ratio 10 \
-    --extra-engine-args '{"block_size":512}'
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}'
 ```
 
 ### Arrival Speedup
@@ -274,7 +296,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --num-workers 4 \
     --arrival-speedup-ratio 5 \
-    --extra-engine-args '{"block_size":512}'
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}'
 ```
 
 ### Router Modes
@@ -292,6 +315,8 @@ provided through `--router-config`, not a dedicated top-level replay flag. In of
 - KV visibility is delayed slightly relative to request lifecycle events
 - queue admission is driven by router lifecycle edges (`add_request`, `mark_prefill_completed`, and `free`)
 - transient in-pass prefill occupancy is still approximated at the router level rather than modeled exactly
+- when `router_prefill_load_model` is `"aic"`, replay predicts one expected prefill duration per
+  admitted request and decays only the oldest active prefill request on each worker
 
 To compare queue policies manually, keep the same trace and engine args fixed and swap only
 `router_queue_policy` inside `--router-config`:
@@ -301,19 +326,40 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"fcfs"}'
 
 python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --num-workers 4 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"lcfs"}'
 ```
 
 `lcfs` is intentionally a worse comparison policy under saturation; use it for experiments, not as
 an expected production default.
+
+To enable router-side AIC prefill-load modeling during replay:
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --num-workers 4 \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
+    --router-config '{"router_track_prefill_tokens":true,"router_prefill_load_model":"aic"}' \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --aic-tp-size 1
+```
+
+For offline disagg replay, the same top-level `--aic-*` flags are supported, but the estimator is
+applied only to the prefill-stage router.
 
 ## Output
 
@@ -366,14 +412,18 @@ If you violate those constraints, replay fails immediately with a validation err
 - mocker compute-speed knobs such as `speedup_ratio` still affect simulated timing when passed via
   the engine-args JSON for the chosen replay mode
 - `--arrival-speedup-ratio` affects trace timestamps, not worker compute speed
+- `--trace-block-size` affects only how trace `hash_ids` expand into tokens
 - `--arrival-interval-ms` only applies to synthetic replay
 - `--turns-per-session`, `--shared-prefix-ratio`, `--num-prefix-groups`, and
   `--inter-turn-delay-ms` only apply to synthetic replay
 - `--extra-engine-args`, `--prefill-engine-args`, `--decode-engine-args`, and `--router-config`
   are JSON strings on the standalone replay CLI
+- top-level `--aic-*` flags are used only for router-side prompt-load modeling; engine timing AIC
+  still belongs in the engine-args JSON
 - offline replay does not need planner runtime setup, router registration, or external event transport
-- the replay block size should match the trace block size, because token synthesis expands `hash_ids`
-  using the configured block size
+- trace-file replay can use different values for `--trace-block-size` and engine `block_size`
+- Mooncake/toolagent traces typically use `--trace-block-size 512`, while engine `block_size`
+  often stays `64`
 
 ## When To Use This vs AIPerf
 

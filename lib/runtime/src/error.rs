@@ -53,6 +53,8 @@ pub enum ErrorType {
     ConnectionTimeout,
     /// The request was cancelled (e.g., client disconnected).
     Cancelled,
+    /// The system does not have enough resources to handle the request.
+    ResourceExhausted,
     /// Error originating from a backend engine.
     Backend(BackendError),
 }
@@ -66,6 +68,7 @@ impl fmt::Display for ErrorType {
             ErrorType::Disconnected => write!(f, "Disconnected"),
             ErrorType::ConnectionTimeout => write!(f, "ConnectionTimeout"),
             ErrorType::Cancelled => write!(f, "Cancelled"),
+            ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
             ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
         }
     }

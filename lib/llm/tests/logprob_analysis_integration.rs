@@ -381,7 +381,6 @@ fn create_response_with_linear_probs(
         index: 0,
         delta: ChatCompletionStreamResponseDelta {
             content: Some(ChatCompletionMessageContent::Text(_content.to_string())),
-            #[expect(deprecated)]
             function_call: None,
             tool_calls: None,
             role: Some(Role::Assistant),
@@ -463,7 +462,6 @@ fn create_multi_choice_response(
                 index: choice_idx as u32,
                 delta: ChatCompletionStreamResponseDelta {
                     content: Some(ChatCompletionMessageContent::Text("test".to_string())),
-                    #[expect(deprecated)]
                     function_call: None,
                     tool_calls: None,
                     role: Some(Role::Assistant),
