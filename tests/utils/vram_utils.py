@@ -109,6 +109,12 @@ def write_test_meta(items, dest_dir: str | None = None) -> None:
         kv_tokens_mark = item.get_closest_marker("requested_sglang_kv_tokens")
         if kv_tokens_mark and kv_tokens_mark.args:
             meta["requested_sglang_kv_tokens"] = kv_tokens_mark.args[0]
+        trtllm_tokens_mark = item.get_closest_marker("requested_trtllm_kv_tokens")
+        if trtllm_tokens_mark and trtllm_tokens_mark.args:
+            meta["requested_trtllm_kv_tokens"] = trtllm_tokens_mark.args[0]
+        trtllm_vram_mark = item.get_closest_marker("requested_trtllm_vram_gib")
+        if trtllm_vram_mark and trtllm_vram_mark.args:
+            meta["requested_trtllm_vram_gib"] = trtllm_vram_mark.args[0]
         skip_mark = item.get_closest_marker("skip")
         if skip_mark:
             reason = skip_mark.kwargs.get("reason", "")

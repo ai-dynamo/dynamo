@@ -20,7 +20,7 @@ use dynamo_protocols::types::{
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, FunctionName,
-    FunctionObject, ImageUrl, ReasoningContent,
+    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
 };
 use uuid::Uuid;
 
@@ -312,7 +312,7 @@ fn convert_assistant_blocks(
                 segments.push(std::mem::take(&mut pending_reasoning));
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: id.clone(),
-                    r#type: ChatCompletionToolType::Function,
+                    r#type: FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
                         name: name.clone(),
                         arguments: serde_json::to_string(input).unwrap_or_default(),

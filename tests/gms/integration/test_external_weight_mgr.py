@@ -10,7 +10,8 @@ from typing import Callable, Protocol
 
 import pytest
 from gpu_memory_service.client.session import _GMSClientSession
-from gpu_memory_service.common.types import RequestedLockType, ServerState
+from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.server.fsm import ServerState
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess

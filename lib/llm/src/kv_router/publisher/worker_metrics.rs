@@ -13,7 +13,8 @@ use crate::kv_router::KV_METRICS_SUBJECT;
 #[derive(Debug, Clone, Default, PartialEq)]
 struct WorkerMetrics {
     dp_rank: DpRank,
-    active_decode_blocks: u64,
+    active_decode_blocks: Option<u64>,
+    kv_used_blocks: Option<u64>,
 }
 
 pub struct WorkerMetricsPublisher {
@@ -27,15 +28,26 @@ impl WorkerMetricsPublisher {
         Ok(Self { tx, rx })
     }
 
-    pub fn publish(&self, dp_rank: Option<DpRank>, active_decode_blocks: u64) -> Result<()> {
+    pub fn publish(
+        &self,
+        dp_rank: Option<DpRank>,
+        active_decode_blocks: Option<u64>,
+        kv_used_blocks: Option<u64>,
+    ) -> Result<()> {
+        if active_decode_blocks.is_none() && kv_used_blocks.is_none() {
+            anyhow::bail!("worker metrics publish requires at least one load metric");
+        }
+
         let metrics = WorkerMetrics {
             dp_rank: dp_rank.unwrap_or(0),
             active_decode_blocks,
+            kv_used_blocks,
         };
         tracing::trace!(
-            "Publish metrics: dp_rank={}, active_decode_blocks={}",
+            "Publish metrics: dp_rank={}, active_decode_blocks={:?}, kv_used_blocks={:?}",
             metrics.dp_rank,
-            metrics.active_decode_blocks
+            metrics.active_decode_blocks,
+            metrics.kv_used_blocks
         );
         self.tx
             .send(metrics)
@@ -95,8 +107,9 @@ impl WorkerMetricsPublisher {
                             let active_load = ActiveLoad {
                                 worker_id,
                                 dp_rank: metrics.dp_rank,
-                                active_decode_blocks: Some(metrics.active_decode_blocks),
+                                active_decode_blocks: metrics.active_decode_blocks,
                                 active_prefill_tokens: None,
+                                kv_used_blocks: metrics.kv_used_blocks,
                             };
 
                             if let Err(e) = event_publisher.publish(&active_load).await {

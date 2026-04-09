@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from queue import Queue
 from typing import Any, Awaitable, List, Optional
 
-import msgpack
+import msgspec
 import torch
 from nixl._api import nixl_agent, nixl_agent_config
 from pydantic import BaseModel
@@ -522,7 +522,7 @@ class NixlWriteEmbeddingSender(AbstractEmbeddingSender):
                     (target_buffer, target_byte_size, target_device_id, target_mem_str),
                     write_done_id,
                     remote_agent_metadata,
-                ) = msgpack.unpackb(notif)
+                ) = msgspec.msgpack.decode(notif)
                 write_requests.append(
                     (
                         # receiver contact
@@ -703,7 +703,7 @@ class NixlWriteEmbeddingReceiver(AbstractEmbeddingReceiver):
 
         # Request for transfer
         tensor_id = self.id_counter.get_next_id()
-        notif_msg = msgpack.packb(
+        notif_msg = msgspec.msgpack.encode(
             (
                 nixl_request.tensor_id,
                 (

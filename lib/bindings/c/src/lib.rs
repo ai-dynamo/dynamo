@@ -455,7 +455,7 @@ impl RouterHandles {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Result<(u64, u32), QueryRouterResult> {
+    ) -> Result<(u64, Option<u32>), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
         }
@@ -716,6 +716,7 @@ pub unsafe extern "C" fn create_routers(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
+                None,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
@@ -781,6 +782,7 @@ pub unsafe extern "C" fn create_routers(
             RouterMode::KV,
             block_size,
             Some(prefill_config),
+            None,
             enforce_disagg,
             model_name.clone(),
             actual_namespace.clone(),
@@ -1211,6 +1213,8 @@ pub unsafe extern "C" fn route_prefill_request(
         let (prefill_worker_id, prefill_dp_rank) = handles
             .query_prefill_worker(&tokens, None, false, None, 0.0, allowed_worker_ids)
             .await?;
+
+        let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
 
         tracing::info!(
             prefill_worker_id = prefill_worker_id,
