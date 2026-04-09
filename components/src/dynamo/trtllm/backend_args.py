@@ -210,10 +210,17 @@ class DynamoTrtllmArgGroup(ArgGroup):
             "Options: xgrammar, llguidance.",
         )
 
+        # --- Diffusion Options ---
+        # [gluo WIP] break down to diffusion runtime args,
+        # (video / image) request args
+        self._add_video_diffusion_arguments(parser)
+
+    def _add_video_diffusion_arguments(self, parser: argparse.ArgumentParser) -> None:
         diffusion_group = parser.add_argument_group(
             "Diffusion Options [Experimental]",
             "Options for video_diffusion modality",
         )
+        # [gluo WIP] check propagation path to revert engineer image diffusion flags
         add_argument(
             diffusion_group,
             flag_name="--default-height",

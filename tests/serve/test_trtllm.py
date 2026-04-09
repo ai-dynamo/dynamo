@@ -413,6 +413,7 @@ trtllm_configs = {
             ),
         ],
     ),
+    # [gluo WIP] add image diffusion test
     "completions_only": TRTLLMConfig(
         name="completions_only",
         directory=trtllm_dir,

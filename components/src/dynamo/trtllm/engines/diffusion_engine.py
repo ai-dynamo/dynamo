@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Modalities that are currently supported
 class DiffusionModality(str, Enum):
     """Output modality of a diffusion pipeline."""
 
@@ -49,11 +50,18 @@ class DiffusionModality(str, Enum):
 # Explicit mapping from TRT-LLM pipeline class names to their output modality.
 # This replaces brittle substring matching and must be updated when new
 # pipelines are registered in TRT-LLM's PIPELINE_REGISTRY.
+# The list of supported pipelines can be found by searching @register_pipeline in TRT-LLM's visual_gen module
 _PIPELINE_MODALITY_MAP: dict[str, DiffusionModality] = {
+    # Text-to-Video pipelines
     "WanPipeline": DiffusionModality.VIDEO,
     "WanImageToVideoPipeline": DiffusionModality.VIDEO,
-    "FluxPipeline": DiffusionModality.IMAGE,
     "LTX2Pipeline": DiffusionModality.VIDEO,
+    "LTX2TwoStagesPipeline": DiffusionModality.VIDEO,
+    # Text-to-Image pipelines
+    "FluxPipeline": DiffusionModality.IMAGE,
+    "Flux2Pipeline": DiffusionModality.IMAGE,
+    # Image-to-Video pipelines (defined in TRT-LLM's visual_gen module but not supported in Dynamo)
+    # "WanImageToVideoPipeline": DiffusionModality.TODO,
 }
 
 # Default when the pipeline is not yet loaded or the class name is unknown.

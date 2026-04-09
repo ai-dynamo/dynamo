@@ -16,16 +16,17 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
 
 
-async def init_video_diffusion_worker(
+async def init_image_diffusion_worker(
     runtime: DistributedRuntime,
     config: Config,
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
 ) -> None:
-    """Initialize and run the video diffusion worker.
+    # [gluo WIP] make sure arguments for image diffusion are propagated correctly
+    """Initialize and run the image diffusion worker.
 
-    This function handles video_diffusion modality, loading the appropriate
-    diffusion model and serving video generation requests.
+    This function handles image_diffusion modality, loading the appropriate
+    diffusion model and serving image generation requests.
 
     Args:
         runtime: The Dynamo distributed runtime.
@@ -41,7 +42,7 @@ async def init_video_diffusion_worker(
         import tensorrt_llm._torch.visual_gen  # noqa: F401
     except ImportError:
         raise ImportError(
-            "Video diffusion requires TensorRT-LLM with visual_gen support.\n"
+            "Image diffusion requires TensorRT-LLM with visual_gen support.\n"
             "The visual_gen module is at tensorrt_llm._torch.visual_gen.\n"
             "Install TensorRT-LLM with AIGV support:\n"
             "  pip install tensorrt_llm\n"
@@ -50,9 +51,9 @@ async def init_video_diffusion_worker(
 
     from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
     from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
-    from dynamo.trtllm.request_handlers.diffusion import VideoGenerationHandler
+    from dynamo.trtllm.request_handlers.diffusion import ImageGenerationHandler
 
-    logging.info(f"Initializing video diffusion worker with config: {config}")
+    logging.info(f"Initializing image diffusion worker with config: {config}")
 
     # Parse skip_components from comma-separated string to list
     skip_components = (
@@ -62,7 +63,7 @@ async def init_video_diffusion_worker(
     )
 
     if not config.endpoint:
-        raise ValueError("endpoint must be configured for video diffusion worker")
+        raise ValueError("endpoint must be configured for image diffusion worker")
 
     # Build DiffusionConfig from the main Config
     diffusion_config = DiffusionConfig(
@@ -125,7 +126,7 @@ async def init_video_diffusion_worker(
     await engine.initialize()
 
     # Create the request handler
-    handler = VideoGenerationHandler(engine, diffusion_config)
+    handler = ImageGenerationHandler(engine, diffusion_config)
 
     # Register the model with Dynamo's discovery system
     model_name = config.served_model_name or config.model

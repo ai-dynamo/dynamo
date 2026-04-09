@@ -6,8 +6,11 @@
 This module provides handlers for video generation using diffusion models.
 """
 
-from dynamo.trtllm.request_handlers.video_diffusion.video_handler import (
+from dynamo.trtllm.request_handlers.diffusion.image_handler import (
+    ImageGenerationHandler,
+)
+from dynamo.trtllm.request_handlers.diffusion.video_handler import (
     VideoGenerationHandler,
 )
 
-__all__ = ["VideoGenerationHandler"]
+__all__ = ["VideoGenerationHandler", "ImageGenerationHandler"]

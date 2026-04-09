@@ -143,7 +143,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
 def _default_endpoint(
     namespace: str, modality: Modality, disaggregation_mode: DisaggregationMode
 ) -> str:
-    if modality == Modality.VIDEO_DIFFUSION:
+    if Modality.is_diffusion(modality):
         component_name = DEFAULT_DIFFUSION_COMPONENT
     elif disaggregation_mode == DisaggregationMode.ENCODE:
         component_name = DEFAULT_ENCODE_COMPONENT

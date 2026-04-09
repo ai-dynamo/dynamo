@@ -27,7 +27,6 @@ from dynamo.common.protocols.video_protocol import (
     VideoNvExt,
 )
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
-from dynamo.trtllm.constants import Modality
 
 pytestmark = [
     pytest.mark.unit,
@@ -41,49 +40,9 @@ pytestmark = [
 # Part 1: Modality Enum Tests
 # =============================================================================
 
+# This part of the test has been covered in test_trtllm_video_diffusion.py
 
-class TestModality:
-    """Tests for the Modality enum and its helper methods."""
-
-    def test_modality_values_exist(self):
-        """Test that TEXT, MULTIMODAL, VIDEO_DIFFUSION, and IMAGE_DIFFUSION exist."""
-        assert Modality.TEXT.value == "text"
-        assert Modality.MULTIMODAL.value == "multimodal"
-        assert Modality.VIDEO_DIFFUSION.value == "video_diffusion"
-        assert Modality.IMAGE_DIFFUSION.value == "image_diffusion"
-
-    def test_is_diffusion_true_for_video_diffusion(self):
-        """Test that VIDEO_DIFFUSION returns True for is_diffusion."""
-        assert Modality.is_diffusion(Modality.VIDEO_DIFFUSION) is True
-
-    def test_is_diffusion_true_for_image_diffusion(self):
-        """Test that IMAGE_DIFFUSION returns True for is_diffusion."""
-        assert Modality.is_diffusion(Modality.IMAGE_DIFFUSION) is True
-
-    def test_is_diffusion_false_for_text(self):
-        """Test that TEXT returns False for is_diffusion."""
-        assert Modality.is_diffusion(Modality.TEXT) is False
-
-    def test_is_diffusion_false_for_multimodal(self):
-        """Test that MULTIMODAL returns False for is_diffusion."""
-        assert Modality.is_diffusion(Modality.MULTIMODAL) is False
-
-    def test_is_llm_true_for_text(self):
-        """Test that TEXT returns True for is_llm."""
-        assert Modality.is_llm(Modality.TEXT) is True
-
-    def test_is_llm_true_for_multimodal(self):
-        """Test that MULTIMODAL returns True for is_llm."""
-        assert Modality.is_llm(Modality.MULTIMODAL) is True
-
-    def test_is_llm_false_for_video_diffusion(self):
-        """Test that VIDEO_DIFFUSION returns False for is_llm."""
-        assert Modality.is_llm(Modality.VIDEO_DIFFUSION) is False
-
-    def test_is_llm_false_for_image_diffusion(self):
-        """Test that IMAGE_DIFFUSION returns False for is_llm."""
-        assert Modality.is_llm(Modality.IMAGE_DIFFUSION) is False
-
+# [gluo WIP] change below to fit with image diffusion
 
 # =============================================================================
 # Part 2: DiffusionConfig Tests
