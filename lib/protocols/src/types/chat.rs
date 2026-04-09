@@ -871,20 +871,16 @@ mod tests {
 
     #[test]
     fn tool_call_with_dict_arguments_roundtrip() {
-        let tc: ChatCompletionMessageToolCall =
-            serde_json::from_value(serde_json::json!({
-                "id": "call_abc",
-                "type": "function",
-                "function": {
-                    "name": "search",
-                    "arguments": {"query": "hello", "limit": 10}
-                }
-            }))
-            .unwrap();
-        assert_eq!(
-            tc.function.arguments,
-            "{\"limit\":10,\"query\":\"hello\"}"
-        );
+        let tc: ChatCompletionMessageToolCall = serde_json::from_value(serde_json::json!({
+            "id": "call_abc",
+            "type": "function",
+            "function": {
+                "name": "search",
+                "arguments": {"query": "hello", "limit": 10}
+            }
+        }))
+        .unwrap();
+        assert_eq!(tc.function.arguments, "{\"limit\":10,\"query\":\"hello\"}");
         // Re-serialisation produces a string, not an object
         let json = serde_json::to_value(&tc).unwrap();
         assert!(json["function"]["arguments"].is_string());
