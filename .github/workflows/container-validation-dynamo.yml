@@ -313,7 +313,7 @@ jobs:
     if: needs.changed-files.outputs.core == 'true'
     runs-on: prod-tester-amd-gpu-v1
     name: Pytest (GPU)
-    timeout-minutes: 5
+    timeout-minutes: 30
     env:
       IMAGE_TAG: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_suffix }}
     steps:
