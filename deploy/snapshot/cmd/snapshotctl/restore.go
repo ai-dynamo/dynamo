@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -191,10 +190,10 @@ func waitForRestore(ctx context.Context, clientset kubernetes.Interface, namespa
 		},
 	)
 	if err != nil {
-		if !errors.Is(err, context.DeadlineExceeded) {
-			return "", err
+		if err == context.DeadlineExceeded {
+			return "", fmt.Errorf("restore pod %s/%s timed out: status=%q", namespace, podName, status)
 		}
-		return "", fmt.Errorf("restore pod %s/%s timed out: status=%q", namespace, podName, status)
+		return "", err
 	}
 	return status, nil
 }
