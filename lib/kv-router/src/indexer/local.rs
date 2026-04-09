@@ -56,6 +56,10 @@ struct RecoveryCacheState {
     building: Option<InFlightRecoveryBuild>,
 }
 
+struct RecoverySnapshotCache {
+    state: AsyncMutex<RecoveryCacheState>,
+}
+
 enum DumpPlan {
     Immediate(WorkerKvQueryResponse),
     RequiresDump { last_event_id: u64 },
@@ -90,6 +94,132 @@ struct FreshDumpOutput {
     snapshot: Option<CachedRecoverySnapshot>,
 }
 
+impl RecoverySnapshotCache {
+    fn new() -> Self {
+        Self {
+            state: AsyncMutex::new(RecoveryCacheState::default()),
+        }
+    }
+
+    async fn decide_reuse_or_build<F>(
+        &self,
+        fallback_last_event_id: u64,
+        current_last_event_id: Option<u64>,
+        assess_tail_append_safety: F,
+    ) -> CacheReuseDecision
+    where
+        F: FnOnce(u64) -> TailAppendSafety,
+    {
+        let mut cache_state = self.state.lock().await;
+        let now = Instant::now();
+
+        if cache_state
+            .cached
+            .as_ref()
+            .is_some_and(|cached| now.duration_since(cached.last_used_at) > RECOVERY_CACHE_TTL)
+        {
+            cache_state.cached = None;
+        }
+
+        if let Some(cached) = cache_state.cached.clone() {
+            match assess_tail_append_safety(cached.last_event_id) {
+                TailAppendSafety::ExactHit => {
+                    let exact = CachedRecoverySnapshot {
+                        last_used_at: now,
+                        ..cached
+                    };
+                    cache_state.cached = Some(exact.clone());
+                    return CacheReuseDecision::ReturnExact(exact);
+                }
+                TailAppendSafety::Safe {
+                    last_event_id,
+                    tail,
+                } => {
+                    let mut events = cached.events.as_ref().clone();
+                    events.extend(tail);
+                    let shared_events = Arc::new(events);
+                    cache_state.cached = Some(CachedRecoverySnapshot {
+                        events: shared_events.clone(),
+                        last_event_id,
+                        last_used_at: now,
+                    });
+                    return CacheReuseDecision::ReturnExtended(WorkerKvQueryResponse::TreeDump {
+                        events: shared_events.as_ref().clone(),
+                        last_event_id,
+                    });
+                }
+                TailAppendSafety::Invalidate => {
+                    cache_state.cached = None;
+                }
+            }
+        }
+
+        if let Some(build) = cache_state.building.clone() {
+            return CacheReuseDecision::WaitForBuilder(build.notify.notified_owned());
+        }
+
+        let build = InFlightRecoveryBuild {
+            generation: cache_state.generation,
+            notify: Arc::new(Notify::new()),
+        };
+        let last_event_id = current_last_event_id.unwrap_or(fallback_last_event_id);
+        cache_state.building = Some(build.clone());
+        CacheReuseDecision::BuildFresh {
+            build,
+            last_event_id,
+        }
+    }
+
+    async fn finish_build(
+        &self,
+        build: &InFlightRecoveryBuild,
+        build_output: FreshDumpOutput,
+    ) -> BuildTaskResult {
+        let mut cache_state = self.state.lock().await;
+        let is_current_build = cache_state
+            .building
+            .as_ref()
+            .is_some_and(|inflight| inflight.generation == build.generation);
+        let generation_matches = cache_state.generation == build.generation;
+
+        if is_current_build {
+            cache_state.building = None;
+        }
+
+        if !is_current_build || !generation_matches {
+            return BuildTaskResult::StaleGeneration;
+        }
+
+        if let Some(snapshot) = build_output.snapshot {
+            cache_state.cached = Some(snapshot);
+        }
+        BuildTaskResult::Response(build_output.response)
+    }
+
+    async fn clear_build_if_current(&self, generation: u64) {
+        let mut cache_state = self.state.lock().await;
+        if cache_state
+            .building
+            .as_ref()
+            .is_some_and(|inflight| inflight.generation == generation)
+        {
+            cache_state.building = None;
+        }
+    }
+
+    async fn invalidate(&self) {
+        let mut cache_state = self.state.lock().await;
+        cache_state.generation = cache_state.generation.saturating_add(1);
+        cache_state.cached = None;
+    }
+
+    fn try_clear_cached(&self) {
+        if let Ok(mut cache_state) = self.state.try_lock() {
+            cache_state.cached = None;
+        }
+    }
+}
+
 /// A thin wrapper around KvIndexer that buffers recent events
 /// (e.g. which may be queued by router upon startup)
 ///
@@ -101,7 +231,7 @@ pub struct LocalKvIndexer {
     /// Coordinates single-flight tree dumps and the short-lived cached snapshot.
     /// This stays separate from `event_buffer` so dump wait/build state can be
     /// managed on the async path without holding the buffer lock across `.await`.
-    recovery_cache: Arc<AsyncMutex<RecoveryCacheState>>,
+    recovery_cache: Arc<RecoverySnapshotCache>,
     /// Maximum number of events to keep in buffer
     max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
     #[cfg(test)]
@@ -121,7 +251,7 @@ impl LocalKvIndexer {
         Self {
             indexer: KvIndexer::new(token, kv_block_size, metrics),
             event_buffer: Mutex::new(VecDeque::with_capacity(max_buffer_size)),
-            recovery_cache: Arc::new(AsyncMutex::new(RecoveryCacheState::default())),
+            recovery_cache: Arc::new(RecoverySnapshotCache::new()),
             max_buffer_size,
             #[cfg(test)]
             dump_build_count: AtomicUsize::new(0),
@@ -212,7 +342,7 @@ impl LocalKvIndexer {
             let should_invalidate = matches!(event.event.data, KvCacheEventData::Cleared);
             let detected_gap = self.record_event(event);
             if should_invalidate || detected_gap {
-                self.invalidate_recovery_cache().await;
+                self.recovery_cache.invalidate().await;
             }
         }
 
@@ -223,9 +353,7 @@ impl LocalKvIndexer {
     pub fn clear_buffer(&self) {
         let mut buffer = self.event_buffer.lock().unwrap();
         buffer.clear();
-        if let Ok(mut cache_state) = self.recovery_cache.try_lock() {
-            cache_state.cached = None;
-        }
+        self.recovery_cache.try_clear_cached();
     }
 
     /// Get the current buffer size.
@@ -318,10 +446,14 @@ impl LocalKvIndexer {
 
     async fn get_cached_or_fresh_dump(&self, fallback_last_event_id: u64) -> WorkerKvQueryResponse {
         loop {
-            let decision = {
-                let mut cache_state = self.recovery_cache.lock().await;
-                self.try_reuse_cached_dump(&mut cache_state, fallback_last_event_id)
-            };
+            let decision = self
+                .recovery_cache
+                .decide_reuse_or_build(
+                    fallback_last_event_id,
+                    self.current_buffer_last_event_id(),
+                    |cached_last_event_id| self.assess_tail_append_safety(cached_last_event_id),
+                )
+                .await;
 
             match decision {
                 CacheReuseDecision::ReturnExact(snapshot) => return snapshot.into_response(),
@@ -339,15 +471,7 @@ impl LocalKvIndexer {
                         Ok(BuildTaskResult::StaleGeneration) => continue,
                         Err(error) => {
                             tracing::warn!("Recovery cache build task failed: {error}");
-                            let mut cache_state = self.recovery_cache.lock().await;
-                            if cache_state
-                                .building
-                                .as_ref()
-                                .is_some_and(|inflight| inflight.generation == generation)
-                            {
-                                cache_state.building = None;
-                            }
-                            drop(cache_state);
+                            self.recovery_cache.clear_build_if_current(generation).await;
                             notify.notify_waiters();
                             return WorkerKvQueryResponse::TreeDump {
                                 events: Vec::new(),
@@ -357,71 +481,6 @@ impl LocalKvIndexer {
                     }
                 }
             }
-        }
-    }
-
-    fn try_reuse_cached_dump(
-        &self,
-        cache_state: &mut RecoveryCacheState,
-        fallback_last_event_id: u64,
-    ) -> CacheReuseDecision {
-        let now = Instant::now();
-        if cache_state
-            .cached
-            .as_ref()
-            .is_some_and(|cached| now.duration_since(cached.last_used_at) > RECOVERY_CACHE_TTL)
-        {
-            cache_state.cached = None;
-        }
-
-        if let Some(cached) = cache_state.cached.clone() {
-            match self.assess_tail_append_safety(cached.last_event_id) {
-                TailAppendSafety::ExactHit => {
-                    let exact = CachedRecoverySnapshot {
-                        last_used_at: now,
-                        ..cached
-                    };
-                    cache_state.cached = Some(exact.clone());
-                    return CacheReuseDecision::ReturnExact(exact);
-                }
-                TailAppendSafety::Safe {
-                    last_event_id,
-                    tail,
-                } => {
-                    let mut events = cached.events.as_ref().clone();
-                    events.extend(tail);
-                    let shared_events = Arc::new(events);
-                    cache_state.cached = Some(CachedRecoverySnapshot {
-                        events: shared_events.clone(),
-                        last_event_id,
-                        last_used_at: now,
-                    });
-                    return CacheReuseDecision::ReturnExtended(WorkerKvQueryResponse::TreeDump {
-                        events: shared_events.as_ref().clone(),
-                        last_event_id,
-                    });
-                }
-                TailAppendSafety::Invalidate => {
-                    cache_state.cached = None;
-                }
-            }
-        }
-
-        if let Some(build) = cache_state.building.clone() {
-            return CacheReuseDecision::WaitForBuilder(build.notify.notified_owned());
-        }
-
-        let build = InFlightRecoveryBuild {
-            generation: cache_state.generation,
-            notify: Arc::new(Notify::new()),
-        };
-        let last_event_id = self
-            .current_buffer_last_event_id()
-            .unwrap_or(fallback_last_event_id);
-        cache_state.building = Some(build.clone());
-        CacheReuseDecision::BuildFresh {
-            build,
-            last_event_id,
         }
     }
 
@@ -497,27 +556,7 @@ impl LocalKvIndexer {
 
             let build_output = Self::build_fresh_dump(indexer, last_event_id).await;
             let notify = build.notify.clone();
-            let result = {
-                let mut cache_state = recovery_cache.lock().await;
-                let is_current_build = cache_state
-                    .building
-                    .as_ref()
-                    .is_some_and(|inflight| inflight.generation == build.generation);
-                let generation_matches = cache_state.generation == build.generation;
-
-                if is_current_build {
-                    cache_state.building = None;
-                }
-
-                if !is_current_build || !generation_matches {
-                    BuildTaskResult::StaleGeneration
-                } else {
-                    if let Some(snapshot) = build_output.snapshot {
-                        cache_state.cached = Some(snapshot);
-                    }
-                    BuildTaskResult::Response(build_output.response)
-                }
-            };
+            let result = recovery_cache.finish_build(&build, build_output).await;
 
             notify.notify_waiters();
             result
@@ -548,12 +587,6 @@ impl LocalKvIndexer {
                 }
             }
         }
-    }
-
-    async fn invalidate_recovery_cache(&self) {
-        let mut cache_state = self.recovery_cache.lock().await;
-        cache_state.generation = cache_state.generation.saturating_add(1);
-        cache_state.cached = None;
     }
 
     #[cfg(test)]
