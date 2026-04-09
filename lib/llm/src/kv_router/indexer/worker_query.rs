@@ -740,8 +740,27 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
         };
 
         // Process the query with slow operation logging
-        let worker_id = self.worker_id;
-        let slow_query_handle = tokio::spawn(async move {
+        // RAII guard ensures the logger is aborted even if request is cancelled
+        let _slow_query_guard = SlowQueryGuard::spawn(self.worker_id);
+
+        let response = self
+            .local_indexer
+            .get_events_in_id_range(request.start_event_id, request.end_event_id)
+            .await;
+
+        Ok(ResponseStream::new(
+            Box::pin(stream::iter(vec![response])),
+            ctx.context(),
+        ))
+    }
+}
+
+/// RAII guard that aborts a slow query logger task on drop.
+struct SlowQueryGuard(tokio::task::JoinHandle<()>);
+
+impl SlowQueryGuard {
+    fn spawn(worker_id: u64) -> Self {
+        Self(tokio::spawn(async move {
             let mut elapsed_secs = 0u64;
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -752,19 +771,13 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
                     "Worker KV query still running - possible slow tree dump",
                 );
             }
-        });
+        }))
+    }
+}
 
-        let response = self
-            .local_indexer
-            .get_events_in_id_range(request.start_event_id, request.end_event_id)
-            .await;
-
-        slow_query_handle.abort();
-
-        Ok(ResponseStream::new(
-            Box::pin(stream::iter(vec![response])),
-            ctx.context(),
-        ))
+impl Drop for SlowQueryGuard {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
