@@ -3,6 +3,8 @@
 
 //! Pluggable KV cache block managers.
 
+#[cfg(feature = "kvbm")]
+pub mod kvbm_offload;
 pub mod sglang_backend;
 pub mod vllm_backend;
 
