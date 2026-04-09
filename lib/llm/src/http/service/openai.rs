@@ -1262,11 +1262,7 @@ async fn chat_completions(
             let mut events: Vec<Result<Event, axum::Error>> = vec![];
             // Skip empty chunks (e.g. incomplete multi-byte tokens).
             // Usage-only and finish_reason chunks are preserved.
-            if response
-                .data
-                .as_ref()
-                .is_some_and(is_empty_stream_response)
-            {
+            if response.data.as_ref().is_some_and(is_empty_stream_response) {
                 return stream::iter(events);
             }
             if tool_dispatch_enabled {
