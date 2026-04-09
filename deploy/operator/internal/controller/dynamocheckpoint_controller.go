@@ -39,9 +39,8 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 // CheckpointReconciler reconciles a DynamoCheckpoint object
@@ -86,8 +85,8 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if ckpt.Labels == nil {
 		ckpt.Labels = map[string]string{}
 	}
-	if ckpt.Labels[consts.KubeLabelCheckpointID] != identityHash {
-		ckpt.Labels[consts.KubeLabelCheckpointID] = identityHash
+	if ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != identityHash {
+		ckpt.Labels[snapshotprotocol.CheckpointIDLabel] = identityHash
 		if err := r.Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -117,7 +116,10 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		return ctrl.Result{}, nil
 	}
-	desiredJobName := checkpointjob.DesiredCheckpointJobName(identityHash, ckpt.Annotations)
+	desiredJobName := snapshotprotocol.GetCheckpointJobName(
+		identityHash,
+		ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
+	)
 	switch ckpt.Status.Phase {
 	case "", nvidiacomv1alpha1.DynamoCheckpointPhasePending, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed:
 	default:
@@ -181,11 +183,14 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 			return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
 		}
 	}
-	jobName := checkpointjob.DesiredCheckpointJobName(hash, ckpt.Annotations)
+	jobName := snapshotprotocol.GetCheckpointJobName(
+		hash,
+		ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
+	)
 
 	// Use SyncResource to create/update the checkpoint Job
 	modified, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*batchv1.Job, bool, error) {
-		job, err := checkpointjob.BuildCheckpointJob(r.Config, ckpt, jobName)
+		job, err := buildCheckpointJob(r.Config, ckpt, jobName)
 		return job, false, err
 	})
 	if err != nil {
@@ -276,12 +281,12 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		}
 	}
 
-	observation := checkpointjob.Observe(job, checkpointWorkerActive)
+	observation := snapshotprotocol.ObserveCheckpointJob(job, checkpointWorkerActive)
 	switch observation.Phase {
-	case checkpointjob.ObservationPhaseWaitingForConfirmation:
+	case snapshotprotocol.CheckpointObservationPhaseWaitingForConfirmation:
 		logger.V(1).Info("Checkpoint job is complete but checkpoint worker is still active; waiting for terminal watcher status", "job", job.Name)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
-	case checkpointjob.ObservationPhaseReady:
+	case snapshotprotocol.CheckpointObservationPhaseReady:
 		logger.Info("Checkpoint Job succeeded", "job", job.Name)
 		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", observation.Message)
 
@@ -300,7 +305,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
-	case checkpointjob.ObservationPhaseFailed:
+	case snapshotprotocol.CheckpointObservationPhaseFailed:
 		logger.Info("Checkpoint Job failed", "job", job.Name, "message", observation.Message)
 		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointFailed", observation.Message)
 

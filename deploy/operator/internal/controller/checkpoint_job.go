@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package checkpointjob
+package controller
 
 import (
 	"fmt"
@@ -16,10 +16,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
-
-func DesiredCheckpointJobName(identityHash string, annotations map[string]string) string {
-	return "checkpoint-job-" + identityHash + "-" + snapshotprotocol.ArtifactVersion(annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
-}
 
 func buildCheckpointWorkerDefaultEnv(
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
@@ -50,7 +46,7 @@ func buildCheckpointWorkerDefaultEnv(
 	return defaultContainer.Env
 }
 
-func BuildCheckpointJob(
+func buildCheckpointJob(
 	config *configv1alpha1.OperatorConfiguration,
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
 	jobName string,
@@ -118,7 +114,7 @@ func BuildCheckpointJob(
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
 		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
-		SeccompProfile:        consts.SeccompProfilePath,
+		SeccompProfile:        snapshotprotocol.DefaultSeccompLocalhostProfile,
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,

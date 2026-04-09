@@ -378,11 +378,7 @@ impl KvIndexer {
         self.event_tx.clone()
     }
 
-    /// Get a sender for dump requests (snapshot events).
-    ///
-    /// ### Returns
-    ///
-    /// A `mpsc::Sender` for `DumpRequest`s.
+    #[cfg(test)]
     pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
         self.dump_tx.clone()
     }

@@ -352,6 +352,18 @@ impl WorkerQueryClient {
         self.indexer.apply_event(event).await;
     }
 
+    async fn apply_tree_dump_replace_locked(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+        events: Vec<RouterEvent>,
+    ) {
+        self.indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
+        for event in events {
+            self.indexer.apply_event(event).await;
+        }
+    }
+
     pub(crate) async fn handle_live_event(self: &Arc<Self>, event: RouterEvent) {
         let worker_id = event.worker_id;
         let dp_rank = event.event.dp_rank;
@@ -486,7 +498,10 @@ impl WorkerQueryClient {
         let mut saw_clear = false;
 
         match result {
-            Ok(WorkerKvQueryResponse::Events(events)) => {
+            Ok(WorkerKvQueryResponse::Events {
+                events,
+                last_event_id,
+            }) => {
                 tracing::debug!(
                     "Got {count} buffered events from worker {} dp_rank {}",
                     key.0,
@@ -505,6 +520,7 @@ impl WorkerQueryClient {
                     self.indexer.apply_event(event).await;
                     new_cursor = new_cursor.advance_to(event_id);
                 }
+                new_cursor = new_cursor.advance_to(last_event_id);
                 successful_response = true;
             }
             Ok(WorkerKvQueryResponse::TreeDump {
@@ -518,9 +534,8 @@ impl WorkerQueryClient {
                     events.len(),
                     last_event_id
                 );
-                for event in events {
-                    self.indexer.apply_event(event).await;
-                }
+                self.apply_tree_dump_replace_locked(key.0, key.1, events)
+                    .await;
                 new_cursor = new_cursor.advance_to(last_event_id);
                 successful_response = true;
             }
@@ -889,6 +904,25 @@ mod tests {
         hashes
     }
 
+    fn stored_block_hashes_for(
+        events: &[RouterEvent],
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Vec<u64> {
+        let mut hashes = events
+            .iter()
+            .filter(|event| event.worker_id == worker_id && event.event.dp_rank == dp_rank)
+            .filter_map(|event| match &event.event.data {
+                KvCacheEventData::Stored(data) => {
+                    data.blocks.first().map(|block| block.block_hash.0)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        hashes.sort_unstable();
+        hashes
+    }
+
     async fn wait_for<F>(mut check: F)
     where
         F: FnMut() -> bool,
@@ -958,9 +992,13 @@ mod tests {
             .expect("response stream should yield one item");
 
         match response {
-            WorkerKvQueryResponse::Events(events) => {
+            WorkerKvQueryResponse::Events {
+                events,
+                last_event_id,
+            } => {
                 assert_eq!(events.len(), 1);
                 assert_eq!(events[0].event.event_id, 1);
+                assert_eq!(last_event_id, 1);
             }
             other => panic!("Unexpected response: {other:?}"),
         }
@@ -1022,9 +1060,10 @@ mod tests {
             MockQueryAction {
                 started: Some(first_started.clone()),
                 release: Some(first_release.clone()),
-                response: Ok(WorkerKvQueryResponse::Events(
-                    (11..=15).map(|id| make_store_event(1, 0, id)).collect(),
-                )),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: (11..=15).map(|id| make_store_event(1, 0, id)).collect(),
+                    last_event_id: 15,
+                }),
             },
         );
         transport.push_action(
@@ -1032,9 +1071,10 @@ mod tests {
             MockQueryAction {
                 started: None,
                 release: None,
-                response: Ok(WorkerKvQueryResponse::Events(
-                    (16..=18).map(|id| make_store_event(1, 0, id)).collect(),
-                )),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: (16..=18).map(|id| make_store_event(1, 0, id)).collect(),
+                    last_event_id: 18,
+                }),
             },
         );
 
@@ -1085,10 +1125,10 @@ mod tests {
             MockQueryAction {
                 started: None,
                 release: None,
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 12),
-                    make_store_event(1, 0, 13),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![make_store_event(1, 0, 12), make_store_event(1, 0, 13)],
+                    last_event_id: 13,
+                }),
             },
         );
 
@@ -1125,6 +1165,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_initial_restore_tree_dump_with_safe_tail_advances_cursor() {
+        let (client, transport, kv_indexer) = make_test_client("initial-restore-safe-tail").await;
+        let key = (1, 0);
+
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(1, 0, 0), make_store_event(1, 0, 11)],
+                    last_event_id: 11,
+                }),
+            },
+        );
+
+        client.handle_discovered_worker(1, 0).await;
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(11) && !state.recovery_inflight
+            })
+        })
+        .await;
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(stored_block_hashes(&events), vec![0, 11]);
+        assert_eq!(transport.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_tree_dump_replaces_stale_state_for_recovered_rank() {
+        let (client, transport, kv_indexer) = make_test_client("tree-dump-replaces-rank").await;
+        let key = (1, 0);
+
+        kv_indexer.apply_event(make_store_event(1, 0, 90)).await;
+        kv_indexer.apply_event(make_store_event(1, 0, 91)).await;
+        kv_indexer.flush().await;
+
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(1, 0, 11)],
+                    last_event_id: 11,
+                }),
+            },
+        );
+
+        client.handle_discovered_worker(1, 0).await;
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(11) && !state.recovery_inflight
+            })
+        })
+        .await;
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(stored_block_hashes_for(&events, 1, 0), vec![11]);
+    }
+
+    #[tokio::test]
+    async fn test_tree_dump_recovery_does_not_clear_other_dp_ranks() {
+        let (client, transport, kv_indexer) = make_test_client("tree-dump-preserves-sibling").await;
+        let key = (1, 0);
+
+        kv_indexer.apply_event(make_store_event(1, 0, 90)).await;
+        kv_indexer.apply_event(make_store_event(1, 1, 77)).await;
+        kv_indexer.flush().await;
+
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(1, 0, 11)],
+                    last_event_id: 11,
+                }),
+            },
+        );
+
+        client.handle_discovered_worker(1, 0).await;
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(11) && !state.recovery_inflight
+            })
+        })
+        .await;
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(stored_block_hashes_for(&events, 1, 0), vec![11]);
+        assert_eq!(stored_block_hashes_for(&events, 1, 1), vec![77]);
+    }
+
+    #[tokio::test]
+    async fn test_empty_tree_dump_clears_only_recovered_rank() {
+        let (client, transport, kv_indexer) = make_test_client("tree-dump-empty-clears-rank").await;
+        let key = (1, 0);
+
+        kv_indexer.apply_event(make_store_event(1, 0, 90)).await;
+        kv_indexer.apply_event(make_store_event(1, 1, 77)).await;
+        kv_indexer.flush().await;
+
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![],
+                    last_event_id: 11,
+                }),
+            },
+        );
+
+        client.handle_discovered_worker(1, 0).await;
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(11) && !state.recovery_inflight
+            })
+        })
+        .await;
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert!(stored_block_hashes_for(&events, 1, 0).is_empty());
+        assert_eq!(stored_block_hashes_for(&events, 1, 1), vec![77]);
+    }
+
+    #[tokio::test]
     async fn test_live_event_for_other_worker_is_not_blocked_by_inflight_recovery() {
         let (client, transport, kv_indexer) = make_test_client("live-concurrency").await;
 
@@ -1148,11 +1323,14 @@ mod tests {
             MockQueryAction {
                 started: Some(started.clone()),
                 release: Some(release.clone()),
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 11),
-                    make_store_event(1, 0, 12),
-                    make_store_event(1, 0, 13),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![
+                        make_store_event(1, 0, 11),
+                        make_store_event(1, 0, 12),
+                        make_store_event(1, 0, 13),
+                    ],
+                    last_event_id: 13,
+                }),
             },
         );
 
@@ -1193,10 +1371,10 @@ mod tests {
             MockQueryAction {
                 started: Some(started.clone()),
                 release: Some(release.clone()),
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 11),
-                    make_store_event(1, 0, 12),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![make_store_event(1, 0, 11), make_store_event(1, 0, 12)],
+                    last_event_id: 12,
+                }),
             },
         );
 
@@ -1231,11 +1409,14 @@ mod tests {
             MockQueryAction {
                 started: Some(started.clone()),
                 release: Some(release.clone()),
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 11),
-                    make_store_event(1, 0, 12),
-                    make_store_event(1, 0, 13),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![
+                        make_store_event(1, 0, 11),
+                        make_store_event(1, 0, 12),
+                        make_store_event(1, 0, 13),
+                    ],
+                    last_event_id: 13,
+                }),
             },
         );
         client.handle_live_event(make_store_event(1, 0, 13)).await;
@@ -1285,11 +1466,14 @@ mod tests {
             MockQueryAction {
                 started: None,
                 release: None,
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 11),
-                    make_clear_event(1, 0, 12),
-                    make_store_event(1, 0, 13),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![
+                        make_store_event(1, 0, 11),
+                        make_clear_event(1, 0, 12),
+                        make_store_event(1, 0, 13),
+                    ],
+                    last_event_id: 13,
+                }),
             },
         );
 
