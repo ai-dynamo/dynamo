@@ -2485,6 +2485,49 @@ mod local_indexer_tests {
     }
 
     #[tokio::test]
+    async fn test_local_indexer_remove_worker_dp_rank_only_clears_target_rank() {
+        let local_indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+
+        local_indexer
+            .apply_event_with_buffer(make_store_event_with_dp_rank(7, &[101], 0))
+            .await
+            .unwrap();
+        local_indexer
+            .apply_event_with_buffer(make_store_event_with_dp_rank(7, &[202], 1))
+            .await
+            .unwrap();
+        local_indexer.flush().await;
+
+        local_indexer.remove_worker_dp_rank(7, 0).await;
+        local_indexer.flush().await;
+
+        let events = local_indexer.dump_events().await.unwrap();
+        let mut rank0 = events
+            .iter()
+            .filter(|event| event.worker_id == 7 && event.event.dp_rank == 0)
+            .collect::<Vec<_>>();
+        let mut rank1 = events
+            .iter()
+            .filter(|event| event.worker_id == 7 && event.event.dp_rank == 1)
+            .collect::<Vec<_>>();
+        rank0.sort_by_key(|event| event.event.event_id);
+        rank1.sort_by_key(|event| event.event.event_id);
+
+        assert!(rank0.is_empty());
+        assert_eq!(rank1.len(), 1);
+        assert!(matches!(
+            &rank1[0].event.data,
+            KvCacheEventData::Stored(data)
+                if data.blocks.first().map(|block| block.block_hash.0) == Some(202)
+        ));
+    }
+
+    #[tokio::test]
     async fn test_local_indexer_coalesces_concurrent_tree_dumps() {
         let indexer = Arc::new(LocalKvIndexer::new(
             CancellationToken::new(),

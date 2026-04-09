@@ -12,11 +12,13 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    DumpRequest, GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
+    GetWorkersRequest, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
     WorkerKvQueryResponse,
 };
 use crate::protocols::*;
 
+#[cfg(test)]
+use super::DumpRequest;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
@@ -237,7 +239,7 @@ impl LocalKvIndexer {
         }
     }
 
-    /// Test-only helper to inspect the buffered events (oldest first).
+    #[cfg(test)]
     pub fn get_all_events_in_buffer(&self) -> Vec<RouterEvent> {
         let buffer = self.event_buffer.lock().unwrap();
         buffer.iter().cloned().collect()
@@ -329,7 +331,7 @@ impl LocalKvIndexer {
         result
     }
 
-    /// Test-only helper to inspect the current buffer size.
+    #[cfg(test)]
     pub fn buffer_len(&self) -> usize {
         let buffer = self.event_buffer.lock().unwrap();
         buffer.len()
@@ -579,7 +581,7 @@ impl LocalKvIndexer {
         self.indexer.event_sender()
     }
 
-    /// Test-only helper to send dump requests directly to the underlying indexer.
+    #[cfg(test)]
     pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
         self.indexer.snapshot_event_sender()
     }
@@ -623,6 +625,10 @@ impl KvIndexerInterface for LocalKvIndexer {
 
     async fn remove_worker(&self, worker: WorkerId) {
         let _ = self.indexer.remove_worker_sender().send(worker).await;
+    }
+
+    async fn remove_worker_dp_rank(&self, worker: WorkerId, dp_rank: DpRank) {
+        KvIndexerInterface::remove_worker_dp_rank(&self.indexer, worker, dp_rank).await;
     }
 
     fn shutdown(&self) {
