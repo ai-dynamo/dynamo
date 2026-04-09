@@ -454,50 +454,6 @@ impl RemoteIndexerMetrics {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Worker query metrics (simple counter)
-// ---------------------------------------------------------------------------
-
-/// Metrics for worker-side KV query operations.
-pub struct WorkerQueryMetrics {
-    pub queries_total: prometheus::IntCounter,
-}
-
-static WORKER_QUERY_METRICS: OnceLock<Arc<WorkerQueryMetrics>> = OnceLock::new();
-
-impl WorkerQueryMetrics {
-    pub fn get() -> Option<Arc<Self>> {
-        WORKER_QUERY_METRICS.get().cloned()
-    }
-
-    pub fn register(
-        registry: &prometheus::Registry,
-        worker_id: u64,
-    ) -> Result<(), prometheus::Error> {
-        let m = WORKER_QUERY_METRICS.get_or_init(|| {
-            let worker_id_str = worker_id.to_string();
-
-            let queries_total = prometheus::IntCounter::with_opts(
-                Opts::new(
-                    "dynamo_worker_query_requests_total",
-                    "Total number of KV query requests received",
-                )
-                .const_label("worker_id", &worker_id_str),
-            )
-            .expect("failed to create queries_total counter");
-
-            Arc::new(Self { queries_total })
-        });
-
-        registry.register(Box::new(m.queries_total.clone()))?;
-        Ok(())
-    }
-
-    pub fn increment_queries(&self) {
-        self.queries_total.inc();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
