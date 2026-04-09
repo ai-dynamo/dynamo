@@ -12,11 +12,16 @@ GPU Memory Service:
 For PyTorch integration (MemPool, tensor utilities), see gpu_memory_service.client.torch.
 """
 
-from gpu_memory_service.client.gms_storage_client import GMSStorageClient, SaveManifest
-from gpu_memory_service.client.memory_manager import (
-    GMSClientMemoryManager,
-    StaleMemoryLayoutError,
-)
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from gpu_memory_service.client.gms_storage_client import GMSStorageClient, SaveManifest
+    from gpu_memory_service.client.memory_manager import (
+        GMSClientMemoryManager,
+        StaleMemoryLayoutError,
+    )
 
 __all__ = [
     "GMSClientMemoryManager",
@@ -24,3 +29,29 @@ __all__ = [
     "GMSStorageClient",
     "SaveManifest",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in {"GMSClientMemoryManager", "StaleMemoryLayoutError"}:
+        from gpu_memory_service.client.memory_manager import (
+            GMSClientMemoryManager,
+            StaleMemoryLayoutError,
+        )
+
+        return {
+            "GMSClientMemoryManager": GMSClientMemoryManager,
+            "StaleMemoryLayoutError": StaleMemoryLayoutError,
+        }[name]
+
+    if name in {"GMSStorageClient", "SaveManifest"}:
+        from gpu_memory_service.client.gms_storage_client import (
+            GMSStorageClient,
+            SaveManifest,
+        )
+
+        return {
+            "GMSStorageClient": GMSStorageClient,
+            "SaveManifest": SaveManifest,
+        }[name]
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

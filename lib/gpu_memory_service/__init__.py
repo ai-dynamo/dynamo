@@ -23,19 +23,21 @@ Server API:
     from gpu_memory_service.server import GMSRPCServer
 """
 
-# Primary client exports
-from gpu_memory_service.client.memory_manager import (
-    GMSClientMemoryManager,
-    StaleMemoryLayoutError,
-)
+from __future__ import annotations
 
-# PyTorch integration (GMS client memory manager)
-from gpu_memory_service.client.torch.allocator import (
-    get_gms_client_memory_manager,
-    get_gms_client_memory_managers,
-    get_or_create_gms_client_memory_manager,
-    gms_use_mem_pool,
-)
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from gpu_memory_service.client.memory_manager import (
+        GMSClientMemoryManager,
+        StaleMemoryLayoutError,
+    )
+    from gpu_memory_service.client.torch.allocator import (
+        get_gms_client_memory_manager,
+        get_gms_client_memory_managers,
+        get_or_create_gms_client_memory_manager,
+        gms_use_mem_pool,
+    )
 
 __all__ = [
     # Client
@@ -47,3 +49,38 @@ __all__ = [
     "get_gms_client_memory_managers",
     "gms_use_mem_pool",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in {"GMSClientMemoryManager", "StaleMemoryLayoutError"}:
+        from gpu_memory_service.client.memory_manager import (
+            GMSClientMemoryManager,
+            StaleMemoryLayoutError,
+        )
+
+        return {
+            "GMSClientMemoryManager": GMSClientMemoryManager,
+            "StaleMemoryLayoutError": StaleMemoryLayoutError,
+        }[name]
+
+    if name in {
+        "get_or_create_gms_client_memory_manager",
+        "get_gms_client_memory_manager",
+        "get_gms_client_memory_managers",
+        "gms_use_mem_pool",
+    }:
+        from gpu_memory_service.client.torch.allocator import (
+            get_gms_client_memory_manager,
+            get_gms_client_memory_managers,
+            get_or_create_gms_client_memory_manager,
+            gms_use_mem_pool,
+        )
+
+        return {
+            "get_or_create_gms_client_memory_manager": get_or_create_gms_client_memory_manager,
+            "get_gms_client_memory_manager": get_gms_client_memory_manager,
+            "get_gms_client_memory_managers": get_gms_client_memory_managers,
+            "gms_use_mem_pool": gms_use_mem_pool,
+        }[name]
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

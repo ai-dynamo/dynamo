@@ -16,9 +16,11 @@ from collections import defaultdict
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 from gpu_memory_service.client._gms_storage_disk import (  # noqa: F401  re-exported for external callers
     ShardWriter as _ShardWriter,
+)
+from gpu_memory_service.client._gms_storage_disk import (
+    _write_tensor_bytes as _write_tensor_bytes_impl,
 )
 from gpu_memory_service.client._gms_storage_disk import (
     decode_metadata as _decode_metadata_impl,
@@ -89,7 +91,6 @@ def _read_shard_sequential(
         device,
         pin_memory=pin_memory,
         os_module=os,
-        np_module=np,
         torch_module=torch,
         logger=logger,
     )
@@ -259,7 +260,10 @@ class GMSStorageClient:
                         torch.uint8,
                         self.device,
                     )
-                    tensor.cpu().numpy().tofile(handle)
+                    cpu_tensor = tensor.cpu()
+                    if not cpu_tensor.is_contiguous():
+                        cpu_tensor = cpu_tensor.contiguous()
+                    _write_tensor_bytes_impl(handle, cpu_tensor, aligned_size)
                     entries[index] = AllocationEntry(
                         allocation_id=alloc["allocation_id"],
                         size=int(alloc["size"]),

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import errno
 import json
 import os
@@ -52,15 +53,14 @@ class ShardWriter:
         cpu = tensor.cpu() if hasattr(tensor, "is_cuda") and tensor.is_cuda else tensor
         if hasattr(cpu, "is_contiguous") and not cpu.is_contiguous():
             cpu = cpu.contiguous()
-        arr = cpu.numpy()
-        size = arr.nbytes
+        size = int(cpu.numel())
         if self._current_file is None or (
             self._current_offset > 0 and self._current_offset + size > self._shard_size
         ):
             self._roll_shard()
 
         offset = self._current_offset
-        arr.tofile(self._current_file)
+        _write_tensor_bytes(self._current_file, cpu, size)
         self._current_offset += size
         return self._current_rel_path, offset
 
@@ -83,13 +83,12 @@ def read_shard_sequential(
     *,
     pin_memory: bool = False,
     os_module=os,
-    np_module=None,
     torch_module=None,
     logger=None,
 ) -> Dict[str, torch.Tensor]:
     """Read one shard file front-to-back without seeking."""
-    if np_module is None or torch_module is None:
-        raise RuntimeError("numpy and torch modules are required to read shards")
+    if torch_module is None:
+        raise RuntimeError("torch module is required to read shards")
 
     result: Dict[str, torch.Tensor] = {}
     device_str = f"cuda:{device}" if device >= 0 else "cpu"
@@ -114,20 +113,15 @@ def read_shard_sequential(
         done = 0
         try:
             total_size = sum(entry.aligned_size for entry in sorted_entries)
-            if pin_memory and torch_module.cuda.is_available():
-                shard_t = torch_module.empty(
-                    total_size,
-                    dtype=torch_module.uint8,
-                    pin_memory=True,
-                )
-                arr = shard_t.numpy()
-            else:
-                shard_t = None
-                arr = np_module.empty(total_size, dtype=np_module.uint8)
+            shard_t = torch_module.empty(
+                total_size,
+                dtype=torch_module.uint8,
+                pin_memory=pin_memory and torch_module.cuda.is_available(),
+            )
 
             fd = os_module.open(abs_path, os_module.O_RDONLY | odirect_flag)
             try:
-                mv = memoryview(arr)
+                mv = _tensor_bytes_view(shard_t, total_size)
                 try:
                     while done < total_size:
                         read = os_module.readv(fd, [mv[done:]])
@@ -145,10 +139,7 @@ def read_shard_sequential(
             offset = 0
             for entry in sorted_entries:
                 size = entry.aligned_size
-                if shard_t is not None:
-                    tensor = shard_t[offset : offset + size]
-                else:
-                    tensor = torch_module.from_numpy(arr[offset : offset + size])
+                tensor = shard_t[offset : offset + size]
                 if device >= 0:
                     tensor = tensor.to(device_str)
                 result[entry.allocation_id] = tensor
@@ -181,18 +172,37 @@ def read_shard_sequential(
         )
     with open(abs_path, "rb") as handle:
         for entry in sorted_entries:
-            raw = handle.read(entry.aligned_size)
-            if len(raw) != entry.aligned_size:
+            tensor = torch_module.empty(
+                entry.aligned_size,
+                dtype=torch_module.uint8,
+                pin_memory=pin_memory and torch_module.cuda.is_available(),
+            )
+            mv = _tensor_bytes_view(tensor, entry.aligned_size)
+            try:
+                read = handle.readinto(mv)
+            finally:
+                mv.release()
+            if read != entry.aligned_size:
                 raise RuntimeError(
                     f"Short read from {abs_path} at offset {entry.tensor_offset}: "
-                    f"expected {entry.aligned_size} bytes, got {len(raw)}"
+                    f"expected {entry.aligned_size} bytes, got {read}"
                 )
-            arr = np_module.frombuffer(raw, dtype=np_module.uint8).copy()
-            tensor = torch_module.from_numpy(arr)
             if device >= 0:
                 tensor = tensor.to(device_str)
             result[entry.allocation_id] = tensor
     return result
+
+
+def _tensor_bytes_view(tensor: torch.Tensor, size: int) -> memoryview:
+    return memoryview((ctypes.c_ubyte * size).from_address(tensor.data_ptr()))
+
+
+def _write_tensor_bytes(handle: Any, tensor: torch.Tensor, size: int) -> None:
+    view = _tensor_bytes_view(tensor, size)
+    try:
+        handle.write(view)
+    finally:
+        view.release()
 
 
 def decode_metadata(raw_meta: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
