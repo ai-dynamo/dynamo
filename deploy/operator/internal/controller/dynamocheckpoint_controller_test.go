@@ -152,7 +152,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	for _, e := range main.Env {
 		envMap[e.Name] = e.Value
 	}
-	assert.Equal(t, "/tmp/ready-for-checkpoint", envMap[consts.EnvReadyForCheckpointFile])
+	assert.Equal(t, "/tmp/ready-for-checkpoint", envMap[readyForCheckpointFileEnv])
 	assert.Equal(t, "manual-checkpoint", envMap[consts.DynamoNamespaceEnvVar])
 	assert.Equal(t, consts.ComponentTypeWorker, envMap[consts.DynamoComponentEnvVar])
 	assert.Equal(t, "worker-1234", envMap[consts.DynamoNamespaceWorkerSuffixEnvVar])
