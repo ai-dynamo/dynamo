@@ -448,12 +448,12 @@ impl WorkerQueryClient {
         let client = self.clone();
 
         tokio::spawn(async move {
-            // Add jitter only for full-restore (start_event_id is None).
+            // Add jitter only for full-restore (start_event_id is None)
             // to permute semaphore acquisition order and reduce thundering herd risk on initial discovery.
             // This distributes load when multiple routers start simultaneously.
             if start_event_id.is_none() {
-                let jitter_ms = rand::rng().random_range(0..10u64);
-                tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+                let jitter_us = rand::rng().random_range(0..3000u64);
+                tokio::time::sleep(Duration::from_micros(jitter_us)).await;
             }
 
             let Ok(_permit) = client.recovery_semaphore.clone().acquire_owned().await else {
