@@ -1021,6 +1021,9 @@ fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool
                 && c.delta.content.is_none()
                 && c.delta.reasoning_content.is_none()
                 && c.delta.tool_calls.is_none()
+                && c.delta.role.is_none()
+                && c.delta.refusal.is_none()
+                && c.delta.function_call.is_none()
         })
 }
 
