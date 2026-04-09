@@ -212,12 +212,6 @@ impl RecoverySnapshotCache {
         cache_state.generation = cache_state.generation.saturating_add(1);
         cache_state.cached = None;
     }
-
-    fn try_clear_cached(&self) {
-        if let Ok(mut cache_state) = self.state.try_lock() {
-            cache_state.cached = None;
-        }
-    }
 }
 
 /// A thin wrapper around KvIndexer that buffers recent events
@@ -260,7 +254,7 @@ impl LocalKvIndexer {
         }
     }
 
-    /// Get all buffered events (oldest first).
+    /// Test-only helper to inspect the buffered events (oldest first).
     pub fn get_all_events_in_buffer(&self) -> Vec<RouterEvent> {
         let buffer = self.event_buffer.lock().unwrap();
         buffer.iter().cloned().collect()
@@ -271,11 +265,14 @@ impl LocalKvIndexer {
     /// ### Arguments
     ///
     /// * `start_id` - Starting event ID (inclusive). If `None`, dumps entire tree.
-    /// * `end_id` - Ending event ID (inclusive). If `None`, returns up to newest available.
+    /// * `end_id` - Ending event ID (inclusive). Used for validation and
+    ///   `TooNew` responses; successful buffer-backed responses may still
+    ///   return through the newest buffered event.
     ///
     /// ### Returns
     ///
-    /// - `Events`: Buffered events with original IDs (when range is within buffer)
+    /// - `Events`: Buffered events with original IDs from `start_id` through the
+    ///   current buffered tail, plus the buffered `last_event_id`
     /// - `TreeDump`: Full tree dump with synthetic IDs and the worker's latest real event ID (when range is too old or unspecified)
     /// - `TooNew`: Error when requested range is newer than available data
     /// - `InvalidRange`: Error when end_id < start_id
@@ -349,14 +346,7 @@ impl LocalKvIndexer {
         result
     }
 
-    /// Clear the event buffer.
-    pub fn clear_buffer(&self) {
-        let mut buffer = self.event_buffer.lock().unwrap();
-        buffer.clear();
-        self.recovery_cache.try_clear_cached();
-    }
-
-    /// Get the current buffer size.
+    /// Test-only helper to inspect the current buffer size.
     pub fn buffer_len(&self) -> usize {
         let buffer = self.event_buffer.lock().unwrap();
         buffer.len()
@@ -427,21 +417,12 @@ impl LocalKvIndexer {
             Ok(idx) => idx,
             Err(insertion_point) => insertion_point,
         };
-        let clamped_end_id = end_id.min(last_buffered);
-        let end_idx =
-            match buffer.binary_search_by_key(&clamped_end_id, |event| event.event.event_id) {
-                Ok(idx) => idx + 1,
-                Err(insertion_point) => insertion_point,
-            };
+        let events = buffer.iter().skip(start_idx).cloned().collect();
 
-        let events = buffer
-            .iter()
-            .skip(start_idx)
-            .take(end_idx.saturating_sub(start_idx))
-            .cloned()
-            .collect();
-
-        DumpPlan::Immediate(WorkerKvQueryResponse::Events(events))
+        DumpPlan::Immediate(WorkerKvQueryResponse::Events {
+            events,
+            last_event_id: last_buffered,
+        })
     }
 
     async fn get_cached_or_fresh_dump(&self, fallback_last_event_id: u64) -> WorkerKvQueryResponse {
@@ -605,7 +586,7 @@ impl LocalKvIndexer {
         self.indexer.event_sender()
     }
 
-    /// Get a sender for dump requests (snapshot events).
+    /// Test-only helper to send dump requests directly to the underlying indexer.
     pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
         self.indexer.snapshot_event_sender()
     }
@@ -618,11 +599,6 @@ impl LocalKvIndexer {
     /// Get a sender for get workers requests.
     pub fn get_workers_sender(&self) -> mpsc::Sender<GetWorkersRequest> {
         self.indexer.get_workers_sender()
-    }
-
-    /// Get the KV block size.
-    pub fn block_size(&self) -> u32 {
-        self.indexer.block_size()
     }
 }
 

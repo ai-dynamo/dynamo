@@ -2147,9 +2147,17 @@ mod local_indexer_tests {
         // Helper to extract events from response
         let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
             match resp {
-                WorkerKvQueryResponse::Events(e) => e,
+                WorkerKvQueryResponse::Events { events: e, .. } => e,
                 WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
                 _ => panic!("Unexpected response type"),
+            }
+        };
+
+        let extract_last_event_id = |resp: &WorkerKvQueryResponse| -> Option<u64> {
+            match resp {
+                WorkerKvQueryResponse::Events { last_event_id, .. } => Some(*last_event_id),
+                WorkerKvQueryResponse::TreeDump { last_event_id, .. } => Some(*last_event_id),
+                _ => None,
             }
         };
 
@@ -2158,22 +2166,25 @@ mod local_indexer_tests {
         };
 
         // Test get_events_in_id_range (buffer queries)
-        // Range is [start, end] inclusive
+        // Buffer hits now return the contiguous suffix through the buffered tail.
         let result = indexer.get_events_in_id_range(Some(2), Some(4)).await;
-        let ids = get_ids(extract_events(result));
-        assert_eq!(ids, vec![2, 3, 4]); // inclusive range [2, 4]
+        let ids = get_ids(extract_events(result.clone()));
+        assert_eq!(ids, vec![2, 3, 4, 5]);
+        assert_eq!(extract_last_event_id(&result), Some(5));
 
         let result = indexer.get_events_in_id_range(Some(2), Some(6)).await;
-        let ids = get_ids(extract_events(result));
+        let ids = get_ids(extract_events(result.clone()));
         assert_eq!(ids, vec![2, 3, 4, 5]); // clamp end to buffer max
+        assert_eq!(extract_last_event_id(&result), Some(5));
 
         // start_id=0 is before buffer (first is 1), so should trigger tree dump
         let result = indexer.get_events_in_id_range(Some(0), Some(4)).await;
         assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
 
         let result = indexer.get_events_in_id_range(Some(3), Some(3)).await;
-        let ids = get_ids(extract_events(result));
-        assert_eq!(ids, vec![3]); // single element when start == end
+        let ids = get_ids(extract_events(result.clone()));
+        assert_eq!(ids, vec![3, 4, 5]);
+        assert_eq!(extract_last_event_id(&result), Some(5));
 
         // Invalid range: end < start
         let result = indexer.get_events_in_id_range(Some(5), Some(2)).await;
@@ -2222,9 +2233,17 @@ mod local_indexer_tests {
 
         let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
             match resp {
-                WorkerKvQueryResponse::Events(e) => e,
+                WorkerKvQueryResponse::Events { events: e, .. } => e,
                 WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
                 _ => panic!("Unexpected response type: {:?}", resp),
+            }
+        };
+
+        let extract_last_event_id = |resp: &WorkerKvQueryResponse| -> Option<u64> {
+            match resp {
+                WorkerKvQueryResponse::Events { last_event_id, .. } => Some(*last_event_id),
+                WorkerKvQueryResponse::TreeDump { last_event_id, .. } => Some(*last_event_id),
+                _ => None,
             }
         };
 
@@ -2238,10 +2257,25 @@ mod local_indexer_tests {
 
         // Buffer path tests
         let result = indexer.get_events_in_id_range(Some(11), None).await;
-        assert_eq!(get_ids(extract_events(result)), vec![11, 12, 13, 14]);
+        assert_eq!(
+            get_ids(extract_events(result.clone())),
+            vec![11, 12, 13, 14]
+        );
+        assert_eq!(extract_last_event_id(&result), Some(14));
 
         let result = indexer.get_events_in_id_range(Some(10), Some(14)).await;
-        assert_eq!(get_ids(extract_events(result)), vec![10, 11, 12, 13, 14]);
+        assert_eq!(
+            get_ids(extract_events(result.clone())),
+            vec![10, 11, 12, 13, 14]
+        );
+        assert_eq!(extract_last_event_id(&result), Some(14));
+
+        let result = indexer.get_events_in_id_range(Some(11), Some(12)).await;
+        assert_eq!(
+            get_ids(extract_events(result.clone())),
+            vec![11, 12, 13, 14]
+        );
+        assert_eq!(extract_last_event_id(&result), Some(14));
 
         // Tree dump path tests
         let result = indexer.get_events_in_id_range(None, None).await;
@@ -2386,16 +2420,23 @@ mod local_indexer_tests {
         assert_eq!(buffered_events[0].worker_id, worker_id);
 
         // Test serialization round-trip
-        let response = WorkerKvQueryResponse::Events(buffered_events);
+        let response = WorkerKvQueryResponse::Events {
+            events: buffered_events,
+            last_event_id: 1,
+        };
         let serialized = serde_json::to_vec(&response).unwrap();
         let deserialized: WorkerKvQueryResponse = serde_json::from_slice(&serialized).unwrap();
 
-        let events = match deserialized {
-            WorkerKvQueryResponse::Events(e) => e,
+        let (events, last_event_id) = match deserialized {
+            WorkerKvQueryResponse::Events {
+                events,
+                last_event_id,
+            } => (events, last_event_id),
             _ => panic!("Expected Events variant"),
         };
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].worker_id, worker_id);
+        assert_eq!(last_event_id, 1);
     }
 
     #[tokio::test]

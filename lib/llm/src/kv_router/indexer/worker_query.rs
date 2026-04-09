@@ -486,7 +486,10 @@ impl WorkerQueryClient {
         let mut saw_clear = false;
 
         match result {
-            Ok(WorkerKvQueryResponse::Events(events)) => {
+            Ok(WorkerKvQueryResponse::Events {
+                events,
+                last_event_id,
+            }) => {
                 tracing::debug!(
                     "Got {count} buffered events from worker {} dp_rank {}",
                     key.0,
@@ -505,6 +508,7 @@ impl WorkerQueryClient {
                     self.indexer.apply_event(event).await;
                     new_cursor = new_cursor.advance_to(event_id);
                 }
+                new_cursor = new_cursor.advance_to(last_event_id);
                 successful_response = true;
             }
             Ok(WorkerKvQueryResponse::TreeDump {
@@ -958,9 +962,13 @@ mod tests {
             .expect("response stream should yield one item");
 
         match response {
-            WorkerKvQueryResponse::Events(events) => {
+            WorkerKvQueryResponse::Events {
+                events,
+                last_event_id,
+            } => {
                 assert_eq!(events.len(), 1);
                 assert_eq!(events[0].event.event_id, 1);
+                assert_eq!(last_event_id, 1);
             }
             other => panic!("Unexpected response: {other:?}"),
         }
@@ -1022,9 +1030,10 @@ mod tests {
             MockQueryAction {
                 started: Some(first_started.clone()),
                 release: Some(first_release.clone()),
-                response: Ok(WorkerKvQueryResponse::Events(
-                    (11..=15).map(|id| make_store_event(1, 0, id)).collect(),
-                )),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: (11..=15).map(|id| make_store_event(1, 0, id)).collect(),
+                    last_event_id: 15,
+                }),
             },
         );
         transport.push_action(
@@ -1032,9 +1041,10 @@ mod tests {
             MockQueryAction {
                 started: None,
                 release: None,
-                response: Ok(WorkerKvQueryResponse::Events(
-                    (16..=18).map(|id| make_store_event(1, 0, id)).collect(),
-                )),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: (16..=18).map(|id| make_store_event(1, 0, id)).collect(),
+                    last_event_id: 18,
+                }),
             },
         );
 
@@ -1085,10 +1095,10 @@ mod tests {
             MockQueryAction {
                 started: None,
                 release: None,
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 12),
-                    make_store_event(1, 0, 13),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![make_store_event(1, 0, 12), make_store_event(1, 0, 13)],
+                    last_event_id: 13,
+                }),
             },
         );
 
@@ -1179,11 +1189,14 @@ mod tests {
             MockQueryAction {
                 started: Some(started.clone()),
                 release: Some(release.clone()),
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 11),
-                    make_store_event(1, 0, 12),
-                    make_store_event(1, 0, 13),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![
+                        make_store_event(1, 0, 11),
+                        make_store_event(1, 0, 12),
+                        make_store_event(1, 0, 13),
+                    ],
+                    last_event_id: 13,
+                }),
             },
         );
 
@@ -1224,10 +1237,10 @@ mod tests {
             MockQueryAction {
                 started: Some(started.clone()),
                 release: Some(release.clone()),
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 11),
-                    make_store_event(1, 0, 12),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![make_store_event(1, 0, 11), make_store_event(1, 0, 12)],
+                    last_event_id: 12,
+                }),
             },
         );
 
@@ -1262,11 +1275,14 @@ mod tests {
             MockQueryAction {
                 started: Some(started.clone()),
                 release: Some(release.clone()),
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 11),
-                    make_store_event(1, 0, 12),
-                    make_store_event(1, 0, 13),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![
+                        make_store_event(1, 0, 11),
+                        make_store_event(1, 0, 12),
+                        make_store_event(1, 0, 13),
+                    ],
+                    last_event_id: 13,
+                }),
             },
         );
         client.handle_live_event(make_store_event(1, 0, 13)).await;
@@ -1316,11 +1332,14 @@ mod tests {
             MockQueryAction {
                 started: None,
                 release: None,
-                response: Ok(WorkerKvQueryResponse::Events(vec![
-                    make_store_event(1, 0, 11),
-                    make_clear_event(1, 0, 12),
-                    make_store_event(1, 0, 13),
-                ])),
+                response: Ok(WorkerKvQueryResponse::Events {
+                    events: vec![
+                        make_store_event(1, 0, 11),
+                        make_clear_event(1, 0, 12),
+                        make_store_event(1, 0, 13),
+                    ],
+                    last_event_id: 13,
+                }),
             },
         );
 

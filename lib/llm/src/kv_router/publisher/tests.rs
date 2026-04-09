@@ -1223,7 +1223,7 @@ mod tests_startup_helpers {
             .get_events_in_id_range(Some(last_known_id + 1), None)
             .await;
         let missed_events = match response {
-            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events { events: e, .. } => e,
             dynamo_kv_router::indexer::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             dynamo_kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
                 panic!("Unexpected error response: {message}")

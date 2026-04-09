@@ -47,15 +47,23 @@ pub struct WorkerKvQueryRequest {
 
     /// Start event ID (inclusive). If `None`, dumps entire tree.
     pub start_event_id: Option<u64>,
-    /// End event ID (inclusive). If `None`, returns up to newest available.
+    /// End event ID (inclusive). Used for validation and `TooNew` responses.
+    /// Successful buffer-backed recovery may still return through the current
+    /// newest buffered event.
     pub end_event_id: Option<u64>,
 }
 
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WorkerKvQueryResponse {
-    /// Events served from the circular buffer (with original event IDs)
-    Events(Vec<RouterEvent>),
+    /// Events served from the circular buffer (with original event IDs),
+    /// always covering the requested `start_event_id` through the current
+    /// buffered tail. `last_event_id` is taken from the same buffer snapshot
+    /// and should be used as the recovery watermark after applying the batch.
+    Events {
+        events: Vec<RouterEvent>,
+        last_event_id: u64,
+    },
     /// Full tree dump (with synthetic 0-indexed event IDs).
     /// Includes `last_event_id`: the newest real event ID in the worker's buffer
     /// at the time of the dump, so the caller can set its tracking cursor correctly.
