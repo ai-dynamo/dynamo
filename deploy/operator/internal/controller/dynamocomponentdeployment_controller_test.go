@@ -1306,7 +1306,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
 						commonconsts.KubeLabelDynamoWorkerHash:          "workerhash",
-						commonconsts.KubeLabelIsRestoreTarget:           commonconsts.KubeLabelValueTrue,
+						snapshotprotocol.RestoreTargetLabel:             commonconsts.KubeLabelValueTrue,
 					},
 					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
 						Enabled:       true,
@@ -1368,11 +1368,11 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelIsRestoreTarget]; got != commonconsts.KubeLabelValueTrue {
-			t.Fatalf("expected %s label to be true, got %q", commonconsts.KubeLabelIsRestoreTarget, got)
+		if got := podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel]; got != commonconsts.KubeLabelValueTrue {
+			t.Fatalf("expected %s label to be true, got %q", snapshotprotocol.RestoreTargetLabel, got)
 		}
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelCheckpointID]; got != checkpointName {
-			t.Fatalf("expected %s to be checkpoint id, got %q", commonconsts.KubeLabelCheckpointID, got)
+		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
+			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
 		}
 	})
 
@@ -1454,11 +1454,11 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		if _, ok := podTemplateSpec.Labels[commonconsts.KubeLabelIsRestoreTarget]; ok {
-			t.Fatalf("did not expect %s label when checkpoint is not ready", commonconsts.KubeLabelIsRestoreTarget)
+		if _, ok := podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel]; ok {
+			t.Fatalf("did not expect %s label when checkpoint is not ready", snapshotprotocol.RestoreTargetLabel)
 		}
-		if _, ok := podTemplateSpec.Labels[commonconsts.KubeLabelCheckpointID]; ok {
-			t.Fatalf("did not expect %s label when checkpoint is not ready", commonconsts.KubeLabelCheckpointID)
+		if _, ok := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; ok {
+			t.Fatalf("did not expect %s label when checkpoint is not ready", snapshotprotocol.CheckpointIDLabel)
 		}
 	})
 }

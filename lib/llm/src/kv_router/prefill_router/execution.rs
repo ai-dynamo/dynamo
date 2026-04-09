@@ -123,7 +123,7 @@ impl PrefillRouter {
     ///
     /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
     /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
-    /// the prefill route must finish `record_worker_full` before the phase can change to Decode.
+    /// the prefill route must finish worker recording before the phase can change to Decode.
     ///
     /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     pub(super) async fn execute_prefill(
@@ -131,7 +131,7 @@ impl PrefillRouter {
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
+    ) -> Result<(PrefillResult, Option<(u64, Option<u32>)>), PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
@@ -143,7 +143,7 @@ impl PrefillRouter {
                 )
             })?;
 
-        // Release the phase barrier now that routing completed and record_worker_full already ran.
+        // Release the phase barrier now that routing completed and worker recording already ran.
         // Decode may proceed without waiting for prefill output streaming to finish.
         drop(phase_transition_permit);
 
@@ -201,8 +201,7 @@ impl PrefillRouter {
                     let dp_rank = worker_id_json
                         .get("prefill_dp_rank")
                         .and_then(|v| v.as_u64())
-                        .map(|r| r as u32)
-                        .unwrap_or(0);
+                        .map(|r| r as u32);
                     Some((worker_id, dp_rank))
                 });
         Ok((
