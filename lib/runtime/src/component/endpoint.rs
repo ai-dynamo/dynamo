@@ -258,13 +258,19 @@ fn build_transport_type_inner(
             Ok(TransportType::Http(http_endpoint))
         }
         RequestPlaneMode::Tcp => {
-            let tcp_host = crate::utils::get_tcp_rpc_host_from_env();
+            let tcp_host = std::env::var("DYN_TCP_RPC_ADVERTISE_HOST")
+                .unwrap_or_else(|_| crate::utils::get_tcp_rpc_host_from_env());
             // If a fixed port is explicitly configured, use it directly (no init ordering dependency).
             // Otherwise, use the actual bound port (set by TCP server after binding when port 0 is used).
-            let tcp_port = std::env::var("DYN_TCP_RPC_PORT")
+            let tcp_port = std::env::var("DYN_TCP_RPC_ADVERTISE_PORT")
                 .ok()
                 .and_then(|p| p.parse::<u16>().ok())
-                .filter(|&p| p != 0)
+                .or_else(|| {
+                    std::env::var("DYN_TCP_RPC_PORT")
+                        .ok()
+                        .and_then(|p| p.parse::<u16>().ok())
+                        .filter(|&p| p != 0)
+                })
                 .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
             // Include instance_id and endpoint name for proper TCP routing.
