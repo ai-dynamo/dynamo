@@ -208,7 +208,7 @@ run_aiperf() {
     # Scrape metrics before
     local metrics_dir="${artifact_dir}/metrics"
     mkdir -p "${metrics_dir}"
-    scrape_metrics "${metrics_dir}/before.txt"
+    scrape_metrics "${metrics_dir}/before.txt" || true
 
     aiperf profile \
         --model "${MODEL}" \
@@ -219,10 +219,12 @@ run_aiperf() {
         --concurrency "${conc}" \
         --artifact-dir "${artifact_dir}"
 
-    # Scrape metrics after and compute summary
-    scrape_metrics "${metrics_dir}/after.txt"
+    # Scrape metrics after and compute summary.
+    # Run in a subshell so grep/awk failures in metrics parsing
+    # don't kill the script under set -e.
+    scrape_metrics "${metrics_dir}/after.txt" || true
     echo "  --- Metrics summary ---"
-    diff_worker_requests "${metrics_dir}/before.txt" "${metrics_dir}/after.txt" "${metrics_dir}/summary.txt"
+    ( diff_worker_requests "${metrics_dir}/before.txt" "${metrics_dir}/after.txt" "${metrics_dir}/summary.txt" ) || echo "  [warn] metrics summary had errors"
     echo "  -----------------------"
 
     sleep "${SLEEP_BETWEEN}"
