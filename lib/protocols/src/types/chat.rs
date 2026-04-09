@@ -880,7 +880,9 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!(tc.function.arguments, "{\"limit\":10,\"query\":\"hello\"}");
+        // Compare as parsed JSON values since key order is non-deterministic
+        let parsed: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap();
+        assert_eq!(parsed, serde_json::json!({"query": "hello", "limit": 10}));
         // Re-serialisation produces a string, not an object
         let json = serde_json::to_value(&tc).unwrap();
         assert!(json["function"]["arguments"].is_string());
