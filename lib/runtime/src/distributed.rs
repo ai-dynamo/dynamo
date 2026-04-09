@@ -345,12 +345,19 @@ impl DistributedRuntime {
         Ok(self
             .tcp_server
             .get_or_try_init(async move {
-                let port = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT)
+                let port = match std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT) {
+                    Ok(p) => p.parse::<u16>().map_err(|_| {
+                        PipelineError::Generic(format!(
+                            "invalid {}: '{}' is not a valid port number",
+                            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+                            p
+                        ))
+                    })?,
+                    Err(_) => 0,
+                };
+                let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
                     .ok()
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(0);
-                let interface =
-                    std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST).ok();
+                    .filter(|h| !h.is_empty());
 
                 let host_suffix = interface
                     .as_ref()
