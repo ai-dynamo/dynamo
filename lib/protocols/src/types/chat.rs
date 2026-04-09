@@ -29,7 +29,6 @@ pub use async_openai::types::chat::{
     ChatCompletionFunctionCall,
     ChatCompletionFunctions,
     ChatCompletionFunctionsArgs,
-    ChatCompletionMessageToolCallChunk,
     ChatCompletionRequestAssistantMessageAudio,
     ChatCompletionRequestAssistantMessageContent,
     ChatCompletionRequestAssistantMessageContentPart,
@@ -163,6 +162,22 @@ pub struct FunctionCallStream {
         skip_serializing_if = "Option::is_none"
     )]
     pub arguments: Option<String>,
+}
+
+/// Streaming tool-call chunk.
+///
+/// Defined locally (instead of re-exporting from upstream) because its
+/// `function` field references our local [`FunctionCallStream`] with the
+/// flexible `arguments` deserialiser.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct ChatCompletionMessageToolCallChunk {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<FunctionType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionCallStream>,
 }
 
 // ---------------------------------------------------------------------------
