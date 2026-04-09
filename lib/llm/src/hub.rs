@@ -3,12 +3,14 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use hf_hub::Cache;
 use modelexpress_client::{
     Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider,
 };
 use modelexpress_common::download as mx;
+use tokio::time::sleep;
 
 use dynamo_runtime::config::environment_names::model as env_model;
 
@@ -152,13 +154,34 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
 // Direct download using the ModelExpress client.
 async fn mx_download_direct(model_name: &str, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let cache_dir = get_model_express_cache_dir();
-    mx::download_model(
-        model_name,
-        MxModelProvider::HuggingFace,
-        Some(cache_dir),
-        ignore_weights,
-    )
-    .await
+    let mut last_error = None;
+
+    for attempt in 1..=3 {
+        match mx::download_model(
+            model_name,
+            MxModelProvider::HuggingFace,
+            Some(cache_dir.clone()),
+            ignore_weights,
+        )
+        .await
+        {
+            Ok(path) => return Ok(path),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt == 3 {
+                    break;
+                }
+                let delay = Duration::from_secs(attempt * 5);
+                tracing::warn!(
+                    "Direct download attempt {attempt}/3 failed for model '{model_name}'; retrying in {}s",
+                    delay.as_secs()
+                );
+                sleep(delay).await;
+            }
+        }
+    }
+
+    Err(last_error.expect("retry loop must capture at least one error"))
 }
 
 // TODO: remove in the future. This is a temporary workaround to find common

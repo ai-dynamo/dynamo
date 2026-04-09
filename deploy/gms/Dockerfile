@@ -29,15 +29,20 @@ ARG TORCH_INDEX_URL
 ENV PIP_ROOT_USER_ACTION=ignore
 ENV PIP_NO_CACHE_DIR=1
 ENV PYTHONUNBUFFERED=1
+ENV LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    e2fsprogs \
     python${PYTHON_VERSION} \
     python${PYTHON_VERSION}-venv \
+    util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python3 \
-    && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python
+    && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python \
+    && ln -sf /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so.13 \
+        /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so
 
 RUN python3 -m venv /opt/gms
 

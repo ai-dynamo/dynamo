@@ -31,6 +31,8 @@ This module uses cuda-python bindings for CUDA driver API calls:
 from __future__ import annotations
 
 import logging
+import statistics
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -175,6 +177,11 @@ class GMSClientMemoryManager:
         # VA-stable unmap/remap state
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
+        self._create_mapping_step_seconds: Dict[str, List[float]] = {
+            "allocate_export": [],
+            "reserve_va": [],
+            "map_va": [],
+        }
 
         cuda_set_current_device(self.device)
         self.granularity = cumem_get_allocation_granularity(device)
@@ -464,13 +471,22 @@ class GMSClientMemoryManager:
         if size <= 0:
             raise ValueError("size must be > 0 when allocation_id is None")
         aligned_size = align_to_granularity(size, self.granularity)
+        step_started = time.monotonic()
         response, fd = self._client_rpc.allocate_and_export_info(aligned_size, tag)
+        self._create_mapping_step_seconds["allocate_export"].append(
+            time.monotonic() - step_started
+        )
         if int(response.aligned_size) != aligned_size:
             raise RuntimeError(
                 "GMS allocation alignment mismatch: "
                 f"{aligned_size} vs {response.aligned_size}"
             )
+        step_started = time.monotonic()
         va = self.reserve_va(aligned_size)
+        self._create_mapping_step_seconds["reserve_va"].append(
+            time.monotonic() - step_started
+        )
+        step_started = time.monotonic()
         self.map_va(
             fd,
             va,
@@ -479,7 +495,31 @@ class GMSClientMemoryManager:
             tag,
             int(response.layout_slot),
         )
+        self._create_mapping_step_seconds["map_va"].append(
+            time.monotonic() - step_started
+        )
         return va
+
+    def take_create_mapping_step_summary(self) -> Dict[str, Dict[str, float]]:
+        summary: Dict[str, Dict[str, float]] = {}
+        for step, samples in self._create_mapping_step_seconds.items():
+            if not samples:
+                continue
+            sorted_samples = sorted(samples)
+            summary[step] = {
+                "avg": statistics.fmean(sorted_samples),
+                "p50": statistics.median(sorted_samples),
+                "p95": sorted_samples[
+                    min(len(sorted_samples) - 1, int(len(sorted_samples) * 0.95))
+                ],
+                "max": sorted_samples[-1],
+            }
+        self._create_mapping_step_seconds = {
+            "allocate_export": [],
+            "reserve_va": [],
+            "map_va": [],
+        }
+        return summary
 
     def destroy_mapping(self, va: int) -> None:
         """Unmap + free VA + free server handle for a single mapping."""
