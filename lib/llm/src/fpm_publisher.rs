@@ -439,6 +439,197 @@ mod tests {
         assert_eq!(partial.dp_rank, 7);
     }
 
+    /// Verify that the idle heartbeat fires when no FPM arrives within
+    /// IDLE_HEARTBEAT_INTERVAL. We replicate the per-dp_rank serialization
+    /// task logic with real channels to test the timeout behavior.
+    #[tokio::test]
+    async fn test_idle_heartbeat_emits_zeroed_snapshot() {
+        let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel::<ForwardPassSnapshot>();
+        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let worker_id = "test-worker".to_string();
+        let dp_rank: u32 = 0;
+
+        // Spawn the same task logic as FpmDirectPublisher
+        tokio::spawn(async move {
+            let mut counter: i64 = 0;
+            let heartbeat_sleep = tokio::time::sleep(IDLE_HEARTBEAT_INTERVAL);
+            tokio::pin!(heartbeat_sleep);
+
+            loop {
+                let snapshot = tokio::select! {
+                    biased;
+                    _ = cancel_clone.cancelled() => break,
+                    result = fpm_rx.recv() => {
+                        match result {
+                            Some(snapshot) => {
+                                heartbeat_sleep
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
+                                snapshot
+                            }
+                            None => break,
+                        }
+                    }
+                    _ = &mut heartbeat_sleep => {
+                        heartbeat_sleep
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
+                        ForwardPassSnapshot::default()
+                    }
+                };
+
+                counter += 1;
+                if let Ok(bytes) = serialize_fpm(&snapshot, &worker_id, dp_rank, counter) {
+                    let _ = pub_tx.send(bytes);
+                }
+            }
+        });
+
+        // 1) Send an active snapshot first
+        let active = ForwardPassSnapshot {
+            num_prefill_requests: 2,
+            sum_prefill_tokens: 100,
+            wall_time_secs: 0.05,
+            ..Default::default()
+        };
+        fpm_tx.send(active).unwrap();
+
+        // Receive the active snapshot
+        let bytes = tokio::time::timeout(Duration::from_secs(2), pub_rx.recv())
+            .await
+            .expect("timed out waiting for active FPM")
+            .expect("channel closed");
+
+        #[derive(Deserialize)]
+        struct FpmWallTime {
+            wall_time: f64,
+        }
+        let decoded: FpmWallTime = rmp_serde::from_slice(&bytes).expect("active FPM decode failed");
+        assert!(
+            decoded.wall_time > 0.0,
+            "active snapshot should have wall_time > 0"
+        );
+
+        // 2) Now wait for the idle heartbeat (should arrive within ~1s)
+        let heartbeat_bytes = tokio::time::timeout(Duration::from_secs(3), pub_rx.recv())
+            .await
+            .expect("timed out waiting for idle heartbeat")
+            .expect("channel closed");
+
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct HeartbeatDe {
+            wall_time: f64,
+            counter_id: i64,
+            worker_id: String,
+        }
+        let heartbeat: HeartbeatDe =
+            rmp_serde::from_slice(&heartbeat_bytes).expect("heartbeat decode failed");
+        assert_eq!(
+            heartbeat.wall_time, 0.0,
+            "idle heartbeat should have wall_time=0.0"
+        );
+        assert_eq!(heartbeat.counter_id, 2, "heartbeat is the second message");
+        assert_eq!(heartbeat.worker_id, "test-worker");
+
+        cancel.cancel();
+    }
+
+    /// Verify that active snapshots reset the heartbeat timer so heartbeats
+    /// only fire after a period of true inactivity.
+    #[tokio::test]
+    async fn test_active_snapshots_suppress_heartbeat() {
+        let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel::<ForwardPassSnapshot>();
+        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        tokio::spawn(async move {
+            let mut counter: i64 = 0;
+            let heartbeat_sleep = tokio::time::sleep(IDLE_HEARTBEAT_INTERVAL);
+            tokio::pin!(heartbeat_sleep);
+
+            loop {
+                let snapshot = tokio::select! {
+                    biased;
+                    _ = cancel_clone.cancelled() => break,
+                    result = fpm_rx.recv() => {
+                        match result {
+                            Some(snapshot) => {
+                                heartbeat_sleep
+                                    .as_mut()
+                                    .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
+                                snapshot
+                            }
+                            None => break,
+                        }
+                    }
+                    _ = &mut heartbeat_sleep => {
+                        heartbeat_sleep
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
+                        ForwardPassSnapshot::default()
+                    }
+                };
+
+                counter += 1;
+                if let Ok(bytes) = serialize_fpm(&snapshot, "w", 0, counter) {
+                    let _ = pub_tx.send(bytes);
+                }
+            }
+        });
+
+        // Send active snapshots every 500ms for 2 seconds — heartbeat should
+        // NOT fire during this time since each send resets the timer.
+        for _ in 0..4 {
+            let active = ForwardPassSnapshot {
+                num_decode_requests: 1,
+                wall_time_secs: 0.01,
+                ..Default::default()
+            };
+            fpm_tx.send(active).unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        // Drain all active snapshots
+        let mut active_count = 0;
+        while let Ok(Some(bytes)) =
+            tokio::time::timeout(Duration::from_millis(100), pub_rx.recv()).await
+        {
+            #[derive(Deserialize)]
+            struct Wt {
+                wall_time: f64,
+            }
+            let wt: Wt = rmp_serde::from_slice(&bytes).unwrap();
+            assert!(
+                wt.wall_time > 0.0,
+                "all messages during active period should have wall_time > 0"
+            );
+            active_count += 1;
+        }
+        assert_eq!(
+            active_count, 4,
+            "should have received exactly 4 active snapshots"
+        );
+
+        // Now wait for the heartbeat (should fire ~1s after last active send)
+        let heartbeat_bytes = tokio::time::timeout(Duration::from_secs(3), pub_rx.recv())
+            .await
+            .expect("timed out waiting for heartbeat after active period")
+            .expect("channel closed");
+
+        #[derive(Deserialize)]
+        struct Wt2 {
+            wall_time: f64,
+        }
+        let hb: Wt2 = rmp_serde::from_slice(&heartbeat_bytes).unwrap();
+        assert_eq!(hb.wall_time, 0.0, "heartbeat should have wall_time=0.0");
+
+        cancel.cancel();
+    }
+
     /// Verify all 7 expected field names appear in scheduled_requests and
     /// 6 in queued_requests — matching the Python schema exactly.
     #[test]
