@@ -185,7 +185,17 @@ pub struct NixlS3Config {
     /// Omit (or set to 0) to disable CRT acceleration.
     #[serde(default)]
     pub crt_min_limit_bytes: Option<u64>,
+
+    // ── Transfer behaviour ────────────────────────────────────────────────────
+    /// Maximum time in seconds to wait for a single NIXL OBJ transfer to
+    /// complete.  Returns an error after this deadline.
+    /// Default: 60 s.  Set to 0 to wait indefinitely (not recommended).
+    #[serde(default)]
+    pub transfer_timeout_secs: Option<u64>,
 }
+
+/// Default transfer timeout when `transfer_timeout_secs` is not set.
+pub const DEFAULT_TRANSFER_TIMEOUT_SECS: u64 = 60;
 
 impl NixlS3Config {
     /// Create a configuration for S3-compatible services accessed at a custom
@@ -250,6 +260,19 @@ impl NixlS3Config {
             }
         }
         m
+    }
+
+    /// Maximum time to wait for a single NIXL OBJ transfer.
+    ///
+    /// Returns `None` when `transfer_timeout_secs` is `Some(0)`, meaning no
+    /// timeout (wait indefinitely).  Returns `Some(duration)` otherwise.
+    /// The default (no config) is [`DEFAULT_TRANSFER_TIMEOUT_SECS`] seconds.
+    pub fn transfer_timeout(&self) -> Option<std::time::Duration> {
+        match self.transfer_timeout_secs {
+            Some(0) => None,
+            Some(s) => Some(std::time::Duration::from_secs(s)),
+            None => Some(std::time::Duration::from_secs(DEFAULT_TRANSFER_TIMEOUT_SECS)),
+        }
     }
 
     /// Derive the bucket name (for use in NIXL Object descriptors and S3 HEAD
@@ -350,6 +373,7 @@ mod tests {
             req_checksum: Some("required".into()),
             ca_bundle: Some("/etc/ssl/ca.pem".into()),
             crt_min_limit_bytes: Some(10_485_760),
+            transfer_timeout_secs: None,
         };
         let params = cfg.to_nixl_params();
         assert_eq!(params["access_key"], "AKID");
@@ -375,6 +399,48 @@ mod tests {
         let params = cfg.to_nixl_params();
         assert_eq!(params.len(), 1);
         assert_eq!(params["bucket"], "sparse-bucket");
+    }
+
+    #[test]
+    fn test_nixl_s3_transfer_timeout_default() {
+        let cfg = NixlS3Config::default();
+        assert_eq!(
+            cfg.transfer_timeout(),
+            Some(std::time::Duration::from_secs(DEFAULT_TRANSFER_TIMEOUT_SECS))
+        );
+    }
+
+    #[test]
+    fn test_nixl_s3_transfer_timeout_custom() {
+        let cfg = NixlS3Config {
+            transfer_timeout_secs: Some(120),
+            ..Default::default()
+        };
+        assert_eq!(
+            cfg.transfer_timeout(),
+            Some(std::time::Duration::from_secs(120))
+        );
+    }
+
+    #[test]
+    fn test_nixl_s3_transfer_timeout_zero_means_no_timeout() {
+        let cfg = NixlS3Config {
+            transfer_timeout_secs: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(cfg.transfer_timeout(), None);
+    }
+
+    #[test]
+    fn test_nixl_s3_transfer_timeout_not_emitted_in_nixl_params() {
+        // transfer_timeout_secs is a kvbm-engine-side control and must NOT
+        // appear in the NIXL plugin params map.
+        let cfg = NixlS3Config {
+            transfer_timeout_secs: Some(30),
+            ..Default::default()
+        };
+        let params = cfg.to_nixl_params();
+        assert!(!params.contains_key("transfer_timeout_secs"));
     }
 
     #[test]

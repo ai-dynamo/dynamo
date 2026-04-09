@@ -24,6 +24,12 @@
 //! 64 bits.  The same function must be used on both write and read so the
 //! object key round-trips correctly.
 //!
+//! The XOR fold (`lo ^ hi`) is collision-resistant for well-distributed
+//! 128-bit inputs such as `PositionalLineageHash`.  The probability of two
+//! distinct 128-bit values producing the same 64-bit fold is 2⁻⁶⁴, which is
+//! negligible in practice.  Both write and read paths use the same function so
+//! the key always round-trips.
+//!
 //! # `has_blocks`
 //!
 //! NIXL's OBJ backend does not expose a HEAD/stat primitive.  This
@@ -40,41 +46,67 @@ use dynamo_memory::nixl::{
     Agent as RawAgent, MemType, NixlAgent, NixlDescriptor, XferDescList, XferOp, XferRequest,
 };
 use futures::future::BoxFuture;
+use tokio::sync::mpsc;
 use tracing::instrument;
+use velo::{EventHandle, EventManager};
 
 use crate::object::{KeyFormatter, LayoutConfigExt, ObjectBlockOps};
 use crate::{BlockId, SequenceHash};
 use kvbm_common::LogicalLayoutHandle;
-use kvbm_physical::transfer::PhysicalLayout;
+use kvbm_physical::transfer::{PhysicalLayout, TransferCompleteNotification};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// How often the background polling task calls `get_xfer_status`.
+///
+/// 1 ms matches the interval used by the `kvbm-physical` status-polling task
+/// for NIXL RDMA transfers, giving consistent latency across transfer types.
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Bounded channel capacity between transfer submission and the polling task.
+///
+/// Back-pressure kicks in once this many transfers are simultaneously in-flight.
+/// Sized for a realistic upper-bound of concurrent OBJ transfers per worker.
+const POLLING_CHANNEL_CAPACITY: usize = 1024;
+
+/// How long the drain loop waits for in-flight transfers after the channel
+/// closes before giving up and logging an error.
+///
+/// Prevents infinite blocking on shutdown if a NIXL transfer stalls
+/// (no NIXL API exists to cancel a posted request).
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Fallback S3 bucket name when none is set in config or `AWS_DEFAULT_BUCKET`.
+const DEFAULT_BUCKET: &str = "kvbm-blocks";
+
+/// Fallback AWS region for the SDK-backed `has_blocks` HEAD-check client.
+const DEFAULT_REGION: &str = "us-east-1";
+
+/// Maximum concurrent SDK requests for `has_blocks` HEAD checks.
+const HAS_BLOCKS_MAX_CONCURRENT: usize = 16;
 
 /// Convert a [`NixlS3Config`] into an [`S3Config`] for SDK-backed `has_blocks` checks.
 #[cfg(feature = "s3")]
 pub(super) fn nixl_s3_to_sdk_config(cfg: &kvbm_config::NixlS3Config) -> super::s3::S3Config {
     super::s3::S3Config {
         endpoint_url: cfg.endpoint_override.clone(),
-        bucket: cfg.bucket_name().unwrap_or_else(|| "kvbm-blocks".to_string()),
-        region: cfg.region.clone().unwrap_or_else(|| "us-east-1".to_string()),
+        bucket: cfg.bucket_name().unwrap_or_else(|| DEFAULT_BUCKET.to_string()),
+        region: cfg.region.clone().unwrap_or_else(|| DEFAULT_REGION.to_string()),
         // path-style when virtual addressing is disabled (or unset)
         force_path_style: !cfg.use_virtual_addressing.unwrap_or(false),
-        max_concurrent_requests: 16,
+        max_concurrent_requests: HAS_BLOCKS_MAX_CONCURRENT,
     }
-}
-
-/// Polling interval while waiting for NIXL OBJ transfer completion.
-///
-/// Override with `DYN_KVBM_NIXL_OBJ_POLL_MS` (milliseconds).
-fn poll_interval() -> Duration {
-    let ms = std::env::var("DYN_KVBM_NIXL_OBJ_POLL_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(50);
-    Duration::from_millis(ms)
 }
 
 /// XOR-fold a 128-bit `SequenceHash` into a 64-bit NIXL OBJ device_id.
 ///
 /// Both write and read use the same conversion so that the object key is
 /// stable and round-trips correctly across nodes.
+///
+/// Collision probability for well-distributed 128-bit inputs is 2⁻⁶⁴, which
+/// is negligible in practice.
 fn hash_to_device_id(hash: SequenceHash) -> u64 {
     let raw = hash.as_u128();
     (raw as u64) ^ ((raw >> 64) as u64)
@@ -92,6 +124,103 @@ pub fn add_obj_backend(agent: &mut NixlAgent, extra_params: HashMap<String, Stri
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Shared transfer completion poller
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An in-flight OBJ transfer registered with the background polling task.
+struct PendingObjTransfer {
+    /// Held alive for the duration of the transfer (NIXL requirement).
+    xfer_req: XferRequest,
+    agent: Arc<RawAgent>,
+    event_handle: EventHandle,
+}
+
+/// Background task: wakes every [`POLL_INTERVAL`] and calls `get_xfer_status`
+/// for all outstanding OBJ transfers.  Triggers or poisons the associated event
+/// when the transfer completes or errors.
+///
+/// All concurrent transfers share this one task — no per-transfer sleeping
+/// on the async executor.
+///
+/// # Zombie transfers after timeout
+///
+/// When a caller's `tokio::time::timeout` fires, the associated
+/// `PendingObjTransfer` is already registered here and cannot be removed
+/// (NIXL has no cancel API for a posted request).  The task continues polling
+/// that transfer until NIXL reports completion or error, at which point the
+/// event trigger is a no-op (the awaiter was dropped).  In a timeout storm,
+/// outstanding transfers will accumulate until they naturally finish.
+///
+/// # Shutdown
+///
+/// After the submission channel closes, the task drains remaining transfers for
+/// up to [`DRAIN_TIMEOUT`].  Any still-pending transfers after that deadline
+/// are abandoned with an error log — this avoids blocking process exit
+/// indefinitely when NIXL transfers stall.
+async fn poll_obj_transfers(
+    mut rx: mpsc::Receiver<PendingObjTransfer>,
+    events: Arc<EventManager>,
+) {
+    let mut outstanding: Vec<PendingObjTransfer> = Vec::new();
+    let mut tick = tokio::time::interval(POLL_INTERVAL);
+
+    loop {
+        tokio::select! {
+            msg = rx.recv() => match msg {
+                Some(t) => outstanding.push(t),
+                None => break,
+            },
+            _ = tick.tick(), if !outstanding.is_empty() => {
+                outstanding.retain(|t| {
+                    match t.agent.get_xfer_status(&t.xfer_req) {
+                        Ok(status) if status.is_success() => {
+                            if let Err(e) = events.trigger(t.event_handle) {
+                                tracing::error!("NIXL OBJ: failed to trigger completion event: {e}");
+                            }
+                            false // remove from outstanding
+                        }
+                        Ok(_) => true, // still pending
+                        Err(e) => {
+                            if let Err(pe) = events.poison(t.event_handle, e.to_string()) {
+                                tracing::error!("NIXL OBJ: failed to poison completion event: {pe}");
+                            }
+                            false // remove from outstanding
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    // Channel closed — drain remaining transfers up to DRAIN_TIMEOUT.
+    let drain_deadline = tokio::time::Instant::now() + DRAIN_TIMEOUT;
+    while !outstanding.is_empty() {
+        if tokio::time::Instant::now() >= drain_deadline {
+            tracing::error!(
+                count = outstanding.len(),
+                "NIXL OBJ: shutdown drain timed out; {} transfer(s) abandoned",
+                outstanding.len()
+            );
+            break;
+        }
+        tick.tick().await;
+        outstanding.retain(|t| {
+            match t.agent.get_xfer_status(&t.xfer_req) {
+                Ok(status) if status.is_success() => {
+                    let _ = events.trigger(t.event_handle);
+                    false
+                }
+                Ok(_) => true,
+                Err(e) => {
+                    let _ = events.poison(t.event_handle, e.to_string());
+                    false
+                }
+            }
+        });
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // NixlObjectBlockClient
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -100,13 +229,22 @@ pub fn add_obj_backend(agent: &mut NixlAgent, extra_params: HashMap<String, Stri
 ///
 /// Construct via [`NixlObjectBlockClient::from_config`] (from the runtime) or
 /// via [`NixlObjectBlockClient::new`] after manually calling [`add_obj_backend`].
+///
+/// # Transfer completion
+///
+/// After posting a transfer, completion is tracked by a shared background task
+/// ([`poll_obj_transfers`]) that wakes every [`POLL_INTERVAL`] and checks all
+/// outstanding transfers.  The async caller simply awaits a
+/// [`TransferCompleteNotification`] — no per-transfer polling or sleeping on
+/// the executor thread.
 #[derive(Clone)]
 pub struct NixlObjectBlockClient {
     /// Underlying raw NIXL agent (shared across clones for transfer state).
     raw_agent: Arc<RawAgent>,
     /// Bucket name embedded in NIXL Object descriptors.
     bucket: String,
-    /// Key formatter (kept for potential future string-key NIXL support).
+    /// Reserved for future string-key NIXL support (e.g., when NIXL exposes
+    /// a named-object API that doesn't require u64 device_id mapping).
     #[allow(dead_code)]
     key_formatter: Arc<dyn KeyFormatter>,
     /// Optional delegate used only for `has_blocks` HEAD checks.
@@ -115,6 +253,12 @@ pub struct NixlObjectBlockClient {
     /// an `ObjectBlockOps` implementation that does (e.g. `S3ObjectBlockClient`).
     /// `None` → `has_blocks` always returns `None` (conservative).
     has_blocks_delegate: Option<Arc<dyn ObjectBlockOps>>,
+    /// Deadline for a single transfer to complete.  `None` = no timeout.
+    pub(crate) transfer_timeout: Option<Duration>,
+    /// Shared event system — all clones of this client trigger events here.
+    events: Arc<EventManager>,
+    /// Channel to the shared polling background task.
+    polling_tx: mpsc::Sender<PendingObjTransfer>,
 }
 
 impl std::fmt::Debug for NixlObjectBlockClient {
@@ -122,6 +266,7 @@ impl std::fmt::Debug for NixlObjectBlockClient {
         f.debug_struct("NixlObjectBlockClient")
             .field("bucket", &self.bucket)
             .field("has_blocks_delegate", &self.has_blocks_delegate.is_some())
+            .field("transfer_timeout", &self.transfer_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -129,24 +274,51 @@ impl std::fmt::Debug for NixlObjectBlockClient {
 impl NixlObjectBlockClient {
     /// Create a new client.
     ///
-    /// The `agent` must already have the OBJ backend initialised.
+    /// The `agent` must already have the OBJ backend initialised (call
+    /// [`add_obj_backend`] first, or use [`from_config`] which validates this).
+    ///
     /// `has_blocks_delegate` — if `Some`, its `has_blocks()` is called for
     /// existence checks; if `None`, all blocks are assumed absent.
+    ///
+    /// `transfer_timeout` — maximum time to wait for a single transfer.
+    /// `None` means wait indefinitely (use only when the NIXL OBJ backend has
+    /// its own deadline enforcement).
+    ///
+    /// Spawns a [`poll_obj_transfers`] background task on the current tokio
+    /// runtime.  All clones of this client share that task via the sender.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside of a tokio runtime context (internally calls
+    /// `tokio::spawn`).
     pub fn new(
         agent: NixlAgent,
         bucket: String,
         key_formatter: Arc<dyn KeyFormatter>,
         has_blocks_delegate: Option<Arc<dyn ObjectBlockOps>>,
+        transfer_timeout: Option<Duration>,
     ) -> Self {
+        let events = Arc::new(EventManager::local());
+        let (polling_tx, polling_rx) = mpsc::channel(POLLING_CHANNEL_CAPACITY);
+        tokio::spawn(poll_obj_transfers(polling_rx, Arc::clone(&events)));
+
         Self {
             raw_agent: Arc::new(agent.into_raw_agent()),
             bucket,
             key_formatter,
             has_blocks_delegate,
+            transfer_timeout,
+            events,
+            polling_tx,
         }
     }
 
     /// Build from a kvbm-config [`NixlObjectConfig`] and an already-initialised agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the OBJ backend has not been registered on `agent`
+    /// (call [`add_obj_backend`] before invoking this).
     ///
     /// When the `s3` feature is available a thin `S3ObjectBlockClient` is
     /// created from the embedded S3 config and used as the `has_blocks` delegate.
@@ -158,11 +330,16 @@ impl NixlObjectBlockClient {
         use kvbm_config::NixlObjectConfig;
         use super::create_key_formatter;
 
+        // Pre-flight: the OBJ backend must already be registered.
+        // Check before consuming the agent so the error message is clear.
+        agent.require_backend("OBJ")?;
+
         let key_formatter = create_key_formatter(rank);
 
         match nixl_config {
             NixlObjectConfig::S3(nixl_s3) => {
-                let bucket = nixl_s3.bucket_name().unwrap_or_else(|| "kvbm-blocks".to_string());
+                let bucket = nixl_s3.bucket_name().unwrap_or_else(|| DEFAULT_BUCKET.to_string());
+                let transfer_timeout = nixl_s3.transfer_timeout();
 
                 // Build a thin S3 client for has_blocks HEAD checks when the
                 // `s3` feature is available.
@@ -184,7 +361,13 @@ impl NixlObjectBlockClient {
                     }
                 };
 
-                Ok(Self::new(agent, bucket, key_formatter, has_blocks_delegate))
+                Ok(Self::new(
+                    agent,
+                    bucket,
+                    key_formatter,
+                    has_blocks_delegate,
+                    transfer_timeout,
+                ))
             }
         }
     }
@@ -236,9 +419,14 @@ impl ObjectBlockOps for NixlObjectBlockClient {
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
         let agent = Arc::clone(&self.raw_agent);
+        let timeout = self.transfer_timeout;
+        let events = Arc::clone(&self.events);
+        let polling_tx = self.polling_tx.clone();
         Box::pin(async move {
-            execute_nixl_obj_transfer(&agent, XferOp::Write, &keys, &layout, &block_ids)
-                .await
+            execute_nixl_obj_transfer(
+                &agent, XferOp::Write, &keys, &layout, &block_ids, timeout, &events, &polling_tx,
+            )
+            .await
         })
     }
 
@@ -249,11 +437,17 @@ impl ObjectBlockOps for NixlObjectBlockClient {
         block_ids: Vec<BlockId>,
     ) -> BoxFuture<'static, Vec<Result<SequenceHash, SequenceHash>>> {
         let agent = Arc::clone(&self.raw_agent);
+        let timeout = self.transfer_timeout;
+        let events = Arc::clone(&self.events);
+        let polling_tx = self.polling_tx.clone();
         Box::pin(async move {
-            execute_nixl_obj_transfer(&agent, XferOp::Read, &keys, &layout, &block_ids)
-                .await
+            execute_nixl_obj_transfer(
+                &agent, XferOp::Read, &keys, &layout, &block_ids, timeout, &events, &polling_tx,
+            )
+            .await
         })
     }
+
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -268,22 +462,42 @@ impl ObjectBlockOps for NixlObjectBlockClient {
 /// For fully-contiguous layouts each block is one DRAM descriptor.
 /// For layer-separate layouts we add one descriptor per (layer, outer_dim)
 /// region and match them against a correspondingly striped object address space.
+///
+/// # Completion
+///
+/// After posting the transfer, this function registers a [`PendingObjTransfer`]
+/// with the shared [`poll_obj_transfers`] background task.  The task wakes
+/// every [`POLL_INTERVAL`], calls `get_xfer_status` for all outstanding
+/// transfers, and triggers the completion event when done.  The async caller
+/// awaits a [`TransferCompleteNotification`], optionally wrapped in
+/// `tokio::time::timeout` when `transfer_timeout` is `Some`.
+///
+/// This means **no per-transfer sleeping on the executor thread**: all
+/// concurrent OBJ transfers share a single polling tick.
+///
+/// # Timeout and zombie transfers
+///
+/// When `transfer_timeout` is `Some` and the deadline fires, this function
+/// returns errors for all keys.  However, the `PendingObjTransfer` is already
+/// registered with the background task and cannot be cancelled (NIXL has no
+/// cancel API for a posted request).  The background task continues polling
+/// until NIXL reports completion or error; at that point the event trigger
+/// is a no-op because the awaiter was dropped.
 #[instrument(skip_all, fields(op = ?op, n = keys.len()))]
 async fn execute_nixl_obj_transfer(
-    agent: &RawAgent,
+    agent_arc: &Arc<RawAgent>,
     op: XferOp,
     keys: &[SequenceHash],
     layout: &PhysicalLayout,
     block_ids: &[BlockId],
+    transfer_timeout: Option<Duration>,
+    events: &Arc<EventManager>,
+    polling_tx: &mpsc::Sender<PendingObjTransfer>,
 ) -> Vec<Result<SequenceHash, SequenceHash>> {
+    let agent: &RawAgent = agent_arc;
     if keys.is_empty() {
         return Vec::new();
     }
-    debug_assert_eq!(keys.len(), block_ids.len());
-
-    let config = layout.layout().config();
-    let block_size = config.block_size_bytes();
-    let is_contiguous = layout.layout().is_fully_contiguous();
 
     // ── Build descriptor lists ────────────────────────────────────────────────
     //
@@ -298,10 +512,25 @@ async fn execute_nixl_obj_transfer(
 
     // Use a block to drop non-Send registration handles before the first .await.
     let xfer_result = (|| -> anyhow::Result<(XferRequest, bool)> {
+        anyhow::ensure!(
+            keys.len() == block_ids.len(),
+            "keys.len() ({}) != block_ids.len() ({}); caller must provide one block_id per key",
+            keys.len(),
+            block_ids.len()
+        );
+
+        let config = layout.layout().config();
+        let block_size = config.block_size_bytes();
+        let is_contiguous = layout.layout().is_fully_contiguous();
+
         let mut src_dl = XferDescList::new(MemType::Dram)?;
         let mut dst_dl = XferDescList::new(MemType::Object)?;
 
         // Registration handles must stay alive until after post_xfer_req.
+        // NIXL may retain a reference to the registered memory until the
+        // transfer completes; dropping handles early could corrupt in-flight
+        // DMA.  The handles are dropped when this closure scope exits, which
+        // is after post_xfer_req() returns (transfer is at least submitted).
         let mut _obj_reg_handles = Vec::with_capacity(keys.len());
 
         for (key, block_id) in keys.iter().zip(block_ids.iter()) {
@@ -329,6 +558,20 @@ async fn execute_nixl_obj_transfer(
                 // but each points to a different sub-range via addr offset.
                 let inner = layout.layout();
                 let region_size = config.region_size();
+
+                // Sanity: the non-contiguous regions must sum to block_size.
+                debug_assert_eq!(
+                    inner.num_layers() * inner.outer_dim() * region_size,
+                    block_size,
+                    "non-contiguous region size mismatch: \
+                     num_layers({}) * outer_dim({}) * region_size({}) = {} != block_size({})",
+                    inner.num_layers(),
+                    inner.outer_dim(),
+                    region_size,
+                    inner.num_layers() * inner.outer_dim() * region_size,
+                    block_size
+                );
+
                 let mut obj_offset: usize = 0;
                 for layer_id in 0..inner.num_layers() {
                     for outer_id in 0..inner.outer_dim() {
@@ -356,23 +599,146 @@ async fn execute_nixl_obj_transfer(
         }
     };
 
-    // ── Wait for completion ───────────────────────────────────────────────────
+    // ── Wait for completion via shared polling task ───────────────────────────
+    //
+    // Register this transfer with the background `process_polling_notifications`
+    // task.  That task wakes every 1 ms and calls `get_xfer_status` for all
+    // outstanding transfers — no per-transfer sleeping on the executor.
     if still_pending {
-        let interval = poll_interval();
-        loop {
-            tokio::time::sleep(interval).await;
-            match agent.get_xfer_status(&xfer_req) {
-                Ok(status) if status.is_success() => break,
-                Ok(_) => continue,
-                Err(e) => {
-                    tracing::error!("NIXL OBJ: transfer status error: {e}");
+        let event = match events.new_event() {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("NIXL OBJ: failed to create completion event: {e}");
+                return keys.iter().map(|k| Err(*k)).collect();
+            }
+        };
+        let handle = event.into_handle();
+        let awaiter = match events.awaiter(handle) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("NIXL OBJ: failed to get event awaiter: {e}");
+                return keys.iter().map(|k| Err(*k)).collect();
+            }
+        };
+
+        let pending = PendingObjTransfer {
+            xfer_req,
+            agent: Arc::clone(agent_arc),
+            event_handle: handle,
+        };
+
+        if let Err(e) = polling_tx.send(pending).await {
+            tracing::error!("NIXL OBJ: polling channel closed: {e}");
+            return keys.iter().map(|k| Err(*k)).collect();
+        }
+
+        let notification = TransferCompleteNotification::from_awaiter(awaiter);
+        let wait_result = if let Some(deadline) = transfer_timeout {
+            match tokio::time::timeout(deadline, notification).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    tracing::error!("NIXL OBJ: transfer timed out after {deadline:?}");
                     return keys.iter().map(|k| Err(*k)).collect();
                 }
             }
+        } else {
+            notification.await
+        };
+        if let Err(e) = wait_result {
+            tracing::error!("NIXL OBJ: transfer failed: {e}");
+            return keys.iter().map(|k| Err(*k)).collect();
         }
     }
 
     keys.iter().map(|k| Ok(*k)).collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pure unit tests — no NIXL hardware required
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── hash_to_device_id ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hash_to_device_id_deterministic() {
+        let hash = SequenceHash::new(0xDEAD_BEEF_u64, None, 0);
+        assert_eq!(hash_to_device_id(hash), hash_to_device_id(hash));
+    }
+
+    #[test]
+    fn test_hash_to_device_id_distinct() {
+        let h1 = SequenceHash::new(1_u64, None, 0);
+        let h2 = SequenceHash::new(2_u64, None, 0);
+        assert_ne!(hash_to_device_id(h1), hash_to_device_id(h2));
+    }
+
+    #[test]
+    fn test_hash_to_device_id_single_bit_difference() {
+        // Adjacent inputs must produce distinct device_ids.
+        let h1 = SequenceHash::new(0b0_u64, None, 0);
+        let h2 = SequenceHash::new(0b1_u64, None, 0);
+        assert_ne!(hash_to_device_id(h1), hash_to_device_id(h2));
+    }
+
+    #[test]
+    fn test_hash_to_device_id_distribution() {
+        use std::collections::HashSet;
+        // 1 000 sequential inputs through a good 128-bit hash should have
+        // negligible collisions when folded to 64 bits.
+        let n = 1_000u64;
+        let ids: HashSet<u64> = (0..n)
+            .map(|i| hash_to_device_id(SequenceHash::new(i, None, 0)))
+            .collect();
+        assert!(
+            ids.len() >= 990,
+            "Too many hash collisions after XOR fold: {} unique IDs from {} inputs",
+            ids.len(),
+            n
+        );
+    }
+
+    #[test]
+    fn test_hash_to_device_id_boundary_cases() {
+        // Should not panic; just validate the function handles edge values.
+        let _zero = hash_to_device_id(SequenceHash::new(0_u64, None, 0));
+        let _max = hash_to_device_id(SequenceHash::new(u64::MAX, None, 0));
+        let _with_parent =
+            hash_to_device_id(SequenceHash::new(0xDEAD_u64, Some(0xBEEF_u64), 1));
+        // Distinct inputs → distinct outputs for these corner cases.
+        assert_ne!(_zero, _max);
+    }
+
+    // ── LayoutConfigExt arithmetic ────────────────────────────────────────────
+
+    /// Verify the invariant that `execute_nixl_obj_transfer` relies on in the
+    /// non-contiguous path: `block_size == num_layers × outer_dim × region_size`.
+    #[test]
+    fn test_block_size_equals_region_sum() {
+        use crate::object::LayoutConfigExt;
+        use kvbm_physical::layout::LayoutConfig;
+
+        let config = LayoutConfig::builder()
+            .num_blocks(1)
+            .num_layers(2)
+            .outer_dim(2)
+            .page_size(16)
+            .inner_dim(64)
+            .dtype_width_bytes(2)
+            .build()
+            .unwrap();
+
+        let block_size = config.block_size_bytes();
+        let region_size = config.region_size();
+        assert_eq!(
+            block_size,
+            config.num_layers * config.outer_dim * region_size,
+            "block_size_bytes() must equal num_layers * outer_dim * region_size()"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -387,13 +753,12 @@ async fn execute_nixl_obj_transfer(
 //   cargo test -p kvbm-engine --features testing-s3 -- nixl_integration
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[cfg(feature = "testing-s3")]
-pub mod nixl_integration {
+#[cfg(all(test, feature = "testing-s3"))]
+mod nixl_integration {
     use super::*;
     use crate::object::s3::s3_integration::create_test_client;
     use crate::object::s3::{S3Config, S3ObjectBlockClient};
     use crate::object::DefaultKeyFormatter;
-    use dynamo_tokens::PositionalLineageHash;
 
     // ── nixl_s3_to_sdk_config ─────────────────────────────────────────────────
 
@@ -440,23 +805,6 @@ pub mod nixl_integration {
         }
     }
 
-    // ── hash_to_device_id ─────────────────────────────────────────────────────
-
-    /// Same hash must produce the same device_id every time (deterministic).
-    #[test]
-    fn test_hash_to_device_id_deterministic() {
-        let hash = PositionalLineageHash::new(0xDEAD_BEEF, None, 0);
-        assert_eq!(hash_to_device_id(hash), hash_to_device_id(hash));
-    }
-
-    /// Hashes with different content must produce different device_ids with these values.
-    #[test]
-    fn test_hash_to_device_id_distinct_hashes() {
-        let h1 = PositionalLineageHash::new(0x0000_0001, None, 0);
-        let h2 = PositionalLineageHash::new(0x0000_0002, None, 0);
-        assert_ne!(hash_to_device_id(h1), hash_to_device_id(h2));
-    }
-
     // ── NixlS3Config serde round-trip ─────────────────────────────────────────
 
     /// JSON serialisation of `NixlS3Config` must round-trip correctly so that
@@ -488,8 +836,8 @@ pub mod nixl_integration {
         let bucket = "nixl-has-blocks-test";
         let sdk_client = Arc::new(create_test_client(bucket).await) as Arc<dyn ObjectBlockOps>;
 
-        let absent_hash = PositionalLineageHash::new(0xAAAA_AAAA, None, 1);
-        let present_hash = PositionalLineageHash::new(0xBBBB_BBBB, None, 2);
+        let absent_hash = SequenceHash::new(0xAAAA_AAAA_u64, None, 1);
+        let present_hash = SequenceHash::new(0xBBBB_BBBB_u64, None, 2);
 
         // Upload one object under the key that `has_blocks` will HEAD-check.
         let key = DefaultKeyFormatter.format_key(&present_hash);
@@ -519,7 +867,7 @@ pub mod nixl_integration {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NIXL OBJ full round-trip test — requires real NIXL with OBJ backend.
+// NIXL OBJ full round-trip tests — require real NIXL with OBJ backend.
 //
 // Run with:
 //   bash lib/kvbm-engine/scripts/test-nixl-obj.sh
@@ -527,7 +875,7 @@ pub mod nixl_integration {
 //   cargo test -p kvbm-engine --features testing-nixl-obj -- nixl_obj_integration --nocapture
 //
 // Requires:
-//   - NIXL 0.10.0 installed at $NIXL_PREFIX with OBJ backend
+//   - NIXL installed at $NIXL_PREFIX with OBJ backend
 //   - S3_TEST_ENDPOINT / AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY set
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -537,8 +885,7 @@ mod nixl_obj_integration {
     use super::*;
     use crate::object::s3::{S3Config, S3ObjectBlockClient};
     use dynamo_memory::nixl::NixlAgent;
-    use dynamo_tokens::PositionalLineageHash;
-    use kvbm_physical::layout::{LayoutConfig, PhysicalLayoutBuilder};
+    use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder};
     use kvbm_physical::transfer::{FillPattern, PhysicalLayout, StorageKind, fill_blocks};
 
     fn test_endpoint() -> String {
@@ -557,7 +904,7 @@ mod nixl_obj_integration {
             .unwrap()
     }
 
-    fn build_system_layout(agent: NixlAgent, config: LayoutConfig) -> PhysicalLayout {
+    fn build_contiguous_layout(agent: NixlAgent, config: LayoutConfig) -> PhysicalLayout {
         PhysicalLayout::builder(agent)
             .with_config(config)
             .fully_contiguous()
@@ -566,8 +913,16 @@ mod nixl_obj_integration {
             .unwrap()
     }
 
-    /// Verify NIXL is available (OBJ backend).
-    /// Returns false (skip) if running in stub mode.
+    fn build_layer_separate_layout(agent: NixlAgent, config: LayoutConfig) -> PhysicalLayout {
+        PhysicalLayout::builder(agent)
+            .with_config(config)
+            .layer_separate(BlockDimension::BlockIsFirstDim)
+            .allocate_system()
+            .build()
+            .unwrap()
+    }
+
+    /// Returns `false` when NIXL is running in stub mode (skip the test).
     fn nixl_available() -> bool {
         if nixl_sys::is_stub() {
             eprintln!("NIXL is in stub mode — skipping NIXL OBJ transfer test");
@@ -591,11 +946,58 @@ mod nixl_obj_integration {
         all_bytes
     }
 
-    /// End-to-end NIXL OBJ transfer: DRAM → S3 (put) then S3 → DRAM (get).
+    fn build_agent_with_obj(bucket: &str, endpoint: &str) -> NixlAgent {
+        let mut agent = NixlAgent::new("nixl-obj-test").expect("NixlAgent::new failed");
+        let obj_params: std::collections::HashMap<String, String> = {
+            let cfg = kvbm_config::NixlS3Config::with_endpoint(endpoint, bucket);
+            cfg.to_nixl_params()
+        };
+        add_obj_backend(&mut agent, obj_params).expect("OBJ backend required");
+        agent
+    }
+
+    async fn ensure_bucket(endpoint: &str, bucket: &str) {
+        let s3_cfg = S3Config::minio(endpoint.to_string(), bucket.into());
+        S3ObjectBlockClient::new(s3_cfg)
+            .await
+            .unwrap()
+            .ensure_bucket_exists()
+            .await
+            .unwrap();
+    }
+
+    // ── Pre-flight validation ─────────────────────────────────────────────────
+
+    /// `from_config` must return an error when the OBJ backend has not been
+    /// registered on the agent.
+    #[tokio::test]
+    async fn test_from_config_requires_obj_backend() {
+        if !nixl_available() {
+            return;
+        }
+
+        // Create agent WITHOUT adding the OBJ backend.
+        let agent = NixlAgent::new("test-preflight").expect("NixlAgent::new failed");
+
+        let nixl_cfg = kvbm_config::NixlObjectConfig::S3(
+            kvbm_config::NixlS3Config::with_endpoint(test_endpoint(), "preflight-bucket"),
+        );
+        let result = NixlObjectBlockClient::from_config(agent, &nixl_cfg, None).await;
+
+        assert!(result.is_err(), "expected Err when OBJ backend is missing");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("OBJ"),
+            "error message should mention the OBJ backend, got: {msg}"
+        );
+    }
+
+    // ── Contiguous round-trip ─────────────────────────────────────────────────
+
+    /// End-to-end NIXL OBJ transfer: DRAM → S3 (put) then S3 → DRAM (get)
+    /// using a fully-contiguous layout.
     ///
-    /// Uses `SystemStorage` (plain malloc) for the DRAM side so no GPU is required.
-    /// The OBJ backend reads/writes DRAM buffers directly; no RDMA (UCX) is needed
-    /// for a single-agent local transfer.
+    /// Uses `SystemStorage` (plain malloc) so no GPU is required.
     #[tokio::test]
     async fn test_nixl_obj_dram_to_s3_roundtrip() {
         if !nixl_available() {
@@ -604,49 +1006,40 @@ mod nixl_obj_integration {
 
         let bucket = "nixl-obj-roundtrip";
         let endpoint = test_endpoint();
+        ensure_bucket(&endpoint, bucket).await;
 
-        // ── Build NixlAgent with OBJ backend only ────────────────────────────
-        let mut agent = NixlAgent::new("nixl-obj-test").expect("NixlAgent::new failed");
-
-        let obj_params: std::collections::HashMap<String, String> = {
-            let cfg = kvbm_config::NixlS3Config::with_endpoint(endpoint.clone(), bucket);
-            cfg.to_nixl_params()
-        };
-        add_obj_backend(&mut agent, obj_params).expect("OBJ backend required");
+        let agent = build_agent_with_obj(bucket, &endpoint);
 
         // ── Create write layout and fill with known pattern ───────────────────
         let config = make_layout_config(1);
-        let write_agent = agent.clone();
-        let write_layout = build_system_layout(write_agent, config.clone());
+        let write_layout = build_contiguous_layout(agent.clone(), config.clone());
 
         fill_blocks(&write_layout, &[0], FillPattern::Sequential).unwrap();
         let original_bytes = read_layout_bytes(&write_layout, 0);
         assert!(!original_bytes.iter().all(|&b| b == 0), "write buffer must be non-zero");
 
-        // ── Ensure the S3 bucket exists ───────────────────────────────────────
-        let s3_cfg = S3Config::minio(endpoint.clone(), bucket.into());
-        S3ObjectBlockClient::new(s3_cfg).await.unwrap()
-            .ensure_bucket_exists().await.unwrap();
-
         // ── Build the client and offload (DRAM → S3) ─────────────────────────
         let nixl_cfg = kvbm_config::NixlObjectConfig::S3(
-            kvbm_config::NixlS3Config::with_endpoint(endpoint.clone(), bucket)
+            kvbm_config::NixlS3Config::with_endpoint(endpoint.clone(), bucket),
         );
         let client = NixlObjectBlockClient::from_config(agent.clone(), &nixl_cfg, None)
             .await
             .unwrap();
 
-        let hash = PositionalLineageHash::new(0xC0DE_CAFE, None, 7);
+        let hash = SequenceHash::new(0xC0DE_CAFE_u64, None, 7);
         let put_results = client
             .put_blocks_with_layout(vec![hash], write_layout, vec![0])
             .await;
         assert_eq!(put_results.len(), 1);
-        assert!(put_results[0].is_ok(), "put_blocks_with_layout failed: {:?}", put_results[0]);
+        assert!(
+            put_results[0].is_ok(),
+            "put_blocks_with_layout failed: {:?}",
+            put_results[0]
+        );
 
         // ── Create zero-filled read layout and onboard (S3 → DRAM) ───────────
-        let read_layout = build_system_layout(agent.clone(), config.clone());
+        let read_layout = build_contiguous_layout(agent.clone(), config.clone());
         {
-            // Sanity: read buffer starts zeroed
             let bytes = read_layout_bytes(&read_layout, 0);
             assert!(bytes.iter().all(|&b| b == 0), "read buffer must start zeroed");
         }
@@ -655,7 +1048,11 @@ mod nixl_obj_integration {
             .get_blocks_with_layout(vec![hash], read_layout.clone(), vec![0])
             .await;
         assert_eq!(get_results.len(), 1);
-        assert!(get_results[0].is_ok(), "get_blocks_with_layout failed: {:?}", get_results[0]);
+        assert!(
+            get_results[0].is_ok(),
+            "get_blocks_with_layout failed: {:?}",
+            get_results[0]
+        );
 
         // ── Verify byte-for-byte correctness ─────────────────────────────────
         let restored_bytes = read_layout_bytes(&read_layout, 0);
@@ -665,8 +1062,104 @@ mod nixl_obj_integration {
         );
 
         println!(
-            "✓ NIXL OBJ round-trip: {} bytes transferred via DRAM→S3→DRAM",
+            "✓ NIXL OBJ contiguous round-trip: {} bytes via DRAM→S3→DRAM",
             original_bytes.len()
+        );
+    }
+
+    // ── Layer-separate (non-contiguous) round-trip ────────────────────────────
+
+    /// End-to-end NIXL OBJ transfer using a layer-separate (non-contiguous) layout.
+    ///
+    /// This exercises the slow path in `execute_nixl_obj_transfer` that builds one
+    /// DRAM descriptor per (layer, outer_dim) region.
+    #[tokio::test]
+    async fn test_nixl_obj_layer_separate_roundtrip() {
+        if !nixl_available() {
+            return;
+        }
+
+        let bucket = "nixl-obj-layer-sep";
+        let endpoint = test_endpoint();
+        ensure_bucket(&endpoint, bucket).await;
+
+        let agent = build_agent_with_obj(bucket, &endpoint);
+        let config = make_layout_config(1);
+
+        let write_layout = build_layer_separate_layout(agent.clone(), config.clone());
+        fill_blocks(&write_layout, &[0], FillPattern::Sequential).unwrap();
+        let original_bytes = read_layout_bytes(&write_layout, 0);
+        assert!(!original_bytes.iter().all(|&b| b == 0), "write buffer must be non-zero");
+
+        let nixl_cfg = kvbm_config::NixlObjectConfig::S3(
+            kvbm_config::NixlS3Config::with_endpoint(endpoint.clone(), bucket),
+        );
+        let client = NixlObjectBlockClient::from_config(agent.clone(), &nixl_cfg, None)
+            .await
+            .unwrap();
+
+        let hash = SequenceHash::new(0xABCD_EF01_u64, None, 3);
+
+        let put_results = client
+            .put_blocks_with_layout(vec![hash], write_layout, vec![0])
+            .await;
+        assert!(put_results[0].is_ok(), "put failed: {:?}", put_results[0]);
+
+        let read_layout = build_layer_separate_layout(agent.clone(), config.clone());
+        {
+            let bytes = read_layout_bytes(&read_layout, 0);
+            assert!(bytes.iter().all(|&b| b == 0), "read buffer must start zeroed");
+        }
+
+        let get_results = client
+            .get_blocks_with_layout(vec![hash], read_layout.clone(), vec![0])
+            .await;
+        assert!(get_results[0].is_ok(), "get failed: {:?}", get_results[0]);
+
+        let restored_bytes = read_layout_bytes(&read_layout, 0);
+        assert_eq!(
+            original_bytes, restored_bytes,
+            "layer-separate round-trip mismatch"
+        );
+
+        println!(
+            "✓ NIXL OBJ layer-separate round-trip: {} bytes via DRAM→S3→DRAM",
+            original_bytes.len()
+        );
+    }
+
+    // ── Transfer timeout ──────────────────────────────────────────────────────
+
+    /// Verify that a very short transfer_timeout propagates correctly: the client
+    /// is built with the configured timeout and it is stored on the struct.
+    ///
+    /// Full "timeout fires" behaviour is difficult to test without a mock NIXL
+    /// agent, but verifying config propagation catches the most common mistake
+    /// (timeout silently ignored).
+    #[tokio::test]
+    async fn test_transfer_timeout_config_propagated() {
+        if !nixl_available() {
+            return;
+        }
+
+        let bucket = "nixl-obj-timeout-cfg";
+        let endpoint = test_endpoint();
+
+        let agent = build_agent_with_obj(bucket, &endpoint);
+        let nixl_cfg = kvbm_config::NixlObjectConfig::S3(kvbm_config::NixlS3Config {
+            endpoint_override: Some(endpoint.clone()),
+            bucket: Some(bucket.into()),
+            transfer_timeout_secs: Some(5),
+            ..Default::default()
+        });
+        let client = NixlObjectBlockClient::from_config(agent, &nixl_cfg, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            client.transfer_timeout,
+            Some(Duration::from_secs(5)),
+            "transfer_timeout not propagated from config"
         );
     }
 }

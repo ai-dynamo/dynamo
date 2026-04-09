@@ -422,3 +422,82 @@ pub async fn create_lock_manager(
 ) -> Result<Arc<dyn ObjectLockManager>> {
     anyhow::bail!("Object storage requires the 's3' feature to be enabled")
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+/// Verify that `create_lock_manager` falls back to the SDK-backed `S3LockManager`
+/// for `ObjectClientConfig::Nixl` variants.
+///
+/// The NIXL OBJ backend has no conditional-PUT primitive, so distributed locking
+/// must always use the embedded S3 config regardless of the outer `client` variant.
+#[cfg(feature = "testing-s3")]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `create_lock_manager` for a Nixl config must succeed and return a working
+    /// lock manager backed by S3 (not NIXL).
+    ///
+    /// We verify the "happy path" only — that the factory function completes
+    /// without error and the returned lock manager can perform basic operations.
+    #[tokio::test]
+    async fn test_create_lock_manager_nixl_fallback_to_s3() {
+        let endpoint =
+            std::env::var("S3_TEST_ENDPOINT").unwrap_or_else(|_| "http://localhost:9876".into());
+
+        let nixl_s3 = kvbm_config::NixlS3Config::with_endpoint(endpoint, "kvbm-lock-test");
+        let config = kvbm_config::ObjectConfig {
+            client: kvbm_config::ObjectClientConfig::Nixl(kvbm_config::NixlObjectConfig::S3(
+                nixl_s3,
+            )),
+        };
+
+        let manager = create_lock_manager(&config, "test-instance-id".into())
+            .await
+            .expect("create_lock_manager should succeed for Nixl config (falls back to S3)");
+
+        // Exercise a round-trip: acquire lock, check meta, create meta, release.
+        let hash = SequenceHash::new(0xFADE_FADE_u64, None, 0);
+
+        // Initially no meta file.
+        let has_meta = manager.has_meta(hash).await.unwrap();
+        assert!(!has_meta, "meta should not exist before any offload");
+
+        // Acquire lock.
+        let acquired = manager.try_acquire_lock(hash).await.unwrap();
+        assert!(acquired, "should acquire lock on first attempt");
+
+        // Re-acquire with the same instance_id should succeed (we own it).
+        // Note: with a different instance_id this would fail; we verify the
+        // lock is held by checking that a second factory with a different id
+        // cannot steal an active (non-expired) lock.
+        let config2 = kvbm_config::ObjectConfig {
+            client: kvbm_config::ObjectClientConfig::Nixl(kvbm_config::NixlObjectConfig::S3(
+                kvbm_config::NixlS3Config::with_endpoint(
+                    std::env::var("S3_TEST_ENDPOINT")
+                        .unwrap_or_else(|_| "http://localhost:9876".into()),
+                    "kvbm-lock-test",
+                ),
+            )),
+        };
+        let manager2 = create_lock_manager(&config2, "other-instance-id".into())
+            .await
+            .unwrap();
+        let stolen = manager2.try_acquire_lock(hash).await.unwrap();
+        assert!(!stolen, "non-expired lock should not be stolen by another instance");
+
+        // Create meta file and release lock.
+        manager.create_meta(hash).await.unwrap();
+        manager.release_lock(hash).await.unwrap();
+
+        // Meta should now be visible.
+        let has_meta_after = manager.has_meta(hash).await.unwrap();
+        assert!(has_meta_after, "meta should exist after create_meta");
+
+        // Cleanup — S3ObjectBlockClient isn't exposed here so we use the manager's
+        // internal client indirectly: just verify the state is consistent.
+        // (Real cleanup is left to the test environment teardown.)
+    }
+}

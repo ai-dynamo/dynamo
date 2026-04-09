@@ -17,5 +17,5 @@ mod lock;
 pub use client::{S3Config, S3ObjectBlockClient};
 pub use lock::S3LockManager;
 
-#[cfg(feature = "testing-s3")]
+#[cfg(all(test, feature = "testing-s3"))]
 pub use client::s3_integration;
