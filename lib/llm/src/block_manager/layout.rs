@@ -175,6 +175,61 @@ impl LayoutType {
         Ok(LayoutType::LayerSeparate { outer_contiguous })
     }
 
+    /// Create a LayerSeparate layout type with auto-detection that also considers
+    /// tensor strides. This handles hybrid models where vLLM's
+    /// `_update_hybrid_attention_mamba_layout()` uses `as_strided_()` to rearrange
+    /// the memory layout without changing the logical shape.
+    ///
+    /// When `stride[0] < stride[1]`, dim 0 is the fast-varying (inner) dimension
+    /// in memory, so the *physical* layout is block-contiguous even if the shape
+    /// says `[outer_dim, n_blocks, ...]`.
+    pub fn layer_separate_auto_with_strides(
+        shape: &[usize],
+        strides: &[usize],
+        num_device_blocks: usize,
+    ) -> anyhow::Result<Self> {
+        if shape.len() < 2 || strides.len() < 2 {
+            return Err(anyhow::anyhow!(
+                "Need at least 2 dimensions for layout detection. shape: {:?}, strides: {:?}",
+                shape,
+                strides,
+            ));
+        }
+
+        let shape_outer_contiguous = if shape[0] >= num_device_blocks {
+            false
+        } else if shape[1] >= num_device_blocks {
+            true
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unsupported kv cache layout. Got shape: {:?}",
+                shape
+            ));
+        };
+
+        // When strides contradict the shape-based heuristic, the tensor has
+        // been re-strided (e.g. hybrid attention layout).  stride[0] < stride[1]
+        // means dim 0 is physically the fast dimension, so the real memory
+        // order is [dim1, dim0, ...] regardless of the logical shape.
+        let stride_contradicts = (shape_outer_contiguous && strides[0] < strides[1])
+            || (!shape_outer_contiguous && strides[0] > strides[1]);
+
+        let outer_contiguous = if stride_contradicts {
+            tracing::info!(
+                "Stride-based layout override: shape suggests outer_contiguous={}, \
+                 but strides {:?} indicate the opposite. Using outer_contiguous={}",
+                shape_outer_contiguous,
+                &strides[..2],
+                !shape_outer_contiguous,
+            );
+            !shape_outer_contiguous
+        } else {
+            shape_outer_contiguous
+        };
+
+        Ok(LayoutType::LayerSeparate { outer_contiguous })
+    }
+
     /// Create a LayerSeparate layout type with default auto-detection (defaults to outer_contiguous=true)
     /// Use this when tensor shapes are not available
     pub fn layer_separate_auto_default() -> Self {

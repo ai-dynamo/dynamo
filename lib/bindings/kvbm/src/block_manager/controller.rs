@@ -58,7 +58,8 @@ impl BlockManagerClient {
             "G1" => Ok(CacheLevel::G1),
             "G2" => Ok(CacheLevel::G2),
             "G3" => Ok(CacheLevel::G3),
-            _ => anyhow::bail!("Invalid cache level: allowed values are G1, G2, G3"),
+            "G4" => Ok(CacheLevel::G4),
+            _ => anyhow::bail!("Invalid cache level: allowed values are G1, G2, G3, G4"),
         }
     }
 }

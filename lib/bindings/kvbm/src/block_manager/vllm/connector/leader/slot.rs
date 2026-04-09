@@ -103,6 +103,8 @@ pub trait Slot: std::fmt::Debug {
 
     fn sequence(&self) -> &TokenBlockSequence;
 
+    fn sequence_mut(&mut self) -> &mut TokenBlockSequence;
+
     /// The number of tokens that have been computed on the device, i.e. the number of tokens for which we have ownership
     /// of computed kv blocks in the device storage.
     fn computed_tokens(&self) -> usize;
@@ -408,7 +410,7 @@ impl VllmConnectorSlot {
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
-        debug_assert!(block_size.is_power_of_two() && block_size <= 1024);
+        debug_assert!(block_size > 0 && block_size <= 4096);
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
 
         Self {
@@ -623,6 +625,8 @@ impl Slot for VllmConnectorSlot {
             );
         }
 
+        let is_first_apply = self.state == SlotState::Initialized;
+
         if !tokens.is_empty() {
             tracing::debug!(
                 "appending {} newly decoded tokens to sequence",
@@ -630,14 +634,20 @@ impl Slot for VllmConnectorSlot {
             );
             self.state = SlotState::Decoding;
             self.sequence.extend(tokens.into()).unwrap();
-        } else {
+        } else if is_first_apply {
             self.state = SlotState::Prefilling;
         }
 
-        // Use max to advance both current_position and evaluated_blocks at least by num_computed_tokens.
-        // This logic is to prevent redundant block offloading.
+        // Advance current_position to at least num_computed_tokens (for prefix caching).
         self.current_position = max(self.current_position, num_computed_tokens);
-        self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
+
+        // On the very first apply (from Initialized state), skip blocks that
+        // were loaded from prefix cache so they are not re-offloaded.  During
+        // decode and chunked-prefill continuations, evaluated_blocks is managed
+        // exclusively by the offload logic (~line 904).
+        if is_first_apply {
+            self.evaluated_blocks = max(self.evaluated_blocks, num_computed_tokens / self.block_size);
+        }
 
         // Apply new block_ids with suffix/prefix overlap contract.
         // Block IDs are unique, so we use an O(N) algorithm:
@@ -729,21 +739,39 @@ impl Slot for VllmConnectorSlot {
             return Ok(());
         }
 
-        // we should have enough device blocks to cover the newly scheduled tokens
+        // Check that we have enough device blocks to cover the newly scheduled tokens.
+        // In HMA mode (e.g. Nemotron hybrid, block_size=496), block allocation
+        // notification may lag by one iteration at block boundaries.  The offload
+        // evaluation below already caps candidates to available blocks via min(),
+        // so this is a warning rather than a hard failure.
         let next_position = self.current_position + num_scheduled_tokens;
-        assert!(
-            next_position <= self.device_blocks.len() * self.block_size,
-            "next_position: {} > device_blocks.len() {} * block_size {}",
-            next_position,
-            self.device_blocks.len(),
-            self.block_size
-        );
+        if next_position > self.device_blocks.len() * self.block_size {
+            tracing::warn!(
+                "next_position {} exceeds device capacity (device_blocks={} * block_size={}); \
+                 block allocation may be delayed — offload evaluation will cap to available blocks",
+                next_position,
+                self.device_blocks.len(),
+                self.block_size
+            );
+        }
 
-        if next_position > self.sequence.total_tokens() {
-            // vllm stopped providing tokens, so we are done
+        // vLLM >= 0.16 no longer provides per-token IDs during decode
+        // (new_token_ids is empty unless pipeline parallelism is on), so the
+        // token sequence only reflects prompt tokens.  Fall back to the
+        // scheduler's cumulative computed + scheduled count as the effective
+        // sequence length.
+        let effective_tokens = std::cmp::max(
+            self.sequence.total_tokens(),
+            num_computed_tokens.saturating_add(num_scheduled_tokens),
+        );
+        if next_position > effective_tokens {
             self.state = SlotState::Decoding;
             tracing::debug!(
-                "connector source stopped providing tokens; no further evaluation possible"
+                "connector source stopped providing tokens; no further evaluation possible \
+                 (next_pos={}, seq_tokens={}, effective={})",
+                next_position,
+                self.sequence.total_tokens(),
+                effective_tokens,
             );
             return Ok(());
         }
@@ -756,19 +784,41 @@ impl Slot for VllmConnectorSlot {
             self.evaluated_blocks
         );
 
-        // TODO(ryan) - apply policy
+        // HMA-aware candidacy: a device block is an offload candidate only when
+        // all block_size tokens covering it have been scheduled AND the device
+        // block has been allocated.  For large HMA page sizes (e.g. 496 for
+        // Nemotron hybrid models) this means short prompts will produce zero
+        // candidates until enough tokens accumulate to fill a full page.
         let next_position = self.current_position + num_scheduled_tokens;
 
-        debug_assert!(next_position / self.block_size >= self.evaluated_blocks);
+        let num_fully_filled = next_position / self.block_size;
+        let num_candidate_blocks =
+            std::cmp::min(self.device_blocks.len(), num_fully_filled)
+                .saturating_sub(self.evaluated_blocks);
 
-        let num_candidate_blocks = (next_position / self.block_size) - self.evaluated_blocks;
+        if num_candidate_blocks == 0 && next_position > 0 {
+            let partial_fill = next_position % self.block_size;
+            tracing::debug!(
+                "HMA candidacy: no complete blocks yet — \
+                 next_position={}, block_size={}, partial_fill={}/{} ({:.1}%)",
+                next_position,
+                self.block_size,
+                partial_fill,
+                self.block_size,
+                (partial_fill as f64 / self.block_size as f64) * 100.0
+            );
+        }
 
         tracing::debug!(
-            "evaluating policy with the following parameters: state: {:?}; current_position: {}; num_candidate_blocks: {}; num_scheduled_tokens: {}",
+            "evaluating policy: state={:?}, current_position={}, next_position={}, \
+             device_blocks={}, fully_filled={}, evaluated={}, candidates={}",
             self.state,
             self.current_position,
+            next_position,
+            self.device_blocks.len(),
+            num_fully_filled,
+            self.evaluated_blocks,
             num_candidate_blocks,
-            num_scheduled_tokens
         );
 
         if num_candidate_blocks != 0 {
@@ -820,10 +870,35 @@ impl Slot for VllmConnectorSlot {
             );
 
             if num_blocks_to_offload > 0 {
+                // Check that the token sequence has enough committed blocks.
+                // When vLLM doesn't provide decode token IDs (PP disabled),
+                // the sequence may lag behind the scheduler's position.
+                // In that case, defer offloading to mark_as_finished where
+                // the full token sequence is available.
+                let available_token_blocks = self
+                    .sequence
+                    .blocks()
+                    .len()
+                    .saturating_sub(self.evaluated_blocks);
+                let actual_offload = std::cmp::min(num_blocks_to_offload, available_token_blocks);
+
+                if actual_offload == 0 {
+                    tracing::debug!(
+                        "deferring offload: {} blocks ready but sequence only has {} \
+                         committed blocks (evaluated={}); tokens will be fed at request_finished",
+                        num_blocks_to_offload,
+                        self.sequence.blocks().len(),
+                        self.evaluated_blocks,
+                    );
+                    // Don't advance evaluated_blocks — retry at mark_as_finished
+                    self.current_position = next_position;
+                    return Ok(());
+                }
+
                 if self.offload_min_priority > 0 {
                     tracing::debug!(
                         "priority filtering: offloading {}/{} blocks (threshold={})",
-                        num_blocks_to_offload,
+                        actual_offload,
                         num_candidate_blocks,
                         self.offload_min_priority
                     );
@@ -831,7 +906,7 @@ impl Slot for VllmConnectorSlot {
 
                 let offload_block_ids: Vec<usize> = candidate_block_ids
                     .into_iter()
-                    .take(num_blocks_to_offload)
+                    .take(actual_offload)
                     .collect();
 
                 let offload_token_blocks: Vec<TokenBlock> = self
@@ -839,13 +914,13 @@ impl Slot for VllmConnectorSlot {
                     .blocks()
                     .iter()
                     .skip(self.evaluated_blocks)
-                    .take(num_blocks_to_offload)
+                    .take(actual_offload)
                     .cloned()
                     .collect();
 
                 let offload_priorities: Vec<u32> = candidate_priorities
                     .iter()
-                    .take(num_blocks_to_offload)
+                    .take(actual_offload)
                     .copied()
                     .collect();
 
@@ -903,6 +978,40 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn mark_as_finished(&mut self, _iteration: u64) -> Result<(), SlotError> {
+        // Flush any fully-computed blocks that weren't offloaded during
+        // apply_scheduler_output.  This covers an edge case where the block
+        // boundary was crossed in the same iteration the request finished,
+        // and the scheduler already advanced current_position but the
+        // previous apply_scheduler_output hadn't yet seen the new boundary.
+        if self.offload_terminated_at_block.is_none() {
+            let num_complete_device_blocks = std::cmp::min(
+                self.device_blocks.len(),
+                self.current_position / self.block_size,
+            );
+            let flush_count = num_complete_device_blocks.saturating_sub(self.evaluated_blocks);
+
+            if flush_count > 0 {
+                let start = self.evaluated_blocks;
+                let end = start + flush_count;
+                let block_ids: Vec<BlockId> = self.device_blocks[start..end].to_vec();
+                let token_blocks: Vec<TokenBlock> =
+                    self.sequence.blocks()[start..end].to_vec();
+                let priorities: Vec<u32> = block_ids
+                    .iter()
+                    .map(|id| self.stored_block_priorities.get(id).copied().unwrap_or(0))
+                    .collect();
+
+                tracing::info!(
+                    request_id = %self.request_id,
+                    "flush-on-finish: offloading {} blocks completed in the final iteration",
+                    flush_count
+                );
+
+                self.offload_blocks(&block_ids, &token_blocks, &priorities)?;
+                self.evaluated_blocks += flush_count;
+            }
+        }
+
         // Report cache statistics if we performed a cache lookup
         if self.performed_cache_lookup {
             let block_size = self.block_size;
@@ -959,6 +1068,10 @@ impl Slot for VllmConnectorSlot {
 
     fn sequence(&self) -> &TokenBlockSequence {
         &self.sequence
+    }
+
+    fn sequence_mut(&mut self) -> &mut TokenBlockSequence {
+        &mut self.sequence
     }
 
     fn computed_tokens(&self) -> usize {

@@ -74,6 +74,8 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
+    fn feed_tokens(&mut self, request_id: String, tokens: Vec<u32>) -> anyhow::Result<()>;
+
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
 
@@ -85,6 +87,10 @@ pub struct KvConnectorLeader {
     onboarding_slots: HashSet<String>,
     iteration_counter: u64,
     kvbm_metrics: KvbmMetrics,
+
+    /// Flush-on-finish offload operations deferred from request_finished.
+    /// These are drained and injected into the next build_connector_meta call.
+    deferred_flush_ops: Vec<WorkerTransferRequest>,
 }
 
 impl KvConnectorLeader {
@@ -191,6 +197,7 @@ impl KvConnectorLeader {
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
             kvbm_metrics,
+            deferred_flush_ops: Vec::new(),
         }
     }
 }
@@ -532,6 +539,18 @@ impl Leader for KvConnectorLeader {
             slot.mark_as_skipped()?;
         }
 
+        // Inject deferred flush-on-finish offload operations from previous
+        // request_finished calls.  These couldn't be sent directly to the worker
+        // because request_finished runs on the scheduler process (no worker access).
+        if !self.deferred_flush_ops.is_empty() {
+            let flush_ops = std::mem::take(&mut self.deferred_flush_ops);
+            tracing::debug!(
+                "injecting {} deferred flush-on-finish offload ops into metadata",
+                flush_ops.len()
+            );
+            md.add_operations(flush_ops);
+        }
+
         tracing::debug!("metadata: {md:#?}");
         serde_json::to_vec(&md)
             .map_err(|e| anyhow::anyhow!("Failed to serialize connector metadata: {}", e))
@@ -564,6 +583,22 @@ impl Leader for KvConnectorLeader {
         // Mark the slot as finished (sets state to Finishing if there are operations,
         // or Finished if all operations are complete)
         slot.mark_as_finished(self.iteration_counter)?;
+
+        // Extract flush-on-finish pending operations and defer them to the next
+        // build_connector_meta call.  In vLLM V1, request_finished runs on the
+        // scheduler process which has no access to the worker.  By deferring the
+        // ops to the next metadata, they reach the worker through the normal
+        // metadata → bind_connector_metadata → enqueue path.
+        let pending_ops = slot.take_pending_operations().unwrap_or_default();
+        if !pending_ops.is_empty() {
+            tracing::debug!(
+                request_id = %request_id,
+                num_ops = pending_ops.len(),
+                "request_finished: deferring {} flush-on-finish ops to next metadata",
+                pending_ops.len()
+            );
+            self.deferred_flush_ops.extend(pending_ops);
+        }
 
         // remove the request from the inflight requests
         self.inflight_requests.remove(&request_id);
@@ -609,6 +644,21 @@ impl Leader for KvConnectorLeader {
 
         self.inflight_requests.insert(request.request_id);
 
+        Ok(())
+    }
+
+    fn feed_tokens(&mut self, request_id: String, tokens: Vec<u32>) -> anyhow::Result<()> {
+        let shared_slot = self.slot_manager().get_slot(&request_id)?;
+        let mut slot = shared_slot
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
+        tracing::debug!(
+            "feed_tokens: req={}, feeding {} tokens to sequence (current total={})",
+            request_id,
+            tokens.len(),
+            slot.sequence().total_tokens(),
+        );
+        slot.sequence_mut().extend(tokens.into())?;
         Ok(())
     }
 }
@@ -700,6 +750,12 @@ impl PyKvConnectorLeader {
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
         self.connector_leader
             .create_slot(request, tokens)
+            .map_err(to_pyerr)
+    }
+
+    fn feed_tokens(&mut self, request_id: &str, tokens: Vec<u32>) -> PyResult<()> {
+        self.connector_leader
+            .feed_tokens(request_id.to_string(), tokens)
             .map_err(to_pyerr)
     }
 }

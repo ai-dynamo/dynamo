@@ -72,12 +72,9 @@ pub enum ControlMessage {
     ResetAll,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CacheLevel {
-    G1,
-    G2,
-    G3,
-}
+/// Re-export the block-manager-level [`CacheLevel`] so callers that import
+/// from the controller module get the full G1–G4 enum.
+pub use super::CacheLevel;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Dissolve)]
 pub struct ResetRequest {

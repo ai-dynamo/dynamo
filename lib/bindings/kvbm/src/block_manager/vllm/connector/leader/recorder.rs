@@ -199,6 +199,7 @@ impl KvConnectorLeaderRecorder {
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
             kvbm_metrics,
+            deferred_flush_ops: Vec::new(),
         };
 
         Self {
@@ -349,5 +350,9 @@ impl Leader for KvConnectorLeaderRecorder {
             .unbounded_tx
             .send(Action::CreateSlot(input_copy, CreateSlotOutput {}));
         Ok(())
+    }
+
+    fn feed_tokens(&mut self, request_id: String, tokens: Vec<u32>) -> anyhow::Result<()> {
+        self.connector_leader.feed_tokens(request_id, tokens)
     }
 }

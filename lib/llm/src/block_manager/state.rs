@@ -20,6 +20,7 @@ use super::{
         OffloadFilters, OffloadManager, OffloadManagerConfig, filter::OffloadFilter,
         request::BlockResult,
     },
+    pool_registry::{PoolKind, PoolRegistry},
 };
 use derive_getters::Dissolve;
 use std::sync::Arc;
@@ -50,9 +51,10 @@ pub(crate) struct Resources {
 pub struct KvBlockManagerState<Locality: LocalityProvider, Metadata: BlockMetadata> {
     resources: Arc<Resources>,
 
-    disk_pool: Option<Arc<dyn BlockPool<DiskStorage, Locality, Metadata>>>,
-    host_pool: Option<Arc<dyn BlockPool<PinnedStorage, Locality, Metadata>>>,
-    device_pool: Option<Arc<dyn BlockPool<DeviceStorage, Locality, Metadata>>>,
+    /// Dynamic pool registry — replaces the former fixed disk/host/device pool
+    /// fields.  Access pools via the backward-compatible `disk()`, `host()`,
+    /// `device()` accessors or iterate by `CacheLevel` through the registry.
+    pub(crate) pool_registry: PoolRegistry<Locality, Metadata>,
 
     local_block_set: NixlBlockSet,
     remote_block_sets: RwLock<HashMap<WorkerID, HashMap<usize, RemoteBlocks>>>,
@@ -61,15 +63,19 @@ pub struct KvBlockManagerState<Locality: LocalityProvider, Metadata: BlockMetada
 
 impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Locality, Metadata> {
     pub fn disk(&self) -> Option<&dyn BlockPool<DiskStorage, Locality, Metadata>> {
-        self.disk_pool.as_ref().map(|pool| pool.as_ref())
+        self.pool_registry.disk()
     }
 
     pub fn host(&self) -> Option<&dyn BlockPool<PinnedStorage, Locality, Metadata>> {
-        self.host_pool.as_ref().map(|pool| pool.as_ref())
+        self.pool_registry.host()
     }
 
     pub fn device(&self) -> Option<&dyn BlockPool<DeviceStorage, Locality, Metadata>> {
-        self.device_pool.as_ref().map(|pool| pool.as_ref())
+        self.pool_registry.device()
+    }
+
+    pub fn pool_registry(&self) -> &PoolRegistry<Locality, Metadata> {
+        &self.pool_registry
     }
 
     pub fn worker_id(&self) -> WorkerID {
@@ -106,43 +112,47 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 
         let (disk_factory, host_factory, device_factory) = block_data_factories.dissolve();
 
-        let (disk_pool, disk_blocks, disk_offload_filter) = match disk_factory {
+        let mut registry = PoolRegistry::new();
+
+        let (disk_blocks, disk_offload_filter) = match disk_factory {
             Some(factory) => {
                 let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
-                (Some(pool), Some(blocks), offload_filter)
+                registry.register(CacheLevel::G3, PoolKind::Disk(pool), offload_filter.clone());
+                (Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No disk layout provided; will not allocate disk blocks.");
-                (None, None, None)
+                (None, None)
             }
         };
 
-        let (host_pool, host_blocks, host_offload_filter) = match host_factory {
+        let (host_blocks, host_offload_filter) = match host_factory {
             Some(factory) => {
                 let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "host")?;
-                (Some(pool), Some(blocks), offload_filter)
+                registry.register(CacheLevel::G2, PoolKind::Host(pool), offload_filter.clone());
+                (Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No host layout provided; will not allocate host blocks.");
-                (None, None, None)
+                (None, None)
             }
         };
 
-        let (device_pool, device_blocks, device_offload_filter) = match device_factory {
+        let (device_blocks, device_offload_filter) = match device_factory {
             Some(factory) => {
                 let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "device")?;
-                (Some(pool), Some(blocks), offload_filter)
+                registry.register(CacheLevel::G1, PoolKind::Device(pool), offload_filter.clone());
+                (Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No device layout provided; will not allocate device blocks.");
-                (None, None, None)
+                (None, None)
             }
         };
 
-        // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
         let bypass_cpu_mem = config::should_bypass_cpu_cache();
 
         let offload_filters = OffloadFilters::builder()
@@ -161,9 +171,9 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
         };
 
         let offload_manager = OffloadManager::new(
-            disk_pool.clone(),
-            host_pool.clone(),
-            device_pool.clone(),
+            registry.disk_arc(),
+            registry.host_arc(),
+            registry.device_arc(),
             offload_filters,
             offload_config,
         )?;
@@ -172,9 +182,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
 
         let state = Arc::new(Self {
             resources: resources.clone(),
-            disk_pool,
-            host_pool,
-            device_pool,
+            pool_registry: registry,
             local_block_set: NixlBlockSet::new(resources.worker_id),
             remote_block_sets: RwLock::new(HashMap::new()),
             offload_manager,
@@ -184,29 +192,21 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             blocks.iter_mut().for_each(|block| {
                 block.set_manager(state.clone());
             });
-
-            state.disk_pool.as_ref().unwrap().add_blocks(blocks).await?;
+            state.disk().unwrap().add_blocks(blocks).await?;
         }
 
         if let Some(mut blocks) = host_blocks {
             blocks.iter_mut().for_each(|block| {
                 block.set_manager(state.clone());
             });
-
-            state.host_pool.as_ref().unwrap().add_blocks(blocks).await?;
+            state.host().unwrap().add_blocks(blocks).await?;
         }
 
         if let Some(mut blocks) = device_blocks {
             blocks.iter_mut().for_each(|block| {
                 block.set_manager(state.clone());
             });
-
-            state
-                .device_pool
-                .as_ref()
-                .unwrap()
-                .add_blocks(blocks)
-                .await?;
+            state.device().unwrap().add_blocks(blocks).await?;
         }
 
         Ok(state)
@@ -226,43 +226,47 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
         let (mut local_block_set, disk_factory, host_factory, device_factory) =
             block_data_factories.dissolve();
 
-        let (disk_pool, disk_blocks, disk_offload_filter) = match disk_factory {
+        let mut registry = PoolRegistry::new();
+
+        let (disk_blocks, disk_offload_filter) = match disk_factory {
             Some(factory) => {
                 let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
-                (Some(pool), Some(blocks), offload_filter)
+                registry.register(CacheLevel::G3, PoolKind::Disk(pool), offload_filter.clone());
+                (Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No disk layout provided; will not allocate disk blocks.");
-                (None, None, None)
+                (None, None)
             }
         };
 
-        let (host_pool, host_blocks, host_offload_filter) = match host_factory {
+        let (host_blocks, host_offload_filter) = match host_factory {
             Some(factory) => {
                 let (pool, blocks, offload_filter) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "host")?;
-                (Some(pool), Some(blocks), offload_filter)
+                registry.register(CacheLevel::G2, PoolKind::Host(pool), offload_filter.clone());
+                (Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No host layout provided; will not allocate host blocks.");
-                (None, None, None)
+                (None, None)
             }
         };
 
-        let (device_pool, device_blocks, device_offload_filter) = match device_factory {
+        let (device_blocks, device_offload_filter) = match device_factory {
             Some(factory) => {
                 let (pool, blocks, offload_filter) =
-                    create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
-                (Some(pool), Some(blocks), offload_filter)
+                    create_block_pool::<_, _, Metadata>(factory, &resources, "device")?;
+                registry.register(CacheLevel::G1, PoolKind::Device(pool), offload_filter.clone());
+                (Some(blocks), offload_filter)
             }
             None => {
                 tracing::debug!("No device layout provided; will not allocate device blocks.");
-                (None, None, None)
+                (None, None)
             }
         };
 
-        // Finalize the local block set by adding NIXL metadata
         if let Some(nixl_agent) = resources.nixl_agent.as_ref() {
             tracing::debug!("Finalize NixlBlockSet: adding NIXL metadata.");
             local_block_set.set_nixl_metadata(nixl_agent.get_local_md()?);
@@ -274,7 +278,6 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             .disk(disk_offload_filter)
             .build()?;
 
-        // Determine if we should bypass CPU memory (G2) and offload directly from GPU (G1) to Disk (G3)
         let bypass_cpu_mem = config::should_bypass_cpu_cache();
 
         let offload_config = OffloadManagerConfig {
@@ -287,9 +290,9 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
         };
 
         let offload_manager = OffloadManager::new(
-            disk_pool.clone(),
-            host_pool.clone(),
-            device_pool.clone(),
+            registry.disk_arc(),
+            registry.host_arc(),
+            registry.device_arc(),
             offload_filters,
             offload_config,
         )?;
@@ -298,9 +301,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
 
         let state = Arc::new(Self {
             resources: resources.clone(),
-            disk_pool,
-            host_pool,
-            device_pool,
+            pool_registry: registry,
             local_block_set,
             remote_block_sets: RwLock::new(HashMap::new()),
             offload_manager,
@@ -310,29 +311,21 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             blocks.iter_mut().for_each(|block| {
                 block.set_manager(state.clone());
             });
-
-            state.disk_pool.as_ref().unwrap().add_blocks(blocks).await?;
+            state.disk().unwrap().add_blocks(blocks).await?;
         }
 
         if let Some(mut blocks) = host_blocks {
             blocks.iter_mut().for_each(|block| {
                 block.set_manager(state.clone());
             });
-
-            state.host_pool.as_ref().unwrap().add_blocks(blocks).await?;
+            state.host().unwrap().add_blocks(blocks).await?;
         }
 
         if let Some(mut blocks) = device_blocks {
             blocks.iter_mut().for_each(|block| {
                 block.set_manager(state.clone());
             });
-
-            state
-                .device_pool
-                .as_ref()
-                .unwrap()
-                .add_blocks(blocks)
-                .await?;
+            state.device().unwrap().add_blocks(blocks).await?;
         }
 
         Ok(state)

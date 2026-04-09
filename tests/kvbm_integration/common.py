@@ -591,6 +591,10 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
             ["--max-num-batched-tokens", str(params["max_num_batched_tokens"])]
         )
 
+    # Extra vLLM CLI arguments (e.g. --enable-prefix-caching)
+    if "extra_args" in params:
+        command.extend(params["extra_args"])
+
     # Set up environment
     # Note: NATS_SERVER and ETCD_ENDPOINTS are already set by runtime_services_dynamic_ports fixture
     env = os.environ.copy()

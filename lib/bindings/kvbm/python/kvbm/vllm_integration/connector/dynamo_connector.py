@@ -16,6 +16,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+
+try:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
+except ImportError:
+
+    class SupportsHMA:  # type: ignore[no-redef]
+        """Fallback for vLLM versions that lack HMA support."""
+
+        pass
+
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -41,7 +51,7 @@ class DynamoConnectorMetadata(KVConnectorMetadata):
         self.metadata = metadata
 
 
-class DynamoConnector(KVConnectorBase_V1):
+class DynamoConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -98,10 +108,19 @@ class DynamoConnector(KVConnectorBase_V1):
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         return self._scheduler.request_finished(request, block_ids)
 
+    @nvtx_annotate(category="scheduler")
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        flat_ids = [bid for group in block_ids for bid in group]
+        return self.request_finished(request, flat_ids)
+
     # Worker
 
     @nvtx_annotate(category="worker")
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor | list[torch.Tensor]"]):
         self._worker.register_kv_caches(kv_caches)
 
     @nvtx_annotate(category="worker")
@@ -145,7 +164,7 @@ class DynamoConnector(KVConnectorBase_V1):
     @nvtx_annotate(category="worker")
     @override
     def wait_for_save(self):
-        pass
+        self._worker.wait_for_save()
 
     def get_finished(
         self, finished_req_ids: set[str]

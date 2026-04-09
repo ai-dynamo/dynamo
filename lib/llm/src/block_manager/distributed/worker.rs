@@ -50,40 +50,52 @@ impl WorkerState {
     }
 }
 
+/// Returns `(device_storages, reference_shape, reference_strides, per_layer_bytes_per_block)`.
+///
+/// `reference_shape` and `reference_strides` are taken from the first **attention**
+/// tensor (>= 3 dims) so that layout dimension inference works for hybrid models
+/// where Mamba/SSM raw_tensors have only 2 dimensions.  The strides are needed to
+/// detect re-strided tensors (e.g. hybrid attention layout via `as_strided_()`).
 pub fn load_and_validate_tensors(
     tensors: &[Arc<dyn TorchTensor>],
     device_id: usize,
-) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>)> {
-    let mut shape = None;
+    num_device_blocks: usize,
+) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>, Vec<usize>, usize)> {
+    let mut shape: Option<Vec<usize>> = None;
+    let mut ref_strides: Option<Vec<usize>> = None;
     let mut expected_bspb: Option<usize> = None;
 
     let mut device_tensors = Vec::with_capacity(tensors.len());
     let allocator = DeviceAllocator::new(device_id)?;
 
     for tensor in tensors {
-        // Check the stride, and ensure our tensor is contiguous.
-        // TODO: We eventually need to be able to handle this.
         let stride = tensor.stride();
         tracing::debug!("stride: {:?}", stride);
         tracing::debug!("stride is monotonically decreasing for NHD layout");
         tracing::debug!("stride is NOT monotonically decreasing for HND layout");
 
-        if shape.is_none() {
+        // Capture the first attention tensor's shape and strides (>= 3 dims)
+        // for layout detection. Mamba/SSM raw_tensors have only 2 dimensions
+        // and would cause incorrect layout inference if used as the reference.
+        if shape.is_none() && tensor.shape().len() >= 3 {
             shape = Some(tensor.shape());
+            ref_strides = Some(stride.clone());
         }
 
         // Validate uniform byte-size-per-block across all layers.
         // Hybrid models (e.g. Nemotron) have heterogeneous tensor shapes
         // between attention and Mamba/SSM layers, but HMA mode guarantees
-        // uniform byte-size-per-block.
+        // uniform byte-size-per-block.  Use num_device_blocks (not shape[0])
+        // because attention tensors in hybrid layout have shape
+        // [2, num_blocks, ...] where shape[0]=2 is the K/V split.
         let t_shape = tensor.shape();
-        if t_shape.is_empty() || t_shape[0] == 0 {
+        if t_shape.is_empty() {
             return Err(anyhow::anyhow!(
-                "Tensor has invalid shape (empty or zero first dim): {:?}",
+                "Tensor has invalid shape (empty): {:?}",
                 t_shape
             ));
         }
-        let bspb = tensor.size_bytes() / t_shape[0];
+        let bspb = tensor.size_bytes() / num_device_blocks;
         if let Some(expected) = expected_bspb {
             if bspb != expected {
                 return Err(anyhow::anyhow!(
@@ -91,7 +103,7 @@ pub fn load_and_validate_tensors(
                      Expected {} but got {} (shapes: {:?} vs {:?})",
                     expected,
                     bspb,
-                    shape.as_ref().unwrap(),
+                    shape.as_ref().map(|s| s.as_slice()),
                     t_shape
                 ));
             }
@@ -105,7 +117,29 @@ pub fn load_and_validate_tensors(
         device_tensors.push(device_tensor);
     }
 
-    Ok((device_tensors, shape.unwrap()))
+    // Fall back to the first tensor's shape/strides if no attention tensor was
+    // found (e.g. a pure Mamba model — unlikely but handled gracefully).
+    let (reference_shape, reference_strides) = match (shape, ref_strides) {
+        (Some(s), Some(st)) => (s, st),
+        _ if !tensors.is_empty() => {
+            tracing::warn!(
+                "No attention tensor (>= 3 dims) found; falling back to first tensor shape {:?}",
+                tensors[0].shape()
+            );
+            (tensors[0].shape(), tensors[0].stride())
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "No tensors provided to load_and_validate_tensors"
+            ));
+        }
+    };
+
+    let per_layer_bspb = expected_bspb.ok_or_else(|| {
+        anyhow::anyhow!("No tensors provided to load_and_validate_tensors")
+    })?;
+
+    Ok((device_tensors, reference_shape, reference_strides, per_layer_bspb))
 }
 
 fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
@@ -455,13 +489,16 @@ impl KvbmWorker {
             return Err(anyhow::anyhow!("num_device_blocks must be greater than 0"));
         }
 
-        let (device_tensors, shape) = load_and_validate_tensors(&config.tensors, config.device_id)?;
+        let (device_tensors, shape, strides, per_layer_bspb) =
+            load_and_validate_tensors(&config.tensors, config.device_id, config.num_device_blocks)?;
 
         if shape.len() < 3 {
-            return Err(anyhow::anyhow!(format!(
-                "Unsupported kv cache layout. Got shape: {:?}",
+            return Err(anyhow::anyhow!(
+                "Unsupported kv cache layout: reference tensor shape has fewer than 3 \
+                 dimensions. For hybrid models, at least one attention tensor (>= 3 dims) \
+                 is required. Got shape: {:?}",
                 shape
-            )));
+            ));
         }
 
         let (layout_type, num_layers, outer_dim, inner_dim) = match config.device_layout_type {
@@ -484,35 +521,53 @@ impl KvbmWorker {
                     inner_dim,
                 )
             }
-            LayoutType::LayerSeparate { outer_contiguous } => {
-                // Use the already-detected layout type from config (no re-detection needed)
-                let layout_type = config.device_layout_type;
+            LayoutType::LayerSeparate { outer_contiguous: _ } => {
+                // Re-detect layout using strides to handle hybrid models where
+                // as_strided_() rearranges memory without changing the logical shape.
+                let layout_type = LayoutType::layer_separate_auto_with_strides(
+                    &shape,
+                    &strides,
+                    config.num_device_blocks,
+                )?;
+                let outer_contiguous = matches!(
+                    layout_type,
+                    LayoutType::LayerSeparate {
+                        outer_contiguous: true
+                    }
+                );
 
-                // Extract outer_dim based on the provided outer_contiguous value
-                let outer_dim = if outer_contiguous {
-                    shape[0] // Outer contiguous: [outer_dim, n_blocks, ...]
+                // Identify which shape dimension is the block dimension vs the
+                // outer dimension.  This is independent of the physical layout
+                // (outer_contiguous) because as_strided_() can swap memory order
+                // without changing the logical shape.
+                let outer_dim = if shape[0] >= config.num_device_blocks {
+                    shape[1] // shape[0] is blocks
                 } else {
-                    shape[1] // Block contiguous: [n_blocks, outer_dim, ...]
+                    shape[0] // shape[1] is blocks
                 };
 
                 let num_layers = device_tensors.len();
                 let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
 
                 tracing::info!(
-                    "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}",
+                    "Inferred layout: num_layers={}, outer_dim={}, outer_contiguous={}, page_size={}, inner_dim={}, strides={:?}",
                     num_layers,
                     outer_dim,
                     outer_contiguous,
                     config.page_size,
-                    inner_dim
+                    inner_dim,
+                    &strides[..2],
                 );
 
                 (layout_type, num_layers, outer_dim, inner_dim)
             }
         };
 
-        let bytes_per_block =
-            num_layers * outer_dim * config.page_size * inner_dim * config.dtype_width_bytes;
+        // For hybrid models (e.g. Nemotron), compute bytes_per_block from the
+        // validated per-layer byte size instead of shape-derived dimensions,
+        // since Mamba/SSM and attention layers have different tensor shapes but
+        // HMA guarantees uniform bytes-per-block across all layer types.
+        let bytes_per_block = num_layers * per_layer_bspb;
 
         let mut layout_builder_instance = LayoutConfigBuilder::default();
         let layout_builder = layout_builder_instance

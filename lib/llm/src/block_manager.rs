@@ -20,6 +20,7 @@ pub mod metrics_kvbm;
 pub mod numa_allocator;
 pub mod offload;
 pub mod pool;
+pub mod pool_registry;
 pub mod storage;
 pub mod v2;
 
@@ -37,6 +38,7 @@ pub use config::*;
 pub use layout::{LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType, nixl::NixlLayout};
 pub use offload::{filter::OffloadFilter, request::BlockResult};
 pub use pool::{BlockPool, ManagedBlockPool};
+pub use pool_registry::{PoolId, PoolKind, PoolRegistry};
 pub use storage::{
     DeviceStorage, DiskStorage, PinnedStorage, Storage, StorageAllocator,
     nixl::NixlRegisterableStorage,
@@ -140,6 +142,11 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Localit
     /// Get the worker ID
     pub fn worker_id(&self) -> WorkerID {
         self.state.worker_id()
+    }
+
+    /// Access the dynamic pool registry for iteration by cache level.
+    pub fn pool_registry(&self) -> &pool_registry::PoolRegistry<Locality, Metadata> {
+        self.state.pool_registry()
     }
 
     /// Onboard a set of blocks to the device pool

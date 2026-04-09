@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from .dynamo_connector import DynamoConnector, DynamoConnectorMetadata
-from .pd_connector import PdConnector, PdConnectorMetadata
 
 __all__ = [
     "DynamoConnector",
     "DynamoConnectorMetadata",
-    "PdConnector",
-    "PdConnectorMetadata",
 ]
+
+try:
+    from .pd_connector import PdConnector, PdConnectorMetadata
+
+    __all__ += ["PdConnector", "PdConnectorMetadata"]
+except ImportError:
+    pass

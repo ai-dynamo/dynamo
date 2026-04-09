@@ -46,6 +46,15 @@ pub trait Worker: Send + Sync {
 
     fn save_kv_layer(&mut self, layer_name: String) -> anyhow::Result<()>;
 
+    /// Block until all save operations complete.
+    /// For hybrid models, this syncs on a post-forward-pass CUDA event and
+    /// enqueues the deferred offload operations. For pure-attention models
+    /// this is a no-op (offloading was already triggered in save_kv_layer).
+    fn wait_for_save(&mut self, event: u64) -> anyhow::Result<()>;
+
+    /// Enqueue a single flush-on-finish offload operation from the leader.
+    fn enqueue_flush_op(&mut self, operation: WorkerTransferRequest);
+
     fn get_finished(
         &mut self,
         finished_requests: HashSet<String>,
@@ -65,6 +74,10 @@ pub struct KvConnectorWorker {
     /// save_kv_layer, so completion must trigger at this count rather than
     /// the total number of registered kv_cache_layers.
     active_save_layers: usize,
+
+    /// True when the model has Mamba/SSM layers that don't call save_kv_layer.
+    /// When true, save_kv_layer defers offload enqueuing to wait_for_save().
+    is_hybrid: bool,
 
     /// Map of request id to inflight load requests
     maybe_finished_onboarding: HashSet<String>,
@@ -119,6 +132,7 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             active_save_layers: 0,
+            is_hybrid: false,
             layer_events: Vec::new(),
         })
     }
@@ -155,14 +169,17 @@ impl Worker for KvConnectorWorker {
 
         // Process kv_caches in layer execution order (already sorted by layer index)
         let mut vllm_tensors = Vec::new();
-        let mut first_tensor_shape: Option<Vec<usize>> = None;
+        let mut first_attn_tensor: Option<(Vec<usize>, Vec<usize>)> = None;
 
         for (layer_name, vllm_tensor) in kv_caches {
             tracing::trace!("Registering KV cache layer: {layer_name}, tensor: {vllm_tensor:?}");
 
-            // Capture the shape of the first tensor for layout detection
-            if first_tensor_shape.is_none() {
-                first_tensor_shape = Some(vllm_tensor.shape());
+            // Capture the first attention tensor's shape and strides (>= 3 dims)
+            // for layout detection. Strides are needed to handle hybrid models
+            // where as_strided_() rearranges memory without changing the shape.
+            // Mamba/SSM raw_tensors have only 2 dimensions and are skipped.
+            if first_attn_tensor.is_none() && vllm_tensor.shape().len() >= 3 {
+                first_attn_tensor = Some((vllm_tensor.shape(), vllm_tensor.stride()));
             }
 
             // Store for later lookup by name
@@ -174,37 +191,50 @@ impl Worker for KvConnectorWorker {
 
         self.layer_events = raw_event_handles;
         self.active_save_layers = active_save_layers.unwrap_or(self.kv_cache_layers.len());
+        self.is_hybrid = self.active_save_layers < self.kv_cache_layers.len();
 
         tracing::info!(
-            "Registered {} KV cache layers ({} active save layers)",
+            "Registered {} KV cache layers ({} active save layers, hybrid={})",
             self.kv_cache_layers.len(),
             self.active_save_layers,
+            self.is_hybrid,
         );
 
-        // Auto-detect device layout type if not explicitly provided
+        // Auto-detect device layout type if not explicitly provided.
+        // Uses stride-aware detection to handle hybrid models where
+        // as_strided_() rearranges memory without changing the logical shape.
         let detected_device_layout_type = match device_layout_type {
             Some(layout) => layout,
             None => {
-                if let Some(ref shape) = first_tensor_shape {
-                    match LayoutType::layer_separate_auto(shape, num_device_blocks) {
+                if let Some((ref shape, ref strides)) = first_attn_tensor {
+                    match LayoutType::layer_separate_auto_with_strides(
+                        shape,
+                        strides,
+                        num_device_blocks,
+                    ) {
                         Ok(detected) => {
                             tracing::info!(
-                                "Auto-detected device layout from tensor shape: {:?}",
+                                "Auto-detected device layout from tensor shape {:?} / strides {:?}: {:?}",
+                                shape,
+                                strides,
                                 detected
                             );
                             detected
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "Failed to auto-detect layout from shape {:?}: {}. Using default.",
+                                "Failed to auto-detect layout from shape {:?} / strides {:?}: {}. Using default.",
                                 shape,
+                                strides,
                                 e
                             );
                             LayoutType::layer_separate_auto_default()
                         }
                     }
                 } else {
-                    tracing::warn!("No tensors available for layout detection. Using default.");
+                    tracing::warn!(
+                        "No attention tensors (>= 3 dims) found for layout detection. Using default."
+                    );
                     LayoutType::layer_separate_auto_default()
                 }
             }
@@ -281,6 +311,18 @@ impl Worker for KvConnectorWorker {
             )?;
         }
 
+        // Collect request_ids that have active slots in this metadata.
+        // Operations for these requests are "normal" offload ops that must be
+        // deferred to save_kv_layer for CUDA event synchronization.
+        // Operations for OTHER request_ids are "flush-on-finish" ops from
+        // request_finished → deferred_flush_ops — these can be enqueued
+        // immediately since the request's GPU work is already complete.
+        let active_request_ids: HashSet<String> = metadata
+            .new_slots
+            .iter()
+            .map(|s| s.request_id.clone())
+            .collect();
+
         let mut onboarding_operations = Vec::new();
         let mut offloading_operations = Vec::new();
 
@@ -303,7 +345,26 @@ impl Worker for KvConnectorWorker {
             self.maybe_finished_onboarding.insert(request_id);
         }
 
-        self.offloading_operations = offloading_operations;
+        // Split offloading operations: flush-on-finish ops (for finished
+        // requests not in this metadata's new_slots) are enqueued immediately;
+        // normal ops (for active requests) are deferred to save_kv_layer.
+        let mut deferred_offloading = Vec::new();
+        for operation in offloading_operations {
+            if active_request_ids.contains(&operation.request_id) {
+                deferred_offloading.push(operation);
+            } else {
+                tracing::debug!(
+                    request_id = %operation.request_id,
+                    operation_id = %operation.uuid,
+                    "enqueuing flush-on-finish offload operation immediately"
+                );
+                self.maybe_finished_offloading
+                    .insert(operation.request_id.clone());
+                self.connector.enqueue_request(operation);
+            }
+        }
+
+        self.offloading_operations = deferred_offloading;
 
         Ok(())
     }
@@ -312,6 +373,12 @@ impl Worker for KvConnectorWorker {
     fn clear_connector_metadata(&mut self) {
         tracing::debug!(iteration = self.iteration, "clearing connector metadata");
         debug_assert!(self.bound, "connector metadata not bound");
+        debug_assert!(
+            self.offloading_operations.is_empty(),
+            "clear_connector_metadata called with {} pending offload operations; \
+             wait_for_save was not called",
+            self.offloading_operations.len()
+        );
         self.bound = false;
         self.iteration = 0; // always reset; leader drives the counter
         self.layers_complete = 0;
@@ -350,29 +417,79 @@ impl Worker for KvConnectorWorker {
         );
 
         if self.layers_complete == self.active_save_layers {
-            let offloading_operations = std::mem::take(&mut self.offloading_operations);
-
-            tracing::trace!(
-                iteration = self.iteration,
-                num_operations = offloading_operations.len(),
-                "All save layers complete, enqueuing {} offload operations",
-                offloading_operations.len()
-            );
-
-            // Block on the completion of the last save layer's CUDA event.
-            // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
-            // or put the event on a stream and use stream waits to keep it all on device.
-            event_sync_blocking(self.layer_events[event_idx]);
-            for operation in &offloading_operations {
+            if self.is_hybrid {
+                // Hybrid model: trailing Mamba layers haven't written yet.
+                // Defer offload to wait_for_save() which receives a post-forward-pass event.
                 tracing::debug!(
-                    request_id = %operation.request_id,
-                    operation_id = %operation.uuid,
-                    "Enqueuing offload operation to scheduler"
+                    iteration = self.iteration,
+                    num_pending = self.offloading_operations.len(),
+                    "Hybrid model: deferring {} offload operations to wait_for_save",
+                    self.offloading_operations.len()
                 );
-                self.connector.enqueue_request(operation.clone());
+            } else {
+                // Pure attention model: all layers done, offload immediately.
+                let offloading_operations = std::mem::take(&mut self.offloading_operations);
+
+                tracing::trace!(
+                    iteration = self.iteration,
+                    num_operations = offloading_operations.len(),
+                    "All save layers complete, enqueuing {} offload operations",
+                    offloading_operations.len()
+                );
+
+                // Block on the completion of the last save layer's CUDA event.
+                // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
+                // or put the event on a stream and use stream waits to keep it all on device.
+                event_sync_blocking(self.layer_events[event_idx]);
+                for operation in &offloading_operations {
+                    tracing::debug!(
+                        request_id = %operation.request_id,
+                        operation_id = %operation.uuid,
+                        "Enqueuing offload operation to scheduler"
+                    );
+                    self.connector.enqueue_request(operation.clone());
+                }
             }
         }
         Ok(())
+    }
+
+    fn wait_for_save(&mut self, event: u64) -> anyhow::Result<()> {
+        if !self.is_hybrid {
+            // Non-hybrid models offload immediately in save_kv_layer.
+            return Ok(());
+        }
+
+        let offloading_operations = std::mem::take(&mut self.offloading_operations);
+        if offloading_operations.is_empty() {
+            return Ok(());
+        }
+
+        tracing::debug!(
+            iteration = self.iteration,
+            num_operations = offloading_operations.len(),
+            "wait_for_save: syncing event and enqueuing {} offload operations",
+            offloading_operations.len()
+        );
+
+        // Sync on the post-forward-pass event recorded by Python.
+        // This guarantees all layers (including trailing Mamba) have completed.
+        event_sync_blocking(event);
+
+        for operation in &offloading_operations {
+            tracing::debug!(
+                request_id = %operation.request_id,
+                operation_id = %operation.uuid,
+                "wait_for_save: enqueuing offload operation"
+            );
+            self.connector.enqueue_request(operation.clone());
+        }
+
+        Ok(())
+    }
+
+    fn enqueue_flush_op(&mut self, operation: WorkerTransferRequest) {
+        self.connector.enqueue_request(operation);
     }
 
     fn get_finished(
@@ -571,6 +688,29 @@ impl PyKvConnectorWorker {
         self.connector_worker
             .save_kv_layer(layer_name)
             .map_err(to_pyerr)
+    }
+
+    pub fn wait_for_save(&mut self, event: u64) -> PyResult<()> {
+        self.connector_worker
+            .wait_for_save(event)
+            .map_err(to_pyerr)
+    }
+
+    /// Enqueue flush-on-finish offload operations received from the leader.
+    /// These are WorkerTransferRequests serialized as JSON by the leader's
+    /// request_finished, forwarded through Python to the worker.
+    pub fn enqueue_flush_ops(&mut self, ops_json: Vec<u8>) -> PyResult<()> {
+        let ops: Vec<WorkerTransferRequest> =
+            serde_json::from_slice(&ops_json).map_err(to_pyerr)?;
+        for operation in &ops {
+            tracing::debug!(
+                request_id = %operation.request_id,
+                operation_id = %operation.uuid,
+                "enqueue_flush_ops: enqueuing flush-on-finish offload operation"
+            );
+            self.connector_worker.enqueue_flush_op(operation.clone());
+        }
+        Ok(())
     }
 
     pub fn get_finished(

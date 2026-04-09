@@ -19,15 +19,18 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> ControllerHandler<Loca
             CacheLevel::G1 => Ok(self
                 .block_manager
                 .device()
-                .ok_or_else(|| anyhow::anyhow!("Device pool not found"))?),
+                .ok_or_else(|| anyhow::anyhow!("Device pool (G1) not found"))?),
             CacheLevel::G2 => Ok(self
                 .block_manager
                 .host()
-                .ok_or_else(|| anyhow::anyhow!("Host pool not found"))?),
+                .ok_or_else(|| anyhow::anyhow!("Host pool (G2) not found"))?),
             CacheLevel::G3 => Ok(self
                 .block_manager
                 .disk()
-                .ok_or_else(|| anyhow::anyhow!("Disk pool not found"))?),
+                .ok_or_else(|| anyhow::anyhow!("Disk pool (G3) not found"))?),
+            CacheLevel::G4 => Err(anyhow::anyhow!(
+                "Remote NVMe pool (G4) not yet supported in controller"
+            )),
         }
     }
 

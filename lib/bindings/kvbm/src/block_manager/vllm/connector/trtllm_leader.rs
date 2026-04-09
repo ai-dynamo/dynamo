@@ -50,6 +50,8 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
+    fn feed_tokens(&mut self, request_id: String, tokens: Vec<u32>) -> anyhow::Result<()>;
+
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
 
@@ -506,6 +508,15 @@ impl Leader for KvConnectorLeader {
 
         self.inflight_requests.insert(request.request_id);
 
+        Ok(())
+    }
+
+    fn feed_tokens(&mut self, request_id: String, tokens: Vec<u32>) -> anyhow::Result<()> {
+        let shared_slot = self.slot_manager().get_slot(&request_id)?;
+        let mut slot = shared_slot
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
+        slot.sequence_mut().extend(tokens.into())?;
         Ok(())
     }
 }

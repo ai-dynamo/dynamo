@@ -64,6 +64,7 @@ class KvConnectorLeader:
 
         self.drt = drt
         self.vllm_config = vllm_config
+        self._slot_seq_len: dict[str, int] = {}
         world_size = vllm_config.parallel_config.world_size
 
         leader = KvbmLeader(world_size, drt=self.drt)
@@ -179,20 +180,29 @@ class KvConnectorLeader:
             cached_reqs.num_computed_tokens
         ), "Number of cached req_ids doesn't match the number of cached num_computed_tokens"
 
-        # In https://github.com/vllm-project/vllm/pull/26388/changes#diff-9eeca590fd99f15621897e559dba39b3ec4e7c2c65ec3c3229711689e008b5f4L732-L736,
-        # new_token_ids was changed to return an empty list unless pipeline
-        # parallelism is turned on. If needed, which for KVBM it is not needed,
-        # KVBM can consult the cached_reqs.all_token_ids to get the token ids
-        # for each of the requests. KVBM doesn't consult this field since
-        # it holds the token sequence in the _connector.
+        # vLLM >= 0.16 returns empty new_token_ids when pipeline parallelism
+        # is disabled.  KVBM needs the decode tokens to grow the internal
+        # TokenBlockSequence (required for correct hash computation during
+        # offloading).  When new_token_ids is empty, derive the missing
+        # tokens from cached_reqs.all_token_ids (a dict[str, list[int]]
+        # keyed by request_id, only populated for requests that were NOT
+        # scheduled in the prior step — e.g. resumed from preemption).
+        # For continuously-scheduled requests the tokens are fed later via
+        # request_finished where the full sequence is available.
         for i, req_id in enumerate(cached_reqs.req_ids):
-            # new_token_ids may be empty when pipeline parallelism is disabled
-
             new_token_ids = (
                 cached_reqs.new_token_ids[i]
                 if i < len(cached_reqs.new_token_ids)
                 else []
             )
+
+            if not new_token_ids and hasattr(cached_reqs, "all_token_ids"):
+                all_ids = cached_reqs.all_token_ids.get(req_id)
+                if all_ids is not None:
+                    last_fed = self._slot_seq_len.get(req_id, 0)
+                    if len(all_ids) > last_fed:
+                        new_token_ids = list(all_ids[last_fed:])
+                        self._slot_seq_len[req_id] = len(all_ids)
             new_block_ids = cached_reqs.new_block_ids[i]
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
 
@@ -238,9 +248,20 @@ class KvConnectorLeader:
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        # note our worker can communication with us oob and we can use that to know
-        # ahead of time if the request is finished.
-        status = self._connector.request_finished(request.request_id, block_ids)
+        # Feed any remaining decode tokens so the Rust TokenBlockSequence
+        # has the full sequence for correct hash computation during the
+        # flush-on-finish offload.  vLLM's scheduler does not propagate
+        # decode token IDs on every step (only for PP or re-scheduled reqs),
+        # so we backfill them here from request.all_token_ids.
+        req_id = request.request_id
+        all_ids = request.all_token_ids
+        last_fed = self._slot_seq_len.get(req_id, 0)
+        if len(all_ids) > last_fed:
+            remaining = list(all_ids[last_fed:])
+            self._connector.feed_tokens(req_id, remaining)
+
+        status = self._connector.request_finished(req_id, block_ids)
+        self._slot_seq_len.pop(req_id, None)
         return status, None
 
     # Utility functions
@@ -257,14 +278,16 @@ class KvConnectorLeader:
             raise ValueError("Unsupported request - requires mm extra keys")
 
         all_token_ids = request.all_token_ids
+        req_id = request.request_id
 
         # extract the critial aspects of the request that effect how the tokens are hashed
         request = KvbmRequest(
-            request_id=request.request_id,
+            request_id=req_id,
             lora_name=request.lora_request.lora_name()
             if request.lora_request
             else None,
             salt_hash=request.cache_salt,
         )
 
+        self._slot_seq_len[req_id] = len(all_token_ids)
         self._connector.create_slot(request, all_token_ids)
