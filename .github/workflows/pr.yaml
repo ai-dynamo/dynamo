@@ -430,7 +430,9 @@ jobs:
 
   allure-report:
     needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    if: ${{ !cancelled() }}
+    # Disabled: gh-pages branch bloated to ~1GB after 72 commits of Allure reports
+    if: false
+    # if: ${{ !cancelled() }}
     uses: ./.github/workflows/generate-allure-report.yml
     with:
       run_id: ${{ github.run_id }}

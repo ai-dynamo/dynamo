@@ -55,7 +55,10 @@ fn parse_fixture(
         let value: Value = serde_json::from_str(line).unwrap();
         let chunk: NvCreateChatCompletionStreamResponse =
             serde_json::from_value(value.clone()).unwrap();
-        expected_stream_json.push(value);
+        // Round-trip through the typed struct so expected JSON matches current serialization
+        // (upstream async-openai skips None fields that the old fork serialized as null).
+        let normalized = serde_json::to_value(&chunk).unwrap();
+        expected_stream_json.push(normalized);
         input_chunks.push(chunk);
     }
 

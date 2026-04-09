@@ -130,6 +130,13 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
                     "--router-prefill-load-model=aic requires "
                     "--router-track-prefill-tokens"
                 )
+        if self.serve_indexer:
+            if self.router_mode != "kv":
+                raise ValueError("--serve-indexer requires --router-mode=kv")
+            if self.use_remote_indexer:
+                raise ValueError(
+                    "--serve-indexer and --use-remote-indexer are mutually exclusive"
+                )
 
 
 @register_encoder(FrontendConfig)
@@ -192,6 +199,14 @@ class FrontendArgGroup(ArgGroup):
             default=8000,
             help="HTTP port for the engine (u16).",
             arg_type=int,
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--serve-indexer",
+            env_var="DYN_SERVE_INDEXER",
+            default=False,
+            help="Serve this frontend's local KV indexers over the request plane.",
+            dest="serve_indexer",
         )
         add_argument(
             g,

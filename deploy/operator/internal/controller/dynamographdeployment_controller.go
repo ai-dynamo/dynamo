@@ -326,6 +326,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile EPP resources: %w", err)
 	}
 
+	// Reconcile the wait-for-leader ConfigMap for multinode mp deployments
+	err = r.reconcileWaitLeaderConfigMap(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile wait-leader ConfigMap")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile wait-leader ConfigMap: %w", err)
+	}
+
 	// Determine if any service is multinode
 	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
 
@@ -1580,6 +1587,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
 	return nil
+}
+
+// reconcileWaitLeaderConfigMap ensures the wait-for-leader Python script
+// ConfigMap exists for multinode DGDs. The ConfigMap is only mounted by
+// vLLM mp worker pods (via UpdatePodSpec); for other backends it is inert.
+func (r *DynamoGraphDeploymentReconciler) reconcileWaitLeaderConfigMap(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	if !dgd.HasAnyMultinodeService() {
+		return nil
+	}
+
+	cm := dynamo.GenerateWaitLeaderConfigMap(dgd.Name, dgd.Namespace)
+	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+		return cm, false, nil
+	})
+	return err
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
