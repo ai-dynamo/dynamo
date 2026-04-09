@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from dynamo.replay.main import _load_engine_args
+
 from .replay_utils import (
     _assert_basic_report_counts,
     _assert_basic_report_metrics,
@@ -54,6 +56,27 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
         output_tokens=25,
     )
     _assert_basic_report_metrics(report)
+
+
+def test_load_engine_args_npz_short_circuits_planner_import(tmp_path, monkeypatch):
+    planner_profile_data = _write_planner_profile_data_npz(tmp_path)
+
+    def fail_import(name):
+        raise AssertionError(f"unexpected import: {name}")
+
+    monkeypatch.setattr("dynamo.replay.main.importlib.import_module", fail_import)
+
+    args = _load_engine_args(
+        json.dumps(
+            {
+                "block_size": 64,
+                "speedup_ratio": 1000.0,
+                "planner_profile_data": str(planner_profile_data),
+            }
+        )
+    )
+
+    assert args is not None
 
 
 @pytest.mark.timeout(30)

@@ -27,15 +27,17 @@ class PlannerProfileDataResult(Protocol):
 def resolve_planner_profile_data(
     planner_profile_data: Path | None,
 ) -> PlannerProfileDataResult:
+    if planner_profile_data is None:
+        return SimpleNamespace(npz_path=None)
+
+    if planner_profile_data.suffix == ".npz":
+        return SimpleNamespace(npz_path=planner_profile_data)
+
     try:
         module = importlib.import_module("dynamo.mocker.args")
     except ImportError:
-        if planner_profile_data is None:
-            return SimpleNamespace(npz_path=None)
         return SimpleNamespace(
-            npz_path=planner_profile_data
-            if planner_profile_data.suffix == ".npz"
-            else None
+            npz_path=None,
         )
     return module.resolve_planner_profile_data(planner_profile_data)
 
