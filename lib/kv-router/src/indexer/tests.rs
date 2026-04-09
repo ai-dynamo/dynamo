@@ -2094,6 +2094,52 @@ mod local_indexer_tests {
     use super::*;
     use rstest_reuse::apply;
 
+    fn make_local_store_event(event_id: u64, block_hash: u64) -> RouterEvent {
+        RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(block_hash),
+                        tokens_hash: LocalBlockHash(block_hash),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        )
+    }
+
+    fn make_local_remove_event(event_id: u64, block_hashes: &[u64]) -> RouterEvent {
+        RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: block_hashes
+                        .iter()
+                        .copied()
+                        .map(ExternalSequenceBlockHash)
+                        .collect(),
+                }),
+                dp_rank: 0,
+            },
+        )
+    }
+
+    fn make_local_clear_event(event_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Cleared,
+                dp_rank: 0,
+            },
+        )
+    }
+
     #[tokio::test]
     async fn test_local_indexer_slice_within_range() {
         let indexer = make_local_indexer_with_events(&[1, 2, 3, 4, 5]);
@@ -2395,6 +2441,220 @@ mod local_indexer_tests {
             }
             other => panic!("Expected TreeDump, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_coalesces_concurrent_tree_dumps() {
+        let indexer = Arc::new(LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        ));
+        indexer.set_dump_build_delay(Some(Duration::from_millis(50)));
+
+        let first = {
+            let indexer = indexer.clone();
+            tokio::spawn(async move { indexer.get_events_in_id_range(None, None).await })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let second = {
+            let indexer = indexer.clone();
+            tokio::spawn(async move { indexer.get_events_in_id_range(None, None).await })
+        };
+
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+
+        assert!(matches!(first, WorkerKvQueryResponse::TreeDump { .. }));
+        assert!(matches!(second, WorkerKvQueryResponse::TreeDump { .. }));
+        assert_eq!(indexer.dump_build_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_local_indexer_reuses_cached_tree_dump_within_ttl() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let first = indexer.get_events_in_id_range(None, None).await;
+        let second = indexer.get_events_in_id_range(None, None).await;
+
+        assert!(matches!(first, WorkerKvQueryResponse::TreeDump { .. }));
+        assert!(matches!(second, WorkerKvQueryResponse::TreeDump { .. }));
+        assert_eq!(indexer.dump_build_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_local_indexer_expires_cached_tree_dump_lazily() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        time::advance(Duration::from_secs(2)).await;
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_appends_safe_tail_to_cached_dump() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let first = indexer.get_events_in_id_range(None, None).await;
+        assert!(matches!(first, WorkerKvQueryResponse::TreeDump { .. }));
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_remove_event(2, &[101]))
+            .await
+            .unwrap();
+
+        match indexer.get_events_in_id_range(None, None).await {
+            WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id,
+            } => {
+                assert_eq!(last_event_id, 2);
+                assert!(events.iter().any(|event| event.event.event_id == 2));
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
+                );
+            }
+            other => panic!("Expected TreeDump, got: {other:?}"),
+        }
+        assert_eq!(indexer.dump_build_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_invalidates_cache_on_clear() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_clear_event(2))
+            .await
+            .unwrap();
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_invalidates_cache_on_event_gap() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_store_event(3, 303))
+            .await
+            .unwrap();
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_invalidates_cache_on_missing_tail_coverage() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            1,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_store_event(2, 202))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_with_buffer(make_local_store_event(3, 303))
+            .await
+            .unwrap();
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_failed_dump_is_not_cached() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+
+        let dump_tx = indexer.snapshot_event_sender();
+        indexer.shutdown();
+        dump_tx.closed().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        let _ = indexer.get_events_in_id_range(None, None).await;
+
+        assert_eq!(indexer.dump_build_count(), 2);
     }
 
     #[tokio::test]

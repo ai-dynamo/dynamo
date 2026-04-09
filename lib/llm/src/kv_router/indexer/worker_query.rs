@@ -1125,6 +1125,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_initial_restore_tree_dump_with_safe_tail_advances_cursor() {
+        let (client, transport, kv_indexer) = make_test_client("initial-restore-safe-tail").await;
+        let key = (1, 0);
+
+        transport.push_action(
+            key,
+            MockQueryAction {
+                started: None,
+                release: None,
+                response: Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![make_store_event(1, 0, 0), make_store_event(1, 0, 11)],
+                    last_event_id: 11,
+                }),
+            },
+        );
+
+        client.handle_discovered_worker(1, 0).await;
+        wait_for(|| {
+            rank_state_matches(&client, key, |state| {
+                state.last_applied_id() == Some(11) && !state.recovery_inflight
+            })
+        })
+        .await;
+
+        kv_indexer.flush().await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert_eq!(stored_block_hashes(&events), vec![0, 11]);
+        assert_eq!(transport.call_count(), 1);
+    }
+
+    #[tokio::test]
     async fn test_live_event_for_other_worker_is_not_blocked_by_inflight_recovery() {
         let (client, transport, kv_indexer) = make_test_client("live-concurrency").await;
 

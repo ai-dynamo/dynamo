@@ -7,7 +7,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -16,9 +17,77 @@ use super::{
 };
 use crate::protocols::*;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 // -------------------------------------------------
 // Decentralized router: LocalKvIndexer for workers
 // -------------------------------------------------
+
+const RECOVERY_CACHE_TTL: Duration = Duration::from_secs(1);
+
+#[derive(Clone)]
+struct CachedRecoverySnapshot {
+    events: Arc<Vec<RouterEvent>>,
+    last_event_id: u64,
+    last_used_at: Instant,
+}
+
+impl CachedRecoverySnapshot {
+    fn into_response(self) -> WorkerKvQueryResponse {
+        WorkerKvQueryResponse::TreeDump {
+            events: self.events.as_ref().clone(),
+            last_event_id: self.last_event_id,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct InFlightRecoveryBuild {
+    generation: u64,
+    notify: Arc<Notify>,
+}
+
+#[derive(Default)]
+struct RecoveryCacheState {
+    generation: u64,
+    cached: Option<CachedRecoverySnapshot>,
+    building: Option<InFlightRecoveryBuild>,
+}
+
+enum DumpPlan {
+    Immediate(WorkerKvQueryResponse),
+    RequiresDump { last_event_id: u64 },
+}
+
+enum CacheReuseDecision {
+    ReturnExact(CachedRecoverySnapshot),
+    ReturnExtended(WorkerKvQueryResponse),
+    WaitForBuilder(Arc<Notify>),
+    BuildFresh {
+        build: InFlightRecoveryBuild,
+        last_event_id: u64,
+    },
+}
+
+enum TailAppendSafety {
+    ExactHit,
+    Safe {
+        last_event_id: u64,
+        tail: Vec<RouterEvent>,
+    },
+    Invalidate,
+}
+
+enum BuildTaskResult {
+    Response(WorkerKvQueryResponse),
+    StaleGeneration,
+}
+
+struct FreshDumpOutput {
+    response: WorkerKvQueryResponse,
+    snapshot: Option<CachedRecoverySnapshot>,
+}
 
 /// A thin wrapper around KvIndexer that buffers recent events
 /// (e.g. which may be queued by router upon startup)
@@ -28,8 +97,16 @@ pub struct LocalKvIndexer {
     indexer: KvIndexer,
     /// Circular buffer of recent events
     pub(super) event_buffer: Mutex<VecDeque<RouterEvent>>,
+    /// Coordinates single-flight tree dumps and the short-lived cached snapshot.
+    /// This stays separate from `event_buffer` so dump wait/build state can be
+    /// managed on the async path without holding the buffer lock across `.await`.
+    recovery_cache: Arc<AsyncMutex<RecoveryCacheState>>,
     /// Maximum number of events to keep in buffer
     max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
+    #[cfg(test)]
+    dump_build_count: AtomicUsize,
+    #[cfg(test)]
+    dump_build_delay: Mutex<Option<Duration>>,
 }
 
 impl LocalKvIndexer {
@@ -43,7 +120,12 @@ impl LocalKvIndexer {
         Self {
             indexer: KvIndexer::new(token, kv_block_size, metrics),
             event_buffer: Mutex::new(VecDeque::with_capacity(max_buffer_size)),
+            recovery_cache: Arc::new(AsyncMutex::new(RecoveryCacheState::default())),
             max_buffer_size,
+            #[cfg(test)]
+            dump_build_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            dump_build_delay: Mutex::new(None),
         }
     }
 
@@ -51,15 +133,6 @@ impl LocalKvIndexer {
     pub fn get_all_events_in_buffer(&self) -> Vec<RouterEvent> {
         let buffer = self.event_buffer.lock().unwrap();
         buffer.iter().cloned().collect()
-    }
-
-    /// Build a tree dump response with the given `last_event_id`.
-    async fn tree_dump_response(&self, last_event_id: u64) -> WorkerKvQueryResponse {
-        let events = self.dump_events().await.unwrap_or_default();
-        WorkerKvQueryResponse::TreeDump {
-            events,
-            last_event_id,
-        }
     }
 
     /// Query events by ID range, returning events in `[start_id, end_id]` (both inclusive).
@@ -80,103 +153,24 @@ impl LocalKvIndexer {
         start_id: Option<u64>,
         end_id: Option<u64>,
     ) -> WorkerKvQueryResponse {
-        // Validate range if both specified
-        if let (Some(s), Some(e)) = (start_id, end_id)
-            && e < s
-        {
-            tracing::warn!(start_id = s, end_id = e, "Invalid range: end_id < start_id");
-            return WorkerKvQueryResponse::InvalidRange {
-                start_id: s,
-                end_id: e,
-            };
-        }
-
-        // Get buffer state
-        let (first_id, last_id) = {
-            let buffer = self.event_buffer.lock().unwrap();
-            if buffer.is_empty() {
-                (None, None)
-            } else {
-                (
-                    Some(buffer.front().unwrap().event.event_id),
-                    Some(buffer.back().unwrap().event.event_id),
-                )
+        match self.classify_query(start_id, end_id) {
+            DumpPlan::Immediate(response) => response,
+            DumpPlan::RequiresDump { last_event_id } => {
+                self.get_cached_or_fresh_dump(last_event_id).await
             }
-        };
-
-        // If no start_id specified, dump entire tree
-        if start_id.is_none() {
-            tracing::debug!("No start_id specified, dumping entire tree");
-            return self.tree_dump_response(last_id.unwrap_or(0)).await;
         }
-
-        let start_id = start_id.unwrap();
-        let end_id = end_id.unwrap_or_else(|| last_id.unwrap_or(start_id));
-
-        // Check for empty buffer
-        let Some(first_buffered) = first_id else {
-            tracing::debug!("Buffer empty, dumping entire tree");
-            return self.tree_dump_response(0).await;
-        };
-        let last_buffered = last_id.unwrap();
-
-        // Check if request is too new
-        if start_id > last_buffered {
-            tracing::warn!(
-                start_id,
-                last_buffered,
-                "Requested start_id is newer than buffer"
-            );
-            return WorkerKvQueryResponse::TooNew {
-                requested_start: Some(start_id),
-                requested_end: Some(end_id),
-                newest_available: last_buffered,
-            };
-        }
-
-        // Check if start_id is too old (before buffer) -> tree dump
-        if start_id < first_buffered {
-            tracing::info!(
-                start_id,
-                first_buffered,
-                "Requested start_id is older than buffer, dumping entire tree"
-            );
-            return self.tree_dump_response(last_buffered).await;
-        }
-
-        // Serve from buffer
-        let buffer = self.event_buffer.lock().unwrap();
-
-        let start_idx = match buffer.binary_search_by_key(&start_id, |e| e.event.event_id) {
-            Ok(idx) => idx,
-            Err(insertion_point) => insertion_point,
-        };
-
-        // Clamp end_id to buffer bounds
-        let clamped_end_id = end_id.min(last_buffered);
-        let end_idx = match buffer.binary_search_by_key(&clamped_end_id, |e| e.event.event_id) {
-            Ok(idx) => idx + 1, // Include the matched element
-            Err(insertion_point) => insertion_point,
-        };
-
-        let events: Vec<RouterEvent> = buffer
-            .iter()
-            .skip(start_idx)
-            .take(end_idx.saturating_sub(start_idx))
-            .cloned()
-            .collect();
-
-        WorkerKvQueryResponse::Events(events)
     }
 
     /// Record an event in the buffer
-    fn record_event(&self, event: RouterEvent) {
+    fn record_event(&self, event: RouterEvent) -> bool {
         let mut buffer = self.event_buffer.lock().unwrap();
+        let mut detected_gap = false;
 
         // Check that event id is consecutive to last one
         if let Some(last_event) = buffer.back()
             && event.event.event_id != last_event.event.event_id + 1
         {
+            detected_gap = true;
             let expected = last_event.event.event_id + 1;
             tracing::error!(
                 worker_id = event.worker_id,
@@ -198,6 +192,8 @@ impl LocalKvIndexer {
         while buffer.len() > self.max_buffer_size {
             buffer.pop_front();
         }
+
+        detected_gap
     }
 
     /// Apply event with buffering.
@@ -212,7 +208,11 @@ impl LocalKvIndexer {
             .await
             .map_err(|_| KvRouterError::IndexerOffline);
         if result.is_ok() {
-            self.record_event(event);
+            let should_invalidate = matches!(event.event.data, KvCacheEventData::Cleared);
+            let detected_gap = self.record_event(event);
+            if should_invalidate || detected_gap {
+                self.invalidate_recovery_cache().await;
+            }
         }
 
         result
@@ -222,12 +222,346 @@ impl LocalKvIndexer {
     pub fn clear_buffer(&self) {
         let mut buffer = self.event_buffer.lock().unwrap();
         buffer.clear();
+        if let Ok(mut cache_state) = self.recovery_cache.try_lock() {
+            cache_state.cached = None;
+        }
     }
 
     /// Get the current buffer size.
     pub fn buffer_len(&self) -> usize {
         let buffer = self.event_buffer.lock().unwrap();
         buffer.len()
+    }
+
+    fn classify_query(&self, start_id: Option<u64>, end_id: Option<u64>) -> DumpPlan {
+        if let (Some(s), Some(e)) = (start_id, end_id)
+            && e < s
+        {
+            tracing::warn!(start_id = s, end_id = e, "Invalid range: end_id < start_id");
+            return DumpPlan::Immediate(WorkerKvQueryResponse::InvalidRange {
+                start_id: s,
+                end_id: e,
+            });
+        }
+
+        let buffer = self.event_buffer.lock().unwrap();
+        let (first_id, last_id) = if buffer.is_empty() {
+            (None, None)
+        } else {
+            (
+                Some(buffer.front().unwrap().event.event_id),
+                Some(buffer.back().unwrap().event.event_id),
+            )
+        };
+
+        if start_id.is_none() {
+            tracing::debug!("No start_id specified, dumping entire tree");
+            return DumpPlan::RequiresDump {
+                last_event_id: last_id.unwrap_or(0),
+            };
+        }
+
+        let start_id = start_id.expect("checked above");
+        let end_id = end_id.unwrap_or_else(|| last_id.unwrap_or(start_id));
+
+        let Some(first_buffered) = first_id else {
+            tracing::debug!("Buffer empty, dumping entire tree");
+            return DumpPlan::RequiresDump { last_event_id: 0 };
+        };
+        let last_buffered = last_id.expect("buffer non-empty");
+
+        if start_id > last_buffered {
+            tracing::warn!(
+                start_id,
+                last_buffered,
+                "Requested start_id is newer than buffer"
+            );
+            return DumpPlan::Immediate(WorkerKvQueryResponse::TooNew {
+                requested_start: Some(start_id),
+                requested_end: Some(end_id),
+                newest_available: last_buffered,
+            });
+        }
+
+        if start_id < first_buffered {
+            tracing::info!(
+                start_id,
+                first_buffered,
+                "Requested start_id is older than buffer, dumping entire tree"
+            );
+            return DumpPlan::RequiresDump {
+                last_event_id: last_buffered,
+            };
+        }
+
+        let start_idx = match buffer.binary_search_by_key(&start_id, |event| event.event.event_id) {
+            Ok(idx) => idx,
+            Err(insertion_point) => insertion_point,
+        };
+        let clamped_end_id = end_id.min(last_buffered);
+        let end_idx =
+            match buffer.binary_search_by_key(&clamped_end_id, |event| event.event.event_id) {
+                Ok(idx) => idx + 1,
+                Err(insertion_point) => insertion_point,
+            };
+
+        let events = buffer
+            .iter()
+            .skip(start_idx)
+            .take(end_idx.saturating_sub(start_idx))
+            .cloned()
+            .collect();
+
+        DumpPlan::Immediate(WorkerKvQueryResponse::Events(events))
+    }
+
+    async fn get_cached_or_fresh_dump(&self, fallback_last_event_id: u64) -> WorkerKvQueryResponse {
+        loop {
+            let decision = {
+                let mut cache_state = self.recovery_cache.lock().await;
+                self.try_reuse_cached_dump(&mut cache_state, fallback_last_event_id)
+            };
+
+            match decision {
+                CacheReuseDecision::ReturnExact(snapshot) => return snapshot.into_response(),
+                CacheReuseDecision::ReturnExtended(response) => return response,
+                CacheReuseDecision::WaitForBuilder(notify) => notify.notified().await,
+                CacheReuseDecision::BuildFresh {
+                    build,
+                    last_event_id,
+                } => {
+                    let notify = build.notify.clone();
+                    let generation = build.generation;
+                    let build_handle = self.spawn_dump_build(build, last_event_id);
+                    match build_handle.await {
+                        Ok(BuildTaskResult::Response(response)) => return response,
+                        Ok(BuildTaskResult::StaleGeneration) => continue,
+                        Err(error) => {
+                            tracing::warn!("Recovery cache build task failed: {error}");
+                            let mut cache_state = self.recovery_cache.lock().await;
+                            if cache_state
+                                .building
+                                .as_ref()
+                                .is_some_and(|inflight| inflight.generation == generation)
+                            {
+                                cache_state.building = None;
+                            }
+                            drop(cache_state);
+                            notify.notify_waiters();
+                            return WorkerKvQueryResponse::TreeDump {
+                                events: Vec::new(),
+                                last_event_id,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn try_reuse_cached_dump(
+        &self,
+        cache_state: &mut RecoveryCacheState,
+        fallback_last_event_id: u64,
+    ) -> CacheReuseDecision {
+        let now = Instant::now();
+        if cache_state
+            .cached
+            .as_ref()
+            .is_some_and(|cached| now.duration_since(cached.last_used_at) > RECOVERY_CACHE_TTL)
+        {
+            cache_state.cached = None;
+        }
+
+        if let Some(cached) = cache_state.cached.clone() {
+            match self.assess_tail_append_safety(cached.last_event_id) {
+                TailAppendSafety::ExactHit => {
+                    let exact = CachedRecoverySnapshot {
+                        last_used_at: now,
+                        ..cached
+                    };
+                    cache_state.cached = Some(exact.clone());
+                    return CacheReuseDecision::ReturnExact(exact);
+                }
+                TailAppendSafety::Safe {
+                    last_event_id,
+                    tail,
+                } => {
+                    let mut events = cached.events.as_ref().clone();
+                    events.extend(tail);
+                    cache_state.cached = Some(CachedRecoverySnapshot {
+                        events: Arc::new(events.clone()),
+                        last_event_id,
+                        last_used_at: now,
+                    });
+                    return CacheReuseDecision::ReturnExtended(WorkerKvQueryResponse::TreeDump {
+                        events,
+                        last_event_id,
+                    });
+                }
+                TailAppendSafety::Invalidate => {
+                    cache_state.cached = None;
+                }
+            }
+        }
+
+        if let Some(build) = cache_state.building.clone() {
+            return CacheReuseDecision::WaitForBuilder(build.notify);
+        }
+
+        let build = InFlightRecoveryBuild {
+            generation: cache_state.generation,
+            notify: Arc::new(Notify::new()),
+        };
+        let last_event_id = self
+            .current_buffer_last_event_id()
+            .unwrap_or(fallback_last_event_id);
+        cache_state.building = Some(build.clone());
+        CacheReuseDecision::BuildFresh {
+            build,
+            last_event_id,
+        }
+    }
+
+    fn assess_tail_append_safety(&self, cached_last_event_id: u64) -> TailAppendSafety {
+        let buffer = self.event_buffer.lock().unwrap();
+        let Some(first_buffered) = buffer.front().map(|event| event.event.event_id) else {
+            return if cached_last_event_id == 0 {
+                TailAppendSafety::ExactHit
+            } else {
+                TailAppendSafety::Invalidate
+            };
+        };
+        let last_buffered = buffer.back().unwrap().event.event_id;
+
+        if last_buffered <= cached_last_event_id {
+            return TailAppendSafety::ExactHit;
+        }
+
+        let next_event_id = cached_last_event_id.saturating_add(1);
+        if next_event_id < first_buffered {
+            return TailAppendSafety::Invalidate;
+        }
+
+        let start_idx =
+            match buffer.binary_search_by_key(&next_event_id, |event| event.event.event_id) {
+                Ok(idx) => idx,
+                Err(insertion_point) => insertion_point,
+            };
+
+        let mut tail = Vec::with_capacity(buffer.len().saturating_sub(start_idx));
+        for event in buffer.iter().skip(start_idx) {
+            match event.event.data {
+                KvCacheEventData::Stored(_) | KvCacheEventData::Removed(_) => {
+                    tail.push(event.clone());
+                }
+                _ => {
+                    return TailAppendSafety::Invalidate;
+                }
+            }
+        }
+
+        TailAppendSafety::Safe {
+            last_event_id: last_buffered,
+            tail,
+        }
+    }
+
+    fn current_buffer_last_event_id(&self) -> Option<u64> {
+        self.event_buffer
+            .lock()
+            .unwrap()
+            .back()
+            .map(|event| event.event.event_id)
+    }
+
+    fn spawn_dump_build(
+        &self,
+        build: InFlightRecoveryBuild,
+        last_event_id: u64,
+    ) -> tokio::task::JoinHandle<BuildTaskResult> {
+        let indexer = self.indexer.clone();
+        let recovery_cache = self.recovery_cache.clone();
+        #[cfg(test)]
+        let build_delay = *self.dump_build_delay.lock().unwrap();
+        #[cfg(test)]
+        self.dump_build_count.fetch_add(1, Ordering::Relaxed);
+
+        tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(delay) = build_delay {
+                tokio::time::sleep(delay).await;
+            }
+
+            let build_output = Self::build_fresh_dump(indexer, last_event_id).await;
+            let notify = build.notify.clone();
+            let result = {
+                let mut cache_state = recovery_cache.lock().await;
+                let is_current_build = cache_state
+                    .building
+                    .as_ref()
+                    .is_some_and(|inflight| inflight.generation == build.generation);
+                let generation_matches = cache_state.generation == build.generation;
+
+                if is_current_build {
+                    cache_state.building = None;
+                }
+
+                if !is_current_build || !generation_matches {
+                    BuildTaskResult::StaleGeneration
+                } else {
+                    if let Some(snapshot) = build_output.snapshot {
+                        cache_state.cached = Some(snapshot);
+                    }
+                    BuildTaskResult::Response(build_output.response)
+                }
+            };
+
+            notify.notify_waiters();
+            result
+        })
+    }
+
+    async fn build_fresh_dump(indexer: KvIndexer, last_event_id: u64) -> FreshDumpOutput {
+        match indexer.dump_events().await {
+            Ok(events) => FreshDumpOutput {
+                response: WorkerKvQueryResponse::TreeDump {
+                    events: events.clone(),
+                    last_event_id,
+                },
+                snapshot: Some(CachedRecoverySnapshot {
+                    events: Arc::new(events),
+                    last_event_id,
+                    last_used_at: Instant::now(),
+                }),
+            },
+            Err(error) => {
+                tracing::warn!("Failed to build recovery dump: {error}");
+                FreshDumpOutput {
+                    response: WorkerKvQueryResponse::TreeDump {
+                        events: Vec::new(),
+                        last_event_id,
+                    },
+                    snapshot: None,
+                }
+            }
+        }
+    }
+
+    async fn invalidate_recovery_cache(&self) {
+        let mut cache_state = self.recovery_cache.lock().await;
+        cache_state.generation = cache_state.generation.saturating_add(1);
+        cache_state.cached = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dump_build_count(&self) -> usize {
+        self.dump_build_count.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_dump_build_delay(&self, delay: Option<Duration>) {
+        *self.dump_build_delay.lock().unwrap() = delay;
     }
 
     // Delegation methods to underlying KvIndexer
