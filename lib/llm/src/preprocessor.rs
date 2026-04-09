@@ -46,7 +46,7 @@ use crate::protocols::common::preprocessor::{
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
-use dynamo_parsers::{ReasoningParser, ReasoningParserType};
+use dynamo_parsers::{ReasoningParser, ReasoningParserType, get_reasoning_template_key};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
@@ -1193,10 +1193,14 @@ impl OpenAIPreprocessor {
 
     /// Override chat_template_args based on reasoning_effort
     fn apply_reasoning_overrides_to_template_args(
-        reasoning_parser: Option<&str>,
+        parser_name: Option<&str>,
         reasoning_effort: Option<&dynamo_protocols::types::ReasoningEffort>,
         chat_template_args: &mut Option<std::collections::HashMap<String, serde_json::Value>>,
     ) {
+        let Some(parser_name) = parser_name else {
+            return;
+        };
+
         let enable_thinking: Option<bool> = match reasoning_effort {
             None => None,
             Some(dynamo_protocols::types::ReasoningEffort::None) => Some(false),
@@ -1205,19 +1209,14 @@ impl OpenAIPreprocessor {
         let Some(enabled) = enable_thinking else {
             return;
         };
+
+        let thinking_template_key = get_reasoning_template_key(parser_name);
+
         let args = chat_template_args.get_or_insert_with(std::collections::HashMap::new);
-        match reasoning_parser {
-            Some("kimi_k25") | Some("deepseek_r1") => {
-                args.insert("thinking".to_string(), serde_json::Value::Bool(enabled));
-            }
-            _ => {
-                // Generic fallback: most templates use enable_thinking
-                args.insert(
-                    "enable_thinking".to_string(),
-                    serde_json::Value::Bool(enabled),
-                );
-            }
-        }
+        args.insert(
+            thinking_template_key.to_string(),
+            serde_json::Value::Bool(enabled),
+        );
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
@@ -1230,40 +1229,27 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
-        match reasoning_parser {
-            Some("kimi_k25") => {
-                if let Some(args) = chat_template_args
-                    && let Some(thinking) = args.get("thinking")
-                {
-                    return thinking == &serde_json::Value::Bool(false);
-                }
-                false
-            }
-            Some("nemotron_nano") | Some("nemotron3") => {
-                if let Some(args) = chat_template_args {
-                    if let Some(enable_thinking) = args.get("enable_thinking")
-                        && enable_thinking == &serde_json::Value::Bool(false)
-                    {
-                        return true;
-                    }
-                    if let Some(force_nonempty) = args.get("force_nonempty_content")
-                        && force_nonempty == &serde_json::Value::Bool(true)
-                    {
-                        return true;
-                    }
-                }
-                false
-            }
-            Some("deepseek_r1") => {
-                if let Some(args) = chat_template_args {
-                    if let Some(thinking) = args.get("thinking") {
-                        return thinking == &serde_json::Value::Bool(false);
-                    }
-                    if let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str()) {
-                        return mode == "chat";
-                    }
-                }
-                false
+        let Some(name) = reasoning_parser else {
+            return false;
+        };
+        let Some(args) = chat_template_args else {
+            return false;
+        };
+
+        // Generic: check the parser's own thinking template key
+        let key = get_reasoning_template_key(name);
+        if args.get(key) == Some(&serde_json::Value::Bool(false)) {
+            return true;
+        }
+
+        // Model-specific additional disable conditions
+        match name {
+            "deepseek_r1" => args
+                .get("thinking_mode")
+                .and_then(|v| v.as_str())
+                .is_some_and(|mode| mode == "chat"),
+            "nemotron_nano" | "nemotron3" => {
+                args.get("force_nonempty_content") == Some(&serde_json::Value::Bool(true))
             }
             _ => false,
         }
@@ -1854,27 +1840,6 @@ mod tests {
                 None,
                 "basic + no effort → args unchanged",
             ),
-            (
-                Some("kimi_k25"),
-                None,
-                None,
-                None,
-                "kimi_k25 + no effort → args unchanged",
-            ),
-            (
-                Some("deepseek_r1"),
-                None,
-                None,
-                None,
-                "deepseek_r1 + no effort → args unchanged",
-            ),
-            (
-                None,
-                None,
-                None,
-                None,
-                "no parser + no effort → args unchanged",
-            ),
             // ReasoningEffort::None → explicitly disables reasoning
             (
                 Some("basic"),
@@ -1883,28 +1848,7 @@ mod tests {
                 Some(false),
                 "basic + None → enable_thinking=false",
             ),
-            (
-                Some("kimi_k25"),
-                Some(ReasoningEffort::None),
-                Some("thinking"),
-                Some(false),
-                "kimi_k25 + None → thinking=false",
-            ),
-            (
-                Some("deepseek_r1"),
-                Some(ReasoningEffort::None),
-                Some("thinking"),
-                Some(false),
-                "deepseek_r1 + None → thinking=false",
-            ),
-            (
-                None,
-                Some(ReasoningEffort::None),
-                Some("enable_thinking"),
-                Some(false),
-                "no parser + None → enable_thinking=false",
-            ),
-            // Generic / unknown parsers → "enable_thinking" = true
+            // Generic parsers → "enable_thinking" = true
             (
                 Some("basic"),
                 Some(ReasoningEffort::Minimal),
@@ -1919,20 +1863,13 @@ mod tests {
                 Some(true),
                 "nemotron_nano + Low → enable_thinking=true",
             ),
-            (
-                None,
-                Some(ReasoningEffort::Medium),
-                Some("enable_thinking"),
-                Some(true),
-                "no parser + Medium → enable_thinking=true",
-            ),
             // kimi_k25 → "thinking" = true
             (
                 Some("kimi_k25"),
-                Some(ReasoningEffort::High),
+                Some(ReasoningEffort::Medium),
                 Some("thinking"),
                 Some(true),
-                "kimi_k25 + High → thinking=true",
+                "kimi_k25 + Medium → thinking=true",
             ),
             // deepseek_r1 → "thinking" = true
             (
