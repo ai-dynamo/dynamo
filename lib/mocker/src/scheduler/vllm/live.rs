@@ -10,8 +10,8 @@ use tokio_util::sync::CancellationToken;
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, OutputSignal};
 use crate::common::utils::sleep_until_precise;
 use crate::scheduler::{
-    AdmissionEvent, RouterEventVisibility, SchedulerHandle, capture_deferred_kv_publish_sink,
-    publish_deferred_kv_events,
+    AdmissionEvent, ForwardPassSnapshot, RouterEventVisibility, SchedulerHandle,
+    capture_deferred_kv_publish_sink, publish_deferred_kv_events,
 };
 
 use super::core::VllmCore;
@@ -66,6 +66,7 @@ impl Scheduler {
         output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
+        fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
     ) -> Self {
         Self::new_internal(
             args,
@@ -74,6 +75,7 @@ impl Scheduler {
             kv_event_publishers,
             cancellation_token,
             None,
+            fpm_tx,
         )
     }
 
@@ -84,6 +86,7 @@ impl Scheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
     ) -> Self {
         Self::new_internal(
             args,
@@ -92,6 +95,7 @@ impl Scheduler {
             kv_event_publishers,
             cancellation_token,
             admission_tx,
+            fpm_tx,
         )
     }
 
@@ -102,6 +106,7 @@ impl Scheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
     ) -> Self {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
         let total_blocks = args.num_gpu_blocks as u64;
@@ -136,6 +141,11 @@ impl Scheduler {
                 }
                 if pass.router_event_visibility == RouterEventVisibility::PassEnd {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                }
+                if let Some(fpm) = pass.fpm
+                    && let Some(fpm_tx) = &fpm_tx
+                {
+                    let _ = fpm_tx.send(fpm);
                 }
                 flush_output_signals(&mut core, &output_tx, pass.output_signals);
                 publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());

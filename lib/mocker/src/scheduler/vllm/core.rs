@@ -19,8 +19,8 @@ use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::KvManager;
 use crate::replay::TraceCollector;
 use crate::scheduler::{
-    AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, RouterEventVisibility,
-    capture_router_event_sink,
+    AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
+    RouterEventVisibility, capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,12 @@ struct ScheduledWork {
     total_tokens: usize,
     prompt_tokens: usize,
     prefix_tokens: usize,
+    /// Full prompt length, captured at schedule time for FPM variance calculation.
+    prompt_len: usize,
+    /// Total sequence length (prompt + generated) at schedule time, used for
+    /// decode KV context in FPM. Captured here because completed requests are
+    /// removed from state before `compute_fpm` runs.
+    sequence_len: usize,
 }
 
 enum ScheduleOutcome {
@@ -380,6 +386,8 @@ impl VllmCore {
         let (decode_time, output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
         let end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
 
+        let fpm = self.compute_fpm(&scheduled, end_ms / 1000.0);
+
         debug_assert_vllm_scheduler_state(&self.state);
         EnginePassResult {
             end_ms,
@@ -393,6 +401,7 @@ impl VllmCore {
                 .as_ref()
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
+            fpm: Some(fpm),
         }
     }
 
@@ -404,6 +413,82 @@ impl VllmCore {
             self.kv_manager.process(&signal);
         }
         self.state.complete(&uuid);
+    }
+
+    /// Compute a forward pass metrics snapshot from the just-completed pass.
+    ///
+    /// `scheduled` contains the work items that were scheduled in this iteration.
+    /// Per-request metadata (prompt_len, sequence_len) is captured in `ScheduledWork`
+    /// at schedule time, so this method does not depend on `self.state.requests` for
+    /// scheduled requests — completed requests may have already been removed.
+    /// Queue metrics are derived from `self.state.waiting` at the moment of the call.
+    fn compute_fpm(
+        &self,
+        scheduled: &FxHashMap<Uuid, ScheduledWork>,
+        wall_time_secs: f64,
+    ) -> ForwardPassSnapshot {
+        // -- scheduled request metrics --
+        let mut prefill_acc = WelfordAcc::default();
+        let mut decode_acc = WelfordAcc::default();
+        let mut sum_prefill_tokens: u64 = 0;
+        let mut sum_prefill_kv_tokens: u64 = 0;
+
+        for (_uuid, work) in scheduled {
+            if work.prompt_tokens > 0 {
+                // Prefill request: prompt_tokens > 0 means new prompt tokens were computed.
+                sum_prefill_tokens += work.total_tokens as u64;
+                sum_prefill_kv_tokens += work.prefix_tokens as u64;
+                // Variance is over the full prompt length, not the chunk size.
+                prefill_acc.add(work.prompt_len as f64);
+            } else {
+                // Decode request: no new prompt tokens, generating output.
+                // Use sequence_len captured at schedule time (before token emission
+                // may remove completed requests from state).
+                decode_acc.add(work.sequence_len as f64);
+            }
+        }
+
+        // -- queued request metrics (from waiting queue) --
+        let mut queued_prefill_acc = WelfordAcc::default();
+        let mut queued_decode_acc = WelfordAcc::default();
+
+        for uuid in &self.state.waiting {
+            let Some(request) = self.state.requests.get(uuid) else {
+                continue;
+            };
+            match request.status {
+                RequestStatus::Preempted => {
+                    // Preempted decode: was running but got evicted.
+                    let kv_tokens = request.sequence.num_input_tokens()
+                        + request.sequence.generated_tokens();
+                    queued_decode_acc.add(kv_tokens as f64);
+                }
+                RequestStatus::Waiting => {
+                    // New prefill waiting in queue.
+                    queued_prefill_acc.add(request.sequence.num_input_tokens() as f64);
+                }
+                RequestStatus::Running => {
+                    // Shouldn't be in waiting with Running status, skip.
+                }
+            }
+        }
+
+        ForwardPassSnapshot {
+            num_prefill_requests: prefill_acc.count,
+            sum_prefill_tokens,
+            var_prefill_length: prefill_acc.variance(),
+            sum_prefill_kv_tokens,
+            num_decode_requests: decode_acc.count,
+            sum_decode_kv_tokens: decode_acc.sum as u64,
+            var_decode_kv_tokens: decode_acc.variance(),
+            num_queued_prefill: queued_prefill_acc.count,
+            sum_queued_prefill_tokens: queued_prefill_acc.sum as u64,
+            var_queued_prefill_length: queued_prefill_acc.variance(),
+            num_queued_decode: queued_decode_acc.count,
+            sum_queued_decode_kv_tokens: queued_decode_acc.sum as u64,
+            var_queued_decode_kv_tokens: queued_decode_acc.variance(),
+            wall_time_secs,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -539,12 +624,20 @@ impl VllmCore {
 
         let prompt_after = actual_computed_after.min(prompt_len);
         let prompt_tokens = prompt_after.saturating_sub(prompt_before);
+        let sequence_len = self
+            .state
+            .requests
+            .get(&uuid)
+            .map(|r| r.sequence.len())
+            .unwrap_or(0);
         scheduled.insert(
             uuid,
             ScheduledWork {
                 total_tokens: tokens_used,
                 prompt_tokens,
                 prefix_tokens: prompt_before,
+                prompt_len,
+                sequence_len,
             },
         );
         if prompt_tokens > 0 && self.args.worker_type != WorkerType::Decode {
@@ -677,6 +770,35 @@ impl VllmCore {
 
         self.state.compact_running();
         (decode_time, output_signals)
+    }
+}
+
+/// Welford's online algorithm for count / sum / population-variance.
+///
+/// Mirrors the Python `WelfordAccumulator` in `forward_pass_metrics.py`.
+#[derive(Default)]
+struct WelfordAcc {
+    count: u32,
+    sum: f64,
+    mean: f64,
+    m2: f64,
+}
+
+impl WelfordAcc {
+    fn add(&mut self, v: f64) {
+        self.count += 1;
+        self.sum += v;
+        let delta = v - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = v - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    fn variance(&self) -> f64 {
+        if self.count == 0 {
+            return 0.0;
+        }
+        self.m2 / self.count as f64
     }
 }
 
@@ -834,4 +956,59 @@ fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
         return false;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn welford_acc_empty() {
+        let acc = WelfordAcc::default();
+        assert_eq!(acc.count, 0);
+        assert_eq!(acc.sum, 0.0);
+        assert_eq!(acc.variance(), 0.0);
+    }
+
+    #[test]
+    fn welford_acc_single_value() {
+        let mut acc = WelfordAcc::default();
+        acc.add(42.0);
+        assert_eq!(acc.count, 1);
+        assert_eq!(acc.sum, 42.0);
+        assert_eq!(acc.variance(), 0.0);
+    }
+
+    #[test]
+    fn welford_acc_population_variance() {
+        let mut acc = WelfordAcc::default();
+        // Values: 2, 4, 4, 4, 5, 5, 7, 9
+        // Mean = 5, Population variance = 4.0
+        for v in [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0] {
+            acc.add(v);
+        }
+        assert_eq!(acc.count, 8);
+        assert_eq!(acc.sum, 40.0);
+        assert!((acc.variance() - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn welford_acc_matches_python() {
+        // Reproduce the Python WelfordAccumulator behavior:
+        // values = [100, 200, 300], mean = 200,
+        // population variance = ((100-200)^2 + (200-200)^2 + (300-200)^2) / 3
+        //                     = (10000 + 0 + 10000) / 3 = 6666.666...
+        let mut acc = WelfordAcc::default();
+        acc.add(100.0);
+        acc.add(200.0);
+        acc.add(300.0);
+        assert_eq!(acc.count, 3);
+        assert_eq!(acc.sum, 600.0);
+        let expected = 20000.0 / 3.0;
+        assert!(
+            (acc.variance() - expected).abs() < 1e-10,
+            "expected {expected}, got {}",
+            acc.variance()
+        );
+    }
 }

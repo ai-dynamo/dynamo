@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{EngineType, KvEventPublishers, MockEngineArgs, OutputSignal};
-use crate::scheduler::{Scheduler, SchedulerHandle, SglangScheduler};
+use crate::scheduler::{ForwardPassSnapshot, Scheduler, SchedulerHandle, SglangScheduler};
 
 /// Create a scheduler for the configured engine type.
 ///
@@ -19,6 +19,7 @@ pub fn create_engine(
     output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
     kv_event_publishers: KvEventPublishers,
     cancellation_token: Option<CancellationToken>,
+    fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
 ) -> Box<dyn SchedulerHandle> {
     match args.engine_type {
         EngineType::Vllm => Box::new(Scheduler::new(
@@ -27,6 +28,7 @@ pub fn create_engine(
             output_tx,
             kv_event_publishers,
             cancellation_token,
+            fpm_tx,
         )),
         EngineType::Sglang => Box::new(SglangScheduler::new(
             args,
@@ -34,6 +36,7 @@ pub fn create_engine(
             output_tx,
             kv_event_publishers,
             cancellation_token,
+            fpm_tx,
         )),
     }
 }

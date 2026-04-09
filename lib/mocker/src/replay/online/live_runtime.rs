@@ -68,6 +68,7 @@ impl LiveRuntime {
                 router.sink(worker_idx as _),
                 Some(cancel_token.clone()),
                 Some(admission_tx.clone()),
+                None,
             );
             senders.push(scheduler.request_sender());
             schedulers.push(scheduler);
