@@ -173,10 +173,6 @@ pub struct RequestTracker {
     /// When the prefill result arrived at the router (disaggregated, original path only).
     /// Set in execute_prefill() after the first output is received from the prefill worker.
     prefill_complete_time: OnceLock<Instant>,
-
-    /// When the decode request was dispatched (disaggregated, original path only).
-    /// Set in PrefillRouter::generate() just before calling next.generate() for decode.
-    decode_dispatch_time: OnceLock<Instant>,
 }
 
 impl RequestTracker {
@@ -213,7 +209,6 @@ impl RequestTracker {
             detokenize_count: AtomicU64::new(0),
             router_queue_depth: OnceLock::new(),
             prefill_complete_time: OnceLock::new(),
-            decode_dispatch_time: OnceLock::new(),
         }
     }
 
@@ -425,12 +420,6 @@ impl RequestTracker {
         self.prefill_complete_time.set(Instant::now()).is_ok()
     }
 
-    /// Record when the decode request was dispatched from the router.
-    /// Returns true if this was the first call (OnceLock first-write-wins).
-    pub fn record_decode_dispatch(&self) -> bool {
-        self.decode_dispatch_time.set(Instant::now()).is_ok()
-    }
-
     /// Upper-bound estimation of KV cache transfer latency in seconds.
     /// Computed as `decode_first_token_time - prefill_complete_time`, which captures:
     /// router dispatch overhead + network + KV transfer (NIXL) + one decode forward pass.
@@ -594,7 +583,7 @@ pub struct TimingInfo {
     pub router_queue_depth: Option<usize>,
 
     /// Upper-bound estimation of KV cache transfer latency in milliseconds (disaggregated only).
-    /// Measured as first_token_time - prefill_complete_time.
+    /// Measured as decode_first_token_time - prefill_complete_time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_transfer_estimated_latency_ms: Option<f64>,
 }
@@ -816,8 +805,6 @@ mod tests {
         let tracker = RequestTracker::new();
         assert!(tracker.record_prefill_complete()); // first call returns true
         assert!(!tracker.record_prefill_complete()); // second call returns false (OnceLock)
-        assert!(tracker.record_decode_dispatch());
-        assert!(!tracker.record_decode_dispatch());
     }
 
     #[test]
