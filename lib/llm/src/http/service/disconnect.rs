@@ -36,16 +36,7 @@ use std::time::Duration;
 
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
 
-/// Environment variable name for configuring the backend stream inactivity timeout.
-///
-/// When set to a positive integer, `monitor_for_disconnects` will kill the engine context
-/// and drop the inflight guard if no SSE event is received from the backend within this
-/// many seconds. This acts as a circuit breaker for zombie workers that hold a live TCP
-/// connection but never produce output, which would otherwise permanently inflate the
-/// `dynamo_frontend_inflight_requests` gauge.
-///
-/// Set to `0` or leave unset to disable the timeout (default: disabled).
-pub const BACKEND_STREAM_TIMEOUT_ENV: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
+use dynamo_runtime::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS as BACKEND_STREAM_TIMEOUT_ENV;
 
 /// Read the backend stream inactivity timeout from the environment.
 /// Returns `None` if unset or zero (timeout disabled).

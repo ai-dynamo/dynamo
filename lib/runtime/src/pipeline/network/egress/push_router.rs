@@ -59,7 +59,8 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
 /// Reuses `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
 /// as the HTTP-layer safety net in `disconnect.rs`.
 fn response_inactivity_timeout() -> Option<std::time::Duration> {
-    std::env::var("DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS")
+    use crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
+    std::env::var(DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS)
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|&secs| secs > 0)
@@ -152,7 +153,7 @@ where
     fault_detection_enabled: bool,
 
     /// Cached response inactivity timeout. Read once at construction from
-    /// `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` to avoid a syscall per request.
+    /// [`environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
     response_timeout: Option<std::time::Duration>,
 
     /// Shared request occupancy state for tracked routing modes.
