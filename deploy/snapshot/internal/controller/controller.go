@@ -291,7 +291,7 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 
 	annotationStatus := pod.Annotations[snapshotprotocol.RestoreStatusAnnotation]
 	annotationContainerID := pod.Annotations[snapshotprotocol.RestoreContainerIDAnnotation]
-	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusInProgress || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
+	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
 		return
 	}
 
@@ -468,6 +468,12 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 			w.release(restoreAttemptKey)
 		}
 	}()
+	restoreCtx := ctx
+	if timeout := w.config.Restore.RestoreTimeout(); timeout > 0 {
+		var cancel context.CancelFunc
+		restoreCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
 	setRestoreStatus := func(value string) error {
@@ -500,7 +506,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		ContainerName:      containerName,
 		Clientset:          w.clientset,
 	}
-	restoredPID, err := executor.Restore(ctx, w.containerd, log, req)
+	restoredPID, err := executor.Restore(restoreCtx, w.containerd, log, req)
 	if err != nil {
 		log.Error(err, "External restore failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
@@ -527,7 +533,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		}
 		return fmt.Errorf("failed to resolve placeholder host PID for signaling: %w", err)
 	}
-	if err := snapshotruntime.SendSignalViaPIDNamespace(ctx, log, placeholderHostPID, restoredPID, syscall.SIGCONT, "restore complete"); err != nil {
+	if err := snapshotruntime.SendSignalViaPIDNamespace(restoreCtx, log, placeholderHostPID, restoredPID, syscall.SIGCONT, "restore complete"); err != nil {
 		log.Error(err, "Failed to signal restored runtime process")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
 		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
@@ -540,13 +546,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	}
 
 	// Step 3: Wait for the pod to become Ready
-	readyCtx := ctx
-	if timeout := w.config.Restore.RestoreReadyTimeout(); timeout > 0 {
-		var cancel context.CancelFunc
-		readyCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	if err := waitForPodReady(readyCtx, w.clientset, pod.Namespace, pod.Name, containerName); err != nil {
+	if err := waitForPodReady(restoreCtx, w.clientset, pod.Namespace, pod.Name, containerName); err != nil {
 		log.Error(err, "Restore post-signal readiness check failed")
 		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
 		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
