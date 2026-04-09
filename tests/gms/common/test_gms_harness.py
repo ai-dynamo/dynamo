@@ -14,7 +14,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.none,
-    pytest.mark.gpu_0,
+    pytest.mark.gpu_1,
 ]
 
 
