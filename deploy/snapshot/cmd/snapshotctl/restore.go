@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,8 +11,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -155,25 +157,41 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 
 func waitForRestore(ctx context.Context, clientset kubernetes.Interface, namespace string, podName string) (string, error) {
 	var status string
-	if err := wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
-		pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
-		if err != nil {
-			return false, fmt.Errorf("get restore pod %s/%s: %w", namespace, podName, err)
-		}
+	err := watchNamedObject(
+		ctx,
+		podName,
+		&corev1.Pod{},
+		func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
+			return clientset.CoreV1().Pods(namespace).List(ctx, options)
+		},
+		func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+			return clientset.CoreV1().Pods(namespace).Watch(ctx, options)
+		},
+		func(event watch.Event) (bool, error) {
+			if event.Type == watch.Error {
+				return false, apierrors.FromObject(event.Object)
+			}
 
-		status = strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreStatusAnnotation])
-		if status == snapshotprotocol.RestoreStatusCompleted {
-			return true, nil
-		}
-		if status == snapshotprotocol.RestoreStatusFailed {
-			return false, fmt.Errorf("restore pod %s/%s failed", namespace, podName)
-		}
-		if pod.Status.Phase == corev1.PodFailed {
-			return false, fmt.Errorf("restore pod %s/%s entered phase Failed (%s)", namespace, podName, pod.Status.Reason)
-		}
-		return false, nil
-	}); err != nil {
-		if !wait.Interrupted(err) {
+			pod, ok := event.Object.(*corev1.Pod)
+			if !ok {
+				return false, fmt.Errorf("unexpected restore watch object %T", event.Object)
+			}
+
+			status = strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreStatusAnnotation])
+			if status == snapshotprotocol.RestoreStatusCompleted {
+				return true, nil
+			}
+			if status == snapshotprotocol.RestoreStatusFailed {
+				return false, fmt.Errorf("restore pod %s/%s failed", namespace, podName)
+			}
+			if pod.Status.Phase == corev1.PodFailed {
+				return false, fmt.Errorf("restore pod %s/%s entered phase Failed (%s)", namespace, podName, pod.Status.Reason)
+			}
+			return false, nil
+		},
+	)
+	if err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) {
 			return "", err
 		}
 		return "", fmt.Errorf("restore pod %s/%s timed out: status=%q", namespace, podName, status)
