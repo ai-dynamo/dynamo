@@ -57,7 +57,7 @@ class AggregatedHandler(HandlerBase):
                     request,
                     self.encode_client,
                     self._encoder_cache,
-                    context=context,
+                    trace_context=context,
                 )
                 if isinstance(result, list):
                     embeddings = result  # type: ignore[assignment]
