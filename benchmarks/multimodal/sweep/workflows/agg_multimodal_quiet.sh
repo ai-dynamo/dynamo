@@ -6,4 +6,4 @@
 # Used to measure tracing/logging overhead vs the default (info) config.
 
 export DYN_LOG=warn
-exec "$(dirname "$0")/../../../examples/backends/vllm/launch/agg_multimodal.sh" "$@"
+exec "$(dirname "$0")/../../../../examples/backends/vllm/launch/agg_multimodal.sh" "$@"
