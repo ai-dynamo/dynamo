@@ -79,6 +79,26 @@ jobs:
                   json.dump(data, fh)
           " "$WORKFLOW_LABEL" "$RUN_URL"
 
+      - name: Redact secrets from allure results
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          # Defense-in-depth: strip HF tokens that may leak via pytest tracebacks
+          # (--showlocals dumps local variable values into allure statusDetails.trace).
+          # The primary fix is SecretValue wrapper in tests/conftest.py; this catches
+          # any tokens that slip through via other code paths or log attachments.
+          python3 -c "
+          import re, glob
+          pattern = re.compile(r'hf_[A-Za-z0-9]{20,}')
+          for f in glob.glob('allure-results/*-result.json') + glob.glob('allure-results/*-attachment.*'):
+              with open(f, 'r') as fh:
+                  content = fh.read()
+              sanitized = pattern.sub('<HF_TOKEN_REDACTED>', content)
+              if sanitized != content:
+                  with open(f, 'w') as fh:
+                      fh.write(sanitized)
+                  print(f'Redacted token in {f}')
+          "
+
       - name: Install Allure 2 CLI
         if: steps.check-results.outputs.has_results == 'true'
         run: |
