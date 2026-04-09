@@ -217,7 +217,6 @@ STUB_MODULES = [
     "vllm.entrypoints.openai.engine.async_llm_engine",
     "vllm.lora",
     "vllm.lora.request",
-    "vllm.inputs",
     "nixl._api",
     "fsspec.implementations.dirfs",
     "sglang.srt.parser.reasoning_parser",
