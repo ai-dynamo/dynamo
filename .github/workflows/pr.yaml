@@ -52,17 +52,22 @@ jobs:
       - changed-files
       - operator
       - vllm-build
+      - vllm-dev-build
       - vllm-test
       - vllm-multi-gpu-test
       - vllm-copy-to-acr
       - sglang-build
+      - sglang-dev-build
       - sglang-test
       - sglang-multi-gpu-test
       - sglang-copy-to-acr
       - trtllm-build
+      - trtllm-dev-build
       - trtllm-test
       - trtllm-multi-gpu-test
       - trtllm-copy-to-acr
+      - planner-build
+      - planner-test
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -200,6 +205,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      push_image: false
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -228,6 +234,7 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      push_image: false
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -256,6 +263,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      push_image: false
       build_timeout_minutes: 60
     secrets: inherit
 
@@ -543,10 +551,7 @@ jobs:
     needs: [changed-files, deploy-operator, vllm-copy-to-acr, vllm-multi-gpu-test]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.vllm-copy-to-acr.result == 'success' &&
-      (needs.vllm-multi-gpu-test.result == 'success' || needs.vllm-multi-gpu-test.result == 'skipped')
+      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
@@ -562,10 +567,7 @@ jobs:
     needs: [changed-files, deploy-operator, sglang-copy-to-acr, sglang-multi-gpu-test]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.sglang-copy-to-acr.result == 'success' &&
-      (needs.sglang-multi-gpu-test.result == 'success' || needs.sglang-multi-gpu-test.result == 'skipped')
+      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
@@ -581,10 +583,7 @@ jobs:
     needs: [changed-files, deploy-operator, trtllm-copy-to-acr, trtllm-multi-gpu-test]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.trtllm-copy-to-acr.result == 'success' &&
-      (needs.trtllm-multi-gpu-test.result == 'success' || needs.trtllm-multi-gpu-test.result == 'skipped')
+      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
@@ -616,6 +615,7 @@ jobs:
     needs:
       - changed-files
       - operator
+      - planner-test
       - vllm-copy-to-acr
       - vllm-multi-gpu-test
       - sglang-copy-to-acr
