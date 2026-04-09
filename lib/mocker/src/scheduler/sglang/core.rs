@@ -195,6 +195,7 @@ impl SglangCore {
                 .as_ref()
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
+            fpm: None,
         }
     }
 

@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, OutputSignal};
 use crate::common::utils::sleep_until_precise;
 use crate::scheduler::{
-    AdmissionEvent, MockerMetrics, RouterEventVisibility, SchedulerHandle,
+    AdmissionEvent, ForwardPassSnapshot, MockerMetrics, RouterEventVisibility, SchedulerHandle,
     capture_deferred_kv_publish_sink, publish_deferred_kv_events,
 };
 
@@ -39,6 +39,7 @@ impl SglangScheduler {
         output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
+        _fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
     ) -> Self {
         Self::new_internal(
             args,
@@ -57,6 +58,7 @@ impl SglangScheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        _fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
     ) -> Self {
         Self::new_internal(
             args,

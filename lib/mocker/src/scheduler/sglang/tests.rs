@@ -96,7 +96,7 @@ mod scheduling {
 
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
         let scheduler =
-            SglangScheduler::new(args, 0, Some(output_tx), KvEventPublishers::default(), None);
+            SglangScheduler::new(args, 0, Some(output_tx), KvEventPublishers::default(), None, None);
 
         let num_requests = 5;
         let max_output = 3;
@@ -617,7 +617,7 @@ mod router_events {
             .build()
             .unwrap();
         let scheduler =
-            SglangScheduler::new(args, 0, Some(output_tx), KvEventPublishers::default(), None);
+            SglangScheduler::new(args, 0, Some(output_tx), KvEventPublishers::default(), None, None);
 
         assert_sglang_scheduler_completes_all(
             &scheduler,
@@ -835,6 +835,7 @@ mod router_events {
             0,
             Some(output_tx),
             KvEventPublishers::new(Some(sink.clone()), None),
+            None,
             None,
         );
 
