@@ -42,6 +42,8 @@ class PrefillPlanner(BasePlanner):
         if num_workers == 0:
             return None
 
+        self._populate_worker_info_from_discovery()
+
         max_num_batched_tokens = getattr(
             self.prefill_worker_info, "max_num_batched_tokens", None
         )

@@ -177,6 +177,8 @@ class AggPlanner:
                 next_isl = self.planner.isl_predictor.predict_next()
                 next_osl = self.planner.osl_predictor.predict_next()
 
+                self.planner._populate_worker_info_from_discovery()
+
                 max_num_batched_tokens = getattr(
                     self.planner.decode_worker_info, "max_num_batched_tokens", None
                 )
@@ -302,6 +304,10 @@ class AggPlanner:
                     f"({self.regression.num_observations}/{self.regression.min_observations})"
                 )
                 continue
+
+            # Try to backfill max_num_batched_tokens from discovery if the
+            # connector didn't provide it (e.g. VirtualConnector).
+            self.planner._populate_worker_info_from_discovery()
 
             max_num_batched_tokens = getattr(
                 self.planner.decode_worker_info, "max_num_batched_tokens", None
