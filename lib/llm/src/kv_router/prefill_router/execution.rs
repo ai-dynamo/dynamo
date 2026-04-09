@@ -43,11 +43,10 @@ impl PrefillRouter {
             let dp_rank = req
                 .routing
                 .as_ref()
-                .and_then(|r| r.prefill_dp_rank.or(r.dp_rank))
-                .unwrap_or(0);
+                .and_then(|r| r.prefill_dp_rank.or(r.dp_rank));
             tracing::debug!(
                 worker_id = id,
-                dp_rank = dp_rank,
+                dp_rank = ?dp_rank,
                 "Using pre-selected prefill worker for bootstrap"
             );
             (id, dp_rank)
@@ -99,7 +98,7 @@ impl PrefillRouter {
 
         tracing::debug!(
             worker_id = worker_id,
-            dp_rank = dp_rank,
+            dp_rank = ?dp_rank,
             bootstrap_host = %host,
             bootstrap_port = port,
             bootstrap_room = bootstrap_room,
@@ -266,7 +265,7 @@ impl PrefillRouter {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Result<(u64, u32)> {
+    ) -> Result<(u64, Option<u32>)> {
         let prefill_router = self
             .prefill_router
             .get()
@@ -288,7 +287,7 @@ impl PrefillRouter {
                         allowed_worker_ids,
                     )
                     .await?;
-                Ok((worker.worker_id, worker.dp_rank))
+                Ok((worker.worker_id, Some(worker.dp_rank)))
             }
             InnerPrefillRouter::SimpleRouter(r) => {
                 let worker_id = if update_states {
@@ -297,7 +296,7 @@ impl PrefillRouter {
                     r.peek_next_worker()
                 }
                 .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-                Ok((worker_id, 0))
+                Ok((worker_id, None))
             }
         }
     }

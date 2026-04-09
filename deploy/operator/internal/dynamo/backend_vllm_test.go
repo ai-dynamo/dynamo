@@ -560,20 +560,18 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 }
 
 func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
-	backend := &VLLMBackend{}
+	backend := &VLLMBackend{ParentGraphDeploymentName: "test-dgd"}
 
 	tests := []struct {
-		name                    string
-		numberOfNodes           int32
-		role                    Role
-		component               *v1alpha1.DynamoComponentDeploymentSharedSpec
-		multinodeDeployer       MultinodeDeployer
-		initialPodSpec          *corev1.PodSpec
-		expectInitContainer     bool
-		expectedInitName        string
-		expectedInitImage       string
-		expectedInitCommandLen  int
-		expectWaitScriptContent string
+		name                string
+		numberOfNodes       int32
+		role                Role
+		component           *v1alpha1.DynamoComponentDeploymentSharedSpec
+		multinodeDeployer   MultinodeDeployer
+		initialPodSpec      *corev1.PodSpec
+		expectInitContainer bool
+		expectedInitImage   string
+		expectedLeaderHost  string
 	}{
 		{
 			name:          "mp worker with Grove deployer injects init container",
@@ -590,11 +588,9 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					{Name: "main", Image: "vllm:latest"},
 				},
 			},
-			expectInitContainer:     true,
-			expectedInitName:        "wait-for-leader-mp",
-			expectedInitImage:       "vllm:latest",
-			expectedInitCommandLen:  3,
-			expectWaitScriptContent: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:latest",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 		{
 			name:          "mp worker with LWS deployer injects init container",
@@ -611,11 +607,9 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					{Name: "main", Image: "vllm:v2"},
 				},
 			},
-			expectInitContainer:     true,
-			expectedInitName:        "wait-for-leader-mp",
-			expectedInitImage:       "vllm:v2",
-			expectedInitCommandLen:  3,
-			expectWaitScriptContent: "$LWS_LEADER_ADDRESS",
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:v2",
+			expectedLeaderHost:  "$LWS_LEADER_ADDRESS",
 		},
 		{
 			name:          "mp leader does not inject init container",
@@ -682,11 +676,9 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					{Name: "main", Image: "vllm:latest"},
 				},
 			},
-			expectInitContainer:     true,
-			expectedInitName:        "wait-for-leader-mp",
-			expectedInitImage:       "vllm:latest",
-			expectedInitCommandLen:  3,
-			expectWaitScriptContent: "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:latest",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 	}
 
@@ -695,25 +687,64 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
 			initialInitCount := len(tt.initialPodSpec.InitContainers)
+			initialVolCount := len(tt.initialPodSpec.Volumes)
 			backend.UpdatePodSpec(tt.initialPodSpec, tt.numberOfNodes, tt.role, tt.component, "test-service", tt.multinodeDeployer)
 
 			if tt.expectInitContainer {
-				g.Expect(len(tt.initialPodSpec.InitContainers)).To(gomega.Equal(initialInitCount + 1))
+				g.Expect(tt.initialPodSpec.InitContainers).To(gomega.HaveLen(initialInitCount + 1))
+				g.Expect(tt.initialPodSpec.Volumes).To(gomega.HaveLen(initialVolCount + 1))
 
 				injected := tt.initialPodSpec.InitContainers[len(tt.initialPodSpec.InitContainers)-1]
-				g.Expect(injected.Name).To(gomega.Equal(tt.expectedInitName))
+				g.Expect(injected.Name).To(gomega.Equal("wait-for-leader-mp"))
 				g.Expect(injected.Image).To(gomega.Equal(tt.expectedInitImage))
-				g.Expect(len(injected.Command)).To(gomega.Equal(tt.expectedInitCommandLen))
-				g.Expect(injected.Command[0]).To(gomega.Equal("python3"))
-				g.Expect(injected.Command[1]).To(gomega.Equal("-c"))
-				g.Expect(injected.Command[2]).To(gomega.ContainSubstring(tt.expectWaitScriptContent))
-				g.Expect(injected.Command[2]).To(gomega.ContainSubstring("socket.create_connection"))
-				g.Expect(injected.Command[2]).To(gomega.ContainSubstring(commonconsts.VLLMMpMasterPort))
+
+				expectedCmd := fmt.Sprintf(
+					`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 /scripts/wait-for-leader.py`,
+					tt.expectedLeaderHost, commonconsts.VLLMMpMasterPort)
+				g.Expect(injected.Command).To(gomega.Equal([]string{"sh", "-c", expectedCmd}))
+				g.Expect(injected.Env).To(gomega.BeEmpty())
+
+				g.Expect(injected.VolumeMounts).To(gomega.HaveLen(1))
+				g.Expect(injected.VolumeMounts[0].Name).To(gomega.Equal("wait-leader-script"))
+				g.Expect(injected.VolumeMounts[0].MountPath).To(gomega.Equal("/scripts"))
+				g.Expect(injected.VolumeMounts[0].ReadOnly).To(gomega.BeTrue())
+
+				vol := tt.initialPodSpec.Volumes[len(tt.initialPodSpec.Volumes)-1]
+				g.Expect(vol.Name).To(gomega.Equal("wait-leader-script"))
+				g.Expect(vol.ConfigMap).ToNot(gomega.BeNil())
+				g.Expect(vol.ConfigMap.Name).To(gomega.Equal("test-dgd-wait-leader-script"))
 			} else {
-				g.Expect(len(tt.initialPodSpec.InitContainers)).To(gomega.Equal(initialInitCount))
+				g.Expect(tt.initialPodSpec.InitContainers).To(gomega.HaveLen(initialInitCount))
+				g.Expect(tt.initialPodSpec.Volumes).To(gomega.HaveLen(initialVolCount))
 			}
 		})
 	}
+}
+
+func TestGenerateWaitLeaderConfigMap(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	cm := GenerateWaitLeaderConfigMap("my-dgd", "my-ns")
+
+	g.Expect(cm.Name).To(gomega.Equal("my-dgd-wait-leader-script"))
+	g.Expect(cm.Namespace).To(gomega.Equal("my-ns"))
+	g.Expect(cm.Labels).To(gomega.HaveKeyWithValue(commonconsts.KubeLabelDynamoGraphDeploymentName, "my-dgd"))
+	g.Expect(cm.Data).To(gomega.HaveKey("wait-for-leader.py"))
+
+	script := cm.Data["wait-for-leader.py"]
+	g.Expect(script).To(gomega.ContainSubstring(`os.environ["LEADER_HOST"]`))
+	g.Expect(script).To(gomega.ContainSubstring(`os.environ["LEADER_PORT"]`))
+	g.Expect(script).To(gomega.ContainSubstring("leader_pod_is_healthy"))
+	g.Expect(script).To(gomega.ContainSubstring("kubernetes.default.svc"))
+	g.Expect(script).To(gomega.ContainSubstring("fieldSelector=status.podIP="))
+	g.Expect(script).To(gomega.ContainSubstring("deletionTimestamp"))
+	g.Expect(script).To(gomega.ContainSubstring("socket.create_connection"))
+	g.Expect(script).To(gomega.ContainSubstring("time.sleep(5)"))
+}
+
+func TestGetWaitLeaderConfigMapName(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	g.Expect(GetWaitLeaderConfigMapName("foo")).To(gomega.Equal("foo-wait-leader-script"))
 }
 
 func TestShouldUseMpBackend(t *testing.T) {

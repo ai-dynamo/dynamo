@@ -294,6 +294,7 @@ pub struct InflightGuard {
     error_type: ErrorType,
     timer: Instant,
     request_id: String,
+    span: tracing::Span,
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -1031,6 +1032,7 @@ impl InflightGuard {
             error_type: ErrorType::Internal,
             timer,
             request_id,
+            span: tracing::Span::current(),
         }
     }
 
@@ -1066,6 +1068,7 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
+        let _enter = self.span.enter();
         let duration = self.timer.elapsed().as_secs_f64();
         self.metrics.dec_inflight_gauge(&self.model);
         self.metrics.inc_request_counter(
