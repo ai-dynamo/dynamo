@@ -74,6 +74,20 @@ def main():
             model=model,
             errors=[],
         )
+        if args.workflow_type == "pr" and args.pr_number:
+            run_url = (
+                f"https://github.com/{args.repo}/actions/runs/{args.run_id}"
+            )
+            post_pr_comment(
+                args.repo,
+                args.pr_number,
+                [],
+                args.run_id,
+                run_url,
+                run_meta.get("name", ""),
+                github_token,
+            )
+            print(f"Posted PR comment to #{args.pr_number}")
         return
 
     print(f"Found {len(failed_jobs)} failed job(s). Classifying...")
@@ -254,23 +268,30 @@ def post_pr_comment(repo, pr_number, results, run_id, run_url, workflow_name, to
     marker = "<!-- error-classification -->"
     failed_count = len({r["job_id"] for r in results})
 
-    # Build table rows — one row per job (first/primary error only)
-    seen_jobs = set()
-    rows = []
-    for r in results:
-        if r["job_id"] in seen_jobs:
-            continue
-        seen_jobs.add(r["job_id"])
-        category_short = r["category"].replace("_error", "")
-        transient = "Yes" if r["is_transient"] else "No"
-        summary = r["summary"]
-        rows.append(
-            f"| {r['job_name']} | {r['step']} | {category_short} | {summary} | {transient} |"
-        )
+    if not results:
+        body = f"""{marker}
+## CI Error Classification
 
-    table = "\n".join(rows) if rows else "| (no errors detected) | | | | |"
+**{workflow_name}** [#{run_id}]({run_url}) | No failures detected
+"""
+    else:
+        # Build table rows — one row per job (first/primary error only)
+        seen_jobs = set()
+        rows = []
+        for r in results:
+            if r["job_id"] in seen_jobs:
+                continue
+            seen_jobs.add(r["job_id"])
+            category_short = r["category"].replace("_error", "")
+            transient = "Yes" if r["is_transient"] else "No"
+            summary = r["summary"]
+            rows.append(
+                f"| {r['job_name']} | {r['step']} | {category_short} | {summary} | {transient} |"
+            )
 
-    body = f"""{marker}
+        table = "\n".join(rows)
+
+        body = f"""{marker}
 ## CI Error Classification
 
 **{workflow_name}** [#{run_id}]({run_url}) | **Failed Jobs**: {failed_count}
