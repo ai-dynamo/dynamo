@@ -4,15 +4,33 @@
 """
 Scenario events for fault tolerance testing.
 
-Events have:
+Events are actions executed in sequence during a test scenario.
+Each event has:
 - execute(ctx): Perform the action
 - stop(ctx): Optional cleanup, called after all events execute
-- name: Event identifier
+- name: Event identifier (used to reference from other events)
 - results: Optional results stored after execution
+- description: Human-readable description for logging
+
+To create a custom event, subclass Event and implement execute() and description.
 """
 
 import asyncio
 import secrets
+
+__all__ = [
+    "Event",
+    "StartLoad",
+    "StopLoad",
+    "WaitForLoadCompletion",
+    "Wait",
+    "DeletePod",
+    "WaitForRecovery",
+    "RollingUpgrade",
+    "WaitForLogPattern",
+    "TerminateProcess",
+    "RunCommand",
+]
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -395,3 +413,30 @@ class TerminateProcess(Event):
     @property
     def description(self) -> str:
         return f"Terminate '{self.process_name}' in {', '.join(self.services)}"
+
+
+@dataclass
+class RunCommand(Event):
+    """Run an arbitrary command in service pod(s).
+
+    Use for custom fault injection that doesn't have a dedicated event.
+
+    Example:
+        RunCommand(services=["VllmWorker"], command="stress --vm 1 --vm-bytes 2G --timeout 30s")
+    """
+
+    services: list[str]
+    command: str
+    name: str = ""
+    results: dict[str, Any] | None = field(default=None, init=False)
+
+    async def execute(self, ctx: "ScenarioContext") -> None:
+        service_pod_dict = ctx.deployment.get_pods(self.services)
+        for service_name, pods in service_pod_dict.items():
+            for pod in pods:
+                ctx.logger.info(f"Running '{self.command}' in {pod.name}")
+                await asyncio.to_thread(pod.exec, ["sh", "-c", self.command])
+
+    @property
+    def description(self) -> str:
+        return f"Run '{self.command[:50]}' in {', '.join(self.services)}"

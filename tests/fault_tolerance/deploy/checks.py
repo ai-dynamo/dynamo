@@ -4,15 +4,27 @@
 """
 Scenario checks for fault tolerance testing.
 
-Checks have:
+Checks validate results after all events complete. Each check has:
 - validate(ctx): Assert conditions, raises AssertionError on failure
-- description: Human-readable description
+- description: Human-readable description for logging
 - get_load(ctx, name): Helper to find StartLoad events by name
+
+To create a custom check, subclass Check and implement validate() and description.
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+__all__ = [
+    "Check",
+    "ZeroErrors",
+    "MaxErrors",
+    "MinRequests",
+    "WasCancelled",
+    "ServiceLogContains",
+    "ServiceLogNotContains",
+]
 
 if TYPE_CHECKING:
     from tests.fault_tolerance.deploy.events import StartLoad

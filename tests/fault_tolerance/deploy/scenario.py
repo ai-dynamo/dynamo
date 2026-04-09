@@ -19,7 +19,7 @@ Usage:
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 from tests.fault_tolerance.deploy.checks import Check
 from tests.fault_tolerance.deploy.events import Event, StartLoad
@@ -60,17 +60,31 @@ class ScenarioContext:
 
 
 async def run_scenario(
-    request: Any,
     deployment_spec: DeploymentSpec,
     events: list[Event],
     checks: list[Check],
+    namespace: str,
+    image: str | None = None,
+    test_name: str | None = None,
+    skip_service_restart: bool = True,
+    storage_class: str | None = None,
     reports: list[Report] | None = None,
     resource_config: Optional["ResourceMonitorConfig"] = None,
 ) -> ScenarioContext:
     """
     Run a test scenario.
 
-    Extracts common fixtures (namespace, image, skip_service_restart) from request.
+    Args:
+        deployment_spec: What to deploy
+        events: Actions to execute in sequence
+        checks: Validations to run after events complete
+        namespace: Kubernetes namespace
+        image: Container image override (applied to all services)
+        test_name: Test name for logging and output directory
+        skip_service_restart: Skip restarting NATS/etcd
+        storage_class: Storage class for PVC log collection
+        reports: Optional report generators
+        resource_config: Optional resource monitoring configuration
 
     Flow:
     1. Setup deployment
@@ -82,13 +96,8 @@ async def run_scenario(
     7. Generate reports (BEFORE checks, so failures don't block reports)
     8. Run checks (assertions happen last)
     """
-    # Extract common fixtures from request
-    namespace = request.getfixturevalue("namespace")
-    image = request.getfixturevalue("image")
-    skip_service_restart = request.getfixturevalue("skip_service_restart")
-    storage_class = request.getfixturevalue("storage_class")
-    log_dir = request.node.name
-    logger = logging.getLogger(request.node.name)
+    log_dir = test_name or "scenario"
+    logger = logging.getLogger(test_name or "scenario")
 
     reports = reports or []
 
@@ -144,7 +153,6 @@ async def run_scenario(
         log_dir=log_dir,
         deployment_spec=deployment_spec,
         skip_service_restart=skip_service_restart,
-        enable_volume_log_collection=True,
     ) as deployment:
         ctx.deployment = deployment
 

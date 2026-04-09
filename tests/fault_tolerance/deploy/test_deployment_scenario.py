@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -33,47 +33,46 @@ from tests.utils.managed_deployment import DeploymentSpec
 from tests.utils.managed_load import LoadConfig
 
 
-def get_deployment_spec(
-    backend: str, deployment_type: str, worker_replicas: int = 1
-) -> DeploymentSpec:
-    """Get DeploymentSpec for a backend and deployment type.
-
-    Args:
-        backend: "vllm", "trtllm", or "sglang"
-        deployment_type: "agg" or "disagg"
-        worker_replicas: Number of worker replicas (1 or 2)
-
-    Returns:
-        DeploymentSpec configured for the backend/type combination
+@pytest.mark.k8s
+@pytest.mark.e2e
+@pytest.mark.weekly
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+async def test_sanity_10_requests(
+    namespace, image, skip_service_restart, storage_class
+):
     """
-    yaml_path = f"/workspace/examples/backends/{backend}/deploy/{deployment_type}.yaml"
-    spec = DeploymentSpec(yaml_path)
+    Sanity test: deploy, send 10 requests via aiperf, verify all succeed.
 
-    # Set worker replicas based on deployment type
-    if deployment_type == "agg":
-        # Aggregated: single worker service
-        worker_service = {
-            "trtllm": "TRTLLMWorker",
-            "vllm": "VllmWorker",
-            "sglang": "SglangWorker",
-        }[backend]
-        spec.set_service_replicas(worker_service, worker_replicas)
-    else:
-        # Disaggregated: prefill and decode workers
-        prefill_service = {
-            "trtllm": "TRTLLMPrefillWorker",
-            "vllm": "VllmPrefillWorker",
-            "sglang": "SglangPrefillWorker",
-        }[backend]
-        decode_service = {
-            "trtllm": "TRTLLMDecodeWorker",
-            "vllm": "VllmDecodeWorker",
-            "sglang": "SglangDecodeWorker",
-        }[backend]
-        spec.set_service_replicas(prefill_service, worker_replicas)
-        spec.set_service_replicas(decode_service, worker_replicas)
-
-    return spec
+    This is the simplest possible end-to-end test. It validates:
+    - Deployment comes up and becomes ready
+    - aiperf can reach the frontend and get responses
+    - All 10 requests complete without errors
+    - Results are collected from PVC
+    """
+    await run_scenario(
+        deployment_spec=DeploymentSpec.from_backend("trtllm", "agg"),
+        events=[
+            StartLoad(
+                load_config=LoadConfig(
+                    request_count=10,
+                    concurrency=2,
+                    input_tokens_mean=128,
+                    output_tokens_mean=32,
+                )
+            ),
+            WaitForLoadCompletion(),
+        ],
+        checks=[
+            WasCancelled(expected=False),
+            MinRequests(min_count=10),
+            ZeroErrors(),
+        ],
+        namespace=namespace,
+        image=image,
+        test_name="test_sanity_10_requests",
+        skip_service_restart=skip_service_restart,
+        storage_class=storage_class,
+    )
 
 
 @pytest.mark.k8s
@@ -81,7 +80,9 @@ def get_deployment_spec(
 @pytest.mark.e2e
 @pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-async def test_worker_pod_kill_recovery(request):
+async def test_worker_pod_kill_recovery(
+    namespace, image, skip_service_restart, storage_class
+):
     """
     Test worker pod kill with recovery.
 
@@ -93,10 +94,7 @@ async def test_worker_pod_kill_recovery(request):
     5. Assert low errors
     """
     await run_scenario(
-        request=request,
-        deployment_spec=DeploymentSpec(
-            "/workspace/examples/backends/trtllm/deploy/disagg.yaml"
-        ),
+        deployment_spec=DeploymentSpec.from_backend("trtllm", "disagg"),
         events=[
             StartLoad(load_config=LoadConfig(duration_minutes=5, concurrency=8)),
             Wait(duration=30),
@@ -109,6 +107,11 @@ async def test_worker_pod_kill_recovery(request):
             MaxErrors(max_errors=20),
             MinRequests(min_count=50),
         ],
+        namespace=namespace,
+        image=image,
+        test_name="test_worker_pod_kill_recovery",
+        skip_service_restart=skip_service_restart,
+        storage_class=storage_class,
     )
 
 
@@ -116,15 +119,12 @@ async def test_worker_pod_kill_recovery(request):
 @pytest.mark.e2e
 @pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-async def test_smoke_50_requests(request):
+async def test_smoke_50_requests(namespace, image, skip_service_restart, storage_class):
     """
     Basic smoke test: 50 requests with no failures.
     """
     await run_scenario(
-        request=request,
-        deployment_spec=DeploymentSpec(
-            "/workspace/examples/backends/trtllm/deploy/agg.yaml"
-        ),
+        deployment_spec=DeploymentSpec.from_backend("trtllm", "agg"),
         events=[
             StartLoad(load_config=LoadConfig(request_count=50, concurrency=4)),
             WaitForLoadCompletion(),
@@ -134,6 +134,11 @@ async def test_smoke_50_requests(request):
             MinRequests(min_count=50),
             ZeroErrors(),
         ],
+        namespace=namespace,
+        image=image,
+        test_name="test_smoke_50_requests",
+        skip_service_restart=skip_service_restart,
+        storage_class=storage_class,
     )
 
 
@@ -142,7 +147,9 @@ async def test_smoke_50_requests(request):
 @pytest.mark.e2e
 @pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-async def test_rolling_upgrade_zero_errors(request):
+async def test_rolling_upgrade_zero_errors(
+    namespace, image, skip_service_restart, storage_class
+):
     """
     Test rolling upgrade with zero errors.
 
@@ -153,15 +160,11 @@ async def test_rolling_upgrade_zero_errors(request):
     4. Stop load
     5. Assert zero errors
     """
-    deployment_spec = DeploymentSpec(
-        "/workspace/examples/backends/trtllm/deploy/disagg.yaml"
-    )
-    deployment_spec.set_service_replicas("TRTLLMPrefillWorker", 2)
-    deployment_spec.set_service_replicas("TRTLLMDecodeWorker", 2)
+    spec = DeploymentSpec.from_backend("trtllm", "disagg")
+    spec.set_worker_replicas(2)
 
     await run_scenario(
-        request=request,
-        deployment_spec=deployment_spec,
+        deployment_spec=spec,
         events=[
             StartLoad(load_config=LoadConfig(duration_minutes=15, concurrency=8)),
             Wait(duration=30),
@@ -175,6 +178,11 @@ async def test_rolling_upgrade_zero_errors(request):
             ZeroErrors(),
             MinRequests(min_count=100),
         ],
+        namespace=namespace,
+        image=image,
+        test_name="test_rolling_upgrade_zero_errors",
+        skip_service_restart=skip_service_restart,
+        storage_class=storage_class,
     )
 
 
@@ -199,16 +207,26 @@ async def test_rolling_upgrade_zero_errors(request):
     ],
 )
 async def test_engine_process_termination(
-    request, backend, deployment_type, worker_service, process_name, replicas
+    namespace,
+    image,
+    skip_service_restart,
+    storage_class,
+    backend,
+    deployment_type,
+    worker_service,
+    process_name,
+    replicas,
 ):
     """
     Test engine process termination with recovery.
 
     Terminates the main engine process (not the pod) and verifies recovery.
     """
+    spec = DeploymentSpec.from_backend(backend, deployment_type)
+    spec.set_worker_replicas(replicas)
+
     await run_scenario(
-        request=request,
-        deployment_spec=get_deployment_spec(backend, deployment_type, replicas),
+        deployment_spec=spec,
         events=[
             StartLoad(load_config=LoadConfig(duration_minutes=5, concurrency=8)),
             Wait(duration=30),
@@ -221,6 +239,11 @@ async def test_engine_process_termination(
             MaxErrors(max_errors=20),
             MinRequests(min_count=50),
         ],
+        namespace=namespace,
+        image=image,
+        test_name=f"test_engine_process_termination[{backend}-{deployment_type}-{replicas}]",
+        skip_service_restart=skip_service_restart,
+        storage_class=storage_class,
     )
 
 
@@ -244,15 +267,25 @@ async def test_engine_process_termination(
         ("vllm", "disagg", 2),
     ],
 )
-async def test_frontend_process_termination(request, backend, deployment_type, replicas):
+async def test_frontend_process_termination(
+    namespace,
+    image,
+    skip_service_restart,
+    storage_class,
+    backend,
+    deployment_type,
+    replicas,
+):
     """
     Test frontend process termination with recovery.
 
     Terminates the frontend process and verifies recovery.
     """
+    spec = DeploymentSpec.from_backend(backend, deployment_type)
+    spec.set_worker_replicas(replicas)
+
     await run_scenario(
-        request=request,
-        deployment_spec=get_deployment_spec(backend, deployment_type, replicas),
+        deployment_spec=spec,
         events=[
             StartLoad(load_config=LoadConfig(duration_minutes=5, concurrency=8)),
             Wait(duration=30),
@@ -265,4 +298,9 @@ async def test_frontend_process_termination(request, backend, deployment_type, r
             MaxErrors(max_errors=20),
             MinRequests(min_count=50),
         ],
+        namespace=namespace,
+        image=image,
+        test_name=f"test_frontend_process_termination[{backend}-{deployment_type}-{replicas}]",
+        skip_service_restart=skip_service_restart,
+        storage_class=storage_class,
     )
