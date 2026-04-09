@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Prometheus configuration for Intel XPU environments.
+# Used via: docker compose -f deploy/docker-observability.yml -f deploy/docker-observability-xpu.yml up -d
+# Requires xpu_smi_exporter.py running on the host:
+#   python3 deploy/observability/xpu_smi_exporter.py --port 9966
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - "/etc/prometheus/xpu-alert-rules.yml"
+
+scrape_configs:
+  - job_name: 'nats-prometheus-exporter'
+    scrape_interval: 2s
+    static_configs:
+      - targets: ['nats-prometheus-exporter:7777']
+
+  - job_name: 'etcd-server'
+    scrape_interval: 2s
+    static_configs:
+      - targets: ['etcd-server:2379']
+
+  - job_name: 'dynamo-frontend'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+
+  - job_name: 'dynamo-backend'
+    scrape_interval: 6s
+    static_configs:
+      - targets: ['host.docker.internal:8081']
+
+  - job_name: 'kvbm-metrics'
+    scrape_interval: 2s
+    static_configs:
+      - targets: ['host.docker.internal:6880']
+
+  - job_name: 'xpu-smi-exporter'
+    scrape_interval: 5s
+    scrape_timeout: 5s
+    static_configs:
+      - targets: ['host.docker.internal:9966']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'xpu-host'

@@ -88,7 +88,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Returns:
             Dict of sampling parameters for SGLang engine.
         """
-        if self.skip_tokenizer_init:
+        if not self.use_sglang_tokenizer:
             # Token-based request format
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
@@ -99,6 +99,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "top_k": sampling_opts.get("top_k"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
+                **self._get_guided_decoding_params(
+                    sampling_opts.get("guided_decoding")
+                ),
             }
         else:
             # OpenAI request format
@@ -107,6 +110,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "top_p": request.get("top_p"),
                 "top_k": request.get("top_k"),
                 "max_new_tokens": request.get("max_tokens"),
+                **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
 
         return {k: v for k, v in param_mapping.items() if v is not None}
@@ -305,7 +309,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **self._priority_kwargs(priority),
             )
 
-            if self.skip_tokenizer_init:
+            if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(decode, context):
                     yield out
             else:
@@ -337,7 +341,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
-            if self.skip_tokenizer_init:
+            if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(agg, context):
                     yield out
             else:
