@@ -29,7 +29,10 @@ from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, get_gms_lock_mode
-from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
+from gpu_memory_service.integrations.vllm.model_loader import (
+    get_mx_ctx,
+    register_gms_loader,
+)
 from gpu_memory_service.integrations.vllm.patches import (
     apply_shadow_mode_patches,
     patch_memory_snapshot,
@@ -216,12 +219,29 @@ class GMSWorker(Worker):
         NOTE: We do NOT call super().sleep() because it tries to copy GPU buffers to CPU,
               which segfaults on already-unmapped GMS memory.
 
+        When MX is active, deregisters NIXL memory and marks STALE before unmap.
+
         Handles two cases for KV cache:
         1. Normal: KV cache was allocated via GMS, unmap + abort
         2. Shadow: KV cache was skipped at startup, manager has no allocations
            (unmap_all_vas is a no-op, abort disconnects)
         """
         free_bytes_before = torch.cuda.mem_get_info()[0]
+
+        # Deregister MX before GMS unmap (CUDA handles still valid)
+        mx_ctx = get_mx_ctx()
+        if mx_ctx is not None:
+            try:
+                from modelexpress.metadata import _heartbeat_threads, _worker_servers
+
+                hb = _heartbeat_threads.pop(mx_ctx.global_rank, None)
+                if hb is not None:
+                    hb.stop()  # marks STALE on MX server
+                ws = _worker_servers.pop(mx_ctx.device_id, None)
+                if ws is not None:
+                    ws.stop()
+            except Exception as e:
+                logger.warning("[GMS-MX] Deregister failed during sleep: %s", e)
 
         # Unmap GMS weights: synchronize + unmap all VAs + disconnect
         weights_manager = get_gms_client_memory_manager("weights")
@@ -256,6 +276,8 @@ class GMSWorker(Worker):
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
         """vLLM wake implementation with GMS integration.
+
+        When MX is active, re-registers NIXL memory and marks READY after remap.
 
         Handles two cases for KV cache:
         1. Normal: KV cache was allocated at startup, reconnect + reallocate + remap
@@ -295,6 +317,27 @@ class GMSWorker(Worker):
             except ConnectionError as e:
                 logger.error("Fatal: cannot connect to GMS during remap: %s", e)
                 sys.exit(1)
+
+            # Re-register MX after GMS remap (new handles, same VAs)
+            mx_ctx = get_mx_ctx()
+            if mx_ctx is not None:
+                try:
+                    from modelexpress.metadata import publish_metadata_and_ready
+                    from modelexpress.tensor_utils import collect_module_tensors
+
+                    mx_ctx.tensors = collect_module_tensors(self.model_runner.model)
+                    mx_ctx.nixl_manager.register_tensors(mx_ctx.tensors)
+                    publish_metadata_and_ready(
+                        mx_ctx.mx_client,
+                        mx_ctx.nixl_manager,
+                        mx_ctx.tensors,
+                        mx_ctx.global_rank,
+                        mx_ctx.device_id,
+                        mx_ctx.identity,
+                        mx_ctx.worker_id,
+                    )
+                except Exception as e:
+                    logger.warning("[GMS-MX] Re-registration failed during wake: %s", e)
 
         if "kv_cache" in tags:
             # Check if KV cache was skipped at startup (shadow engine mode)
