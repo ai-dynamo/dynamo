@@ -45,7 +45,6 @@ pytestmark = [
     pytest.mark.kvbm,
     pytest.mark.e2e,
     pytest.mark.slow,
-    pytest.mark.none,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
     pytest.mark.skipif(not (HAS_VLLM or HAS_TRTLLM), reason="requires vllm or trtllm"),
