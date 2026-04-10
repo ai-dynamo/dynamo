@@ -274,8 +274,9 @@ def download_models(model_list=None, ignore_weights=False):
     if model_list is None:
         model_list = TEST_MODELS
 
-    # Check for HF_TOKEN in environment — avoid storing the value in a local
-    # variable because pytest --showlocals dumps locals into tracebacks.
+    # Check for HF_TOKEN in environment. snapshot_download() picks it up
+    # automatically via huggingface_hub's token resolution (HF_TOKEN env var →
+    # ~/.cache/huggingface/token), so we don't pass it explicitly.
     if os.environ.get("HF_TOKEN", "").strip():
         logging.info("HF_TOKEN found in environment")
     else:
@@ -312,14 +313,12 @@ def download_models(model_list=None, ignore_weights=False):
                 # Download everything except weight files
                 snapshot_download(
                     repo_id=model_id,
-                    token=os.environ.get("HF_TOKEN", "").strip() or None,
                     ignore_patterns=weight_patterns,
                 )
             else:
                 # Download the full model snapshot (includes all files)
                 snapshot_download(
                     repo_id=model_id,
-                    token=os.environ.get("HF_TOKEN", "").strip() or None,
                 )
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
