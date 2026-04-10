@@ -208,13 +208,13 @@ def _synthetic_ticks(
 
 
 class TestDiagnosticsRecorder:
-    def test_disabled_when_no_interval(self):
-        cfg = _make_config("/tmp", report_interval_hours=None)
+    def test_disabled_when_no_interval(self, tmp_path):
+        cfg = _make_config(str(tmp_path), report_interval_hours=None)
         recorder = DiagnosticsRecorder(config=cfg)
         assert not recorder.enabled
 
-    def test_enabled_when_interval_set(self):
-        cfg = _make_config("/tmp", report_interval_hours=1.0)
+    def test_enabled_when_interval_set(self, tmp_path):
+        cfg = _make_config(str(tmp_path), report_interval_hours=1.0)
         recorder = DiagnosticsRecorder(config=cfg)
         assert recorder.enabled
 
@@ -255,7 +255,8 @@ class TestDiagnosticsRecorder:
             assert os.path.exists(filepath)
             assert filepath.endswith(".html")
 
-            content = open(filepath).read()
+            with open(filepath) as f:
+                content = f.read()
             assert len(content) > 1000
             assert "plotly" in content.lower()
             assert "Worker Counts" in content

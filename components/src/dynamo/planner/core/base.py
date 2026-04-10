@@ -577,31 +577,24 @@ class NativePlannerBase:
         if self.prometheus_port == 0:
             return
         pm = self.prometheus_metrics
+        interval = self.config.throughput_adjustment_interval
 
-        if diag.estimated_ttft_ms is not None:
-            pm.estimated_ttft_ms.set(diag.estimated_ttft_ms)
-        if diag.estimated_itl_ms is not None:
-            pm.estimated_itl_ms.set(diag.estimated_itl_ms)
+        pm.estimated_ttft_ms.set(diag.estimated_ttft_ms or 0)
+        pm.estimated_itl_ms.set(diag.estimated_itl_ms or 0)
 
-        if diag.predicted_num_req is not None:
-            interval = self.config.throughput_adjustment_interval
-            pm.predicted_requests_per_second.set(
-                diag.predicted_num_req / interval if interval > 0 else 0
-            )
-        if diag.predicted_isl is not None:
-            pm.predicted_isl.set(diag.predicted_isl)
-        if diag.predicted_osl is not None:
-            pm.predicted_osl.set(diag.predicted_osl)
+        pm.predicted_requests_per_second.set(
+            diag.predicted_num_req / interval
+            if diag.predicted_num_req is not None and interval > 0
+            else 0
+        )
+        pm.predicted_isl.set(diag.predicted_isl or 0)
+        pm.predicted_osl.set(diag.predicted_osl or 0)
 
-        if diag.engine_rps_prefill is not None:
-            pm.engine_prefill_requests_per_second.set(diag.engine_rps_prefill)
-        if diag.engine_rps_decode is not None:
-            pm.engine_decode_requests_per_second.set(diag.engine_rps_decode)
+        pm.engine_prefill_requests_per_second.set(diag.engine_rps_prefill or 0)
+        pm.engine_decode_requests_per_second.set(diag.engine_rps_decode or 0)
 
-        if diag.load_decision_reason is not None:
-            pm.load_scaling_decision.state(diag.load_decision_reason)
-        if diag.throughput_decision_reason is not None:
-            pm.throughput_scaling_decision.state(diag.throughput_decision_reason)
+        pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
+        pm.throughput_scaling_decision.state(diag.throughput_decision_reason or "unset")
 
     # ------------------------------------------------------------------
     # Main loop
@@ -623,11 +616,17 @@ class NativePlannerBase:
             self._report_diagnostics(effects.diagnostics)
 
             if self._recorder.enabled:
-                self._recorder.record(
-                    tick_input, effects, self._last_metrics, self._cumulative_gpu_hours
-                )
-                if self._recorder.should_generate_report(tick_input.now_s):
-                    self._recorder.generate_report()
+                try:
+                    self._recorder.record(
+                        tick_input,
+                        effects,
+                        self._last_metrics,
+                        self._cumulative_gpu_hours,
+                    )
+                    if self._recorder.should_generate_report(tick_input.now_s):
+                        self._recorder.generate_report()
+                except Exception as e:
+                    logger.error(f"Diagnostics report failed: {e}")
 
             assert effects.next_tick is not None
             next_tick = effects.next_tick

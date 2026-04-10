@@ -6,6 +6,7 @@ from prometheus_client import Enum, Gauge
 PREFIX = "dynamo_planner"
 
 LOAD_DECISION_STATES = [
+    "unset",
     "disabled",
     "no_fpm_data",
     "scaling_in_progress",
@@ -18,6 +19,7 @@ LOAD_DECISION_STATES = [
 ]
 
 THROUGHPUT_DECISION_STATES = [
+    "unset",
     "disabled",
     "no_traffic_data",
     "predict_failed",

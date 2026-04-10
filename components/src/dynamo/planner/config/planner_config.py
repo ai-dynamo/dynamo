@@ -141,6 +141,15 @@ class PlannerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
+        if self.report_interval_hours is not None:
+            if (
+                not math.isfinite(self.report_interval_hours)
+                or self.report_interval_hours <= 0
+            ):
+                raise ValueError(
+                    "report_interval_hours must be a positive finite number or None"
+                )
+
         sqrt = math.isqrt(self.fpm_sample_bucket_size)
         if sqrt * sqrt != self.fpm_sample_bucket_size:
             raise ValueError(
