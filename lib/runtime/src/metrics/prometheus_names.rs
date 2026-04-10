@@ -323,6 +323,9 @@ pub mod frontend_service {
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
 
+        /// Backend accepted the request but stopped responding (response inactivity timeout)
+        pub const RESPONSE_TIMEOUT: &str = "response_timeout";
+
         /// Internal server error (500 and other unexpected errors)
         pub const INTERNAL: &str = "internal";
 
