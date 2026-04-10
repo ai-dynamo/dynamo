@@ -32,16 +32,16 @@ def patch_empty_cache() -> None:
     _original_empty_cache = torch.cuda.empty_cache
 
     def safe_empty_cache() -> None:
-        active_mappings = [
-            mapping
+        active_mapping_count = sum(
+            1
             for manager in get_gms_client_memory_managers()
             for mapping in manager.mappings.values()
             if mapping.handle != 0
-        ]
-        if active_mappings:
+        )
+        if active_mapping_count:
             logger.warning(
                 "[GMS] Skipping torch.cuda.empty_cache() - %d active GMS mappings",
-                len(active_mappings),
+                active_mapping_count,
             )
             return
         _original_empty_cache()
