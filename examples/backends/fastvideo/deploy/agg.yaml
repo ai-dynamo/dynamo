@@ -36,7 +36,9 @@ spec:
         limits:
           gpu: "1"
         requests:
-          gpu: "1"
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
       envs:
         - name: DYN_DISCOVERY_BACKEND
           value: kubernetes

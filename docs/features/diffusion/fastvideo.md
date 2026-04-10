@@ -165,10 +165,6 @@ The script writes logs to:
 | File | Description |
 |---|---|
 | `agg.yaml` | Base aggregated deployment (Frontend + `FastVideoWorker`) |
-| `agg-with-model-cache.yaml` | Aggregated deployment that mounts a shared `model-cache` PVC |
-| `support/model-cache-pvc.yaml` | Optional starting point for a shared `model-cache` PVC |
-| `user-workload/agg.yaml` | Same deployment with `user-workload` tolerations and `imagePullSecrets` |
-| `user-workload/dynamo-platform-values.yaml` | Optional Helm values for clusters with tainted `user-workload` nodes |
 
 > [!NOTE]
 > FastVideo currently has only an aggregated deployment path in Dynamo. The example manifests in this directory do not include a disaggregated FastVideo setup.
@@ -215,24 +211,9 @@ Kubernetes example manifests do not override TorchInductor or Triton cache
 paths; they rely on the backend's default writable cache location, matching the
 other backend deployment examples.
 
-For clusters with tainted `user-workload` nodes and private registry pulls:
-
-1. Set your pull secret name and image in `user-workload/agg.yaml`.
-2. Apply:
-
-```bash
-kubectl apply -f user-workload/agg.yaml -n ${NAMESPACE}
-```
-
-If you want a persistent shared Hugging Face cache instead of per-pod downloads:
-
-```bash
-kubectl apply -f support/model-cache-pvc.yaml -n ${NAMESPACE}
-kubectl apply -f agg-with-model-cache.yaml -n ${NAMESPACE}
-```
-
-For production clusters, tune the PVC spec (size, storage class) and optional pre-download
-workflow using [Model Caching](../../kubernetes/model-caching.md).
+For production clusters, if you want a persistent shared Hugging Face cache
+instead of per-pod downloads, adapt `agg.yaml` using the guidance in
+[Model Caching](../../kubernetes/model-caching.md).
 
 ### Update Image Quickly
 

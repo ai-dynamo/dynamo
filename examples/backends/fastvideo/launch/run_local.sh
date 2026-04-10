@@ -67,7 +67,7 @@ echo ""
 echo "API endpoint: http://localhost:${HTTP_PORT}/v1/videos"
 echo ""
 echo "Example request:"
-echo "curl -s -X POST http://localhost:${HTTP_PORT}/v1/videos -H 'Content-Type: application/json' -d '{\"model\":\"${MODEL}\",\"prompt\":\"A cinematic drone shot over snowy mountains at sunrise\",\"size\":\"1920x1088\",\"seconds\":5,\"nvext\":{\"fps\":24,\"num_frames\":121,\"num_inference_steps\":5,\"guidance_scale\":1.0,\"seed\":10}}' > response.json"
+echo "curl -s -X POST http://localhost:${HTTP_PORT}/v1/videos -H 'Content-Type: application/json' -d '{\"model\":\"${MODEL}\",\"prompt\":\"A cinematic drone shot over snowy mountains at sunrise\",\"size\":\"1920x1088\",\"response_format\":\"b64_json\",\"seconds\":5,\"nvext\":{\"fps\":24,\"num_frames\":121,\"num_inference_steps\":5,\"guidance_scale\":1.0,\"seed\":10}}' > response.json"
 echo ""
 
 wait -n "${worker_pid}" "${frontend_pid}"
