@@ -49,12 +49,12 @@ def register_engine_metrics_callback(
     This registers a callback that is invoked when /metrics is scraped, passing through
     engine-specific metrics alongside Dynamo runtime metrics.
 
-    Automatically injects dynamo_namespace, dynamo_component, dynamo_endpoint, model,
-    and model_name labels when namespace_name and component_name are provided.
+    Automatically injects dynamo_namespace, dynamo_component, dynamo_endpoint, worker_id,
+    model, and model_name labels when namespace_name and component_name are provided.
 
     Label Precedence (highest to lowest):
     1. Existing labels from source metrics - never changed, never overwritten
-    2. Auto-injected labels (dynamo_*, model*) - added by Dynamo automatically
+    2. Auto-injected labels (dynamo_*, worker_id, model*) - added by Dynamo automatically
     3. Custom labels (inject_custom_labels) - user-provided, lowest precedence
 
     If inject_custom_labels contains keys that conflict with auto-injected labels,
@@ -68,8 +68,8 @@ def register_engine_metrics_callback(
         inject_custom_labels: Optional dict of custom labels to inject (e.g. {"lora_adapter": "my-lora"}).
                       Injected at collection time without modifying source metrics.
                       Reserved labels (le, quantile) will raise ValueError.
-                      Auto-labels (dynamo_namespace, dynamo_component, dynamo_endpoint, model,
-                      model_name) are added automatically and should not be in inject_custom_labels.
+                      Auto-labels (dynamo_namespace, dynamo_component, dynamo_endpoint, worker_id,
+                      model, model_name) are added automatically and should not be in inject_custom_labels.
         namespace_name: Explicit namespace name for auto-labels (from config.namespace)
         component_name: Explicit component name for auto-labels (from config.component)
         endpoint_name: Explicit endpoint name for auto-labels (from config.endpoint, defaults to "generate")
@@ -120,6 +120,18 @@ def register_engine_metrics_callback(
             labels.ENDPOINT: endpoint_name_final,  # "dynamo_endpoint"
         }
 
+        # Add worker_id label from connection_id (discovery instance ID).
+        # This provides a stable per-worker identity label so metrics from different
+        # workers serving the same endpoint can be distinguished without relying on
+        # Kubernetes labels. Mirrors Rust auto-label injection in create_metric().
+        try:
+            conn_id = endpoint.connection_id()
+            auto_labels[labels.WORKER_ID] = format(conn_id, "x")
+        except Exception:
+            logging.debug(
+                "Could not obtain connection_id for worker_id label injection"
+            )
+
         # Add model labels if model_name is provided
         if model_name:
             auto_labels[labels.MODEL] = model_name  # "model" (OpenAI standard)
@@ -139,7 +151,7 @@ def register_engine_metrics_callback(
 
         # Merge labels with correct precedence:
         # 1. Existing labels (from source metrics) - never overwritten
-        # 2. Auto-labels (dynamo_*, model*) - injected by Dynamo
+        # 2. Auto-labels (dynamo_*, worker_id, model*) - injected by Dynamo
         # 3. Custom labels (inject_custom_labels) - user-provided, lowest precedence
         # Put custom labels first, then overwrite with auto-labels (higher precedence)
         final_inject_labels = {**final_inject_labels, **auto_labels}

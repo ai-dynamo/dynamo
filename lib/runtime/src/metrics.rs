@@ -232,7 +232,11 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
 
     // Validate that user-provided labels don't conflict with auto-generated labels
     for (key, _) in labels {
-        if *key == labels::NAMESPACE || *key == labels::COMPONENT || *key == labels::ENDPOINT {
+        if *key == labels::NAMESPACE
+            || *key == labels::COMPONENT
+            || *key == labels::ENDPOINT
+            || *key == labels::WORKER_ID
+        {
             return Err(anyhow::anyhow!(
                 "Label '{}' is automatically added by auto-label injection and cannot be manually set",
                 key
@@ -268,6 +272,13 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
                 updated_labels.push((labels::ENDPOINT.to_string(), valid_endpoint));
             }
         }
+    }
+
+    // Auto-inject worker_id label from the hierarchy's connection_id (discovery instance ID).
+    // This provides a stable per-worker identity label so metrics from different workers
+    // serving the same endpoint can be distinguished without relying on Kubernetes labels.
+    if let Some(conn_id) = hierarchy.connection_id() {
+        updated_labels.push((labels::WORKER_ID.to_string(), format!("{:x}", conn_id)));
     }
 
     // Add user labels
@@ -568,6 +579,15 @@ pub trait MetricsHierarchy: Send + Sync {
     // Provided methods - have default implementations
     // ========================================================================
 
+    /// Get the connection ID (discovery instance ID) for this hierarchy level.
+    ///
+    /// Returns `Some(id)` when the hierarchy has access to the DistributedRuntime
+    /// (e.g. Namespace, Component, Endpoint). Used by `create_metric()` to auto-inject
+    /// the `worker_id` label. Returns `None` by default.
+    fn connection_id(&self) -> Option<u64> {
+        None
+    }
+
     /// Access the metrics interface for this hierarchy
     /// This is a provided method that works for any type implementing MetricsHierarchy
     fn metrics(&self) -> Metrics<&Self>
@@ -590,6 +610,10 @@ impl<T: MetricsHierarchy + ?Sized> MetricsHierarchy for &T {
 
     fn get_metrics_registry(&self) -> &MetricsRegistry {
         (**self).get_metrics_registry()
+    }
+
+    fn connection_id(&self) -> Option<u64> {
+        (**self).connection_id()
     }
 }
 
