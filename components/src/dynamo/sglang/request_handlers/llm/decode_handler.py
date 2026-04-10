@@ -93,7 +93,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
 
-            stop_token_ids = stop_conditions.get("stop_token_ids_hidden")
+            _hidden = stop_conditions.get("stop_token_ids_hidden") or []
+            _plain = stop_conditions.get("stop_token_ids") or []
+            _merged = list(set(_hidden).union(_plain))
+            stop_token_ids = _merged if _merged else None
 
             param_mapping = {
                 "temperature": sampling_opts.get("temperature"),
