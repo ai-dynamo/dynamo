@@ -114,12 +114,12 @@ class PlannerPrometheusMetrics:
         )
 
         # -- Diagnostics: engine capacity ---------------------------------
-        self.engine_prefill_requests_per_second = Gauge(
-            f"{PREFIX}_engine_prefill_requests_per_second",
+        self.engine_prefill_capacity_requests_per_second = Gauge(
+            f"{PREFIX}_engine_prefill_capacity_requests_per_second",
             "Single prefill engine capacity under SLA (req/s)",
         )
-        self.engine_decode_requests_per_second = Gauge(
-            f"{PREFIX}_engine_decode_requests_per_second",
+        self.engine_decode_capacity_requests_per_second = Gauge(
+            f"{PREFIX}_engine_decode_capacity_requests_per_second",
             "Single decode engine capacity under SLA (req/s)",
         )
 
