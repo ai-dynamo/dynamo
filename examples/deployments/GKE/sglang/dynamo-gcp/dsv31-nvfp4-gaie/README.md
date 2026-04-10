@@ -131,7 +131,33 @@ helm upgrade --install dynamo-platform \
 
 > **Note**: If Grove/KAI causes scheduling issues, use `--set global.grove.enabled=false` and the default Kubernetes scheduler.
 
-### 3. Model Storage (PVC + HF Token)
+### 3. GKE Inference Gateway
+
+Create the Inference Gateway resource before deploying the HTTPRoute and policies. The `gke-l7-rilb` GatewayClass must already be available on your cluster (enabled by default on GKE clusters with the Gateway API).
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: inference-gateway
+  namespace: dynamo-system
+spec:
+  gatewayClassName: gke-l7-rilb
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+EOF
+```
+
+Verify the Gateway has an IP assigned:
+
+```bash
+kubectl get gateway inference-gateway -n dynamo-system -o jsonpath='{.status.addresses[0].value}'
+```
+
+### 4. Model Storage (PVC + HF Token)
 
 ```bash
 kubectl create secret generic hf-token-secret \
@@ -141,11 +167,13 @@ kubectl create secret generic hf-token-secret \
 
 The PVC `deepseek-v31-model-rwx` (ReadWriteMany) must exist in `dynamo-system` with the NVFP4 model pre-downloaded. The worker will download from [nvidia/DeepSeek-V3.1-NVFP4](https://huggingface.co/nvidia/DeepSeek-V3.1-NVFP4) on first boot if not cached, but this adds significant time to startup.
 
-### 4. Custom EPP Image
+### 5. Custom EPP Image
 
-The GAIE DGDs reference a custom Dynamo EPP image at `REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/dynamo-epp:latest`. You must build and push this image to your own Artifact Registry before deploying. See the parent [README](../README.md) for details.
+The GAIE DGDs reference a custom Dynamo EPP image at `REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/dynamo-epp:latest`. You must build and push this image to your own Artifact Registry before deploying.
 
-### 5. Images
+- The EPP Dockerfile and Makefile live at [`deploy/inference-gateway/epp/`](https://github.com/ai-dynamo/dynamo/tree/main/deploy/inference-gateway/epp) in the Dynamo repo. Follow the build instructions there to produce the `dynamo-epp` image, then tag and push it to your Artifact Registry.
+
+### 6. Images
 
 | Component | Image |
 |---|---|
@@ -160,6 +188,8 @@ The GAIE DGDs reference a custom Dynamo EPP image at `REGION-docker.pkg.dev/PROJ
 ### Option A: Aggregated GAIE (single node, 8 GPUs)
 
 #### 1. Deploy the DynamoGraphDeployment
+
+> **Before applying**: Update the EPP image in `dgd-agg-gaie.yaml` — replace `REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/dynamo-epp:latest` with your actual Artifact Registry path (see [prerequisite 5](#5-custom-epp-image)).
 
 ```bash
 kubectl apply -f dgd-agg-gaie.yaml -n dynamo-system
@@ -193,6 +223,8 @@ kubectl delete dynamographdeployment sglang-dsv31-nvfp4-agg-gaie -n dynamo-syste
 ### Option B: Disaggregated GAIE 1P1D (2 nodes, 16 GPUs)
 
 #### 1. Deploy the DynamoGraphDeployment
+
+> **Before applying**: Update the EPP image in `dgd-disagg-gaie-nvfp4.yaml` — replace `REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/dynamo-epp:latest` with your actual Artifact Registry path (see [prerequisite 5](#5-custom-epp-image)).
 
 ```bash
 kubectl apply -f dgd-disagg-gaie-nvfp4.yaml -n dynamo-system
