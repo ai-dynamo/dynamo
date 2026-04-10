@@ -181,7 +181,7 @@ pub struct TransferContext {
     // LEGACY: Old pinned buffer pool (still used by TransferResources)
     pinned_buffer_pool: Option<SyncPinnedBufferPool>,
 
-    cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<()>)>,
+    cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<Result<(), TransferError>>)>,
     cuda_event_worker: Option<JoinHandle<()>>,
     cancel_token: CancellationToken,
 }
@@ -194,7 +194,7 @@ impl TransferContext {
         config: Option<PoolConfig>,
     ) -> Result<Self, anyhow::Error> {
         let (cuda_event_tx, cuda_event_rx) =
-            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<()>)>();
+            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<Result<(), TransferError>>)>();
 
         let cancel_token = CancellationToken::new();
 
@@ -258,7 +258,7 @@ impl TransferContext {
     }
 
     fn setup_cuda_event_worker(
-        mut cuda_event_rx: mpsc::UnboundedReceiver<(CudaEvent, oneshot::Sender<()>)>,
+        mut cuda_event_rx: mpsc::UnboundedReceiver<(CudaEvent, oneshot::Sender<Result<(), TransferError>>)>,
         cancel_token: CancellationToken,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
@@ -271,10 +271,16 @@ impl TransferContext {
                 loop {
                     tokio::select! {
                         Some((event, tx)) = cuda_event_rx.recv() => {
-                            if let Err(e) = event.synchronize() {
-                                tracing::error!("Error synchronizing CUDA event: {}", e);
-                            }
-                            let _ = tx.send(());
+                            let result = match event.synchronize() {
+                                Ok(()) => Ok(()),
+                                Err(e) => {
+                                    tracing::error!("Error synchronizing CUDA event: {}", e);
+                                    Err(TransferError::ExecutionError(
+                                        format!("CUDA event synchronization failed: {}", e),
+                                    ))
+                                }
+                            };
+                            let _ = tx.send(result);
                         }
                         _ = cancel_token.cancelled() => {
                             break;
@@ -302,7 +308,7 @@ impl TransferContext {
         self.cuda_mem_pool.as_ref()
     }
 
-    pub fn cuda_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+    pub fn cuda_event(&self, tx: oneshot::Sender<Result<(), TransferError>>) -> Result<(), TransferError> {
         let event = self
             .stream
             .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))

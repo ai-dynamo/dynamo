@@ -78,7 +78,7 @@ pub fn write_blocks_to<Source, Destination>(
     dst: &mut [Destination],
     ctx: &Arc<TransferContext>,
     transfer_type: NixlTransfer,
-) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>>
+) -> Result<Box<dyn Future<Output = Result<()>> + Send + Sync + Unpin>>
 where
     Source: BlockDataProvider,
     Source::StorageType: NixlDescriptor,
@@ -86,7 +86,7 @@ where
     Destination::StorageType: NixlDescriptor,
 {
     if src.is_empty() || dst.is_empty() {
-        return Ok(Box::new(std::future::ready(())));
+        return Ok(Box::new(std::future::ready(Ok(()))));
     }
     assert_eq!(src.len(), dst.len());
 
@@ -135,18 +135,20 @@ where
 
             loop {
                 match nixl_agent.get_xfer_status(&xfer_req) {
-                    Ok(XferStatus::Success) => break, // Transfer is complete.
+                    Ok(XferStatus::Success) => return Ok(()),
                     Ok(XferStatus::InProgress) => {
                         tokio::time::sleep(std::time::Duration::from_millis(5)).await
-                    } // Transfer is still in progress.
+                    }
                     Err(e) => {
-                        tracing::error!("Error getting transfer status: {}", e);
-                        break;
+                        return Err(anyhow::anyhow!(
+                            "NIXL transfer status check failed: {}",
+                            e
+                        ));
                     }
                 }
             }
         })))
     } else {
-        Ok(Box::new(std::future::ready(())))
+        Ok(Box::new(std::future::ready(Ok(()))))
     }
 }

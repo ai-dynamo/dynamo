@@ -25,7 +25,7 @@ pub trait LogicalResources: Clone + Send + Sync + 'static + std::fmt::Debug {
         sources: &[RB],
         targets: &mut [WB],
         ctx: Arc<TransferContext>,
-    ) -> Result<oneshot::Receiver<()>, TransferError>
+    ) -> Result<oneshot::Receiver<Result<(), TransferError>>, TransferError>
     where
         RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
         <RB as StorageTypeProvider>::StorageType: NixlDescriptor,

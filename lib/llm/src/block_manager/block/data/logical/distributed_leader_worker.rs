@@ -9,7 +9,7 @@ use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-type TransferRequest = (BlockTransferRequest, oneshot::Sender<()>);
+type TransferRequest = (BlockTransferRequest, oneshot::Sender<Result<(), TransferError>>);
 
 #[derive(Clone)]
 pub struct DistributedLeaderWorkerResources {
@@ -72,7 +72,7 @@ impl DistributedLeaderWorkerResources {
 
                     tokio::spawn(async move {
                         rx.await.unwrap();
-                        let _ = notify_tx.send(());
+                        let _ = notify_tx.send(Ok(()));
                     });
                 }
                 _ = cancel_token.cancelled() => {
@@ -92,7 +92,7 @@ impl LogicalResources for DistributedLeaderWorkerResources {
         targets: &mut [WB],
         // TODO: This transfer context is only ever used in the `Local` locality.
         _ctx: Arc<TransferContext>,
-    ) -> Result<oneshot::Receiver<()>, TransferError>
+    ) -> Result<oneshot::Receiver<Result<(), TransferError>>, TransferError>
     where
         RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
         <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
@@ -106,7 +106,7 @@ impl LogicalResources for DistributedLeaderWorkerResources {
                 "DistributedLeaderWorkerResources::handle_transfer called with both sources and targets empty, skipping transfer"
             );
             let (tx, rx) = oneshot::channel();
-            tx.send(()).unwrap();
+            tx.send(Ok(())).unwrap();
             return Ok(rx);
         }
 

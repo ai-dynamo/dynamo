@@ -16,7 +16,7 @@ use crate::block_manager::{
         Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
         data::local::LocalBlockData,
         locality,
-        transfer::{TransferContext, WriteTo, WriteToStrategy},
+        transfer::{TransferContext, TransferError, WriteTo, WriteToStrategy},
     },
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
     offload::max_transfer_batch_size,
@@ -306,7 +306,7 @@ impl BlockTransferHandler {
         source_pool_list: &Option<LocalBlockDataList<Source>>,
         target_pool_list: &Option<LocalBlockDataList<Target>>,
         request: BlockTransferRequest,
-    ) -> Result<tokio::sync::oneshot::Receiver<()>>
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(), TransferError>>>
     where
         Source: Storage + NixlDescriptor,
         Target: Storage + NixlDescriptor,
@@ -387,7 +387,9 @@ impl BlockTransferHandler {
             }
         }?;
 
-        notify.await?;
+        notify
+            .await
+            .map_err(|_| anyhow::anyhow!("Transfer notification channel dropped"))??;
         Ok(())
     }
 
@@ -459,7 +461,9 @@ impl BlockTransferHandler {
                     return Err(anyhow::anyhow!("Invalid transfer type."));
                 }
             }?;
-            notify.await?;
+            notify
+                .await
+                .map_err(|_| anyhow::anyhow!("Transfer notification channel dropped"))??;
         }
 
         // Broadcast Device blocks if needed (all ranks participate)
