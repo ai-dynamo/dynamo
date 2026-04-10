@@ -57,8 +57,9 @@ runs:
 
         if [[ -n "${BASE_BRANCH:-}" ]]; then
           echo "Fetching base branch: $BASE_BRANCH"
-          git fetch --no-tags --depth=1 origin "$BASE_BRANCH"
-          echo "base_sha=$(git rev-parse "origin/$BASE_BRANCH")" >> $GITHUB_OUTPUT
+          git fetch --no-tags --depth=1 origin \
+            "refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+          echo "base_sha=$(git rev-parse "refs/remotes/origin/$BASE_BRANCH")" >> "$GITHUB_OUTPUT"
         else
           echo "base_sha=" >> $GITHUB_OUTPUT
         fi
