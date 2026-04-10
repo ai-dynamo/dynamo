@@ -6,10 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
-import importlib.metadata
-from functools import lru_cache
-from pathlib import Path
 from typing import Optional, Sequence
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -32,6 +28,16 @@ DEFAULT_NUM_FRAMES = 121
 DEFAULT_NUM_INFERENCE_STEPS = 5
 DEFAULT_GUIDANCE_SCALE = 1.0
 DEFAULT_SEED = 10
+ATTENTION_BACKEND_CHOICES = (
+    "FLASH_ATTN",
+    "TORCH_SDPA",
+    "SAGE_ATTN",
+    "SAGE_ATTN_THREE",
+    "VIDEO_SPARSE_ATTN",
+    "VMOBA_ATTN",
+    "SLA_ATTN",
+    "SAGE_SLA_ATTN",
+)
 TORCH_COMPILE_MODE_CHOICES = (
     "default",
     "reduce-overhead",
@@ -40,45 +46,9 @@ TORCH_COMPILE_MODE_CHOICES = (
 )
 
 
-@lru_cache(maxsize=1)
 def get_attention_backend_choices() -> tuple[str, ...]:
-    """Return FastVideo attention backend names from FastVideo's enum.
-
-    We intentionally read the installed FastVideo source lazily instead of
-    importing ``fastvideo`` here. Importing the package during parser setup
-    pulls in a large runtime dependency graph and can also collide with this
-    repository's own ``dynamo.fastvideo`` package name in some test/tooling
-    paths. Reading the enum definition keeps the parser lightweight while still
-    using FastVideo as the source of truth.
-    """
-    interface_path = Path(
-        str(
-            importlib.metadata.distribution("fastvideo").locate_file(
-                "fastvideo/platforms/interface.py"
-            )
-        )
-    )
-    module_ast = ast.parse(interface_path.read_text(encoding="utf-8"))
-
-    for node in module_ast.body:
-        if not isinstance(node, ast.ClassDef) or node.name != "AttentionBackendEnum":
-            continue
-
-        backend_names: list[str] = []
-        for statement in node.body:
-            if not isinstance(statement, ast.Assign):
-                continue
-            for target in statement.targets:
-                if isinstance(target, ast.Name) and target.id != "NO_ATTENTION":
-                    backend_names.append(target.id)
-
-        if backend_names:
-            return tuple(backend_names)
-        break
-
-    raise RuntimeError(
-        "Could not determine FastVideo attention backend choices from AttentionBackendEnum"
-    )
+    """Return the pinned FastVideo attention backends supported by Dynamo."""
+    return ATTENTION_BACKEND_CHOICES
 
 
 class FastVideoArgGroup(ArgGroup):

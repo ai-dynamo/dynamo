@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from dynamo.fastvideo.args import parse_fastvideo_args
+from dynamo.fastvideo.args import get_attention_backend_choices, parse_fastvideo_args
 from dynamo.fastvideo.backend import FastVideoHandler, register_fastvideo_model
 from dynamo.fastvideo.health_check import FastVideoHealthCheckPayload
 from dynamo.llm import ModelInput, ModelType
@@ -114,6 +114,19 @@ def test_parse_fastvideo_args_applies_explicit_overrides():
     assert config.component == "backend"
     assert config.endpoint == "generate"
     assert config.output_modalities == ["video"]
+
+
+def test_fastvideo_attention_backend_choices_are_hardcoded():
+    assert get_attention_backend_choices() == (
+        "FLASH_ATTN",
+        "TORCH_SDPA",
+        "SAGE_ATTN",
+        "SAGE_ATTN_THREE",
+        "VIDEO_SPARSE_ATTN",
+        "VMOBA_ATTN",
+        "SLA_ATTN",
+        "SAGE_SLA_ATTN",
+    )
 
 
 def test_parse_fastvideo_args_keeps_generator_args_for_backend_validation(tmp_path):
