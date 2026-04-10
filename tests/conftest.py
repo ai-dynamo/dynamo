@@ -25,6 +25,7 @@ from tests.utils.test_output import resolve_test_output_path
 
 _logger = logging.getLogger(__name__)
 
+
 # Typed stash keys for GPU-parallel config (avoids setting unknown attrs on Config)
 _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
 _gpu_indices_key: pytest.StashKey[list[int] | None] = pytest.StashKey()
@@ -273,9 +274,10 @@ def download_models(model_list=None, ignore_weights=False):
     if model_list is None:
         model_list = TEST_MODELS
 
-    # Check for HF_TOKEN in environment
-    hf_token = os.environ.get("HF_TOKEN", "").strip() or None
-    if hf_token:
+    # Check for HF_TOKEN in environment. snapshot_download() picks it up
+    # automatically via huggingface_hub's token resolution (HF_TOKEN env var →
+    # ~/.cache/huggingface/token), so we don't pass it explicitly.
+    if os.environ.get("HF_TOKEN", "").strip():
         logging.info("HF_TOKEN found in environment")
     else:
         logging.warning(
@@ -311,14 +313,12 @@ def download_models(model_list=None, ignore_weights=False):
                 # Download everything except weight files
                 snapshot_download(
                     repo_id=model_id,
-                    token=hf_token,
                     ignore_patterns=weight_patterns,
                 )
             else:
                 # Download the full model snapshot (includes all files)
                 snapshot_download(
                     repo_id=model_id,
-                    token=hf_token,
                 )
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
