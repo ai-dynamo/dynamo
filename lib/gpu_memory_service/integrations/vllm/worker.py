@@ -37,7 +37,14 @@ from gpu_memory_service.integrations.vllm.patches import (
     apply_shadow_mode_patches,
     patch_memory_snapshot,
 )
-from gpu_memory_service.integrations.vllm.utils import is_shadow_mode
+from gpu_memory_service.integrations.vllm.utils import (
+    configure_gms_logging,
+    is_shadow_mode,
+)
+
+# Configure logging before anything else — vLLM only sets up "vllm" loggers,
+# so gpu_memory_service and modelexpress logs would be silently dropped.
+configure_gms_logging()
 
 logger = logging.getLogger(__name__)
 

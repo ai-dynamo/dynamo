@@ -8,6 +8,42 @@ import os
 
 logger = logging.getLogger(__name__)
 
+_logging_configured = False
+
+
+def configure_gms_logging() -> None:
+    """Attach a handler to gpu_memory_service and modelexpress loggers.
+
+    vLLM only configures the ``vllm`` logger. Without this, all
+    ``gpu_memory_service.*`` and ``modelexpress.*`` log messages are
+    silently dropped inside the EngineCore worker process.
+
+    Reuses vLLM's handler and formatter when available so that GMS/MX
+    log lines match the surrounding vLLM output style.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    _logging_configured = True
+
+    vllm_logger = logging.getLogger("vllm")
+    if vllm_logger.handlers:
+        handler = vllm_logger.handlers[0]
+    else:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter(
+                "%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s",
+                datefmt="%m-%d %H:%M:%S",
+            )
+        )
+
+    for name in ("gpu_memory_service", "modelexpress"):
+        lg = logging.getLogger(name)
+        if not lg.handlers:
+            lg.addHandler(handler)
+            lg.setLevel(logging.INFO)
+
 
 def is_shadow_mode() -> bool:
     """True when DYN_GMS_SHADOW_MODE=1 (set by main.py at startup)."""
