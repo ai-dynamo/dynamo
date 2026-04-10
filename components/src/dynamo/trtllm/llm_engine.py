@@ -15,18 +15,17 @@ import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from tensorrt_llm.llmapi import KvCacheConfig, SchedulerConfig
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
+from torch.cuda import device_count
 
 from dynamo._core import Context
 from dynamo.common.backend.engine import EngineConfig, LLMEngine
 from dynamo.common.backend.worker import WorkerConfig
-from dynamo.common.engine_utils import (
-    build_completion_usage,
-    normalize_finish_reason,
-    normalize_request_format,
-)
-from dynamo.trtllm.engine import TensorRTLLMEngine
+from dynamo.llm import ModelInput
+from dynamo.trtllm.args import parse_args
+from dynamo.trtllm.engine import Backend, TensorRTLLMEngine
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +54,6 @@ class TrtllmLLMEngine(LLMEngine):
 
     @classmethod
     async def from_args(cls, argv: list[str] | None = None) -> TrtllmLLMEngine:
-        from tensorrt_llm.llmapi import KvCacheConfig, SchedulerConfig
-        from torch.cuda import device_count
-
-        from dynamo.llm import ModelInput
-        from dynamo.trtllm.args import parse_args
-        from dynamo.trtllm.engine import Backend
-
         config = parse_args(argv)
 
         gpus_per_node = config.gpus_per_node or device_count()
@@ -117,8 +109,6 @@ class TrtllmLLMEngine(LLMEngine):
     ) -> AsyncGenerator[dict, None]:
         assert self._engine is not None, "Engine not initialized"
 
-        normalize_request_format(request)
-
         token_ids = request.get("token_ids", [])
         sampling_params = self._override_sampling_params(
             self._default_sampling_params, request
@@ -156,14 +146,17 @@ class TrtllmLLMEngine(LLMEngine):
                 out: dict = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                 if output.finish_reason:
-                    out["finish_reason"] = normalize_finish_reason(output.finish_reason)
+                    out["finish_reason"] = str(output.finish_reason)
 
                 if out.get("finish_reason") or res.finished:
                     if not out.get("finish_reason"):
                         out["finish_reason"] = "unknown"
-                    out["completion_usage"] = build_completion_usage(
-                        len(token_ids), next_total
-                    )
+                    prompt_tokens = len(token_ids)
+                    out["completion_usage"] = {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": next_total,
+                        "total_tokens": prompt_tokens + next_total,
+                    }
 
                 yield out
                 num_output_tokens_so_far = next_total

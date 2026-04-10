@@ -8,7 +8,6 @@ import asyncio
 from collections.abc import AsyncGenerator
 
 from dynamo._core import Context
-from dynamo.common.engine_utils import build_completion_usage
 
 from .engine import EngineConfig, LLMEngine
 from .worker import WorkerConfig
@@ -89,7 +88,11 @@ class SampleLLMEngine(LLMEngine):
                 yield {
                     "token_ids": [],
                     "finish_reason": "cancelled",
-                    "completion_usage": build_completion_usage(prompt_len, i),
+                    "completion_usage": {
+                        "prompt_tokens": prompt_len,
+                        "completion_tokens": i,
+                        "total_tokens": prompt_len + i,
+                    },
                 }
                 break
             await asyncio.sleep(self.delay)
@@ -97,7 +100,11 @@ class SampleLLMEngine(LLMEngine):
             out: dict = {"token_ids": [token_id]}
             if i == max_new - 1:
                 out["finish_reason"] = "length"
-                out["completion_usage"] = build_completion_usage(prompt_len, max_new)
+                out["completion_usage"] = {
+                    "prompt_tokens": prompt_len,
+                    "completion_tokens": max_new,
+                    "total_tokens": prompt_len + max_new,
+                }
             yield out
 
     async def cleanup(self) -> None:

@@ -21,7 +21,8 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from dynamo._core import Context
 from dynamo.common.backend.engine import EngineConfig, LLMEngine
 from dynamo.common.backend.worker import WorkerConfig
-from dynamo.common.engine_utils import build_completion_usage, normalize_finish_reason
+from dynamo.llm import ModelInput
+from dynamo.vllm.args import parse_args
 
 from .handlers import build_sampling_params
 
@@ -39,9 +40,6 @@ class VllmLLMEngine(LLMEngine):
 
     @classmethod
     async def from_args(cls, argv: list[str] | None = None) -> VllmLLMEngine:
-        from dynamo.llm import ModelInput
-        from dynamo.vllm.args import parse_args
-
         config = parse_args()
 
         if not config.served_model_name:
@@ -130,11 +128,13 @@ class VllmLLMEngine(LLMEngine):
             out: dict = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
             if output.finish_reason:
-                out["finish_reason"] = normalize_finish_reason(output.finish_reason)
+                out["finish_reason"] = str(output.finish_reason)
                 prompt_tokens = len(res.prompt_token_ids) if res.prompt_token_ids else 0
-                out["completion_usage"] = build_completion_usage(
-                    prompt_tokens, next_total
-                )
+                out["completion_usage"] = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": next_total,
+                    "total_tokens": prompt_tokens + next_total,
+                }
 
             yield out
             num_output_tokens_so_far = next_total

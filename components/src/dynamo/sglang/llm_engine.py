@@ -19,8 +19,9 @@ import sglang as sgl
 from dynamo._core import Context
 from dynamo.common.backend.engine import EngineConfig, LLMEngine
 from dynamo.common.backend.worker import WorkerConfig
-from dynamo.common.engine_utils import build_completion_usage, normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.llm import ModelInput
+from dynamo.sglang.args import parse_args
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +35,6 @@ class SglangLLMEngine(LLMEngine):
 
     @classmethod
     async def from_args(cls, argv: list[str] | None = None) -> SglangLLMEngine:
-        from dynamo.llm import ModelInput
-        from dynamo.sglang.args import parse_args
-
         config = await parse_args(argv if argv is not None else sys.argv[1:])
         server_args = config.server_args
         dynamo_args = config.dynamo_args
@@ -96,13 +94,16 @@ class SglangLLMEngine(LLMEngine):
             output_ids = res.get("output_ids", [])
             if not output_ids and not finish_reason:
                 if context.is_stopped():
+                    prompt_tokens = meta_info.get("prompt_tokens", 0)
+                    completion_tokens = meta_info.get("completion_tokens", 0)
                     yield {
                         "token_ids": [],
-                        "finish_reason": normalize_finish_reason("cancelled"),
-                        "completion_usage": build_completion_usage(
-                            meta_info.get("prompt_tokens", 0),
-                            meta_info.get("completion_tokens", 0),
-                        ),
+                        "finish_reason": "cancelled",
+                        "completion_usage": {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
+                        },
                     }
                     break
                 continue
@@ -110,20 +111,26 @@ class SglangLLMEngine(LLMEngine):
             out["token_ids"] = output_ids
 
             if finish_reason:
-                out["finish_reason"] = normalize_finish_reason(finish_reason["type"])
-                out["completion_usage"] = build_completion_usage(
-                    meta_info["prompt_tokens"],
-                    meta_info["completion_tokens"],
-                )
+                prompt_tokens = meta_info["prompt_tokens"]
+                completion_tokens = meta_info["completion_tokens"]
+                out["finish_reason"] = finish_reason["type"]
+                out["completion_usage"] = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                }
 
             if context.is_stopped():
+                prompt_tokens = meta_info.get("prompt_tokens", 0)
+                completion_tokens = meta_info.get("completion_tokens", 0)
                 yield {
                     "token_ids": output_ids,
-                    "finish_reason": normalize_finish_reason("cancelled"),
-                    "completion_usage": build_completion_usage(
-                        meta_info.get("prompt_tokens", 0),
-                        meta_info.get("completion_tokens", 0),
-                    ),
+                    "finish_reason": "cancelled",
+                    "completion_usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
                 }
                 break
 

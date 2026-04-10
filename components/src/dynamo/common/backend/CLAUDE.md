@@ -26,8 +26,8 @@ from_args(argv)  ->  init()  ->  generate() / abort()  ->  cleanup()
   The entire reason this module exists is to eliminate the code duplication
   that grew across vllm, sglang, and trtllm. Before writing any logic inside
   a `LLMEngine` subclass, check whether the same logic already exists in
-  another engine. If it does, extract it into `common/engine_utils/` or
-  `Worker` and have all engines call the shared version.
+  another engine. If it does, extract it into `Worker` or a shared
+  utility and have all engines call the shared version.
   When adding new features, always ask: "is this engine-specific or common?"
   If two or more engines would need the same code, it is common.
 
@@ -51,7 +51,7 @@ from_args(argv)  ->  init()  ->  generate() / abort()  ->  cleanup()
   stays clean.
 
 - **No hooks.** If behavior needs to be shared across engines, put it in
-  `Worker` or `common/engine_utils/`, not in a hook system.
+  `Worker` or a shared utility, not in a hook system.
 
 - **Parallel path.** The existing `main.py` / `worker_factory.py` / `init_llm.py`
   entry points remain untouched. The `unified_main.py` files are a separate
@@ -65,8 +65,8 @@ Every `LLMEngine.generate()` must yield dicts with:
 - `finish_reason: str` -- present only on the final chunk
 - `completion_usage: dict` -- present only on the final chunk
 
-Use `build_completion_usage()` and `normalize_finish_reason()` from
-`dynamo.common.engine_utils` instead of building these inline.
+Build the `completion_usage` dict inline. Finish reason normalization
+(e.g. `"abort"` → `"cancelled"`) is handled by the Rust layer.
 
 ## Adding a New Engine
 
@@ -110,5 +110,3 @@ Standardize on:
 | `worker.py` | `Worker` -- runtime lifecycle: create runtime, register model, serve endpoint, cleanup |
 | `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
-| `../engine_utils/request.py` | `normalize_request_format()` -- call this at the top of `generate()` if your engine receives both OpenAI and internal protocol formats |
-| `../engine_utils/response.py` | `build_completion_usage()`, `normalize_finish_reason()` -- use these to build response dicts |

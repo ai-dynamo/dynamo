@@ -69,7 +69,6 @@ Subclass `LLMEngine` and implement the required methods:
 
 ```python
 from dynamo.common.backend import LLMEngine, EngineConfig, WorkerConfig
-from dynamo.common.engine_utils import build_completion_usage
 
 class MyEngine(LLMEngine):
     @classmethod
@@ -97,9 +96,11 @@ class MyEngine(LLMEngine):
         yield {
             "token_ids": result.token_ids,
             "finish_reason": "stop",
-            "completion_usage": build_completion_usage(
-                prompt_tokens, completion_tokens
-            ),
+            "completion_usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
         }
 
     async def abort(self, context):
@@ -145,8 +146,8 @@ All engines yield dicts conforming to this contract:
 }
 ```
 
-Use `build_completion_usage()` and `normalize_finish_reason()` from
-`dynamo.common.engine_utils` to build these.
+Build the `completion_usage` dict inline. Finish reason normalization
+(e.g. `"abort"` → `"cancelled"`) is handled by the Rust layer.
 
 ## Request Cancellation
 
@@ -206,17 +207,6 @@ from dynamo.llm.exceptions import (
 )
 ```
 
-## Common Engine Utilities
-
-`dynamo.common.engine_utils` provides helpers shared across all engine
-implementations:
-
-| Function | Module | Purpose |
-|----------|--------|---------|
-| `normalize_request_format(request)` | `request.py` | Ensures `stop_conditions`/`sampling_options` dicts exist; moves top-level OpenAI fields into them |
-| `build_completion_usage(prompt, completion, details)` | `response.py` | Builds the standard `completion_usage` dict |
-| `normalize_finish_reason(reason)` | `response.py` | Maps engine-specific finish reasons (e.g. `"abort"`) to Dynamo values (`"cancelled"`) |
-
 ## File Index
 
 ```
@@ -228,11 +218,6 @@ common/backend/
     run.py               # Common entry point: run(engine_cls)
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
-
-common/engine_utils/
-    __init__.py          # Re-exports all utilities
-    request.py           # normalize_request_format()
-    response.py          # build_completion_usage(), normalize_finish_reason()
 
 vllm/llm_engine.py       # VllmLLMEngine
 vllm/unified_main.py     # Entry point -> run(VllmLLMEngine)
@@ -257,7 +242,7 @@ the unified path does not yet support.
 - Request cancellation via `abort()` + `context.is_stopped()` monitoring
 - `DynamoException` error chain wrapping
 - Graceful shutdown with signal handling
-- `normalize_finish_reason()` and `build_completion_usage()` on all engines
+- Finish reason normalization handled by Rust layer
 
 ### Common gaps (all engines)
 
