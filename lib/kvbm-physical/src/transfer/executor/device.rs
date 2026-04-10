@@ -77,6 +77,9 @@ pub fn execute_device_transfer(
     // Select stream: caller-provided takes precedence, otherwise pick by engine×direction.
     // - Whole-block (batch_copy): Copy engine (BCS on ZE) — dedicated DMA.
     // - FC↔LW (vectorized_copy): Compute engine (CCS on ZE) — kernel + small H2D.
+    // - D2D: is_d2h=false, so D2D shares the h2d pools. This is intentional —
+    //   the direction label only affects pool selection, not the actual copy
+    //   direction (which is determined by source/destination pointers).
     let device_stream = if let Some(s) = device_stream {
         s
     } else if whole_block {

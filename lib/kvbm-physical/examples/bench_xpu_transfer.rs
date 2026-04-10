@@ -13,86 +13,204 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! XPU integration benchmark using the multi-device kvbm-physical TransferManager API.
+//! XPU transfer benchmark via the `kvbm-physical` TransferManager API.
 //!
-//! Benchmarks KV cache block transfers between host memory and Intel XPU
-//! device memory through the full kvbm-physical stack (TransferManager).
+//! Sweeps the same KV-cache test matrix as `kvbench_xpu.rs` (in kvbm-kernels)
+//! but through the full TransferManager stack, measuring end-to-end overhead
+//! compared to direct Level Zero `ze::` calls.
 //!
-//! This version uses the unified DeviceAllocator / DeviceContext abstraction
-//! introduced in the multi-device workspace, where allocation is dispatched
-//! through `Arc<dyn DeviceAllocator>` rather than backend-specific helpers.
+//! Test matrix (matching kvbench_xpu.rs, minus the `backend` axis):
+//!   - tokens_per_block (tpb): 16, 32, 64
+//!   - num_blocks (N):         1, 2, 4, 8, 16, 32, 64, 128, 256
+//!   - direction:              d2d, h2d, d2h
+//!   - pattern:                fc_to_fc, lw_to_fc, fc_to_lw
+//!   - host_mem:               pinned, system
 //!
-//! Covers:
-//!   - H2D / D2H with system (unpinned) and pinned (ze_host) memory
-//!   - D2D : LW ↔ FC reshuffling
+//! Model dimensions: Llama 3.1 70B (bf16) -- 80 layers, 8 KV heads, 128 head dim.
+//!
+//! The TransferManager selects the engine internally (FC-to-FC = BCS memcpy,
+//! FC-to/from-LW = CCS vectorized kernel), so the CSV `backend` column is
+//! always `transfer_mgr`.
+//!
+//! Output: CSV with the same columns as kvbench_xpu.rs for direct comparison.
 //!
 //! Usage:
-//!   cargo build --example bench_xpu_transfer -p kvbm-physical --features xpu
-//!   LD_LIBRARY_PATH=target/debug/build/kvbm-kernels-<hash>/out:$LD_LIBRARY_PATH \
-//!     ./target/debug/examples/bench_xpu_transfer --device 0
+//! ```bash
+//! cargo build --example bench_xpu_transfer -p kvbm-physical \
+//!   --no-default-features --features xpu --release
 //!
-//! The `<hash>` varies per build; find it with:
-//!   find target/debug/build -name libkvbm_kernels.so -printf '%h\n'
+//! # Full sweep (default: pinned host memory)
+//! ./target/release/examples/bench_xpu_transfer --device 0
 //!
-//! Note: LD_LIBRARY_PATH is needed for libkvbm_kernels.so (CUDA stubs),
-//! not for the SPIR-V kernel which is embedded at compile time via include_bytes!.
+//! # Full sweep with pinned + system host memory
+//! ./target/release/examples/bench_xpu_transfer --host-mem pinned,system
+//!
+//! # Quick smoke test
+//! ./target/release/examples/bench_xpu_transfer \
+//!   --num-blocks 1,4 --tokens-per-block 16 --warmup 3 --iters 10
+//! ```
 
 use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use dynamo_memory::DeviceAllocator;
 use kvbm_physical::device::{DeviceBackend, DeviceContext};
 use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder};
-use kvbm_physical::manager::LayoutHandle;
 use kvbm_physical::transfer::{NixlAgent, StorageKind};
 use kvbm_physical::{BlockId, TransferManager, TransferOptions};
 
-#[derive(Parser)]
-#[command(name = "bench_xpu_transfer")]
-#[command(about = "XPU integration benchmark via kvbm-physical TransferManager")]
-struct Args {
-    /// Number of KV-cache layers
-    #[arg(long, default_value_t = 80)]
-    num_layers: usize,
+// ---------------------------------------------------------------------------
+// Llama 3.1 70B, bf16 KV cache dimensions (same as kvbench_xpu.rs)
+// ---------------------------------------------------------------------------
+const NUM_LAYERS: usize = 80;
+const NUM_KV_HEADS: usize = 8;
+const HEAD_DIM: usize = 128;
+const ELEM_SIZE: usize = 2; // bf16
+const OUTER_DIM: usize = 2; // K and V
 
-    /// Number of KV heads
-    #[arg(long, default_value_t = 8)]
-    num_kv_heads: usize,
+// ---------------------------------------------------------------------------
+// Enums (matching kvbench_xpu.rs)
+// ---------------------------------------------------------------------------
 
-    /// Head dimension
-    #[arg(long, default_value_t = 128)]
-    head_dim: usize,
+#[derive(Clone, Copy, Debug)]
+enum Direction {
+    H2D,
+    D2H,
+    D2D,
+}
 
-    /// Outer dimension (K + V)
-    #[arg(long, default_value_t = 2)]
-    outer_dim: usize,
+impl Direction {
+    fn label(&self) -> &'static str {
+        match self {
+            Direction::H2D => "h2d",
+            Direction::D2H => "d2h",
+            Direction::D2D => "d2d",
+        }
+    }
 
-    /// Tokens per block (page size)
-    #[arg(long, default_value_t = 16)]
-    page_size: usize,
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "h2d" => Some(Direction::H2D),
+            "d2h" => Some(Direction::D2H),
+            "d2d" => Some(Direction::D2D),
+            _ => None,
+        }
+    }
+}
 
-    /// Number of blocks per layout pool
-    #[arg(long, default_value_t = 64)]
-    num_blocks: usize,
+#[derive(Clone, Copy, Debug)]
+enum Pattern {
+    FcToFc,
+    LwToFc,
+    FcToLw,
+}
 
-    /// Blocks transferred per call
-    #[arg(long, default_value_t = 16)]
-    blocks_per_xfer: usize,
+impl Pattern {
+    fn label(&self) -> &'static str {
+        match self {
+            Pattern::FcToFc => "fc_to_fc",
+            Pattern::LwToFc => "lw_to_fc",
+            Pattern::FcToLw => "fc_to_lw",
+        }
+    }
 
-    /// Warmup iterations (untimed)
-    #[arg(long, default_value_t = 5)]
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "fc_to_fc" => Some(Pattern::FcToFc),
+            "lw_to_fc" => Some(Pattern::LwToFc),
+            "fc_to_lw" => Some(Pattern::FcToLw),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HostMemKind {
+    Pinned,
+    System,
+}
+
+impl HostMemKind {
+    fn label(&self) -> &'static str {
+        match self {
+            HostMemKind::Pinned => "pinned",
+            HostMemKind::System => "system",
+        }
+    }
+
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pinned" => Some(HostMemKind::Pinned),
+            "system" => Some(HostMemKind::System),
+            _ => None,
+        }
+    }
+
+    fn to_storage_kind(&self) -> StorageKind {
+        match self {
+            HostMemKind::Pinned => StorageKind::Pinned,
+            HostMemKind::System => StorageKind::System,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLI (matching kvbench_xpu.rs parameters)
+// ---------------------------------------------------------------------------
+
+/// KV cache transfer benchmark for Intel XPU via TransferManager.
+///
+/// Produces CSV output compatible with kvbench_xpu.rs for direct
+/// comparison of TransferManager vs raw Level Zero performance.
+#[derive(Parser, Debug)]
+#[command(name = "bench_xpu_transfer", about = "KV cache TransferManager benchmark (XPU)")]
+struct Cli {
+    /// Comma-separated number of blocks to benchmark.
+    #[arg(
+        long,
+        default_value = "1,2,4,8,16,32,64,128,256",
+        value_delimiter = ','
+    )]
+    num_blocks: Vec<usize>,
+
+    /// Comma-separated tokens per block values.
+    #[arg(long, default_value = "16,32,64", value_delimiter = ',')]
+    tokens_per_block: Vec<usize>,
+
+    /// Comma-separated directions: h2d, d2h, d2d.
+    #[arg(long, default_value = "h2d,d2h,d2d", value_delimiter = ',')]
+    direction: Vec<String>,
+
+    /// Comma-separated patterns: fc_to_fc, lw_to_fc, fc_to_lw.
+    #[arg(
+        long,
+        default_value = "fc_to_fc,lw_to_fc,fc_to_lw",
+        value_delimiter = ','
+    )]
+    pattern: Vec<String>,
+
+    /// Comma-separated host memory kinds: pinned, system.
+    #[arg(long, default_value = "pinned", value_delimiter = ',')]
+    host_mem: Vec<String>,
+
+    /// Number of warmup iterations.
+    #[arg(long, default_value = "10")]
     warmup: usize,
 
-    /// Timed iterations
-    #[arg(long, default_value_t = 100)]
+    /// Number of timed iterations.
+    #[arg(long, default_value = "100")]
     iters: usize,
 
-    /// XPU device ordinal
-    #[arg(long, default_value_t = 0)]
+    /// Device ordinal.
+    #[arg(long, default_value = "0")]
     device: u32,
 }
+
+// ---------------------------------------------------------------------------
+// Layout builders
+// ---------------------------------------------------------------------------
 
 /// Build a fully-contiguous PhysicalLayout for the given storage kind.
 fn build_fc_layout(
@@ -114,206 +232,291 @@ fn build_fc_layout(
     Ok(layout)
 }
 
-/// Build a layer-separate PhysicalLayout on XPU device memory.
+/// Build a layer-separate PhysicalLayout for the given storage kind.
 fn build_lw_layout(
     agent: &NixlAgent,
     config: &LayoutConfig,
+    storage_kind: StorageKind,
     ctx: &Arc<dyn DeviceAllocator>,
 ) -> Result<kvbm_physical::layout::PhysicalLayout> {
-    let layout = PhysicalLayoutBuilder::new(agent.clone())
+    let builder = PhysicalLayoutBuilder::new(agent.clone())
         .with_config(config.clone())
-        .layer_separate(BlockDimension::BlockIsFirstDim)
-        .allocate_device(ctx.clone())
-        .build()?;
+        .layer_separate(BlockDimension::BlockIsFirstDim);
+
+    let layout = match storage_kind {
+        StorageKind::System => builder.allocate_system().build()?,
+        StorageKind::Pinned => builder.allocate_pinned(ctx.clone()).build()?,
+        StorageKind::Device(_) => builder.allocate_device(ctx.clone()).build()?,
+        other => anyhow::bail!("Unsupported storage kind: {:?}", other),
+    };
     Ok(layout)
 }
 
-fn print_latency_stats(latencies: &[Duration]) {
-    let mut sorted_ms: Vec<f64> = latencies.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
-    sorted_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-    let mean = sorted_ms.iter().sum::<f64>() / sorted_ms.len() as f64;
-    let p50 = sorted_ms[sorted_ms.len() / 2];
-    let p99 = sorted_ms[(sorted_ms.len() as f64 * 0.99) as usize];
-    let min = sorted_ms[0];
-    let max = sorted_ms[sorted_ms.len() - 1];
-
-    println!(
-        "    latency (ms): mean={:.3}, p50={:.3}, p99={:.3}, min={:.3}, max={:.3}",
-        mean, p50, p99, min, max
-    );
-}
-
-async fn run_bench(
-    manager: &TransferManager,
-    src_h: LayoutHandle,
-    dst_h: LayoutHandle,
-    block_ids: &[BlockId],
-    warmup: usize,
-    iters: usize,
-    label: &str,
-    bytes_per_xfer: usize,
-) -> Result<()> {
-    if iters == 0 && warmup == 0 {
-        println!("  {:<26} skipped (0 iters)", label);
-        return Ok(());
-    }
-
-    let options = TransferOptions::builder().build()?;
-
-    // Warmup
-    for _ in 0..warmup {
-        let notif = manager.execute_transfer(
-            src_h,
-            block_ids,
-            dst_h,
-            block_ids,
-            options.clone(),
-        )?;
-        notif.await?;
-    }
-
-    // Timed
-    let mut latencies = Vec::with_capacity(iters);
-    for _ in 0..iters {
-        let start = Instant::now();
-        let notif = manager.execute_transfer(
-            src_h,
-            block_ids,
-            dst_h,
-            block_ids,
-            options.clone(),
-        )?;
-        notif.await?;
-        latencies.push(start.elapsed());
-    }
-
-    let mean = latencies.iter().sum::<Duration>() / latencies.len() as u32;
-    let bw_gbs = bytes_per_xfer as f64 / mean.as_nanos() as f64;
-
-    println!(
-        "  {:<26} {:>8.3} ms   {:>8.3} GB/s",
-        label,
-        mean.as_secs_f64() * 1000.0,
-        bw_gbs,
-    );
-    print_latency_stats(&latencies);
-
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    let inner_dim = args.num_kv_heads * args.head_dim;
-    let bytes_per_xfer = args.blocks_per_xfer
-        * args.num_layers
-        * args.outer_dim
-        * args.page_size
-        * inner_dim
-        * 2; // bf16
+    // Parse enums from CLI strings
+    let directions: Vec<Direction> = cli
+        .direction
+        .iter()
+        .map(|s| {
+            Direction::from_str(s)
+                .ok_or_else(|| anyhow::anyhow!("unknown direction: '{}' (valid: h2d, d2h, d2d)", s))
+        })
+        .collect::<Result<_>>()?;
 
-    anyhow::ensure!(
-        args.blocks_per_xfer <= args.num_blocks,
-        "blocks_per_xfer ({}) must be <= num_blocks ({})",
-        args.blocks_per_xfer,
-        args.num_blocks,
-    );
+    let patterns: Vec<Pattern> = cli
+        .pattern
+        .iter()
+        .map(|s| {
+            Pattern::from_str(s).ok_or_else(|| {
+                anyhow::anyhow!("unknown pattern: '{}' (valid: fc_to_fc, lw_to_fc, fc_to_lw)", s)
+            })
+        })
+        .collect::<Result<_>>()?;
 
-    println!("=== XPU Integration Benchmark (kvbm-physical, multi-device) ===");
-    println!(
-        "  config: num_layers={} page_size={} num_blocks={} blocks_per_xfer={}",
-        args.num_layers, args.page_size, args.num_blocks, args.blocks_per_xfer
-    );
-    println!(
-        "          inner_dim={} ({}x{}) dtype=bf16 outer_dim={}",
-        inner_dim, args.num_kv_heads, args.head_dim, args.outer_dim
-    );
-    println!(
-        "          warmup={} iters={} device={}",
-        args.warmup, args.iters, args.device
-    );
-    println!(
-        "          bytes_per_xfer={} ({:.2} MiB)",
-        bytes_per_xfer,
-        bytes_per_xfer as f64 / (1024.0 * 1024.0)
-    );
-    println!();
+    let host_mem_kinds: Vec<HostMemKind> = cli
+        .host_mem
+        .iter()
+        .map(|s| {
+            HostMemKind::from_str(s)
+                .ok_or_else(|| anyhow::anyhow!("unknown host_mem: '{}' (valid: pinned, system)", s))
+        })
+        .collect::<Result<_>>()?;
 
-    // --- Create device context (Level Zero / XPU) ---
-    let ctx: Arc<dyn DeviceAllocator> =
-        Arc::new(DeviceContext::new(DeviceBackend::Ze, args.device)?);
+    let tpb_values = &cli.tokens_per_block;
+    let n_values = &cli.num_blocks;
+    let warmup = cli.warmup;
+    let iters = cli.iters;
 
-    // --- Build TransferManager ---
-    let manager = TransferManager::builder()
-        .device_backend(DeviceBackend::Ze)
-        .device_id(args.device as usize)
-        .build()?;
-
-    let agent = manager.nixl_agent();
-
-    let config = LayoutConfig::builder()
-        .num_blocks(args.num_blocks)
-        .num_layers(args.num_layers)
-        .outer_dim(args.outer_dim)
-        .page_size(args.page_size)
-        .inner_dim(inner_dim)
-        .dtype_width_bytes(2_usize)
-        .build()?;
-
-    // --- Build and register 4 layouts ---
-
-    // a) System memory (unpinned host)
-    let sys = build_fc_layout(agent, &config, StorageKind::System, &ctx)?;
-    let sys_h = manager.register_layout(sys)?;
-
-    // b) Pinned host memory (via zeMemAllocHost)
-    let pinned = build_fc_layout(agent, &config, StorageKind::Pinned, &ctx)?;
-    let pin_h = manager.register_layout(pinned)?;
-
-    // c) XPU device — fully contiguous (FC tier)
-    let dev_fc = build_fc_layout(agent, &config, StorageKind::Device(args.device), &ctx)?;
-    let fc_h = manager.register_layout(dev_fc)?;
-
-    // d) XPU device — layer-wise (LW tier)
-    let dev_lw = build_lw_layout(agent, &config, &ctx)?;
-    let lw_h = manager.register_layout(dev_lw)?;
-
-    let block_ids: Vec<BlockId> = (0..args.blocks_per_xfer).collect();
-
-    // --- Benchmark matrix ---
-    println!(
-        "  {:<26} {:>11}   {:>11}",
-        "Transfer", "Avg Latency", "Bandwidth"
-    );
-    println!("  {:-<26} {:-<11}   {:-<11}", "", "", "");
-
-    let pairs: Vec<(LayoutHandle, LayoutHandle, &str)> = vec![
-        (sys_h, fc_h, "system -> xpu (H2D)"),
-        (fc_h, sys_h, "xpu -> system (D2H)"),
-        (pin_h, fc_h, "pinned -> xpu (H2D)"),
-        (fc_h, pin_h, "xpu -> pinned (D2H)"),
-        (lw_h, fc_h, "LW -> FC (D2D)"),
-        (fc_h, lw_h, "FC -> LW (D2D)"),
-    ];
-
-    for (src_h, dst_h, label) in &pairs {
-        run_bench(
-            &manager,
-            *src_h,
-            *dst_h,
-            &block_ids,
-            args.warmup,
-            args.iters,
-            label,
-            bytes_per_xfer,
-        )
-        .await?;
+    // Pre-compute total test count
+    let mut total_tests = 0;
+    for _ in tpb_values {
+        for _ in n_values {
+            for &dir in &directions {
+                let hm_count = if matches!(dir, Direction::D2D) {
+                    1
+                } else {
+                    host_mem_kinds.len()
+                };
+                total_tests += patterns.len() * hm_count;
+            }
+        }
     }
 
-    println!();
-    println!("Done.");
+    // Create device context (shared across all tests)
+    let ctx: Arc<dyn DeviceAllocator> =
+        Arc::new(DeviceContext::new(DeviceBackend::Ze, cli.device)?);
+
+    // -- Print config ---------------------------------------------------------
+    eprintln!("KV Cache Transfer Benchmark (XPU / TransferManager)");
+    eprintln!("  Device ordinal: {}", cli.device);
+    eprintln!("  Model: Llama 3.1 70B (bf16)");
+    eprintln!(
+        "  Layers: {NUM_LAYERS}, KV heads: {NUM_KV_HEADS}, Head dim: {HEAD_DIM}, \
+         Outer dim: {OUTER_DIM}"
+    );
+    eprintln!("  Warmup: {warmup}, Timed: {iters}");
+    eprintln!("  tokens_per_block: {:?}", tpb_values);
+    eprintln!("  num_blocks: {:?}", n_values);
+    eprintln!(
+        "  directions: [{}]",
+        directions
+            .iter()
+            .map(|d| d.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    eprintln!(
+        "  patterns: [{}]",
+        patterns
+            .iter()
+            .map(|p| p.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    eprintln!(
+        "  host_mem: [{}]",
+        host_mem_kinds
+            .iter()
+            .map(|h| h.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    eprintln!("  Total tests: {total_tests}");
+    eprintln!();
+
+    // -- CSV header (matching kvbench_xpu.rs) ---------------------------------
+    println!(
+        "tokens_per_block,num_blocks,pattern,direction,backend,host_mem,\
+         total_bytes,inner_bytes,copy_size,num_copies,median_ms,bandwidth_gbps"
+    );
+
+    // -- Benchmark loop -------------------------------------------------------
+    let mut test_num = 0;
+    for &tpb in tpb_values {
+        let inner = tpb * NUM_KV_HEADS * HEAD_DIM * ELEM_SIZE;
+        let full_block_size = inner * OUTER_DIM * NUM_LAYERS;
+
+        eprintln!(
+            "--- tokens_per_block={tpb}, inner={inner} bytes ({} KB), \
+             block={full_block_size} bytes ({:.1} MB) ---",
+            inner / 1024,
+            full_block_size as f64 / (1024.0 * 1024.0)
+        );
+
+        for &n in n_values {
+            let total_bytes = full_block_size * n;
+
+            for &direction in &directions {
+                for &pattern in &patterns {
+                    let (copy_size, num_copies) = match pattern {
+                        Pattern::FcToFc => (full_block_size, n),
+                        Pattern::LwToFc | Pattern::FcToLw => {
+                            (inner, n * NUM_LAYERS * OUTER_DIM)
+                        }
+                    };
+
+                    // D2D doesn't involve host memory; run once per pattern.
+                    let host_mems: Vec<HostMemKind> =
+                        if matches!(direction, Direction::D2D) {
+                            vec![HostMemKind::Pinned] // sentinel; label will be "-"
+                        } else {
+                            host_mem_kinds.clone()
+                        };
+
+                    for &host_mem in &host_mems {
+                        test_num += 1;
+
+                        let host_label =
+                            if matches!(direction, Direction::D2D) {
+                                "-"
+                            } else {
+                                host_mem.label()
+                            };
+
+                        eprint!(
+                            "  [{test_num}/{total_tests}] tpb={tpb} N={n:>3} \
+                             {:<8} {:<6} transfer_mgr host={:<7} ... ",
+                            pattern.label(),
+                            direction.label(),
+                            host_label,
+                        );
+
+                        if iters == 0 {
+                            eprintln!("skipped (0 iters)");
+                            continue;
+                        }
+
+                        // Determine src/dst layout shapes and storage kinds
+                        let src_is_lw = matches!(pattern, Pattern::LwToFc);
+                        let dst_is_lw = matches!(pattern, Pattern::FcToLw);
+
+                        let (src_storage, dst_storage) = match direction {
+                            Direction::H2D => (
+                                host_mem.to_storage_kind(),
+                                StorageKind::Device(cli.device),
+                            ),
+                            Direction::D2H => (
+                                StorageKind::Device(cli.device),
+                                host_mem.to_storage_kind(),
+                            ),
+                            Direction::D2D => (
+                                StorageKind::Device(cli.device),
+                                StorageKind::Device(cli.device),
+                            ),
+                        };
+
+                        // Fresh TransferManager per test to ensure memory is
+                        // freed between tests (no unregister_layout API).
+                        let manager = TransferManager::builder()
+                            .device_backend(DeviceBackend::Ze)
+                            .device_id(cli.device as usize)
+                            .build()?;
+                        let agent = manager.nixl_agent();
+
+                        let config = LayoutConfig::builder()
+                            .num_blocks(n)
+                            .num_layers(NUM_LAYERS)
+                            .outer_dim(OUTER_DIM)
+                            .page_size(tpb)
+                            .inner_dim(NUM_KV_HEADS * HEAD_DIM)
+                            .dtype_width_bytes(ELEM_SIZE)
+                            .build()?;
+
+                        // Build source and destination layouts
+                        let src_layout = if src_is_lw {
+                            build_lw_layout(agent, &config, src_storage, &ctx)?
+                        } else {
+                            build_fc_layout(agent, &config, src_storage, &ctx)?
+                        };
+                        let dst_layout = if dst_is_lw {
+                            build_lw_layout(agent, &config, dst_storage, &ctx)?
+                        } else {
+                            build_fc_layout(agent, &config, dst_storage, &ctx)?
+                        };
+
+                        let src_h = manager.register_layout(src_layout)?;
+                        let dst_h = manager.register_layout(dst_layout)?;
+
+                        let block_ids: Vec<BlockId> = (0..n).collect();
+                        let options = TransferOptions::builder().build()?;
+
+                        // Warmup
+                        for _ in 0..warmup {
+                            let notif = manager.execute_transfer(
+                                src_h,
+                                &block_ids,
+                                dst_h,
+                                &block_ids,
+                                options.clone(),
+                            )?;
+                            notif.await?;
+                        }
+
+                        // Timed iterations
+                        let mut latencies_ms = Vec::with_capacity(iters);
+                        for _ in 0..iters {
+                            let t0 = Instant::now();
+                            let notif = manager.execute_transfer(
+                                src_h,
+                                &block_ids,
+                                dst_h,
+                                &block_ids,
+                                options.clone(),
+                            )?;
+                            notif.await?;
+                            latencies_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+                        }
+
+                        // Median (matching kvbench_xpu.rs)
+                        latencies_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        let median_ms = latencies_ms[latencies_ms.len() / 2];
+                        let bw = (total_bytes as f64) / (median_ms / 1000.0) / 1e9;
+
+                        println!(
+                            "{tpb},{n},{},{},transfer_mgr,{host_label},\
+                             {total_bytes},{inner},{copy_size},{num_copies},\
+                             {median_ms:.4},{bw:.2}",
+                            pattern.label(),
+                            direction.label(),
+                        );
+                        eprintln!("{bw:.2} GB/s ({median_ms:.4} ms)");
+
+                        // manager drops here -> layouts and their memory freed
+                    }
+                }
+            }
+        }
+    }
+
+    eprintln!();
+    eprintln!("Done. {test_num} tests completed.");
 
     Ok(())
 }

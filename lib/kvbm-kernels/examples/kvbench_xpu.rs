@@ -31,18 +31,20 @@
 //!   each holding all blocks' K+V for that layer.
 //!   Destination: one contiguous allocation holding all blocks packed
 //!   sequentially.
+//! - **fc_to_lw** -- Fully-contiguous -> layerwise (scattered).
+//!   Reverse of `lw_to_fc`: contiguous source, per-layer destination.
 //!
 //! # Compatibility matrix
 //!
-//! | direction | backend      | fc_to_fc | lw_to_fc | host mem   | notes                          |
-//! |-----------|--------------|----------|----------|------------|--------------------------------|
-//! | **D2D**   | vectorized   | OK       | OK       | n/a        | CCS kernel, `FLAG_DEVICE`      |
-//! | **D2D**   | memcpy       | OK       | OK       | n/a        | BCS (blitter) engine           |
-//! | **H2D**   | vectorized   | OK       | OK       | pinned     | CCS kernel, `FLAG_HOST|DEVICE` |
-//! | **H2D**   | memcpy       | OK       | OK       | pinned, system | BCS; system uses bounce buf |
-//! | **D2H**   | vectorized   | OK       | OK       | pinned     | CCS kernel, `FLAG_HOST|DEVICE` |
-//! | **D2H**   | memcpy       | OK       | OK       | pinned, system | BCS; system uses bounce buf |
-//! | **D2Dx**  | memcpy       | OK       | OK       | n/a        | BCS; cross-device via PCIe     |
+//! | direction | backend      | fc_to_fc | lw_to_fc | fc_to_lw | host mem   | notes                          |
+//! |-----------|--------------|----------|----------|----------|------------|--------------------------------|
+//! | **D2D**   | vectorized   | OK       | OK       | OK       | n/a        | CCS kernel, `FLAG_DEVICE`      |
+//! | **D2D**   | memcpy       | OK       | OK       | OK       | n/a        | BCS (blitter) engine           |
+//! | **H2D**   | vectorized   | OK       | OK       | OK       | pinned     | CCS kernel, `FLAG_HOST|DEVICE` |
+//! | **H2D**   | memcpy       | OK       | OK       | OK       | pinned, system | BCS; system uses bounce buf |
+//! | **D2H**   | vectorized   | OK       | OK       | OK       | pinned     | CCS kernel, `FLAG_HOST|DEVICE` |
+//! | **D2H**   | memcpy       | OK       | OK       | OK       | pinned, system | BCS; system uses bounce buf |
+//! | **D2Dx**  | memcpy       | OK       | OK       | OK       | n/a        | BCS; cross-device via PCIe     |
 //!
 //! **vectorized + system heap**: Skipped. The GPU kernel dereferences raw
 //! pointers — system `Vec<u8>` memory is not USM and cannot be accessed
@@ -70,45 +72,45 @@
 //! the CSV data reaches stdout.
 //!
 //! ```sh
-//! # --- D2D, vectorized (CCS) --- fc_to_fc + lw_to_fc
+//! # --- D2D, vectorized (CCS) --- fc_to_fc + lw_to_fc + fc_to_lw
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction d2d --backend vectorized \
-//!   --pattern fc_to_fc,lw_to_fc 2>/dev/null
+//!   --pattern fc_to_fc,lw_to_fc,fc_to_lw 2>/dev/null
 //!
-//! # --- D2D, memcpy (BCS) --- fc_to_fc + lw_to_fc
+//! # --- D2D, memcpy (BCS) --- fc_to_fc + lw_to_fc + fc_to_lw
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction d2d --backend memcpy \
-//!   --pattern fc_to_fc,lw_to_fc 2>/dev/null
+//!   --pattern fc_to_fc,lw_to_fc,fc_to_lw 2>/dev/null
 //!
 //! # --- H2D, vectorized (CCS) --- pinned host mem only
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction h2d --backend vectorized \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
+//!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned 2>/dev/null
 //!
 //! # --- H2D, memcpy (BCS) --- pinned + system host mem
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction h2d --backend memcpy \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned,system 2>/dev/null
+//!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned,system 2>/dev/null
 //!
 //! # --- D2H, vectorized (CCS) --- pinned host mem only
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction d2h --backend vectorized \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned 2>/dev/null
+//!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned 2>/dev/null
 //!
 //! # --- D2H, memcpy (BCS) --- pinned + system host mem
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction d2h --backend memcpy \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned,system 2>/dev/null
+//!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned,system 2>/dev/null
 //!
 //! # --- Cross-device D2D, memcpy (BCS) --- device 0 -> device 1
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction d2dx --backend memcpy --device 0 --dst-device 1 \
-//!   --pattern fc_to_fc,lw_to_fc 2>/dev/null
+//!   --pattern fc_to_fc,lw_to_fc,fc_to_lw 2>/dev/null
 //!
 //! # --- Full sweep (all 6 table rows, same-device only) ---
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
 //!   --direction d2d,h2d,d2h --backend vectorized,memcpy \
-//!   --pattern fc_to_fc,lw_to_fc --host-mem pinned,system 2>/dev/null
+//!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned,system 2>/dev/null
 //!
 //! # --- Quick smoke test on device 1 ---
 //! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
@@ -173,8 +175,8 @@ struct Cli {
     #[arg(long, default_value = "h2d,d2h,d2d", value_delimiter = ',')]
     direction: Vec<String>,
 
-    /// Comma-separated patterns: fc_to_fc, lw_to_fc.
-    #[arg(long, default_value = "fc_to_fc,lw_to_fc", value_delimiter = ',')]
+    /// Comma-separated patterns: fc_to_fc, lw_to_fc, fc_to_lw.
+    #[arg(long, default_value = "fc_to_fc,lw_to_fc,fc_to_lw", value_delimiter = ',')]
     pattern: Vec<String>,
 
     /// Comma-separated host memory kinds: pinned, system.
@@ -244,6 +246,7 @@ impl Direction {
 enum Pattern {
     FcToFc,
     LwToFc,
+    FcToLw,
 }
 
 impl Pattern {
@@ -251,6 +254,7 @@ impl Pattern {
         match self {
             Pattern::FcToFc => "fc_to_fc",
             Pattern::LwToFc => "lw_to_fc",
+            Pattern::FcToLw => "fc_to_lw",
         }
     }
 
@@ -258,12 +262,13 @@ impl Pattern {
         match s {
             "fc_to_fc" | "fc" => Some(Pattern::FcToFc),
             "lw_to_fc" | "lw" => Some(Pattern::LwToFc),
+            "fc_to_lw" => Some(Pattern::FcToLw),
             _ => None,
         }
     }
 
     fn all_labels() -> &'static str {
-        "fc_to_fc (or fc), lw_to_fc (or lw)"
+        "fc_to_fc (or fc), lw_to_fc (or lw), fc_to_lw"
     }
 }
 
@@ -452,33 +457,39 @@ fn build_fc_pairs(mem: &MemoryPair, num_blocks: usize) -> (Vec<u64>, Vec<u64>) {
     (src_addrs, dst_addrs)
 }
 
-/// LW->FC: src has NUM_LAYERS separate allocations (one per layer, scattered),
-/// dst is one contiguous allocation (all blocks packed sequentially).
-fn build_lw_pairs(
-    mem: &MemoryPair,
+/// Build (scattered, contiguous) pointer pairs for LW<->FC patterns.
+///
+/// `scattered`: NUM_LAYERS separate allocations (one per layer).
+/// `contiguous`: one allocation holding all blocks packed sequentially.
+///
+/// Returns `(scattered_addrs, contiguous_addrs)` -- caller swaps to get
+/// `(src, dst)` depending on copy direction.
+fn build_lw_fc_pairs(
+    scattered: &SideBuffers,
+    contiguous: &SideBuffers,
     num_blocks: usize,
     full_block_size: usize,
     inner: usize,
 ) -> (Vec<u64>, Vec<u64>) {
     let total = num_blocks * NUM_LAYERS * OUTER_DIM;
-    let mut src_addrs = Vec::with_capacity(total);
-    let mut dst_addrs = Vec::with_capacity(total);
-    let dst_base = mem.dst.ptr(0) as u64; // single contiguous FC allocation
+    let mut sc_addrs = Vec::with_capacity(total);
+    let mut fc_addrs = Vec::with_capacity(total);
+    let fc_base = contiguous.ptr(0) as u64;
     for b in 0..num_blocks {
         for layer in 0..NUM_LAYERS {
-            let src_base = mem.src.ptr(layer) as u64;
+            let sc_base = scattered.ptr(layer) as u64;
             for outer in 0..OUTER_DIM {
-                // Src (LW): within layer buffer, skip past earlier blocks' K+V
-                let src_offset = (b * OUTER_DIM + outer) * inner;
-                // Dst (FC): contiguous -- block offset + layer/outer within block
-                let dst_offset = b * full_block_size
+                // Scattered (LW): within layer buffer, skip past earlier blocks' K+V
+                let sc_offset = (b * OUTER_DIM + outer) * inner;
+                // Contiguous (FC): block offset + layer/outer within block
+                let fc_offset = b * full_block_size
                     + (layer * OUTER_DIM + outer) * inner;
-                src_addrs.push(src_base + src_offset as u64);
-                dst_addrs.push(dst_base + dst_offset as u64);
+                sc_addrs.push(sc_base + sc_offset as u64);
+                fc_addrs.push(fc_base + fc_offset as u64);
             }
         }
     }
-    (src_addrs, dst_addrs)
+    (sc_addrs, fc_addrs)
 }
 
 // ---------------------------------------------------------------------------
@@ -574,7 +585,7 @@ fn run_benchmark(
 
     let (copy_size, num_copies) = match pattern {
         Pattern::FcToFc => (full_block_size, num_blocks),
-        Pattern::LwToFc => (inner, num_blocks * NUM_LAYERS * OUTER_DIM),
+        Pattern::LwToFc | Pattern::FcToLw => (inner, num_blocks * NUM_LAYERS * OUTER_DIM),
     };
 
     // Allocate memory.
@@ -584,6 +595,10 @@ fn run_benchmark(
             let layer_buf_size = num_blocks * OUTER_DIM * inner;
             (NUM_LAYERS, layer_buf_size, 1, full_block_size * num_blocks)
         }
+        Pattern::FcToLw => {
+            let layer_buf_size = num_blocks * OUTER_DIM * inner;
+            (1, full_block_size * num_blocks, NUM_LAYERS, layer_buf_size)
+        }
     };
     let mem = allocate_memory(
         ctx, device, dst_device, direction, host_mem,
@@ -592,7 +607,16 @@ fn run_benchmark(
 
     let (src_addrs, dst_addrs) = match pattern {
         Pattern::FcToFc => build_fc_pairs(&mem, num_blocks),
-        Pattern::LwToFc => build_lw_pairs(&mem, num_blocks, full_block_size, inner),
+        Pattern::LwToFc => {
+            // src=LW (scattered), dst=FC (contiguous)
+            let (sc, fc) = build_lw_fc_pairs(&mem.src, &mem.dst, num_blocks, full_block_size, inner);
+            (sc, fc)
+        }
+        Pattern::FcToLw => {
+            // src=FC (contiguous), dst=LW (scattered)
+            let (sc, fc) = build_lw_fc_pairs(&mem.dst, &mem.src, num_blocks, full_block_size, inner);
+            (fc, sc)
+        }
     };
 
     // Device-side pointer arrays for vectorized backend.
@@ -985,7 +1009,7 @@ fn main() {
                 for &pattern in &patterns {
                     let (copy_size, num_copies) = match pattern {
                         Pattern::FcToFc => (full_block_size, num_blocks),
-                        Pattern::LwToFc => (inner, num_blocks * NUM_LAYERS * OUTER_DIM),
+                        Pattern::LwToFc | Pattern::FcToLw => (inner, num_blocks * NUM_LAYERS * OUTER_DIM),
                     };
 
                     for &backend in &backends {
