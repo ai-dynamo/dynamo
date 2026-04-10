@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::watch;
 
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
+use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_base_model_field};
 use dynamo_runtime::prelude::DistributedRuntimeProvider;
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
@@ -29,7 +29,7 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
     let client = endpoint.client().await?;
     let mut instance_ids_rx = client.instance_avail_watcher();
 
-    // Source 2: runtime configs from discovery (watches DiscoveryQuery::EndpointModels)
+    // Source 2: worker runtime configs from base model cards in discovery
     let discovery = component.drt().discovery();
     let eid = endpoint.id();
     let stream = discovery
@@ -43,7 +43,7 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
         )
         .await?;
     let mut configs_rx =
-        watch_and_extract_field(stream, |card: ModelDeploymentCard| card.runtime_config);
+        watch_and_extract_base_model_field(stream, |card: ModelDeploymentCard| card.runtime_config);
 
     let (tx, rx) = watch::channel(HashMap::new());
 

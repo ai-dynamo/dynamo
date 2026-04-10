@@ -170,13 +170,13 @@ impl Discovery for MockDiscovery {
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
-        let instance_id = instance.instance_id();
+        let target_id = instance.id();
 
         self.registry
             .instances
             .lock()
             .unwrap()
-            .retain(|i| i.instance_id() != instance_id);
+            .retain(|i| i.id() != target_id);
 
         Ok(())
     }
@@ -478,5 +478,64 @@ mod tests {
         assert!(err.to_string().contains(
             "Cannot register model 'adapter-a' on endpoint 'ns/comp/generate': a different model 'base-model' is already registered there"
         ));
+    }
+
+    #[tokio::test]
+    async fn unregister_lora_adapter_keeps_base_and_other_loras() {
+        let registry = SharedMockRegistry::new();
+        let discovery = MockDiscovery::new(Some(1), registry);
+
+        let base = discovery
+            .register(DiscoverySpec::Model {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+                card_json: serde_json::json!({
+                    "display_name": "base-model",
+                    "source_path": "base-repo",
+                }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+
+        let lora_a = discovery
+            .register(lora_model_spec(
+                "ns",
+                "comp",
+                "generate",
+                "adapter-a",
+                "base-repo",
+                "adapter-a",
+            ))
+            .await
+            .unwrap();
+        let lora_b = discovery
+            .register(lora_model_spec(
+                "ns",
+                "comp",
+                "generate",
+                "adapter-b",
+                "base-repo",
+                "adapter-b",
+            ))
+            .await
+            .unwrap();
+
+        discovery.unregister(lora_a).await.unwrap();
+
+        let instances = discovery
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(instances.len(), 2);
+        let instance_ids: Vec<_> = instances.iter().map(DiscoveryInstance::id).collect();
+        assert!(instance_ids.contains(&base.id()));
+        assert!(instance_ids.contains(&lora_b.id()));
     }
 }
