@@ -1,14 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import logging
 import gc
+import logging
 from collections.abc import Callable
 
-from dynamo.common.utils.snapshot import (
-    CheckpointConfig,
-    EngineSnapshotController,
-)
+from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
 
 from .args import Config
 from .handlers import VllmEngineQuiesceController
