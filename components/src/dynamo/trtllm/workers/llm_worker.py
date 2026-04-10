@@ -586,16 +586,6 @@ async def init_llm_worker(
                 consolidator_publisher.shutdown()
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
-
-            encoder_cache = getattr(handler, "_encoder_cache", None)
-            if encoder_cache is not None:
-                register_embedding_cache_metrics(
-                    endpoint=endpoint,
-                    cache=encoder_cache,
-                    model_name=model_name_for_metrics,
-                    component_name=config.component,
-                )
-
             await endpoint.serve_endpoint(
                 handler.generate, health_check_payload=health_check_payload
             )

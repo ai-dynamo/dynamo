@@ -13,6 +13,7 @@ while Dynamo runtime metrics are available immediately after component creation.
 
 import logging
 import re
+import threading
 from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
@@ -399,8 +400,9 @@ def register_embedding_cache_metrics(
         model_name: Model name for the 'model' label.
         component_name: Component name for the 'dynamo_component' label.
     """
-    import threading
-
+    # Lazy import: prometheus_client must be imported AFTER set_prometheus_multiproc_dir()
+    # in SGLang's multiprocess mode. This matches the existing pattern used by
+    # get_prometheus_expfmt() and LLMBackendMetrics.__init__() in this file.
     from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
 
     registry = CollectorRegistry()
