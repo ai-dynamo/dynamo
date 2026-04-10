@@ -404,7 +404,7 @@ jobs:
 
   deploy-test-fastvideo:
     needs: [deploy-operator, fastvideo-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: fastvideo
       profiles: '["agg"]'
