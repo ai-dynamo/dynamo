@@ -77,9 +77,8 @@ def parse_args():
     parser.add_argument(
         "--cuda-version",
         type=str,
-        default="12.9",
-        choices=["12.9", "13.0", "13.1"],
-        help="CUDA version to use. [12.9 or 13.0 for vllm and sglang, 13.1 for trtllm]",
+        default="",
+        help="CUDA version to use. [12.9 or 13.0 for vllm and sglang, 13.1 for trtllm]. Not required for non-cuda devices.",
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(
@@ -149,9 +148,13 @@ def validate_args(args):
     }
 
     if args.framework in valid_inputs:
+        cuda_version_valid = (
+            args.device != "cuda"
+            or args.cuda_version in valid_inputs[args.framework]["cuda_version"]
+        )
         if (
             args.target in valid_inputs[args.framework]["target"]
-            and args.cuda_version in valid_inputs[args.framework]["cuda_version"]
+            and cuda_version_valid
             and args.device in valid_inputs[args.framework]["device"]
         ):
             return
