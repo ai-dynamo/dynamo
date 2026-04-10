@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 class ThroughputScalingMixin:
     """Traffic-driven throughput-based scaling decisions."""
 
+    _diag_predicted_num_req: Optional[float]
+    _diag_predicted_isl: Optional[float]
+    _diag_predicted_osl: Optional[float]
+    _diag_engine_rps_prefill: Optional[float]
+    _diag_engine_rps_decode: Optional[float]
+    _diag_throughput_reason: Optional[str]
+
     def _advance_throughput(
         self, traffic: TrafficObservation
     ) -> Optional[ScalingDecision]:

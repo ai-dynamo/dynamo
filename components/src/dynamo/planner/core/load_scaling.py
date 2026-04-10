@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 class LoadScalingMixin:
     """FPM-driven load-based scaling decisions."""
 
+    _diag_estimated_ttft_ms: Optional[float]
+    _diag_estimated_itl_ms: Optional[float]
+    _diag_load_reason: Optional[str]
+
     def _advance_load(self, obs: FpmObservations) -> Optional[ScalingDecision]:
         if not self._config.enable_load_scaling:
             self._diag_load_reason = "disabled"

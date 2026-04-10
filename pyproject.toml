@@ -428,6 +428,8 @@ module = [
     "soundfile.*",
     "librosa",
     "librosa.*",
+    "plotly",
+    "plotly.*",
 ]
 ignore_missing_imports = true
 

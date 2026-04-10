@@ -198,8 +198,8 @@ class DiagnosticsRecorder:
             return None
 
         try:
-            import plotly.graph_objects as go
-            from plotly.subplots import make_subplots
+            import plotly.graph_objects as go  # type: ignore[import-untyped]
+            from plotly.subplots import make_subplots  # type: ignore[import-untyped]
         except ImportError:
             logger.warning(
                 "plotly is not installed -- cannot generate HTML report. "
