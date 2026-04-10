@@ -4,8 +4,9 @@
 name: Nightly CI Pipeline
 
 on:
-  schedule:
-    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:  # Allow manual triggering for testing
 
 permissions:
@@ -70,6 +71,28 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # VLLM XPU PIPELINE
+  # ============================================================================
+  vllm-xpu-pipeline:
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      device: xpu
+      target: runtime
+      platform: 'linux/amd64'
+      builder_name: 'unused-xpu-uses-runner-docker'
+      build_timeout_minutes: 180
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_single_xpu_tests: true
+      single_xpu_test_markers: 'nightly and vllm and (xpu_1 or xpu_2)'
+      single_xpu_test_timeout_minutes: 180
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+      push_image: false
+    secrets: inherit
+
+  # ============================================================================
   # SGLANG PIPELINE
   # ============================================================================
   sglang-pipeline:
@@ -124,7 +147,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, create-fresh-builder]
+    needs: [vllm-pipeline, vllm-xpu-pipeline, sglang-pipeline, trtllm-pipeline, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -147,7 +170,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
+    needs: [ vllm-pipeline, vllm-xpu-pipeline, sglang-pipeline, trtllm-pipeline ]
     permissions:
       contents: read
     steps:

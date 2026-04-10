@@ -8,7 +8,9 @@ on:
     branches:
       - main
       - 'release/*.*.*'
-
+  pull_request:
+    branches:
+      - main
 permissions:
   contents: read
 
@@ -39,6 +41,30 @@ jobs:
       cpu_only_test_timeout_minutes: 60
       single_gpu_test_timeout_minutes: 60
       multi_gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
+  # VLLM XPU PIPELINE
+  # ============================================================================
+  vllm-xpu-pipeline:
+    name: vllm-xpu
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: vllm
+      device: xpu
+      target: runtime
+      platform: 'linux/amd64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      copy_timeout_minutes: 20
+      run_cpu_only_tests: false
+      run_single_gpu_tests: false
+      run_single_xpu_tests: true
+      single_xpu_test_markers: '(pre_merge or post_merge) and vllm and (xpu_1 or xpu_2)'
+      single_xpu_test_timeout_minutes: 120
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+      push_image: false
     secrets: inherit
 
   # ============================================================================
@@ -329,7 +355,7 @@ jobs:
 
   deploy-test-vllm:
     needs: [deploy-operator, vllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test.yml
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
@@ -341,7 +367,7 @@ jobs:
 
   deploy-test-sglang:
     needs: [deploy-operator, sglang-pipeline]
-    uses: ./.github/workflows/shared-deploy-test.yml
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
@@ -353,7 +379,7 @@ jobs:
 
   deploy-test-trtllm:
     needs: [deploy-operator, trtllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test.yml
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
@@ -458,7 +484,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
+    needs: [vllm-pipeline, vllm-xpu-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -479,7 +505,7 @@ jobs:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
+    needs: [ vllm-pipeline, vllm-xpu-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:
       contents: read
     steps:

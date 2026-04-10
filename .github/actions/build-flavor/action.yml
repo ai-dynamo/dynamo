@@ -44,10 +44,6 @@ inputs:
     description: 'SCCache S3 Bucket'
     required: false
     default: ''
-  use_sccache:
-    description: 'Enable sccache for the build'
-    required: false
-    default: 'true'
   aws_access_key_id:
     description: 'AWS Access Key ID'
     required: false
@@ -187,7 +183,6 @@ runs:
         arch: ${{ inputs.platform }}
         cuda_version: ${{ steps.calculate-target-tag.outputs.builder_cuda_version }}
         fresh_builder: ${{ inputs.fresh_builder }}
-        use_runner_docker_builder: ${{ inputs.device == 'xpu' && 'true' || 'false' }}
     - name: Calculate extra tags
       id: extra-tags
       shell: bash
@@ -264,7 +259,6 @@ runs:
         extra_tags: ${{ steps.extra-tags.outputs.tags }}
         push_image: ${{ inputs.push_image }}
         no_load: ${{ inputs.no_load }}
-        use_sccache: ${{ inputs.use_sccache }}
         extra_build_args: |
           DYNAMO_COMMIT_SHA=${{ github.sha }}
           ${{ inputs.extra_build_args }}
