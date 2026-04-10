@@ -247,7 +247,7 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
         SECURITY_FLAGS=""
-        if [[ "${{ inputs.framework }}" == "fastvideo" ]]; then
+        if [[ "${{ inputs.test_suite_name }}" == "fastvideo" ]]; then
           # FastVideo's mp executor returns GPU tensors across process pipes
           # (worker pipe.send of CUDA outputs). PyTorch's CUDA IPC path hits
           # pidfd_getfd, which requires ptrace capability on CI runners.
