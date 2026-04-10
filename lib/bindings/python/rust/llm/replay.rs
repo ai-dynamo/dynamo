@@ -29,6 +29,7 @@ use super::entrypoint::{AicPerfConfig, KvRouterConfig, to_pyerr};
 
 const DEFAULT_GPU_MEMORY_UTILIZATION: f64 = 0.9;
 const DEFAULT_MEM_FRACTION_STATIC: f64 = 0.88;
+const DEFAULT_MAX_NUM_BATCHED_TOKENS: usize = 2048;
 
 fn parse_mocker_engine_type(engine_type: &str) -> PyResult<RsMockerEngineType> {
     match engine_type {
@@ -146,7 +147,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, gpu_memory_utilization=None, mem_fraction_static=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(2048), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, gpu_memory_utilization=None, mem_fraction_static=None, enable_local_indexer=false, bootstrap_port=None, kv_bytes_per_token=None, kv_transfer_bandwidth=None, reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -1047,7 +1048,8 @@ fn materialize_replay_mocker_args(
                 &model_name,
                 tp_size,
                 args.block_size,
-                args.max_num_batched_tokens.unwrap_or(8192),
+                args.max_num_batched_tokens
+                    .unwrap_or(DEFAULT_MAX_NUM_BATCHED_TOKENS),
                 args.gpu_memory_utilization
                     .unwrap_or(DEFAULT_GPU_MEMORY_UTILIZATION),
                 args.mem_fraction_static
