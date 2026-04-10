@@ -158,15 +158,6 @@ STUB_MODULES = [
     "sklearn.linear_model",
 ]
 
-# Some modules may be importable but missing symbols depending on local build
-# artifacts. For marker collection we only need imports to succeed, so force
-# these to be stubbed.
-FORCE_STUB_MODULES = {
-    "dynamo._core",
-    "dynamo.llm",
-    "dynamo.prometheus_names",
-}
-
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
@@ -224,24 +215,20 @@ class DependencyStubber:
             ".".join(parts[:i]) in self.stubbed for i in range(1, len(parts))
         )
 
-        if not parent_stubbed and module_name not in FORCE_STUB_MODULES:
+        if not parent_stubbed:
             try:
                 return importlib.import_module(module_name)
             except (ImportError, AttributeError):
                 pass
 
-        # Create parent packages if needed. Prefer importing real parents first
-        # so we don't accidentally shadow existing packages (e.g., `dynamo`).
+        # Create parent packages if needed
         for i in range(1, len(parts)):
             sub = ".".join(parts[:i])
             if sub not in sys.modules:
-                try:
-                    importlib.import_module(sub)
-                except Exception:
-                    pkg = ModuleType(sub)
-                    pkg.__path__ = []
-                    sys.modules[sub] = pkg
-                    self.stubbed.add(sub)
+                pkg = ModuleType(sub)
+                pkg.__path__ = []
+                sys.modules[sub] = pkg
+                self.stubbed.add(sub)
 
         # Create stub module with proper attributes
         stub = self._create_module_stub(module_name)

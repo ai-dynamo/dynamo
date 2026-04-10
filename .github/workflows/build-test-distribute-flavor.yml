@@ -344,8 +344,8 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.single_xpu_test_markers }}
-          framework: ${{ inputs.framework }}
-          test_type: "pre_merge_gpu"
+          test_suite_name: ${{ inputs.framework }}
+          test_type: "pre_merge_xpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
