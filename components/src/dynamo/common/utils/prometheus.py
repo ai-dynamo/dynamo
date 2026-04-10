@@ -448,16 +448,8 @@ def register_embedding_cache_metrics(
         labelnames=label_names,
         registry=registry,
     )
-    capacity_bytes_gauge = Gauge(
-        f"{name_prefix.COMPONENT}_embedding_cache_capacity_bytes",
-        "Total cache capacity in bytes.",
-        labelnames=label_names,
-        registry=registry,
-    )
-
     # Initialize all labeled metrics so they appear in output from the first scrape,
     # even before any cache activity (Prometheus best practice: export zeros, not absent).
-    capacity_bytes_gauge.labels(**label_values).set(cache.stats["capacity_bytes"])
     hits_counter.labels(**label_values)
     misses_counter.labels(**label_values)
     evictions_counter.labels(**label_values)

@@ -28,7 +28,6 @@ _METRIC_NAMES = [
     "dynamo_component_embedding_cache_utilization",
     "dynamo_component_embedding_cache_current_bytes",
     "dynamo_component_embedding_cache_entries",
-    "dynamo_component_embedding_cache_capacity_bytes",
 ]
 
 
@@ -155,19 +154,6 @@ class TestGauges:
         cache.set("k2", CachedEmbedding(torch.zeros(50, dtype=torch.float32)))
         text2 = callback()
         assert _parse_metric(text2, "dynamo_component_embedding_cache_entries") == 2.0
-
-    def test_capacity_immutable_after_registration(self, cache_env):
-        """Capacity gauge stays constant even after mutations."""
-        cache, callback = cache_env
-        cap_name = "dynamo_component_embedding_cache_capacity_bytes"
-
-        cache.set("k", CachedEmbedding(torch.zeros(10, dtype=torch.float32)))
-        cap1 = _parse_metric(callback(), cap_name)
-
-        cache.set("k2", CachedEmbedding(torch.zeros(10, dtype=torch.float32)))
-        cap2 = _parse_metric(callback(), cap_name)
-
-        assert cap1 == cap2 == 1024 * 1024
 
 
 class TestLabelsAndCompleteness:
