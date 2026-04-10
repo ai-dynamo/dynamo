@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-Scoring invariants for the two-term Thompson router model.
+Scoring invariants for the two-term cost-based Thompson router model (lower is better).
 
-    score(w) = lambda_ranking * ranking(w) + lambda_stickiness * stickiness(w)
+    cost(w) = lambda_ranking * ranking_cost(w) - lambda_stickiness * stickiness_benefit(w)
 
 Coverage:
-  1. Ranking monotonicity: overlap ↑ → ranking ↑
-  2. Ranking monotonicity: kv_util ↑ → ranking ↓  (via osl_load interaction)
+  1. Ranking cost monotonicity: kv_native_score ↑ → ranking_cost ↑ (prefill_blocks component)
+  2. Ranking cost monotonicity: kv_native_score ↑ → ranking_cost ↑ (decode_blocks component)
   3. Stickiness is zero for one-shot sessions (reuse_budget = 0)
   4. Stickiness is positive for sticky worker with reuse_budget > 0
-  5. Stickiness increases with reuse_budget (saturates via tanh)
+  5. Stickiness increases with reuse_budget (linear, not saturating)
   6. Stickiness decreases with high memory_pressure (eviction risk)
   7. Stickiness increases with low IAT (rapid-fire = more urgency)
-  8. Lambda scaling: doubling lambda_stickiness doubles stickiness contribution
+  8. Lambda scaling: cost formula uses subtraction (not addition) for stickiness
   9. All valid inputs produce finite scores
  10. Management server: config hot-reload with new param names
  11. Management server: state / reset endpoints
@@ -60,11 +60,16 @@ def _make_router(mock_kv_router, **overrides):
 
 
 def _score(router, **kwargs):
-    """Shortcut: call _score_worker and return (ranking, stickiness)."""
+    """Shortcut: call _score_worker and return (ranking_cost, stickiness_benefit).
+
+    Defaults use new cost-based signature: kv_native_score and prefill_cost.
+    kv_native_score = w_prefill * prefill_blocks + w_decode * decode_blocks
+    (default represents ~0.5 prefill fraction, 9 decode_blocks).
+    """
     defaults = dict(
-        wid=0, overlap=0.5, kv_util=0.3, prefill_util=0.1,
+        wid=0, kv_native_score=0.55 * (0.5 * 500 / 16) + 0.30 * 9,
         memory_pressure=0.0, osl=250, iat=250,
-        latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+        is_sticky=False, prefill_cost=0.5, reuse_budget=0,
     )
     defaults.update(kwargs)
     return router._score_worker(**defaults)
@@ -90,31 +95,65 @@ def router(mock_kv_router):
 
 
 # ---------------------------------------------------------------------------
-# 1. Ranking monotonicity: overlap
+# 1. Ranking cost monotonicity: kv_native_score and memory_pressure
 # ---------------------------------------------------------------------------
 
-class TestRankingMonotonicity:
-    def test_higher_overlap_yields_higher_ranking(self, router):
-        """Per model: ranking += w_cache * overlap; overlap↑ → ranking↑."""
-        overlaps = [0.0, 0.2, 0.5, 0.8, 1.0]
-        rankings = [_score(router, overlap=o)[0] for o in overlaps]
-        for a, b in zip(rankings, rankings[1:]):
-            assert b > a, f"ranking did not increase: {rankings}"
+class TestRankingCostMonotonicity:
+    def test_higher_kv_native_score_yields_higher_ranking_cost(self, router):
+        """Per model: ranking_cost = kv_native_score + w_mem * memory_pressure;
+        kv_native_score↑ → ranking_cost↑.
 
-    def test_higher_kv_util_yields_lower_ranking(self, router):
-        """Per model: ranking -= w_osl_load * (osl_norm * kv_util); kv_util↑ → ranking↓."""
-        kv_utils = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-        # Use a large osl to make osl_norm non-trivial
-        rankings = [_score(router, kv_util=u, osl=512)[0] for u in kv_utils]
-        for a, b in zip(rankings, rankings[1:]):
-            assert b < a, f"ranking did not decrease with kv_util: {rankings}"
+        kv_native_score = w_prefill × prefill_blocks + w_decode × potential_decode_blocks.
+        We vary the prefill_blocks component to confirm monotonicity.
+        """
+        # Vary prefill fraction from 0.0 to 1.0 while holding decode_blocks fixed.
+        decode_blocks_fixed = 9
+        prefill_costs = [0.0, 0.2, 0.5, 0.8, 1.0]
+        costs = [
+            _score(
+                router,
+                kv_native_score=0.55 * (c * 500 / 16) + 0.30 * decode_blocks_fixed,
+                prefill_cost=c,
+            )[0]
+            for c in prefill_costs
+        ]
+        for a, b in zip(costs, costs[1:]):
+            assert b > a, f"ranking_cost did not increase with kv_native_score: {costs}"
 
-    def test_higher_prefill_util_yields_lower_ranking(self, router):
-        """Per model: ranking += w_queue * (1 - prefill_util); prefill_util↑ → ranking↓."""
-        utils = [0.0, 0.3, 0.6, 1.0]
-        rankings = [_score(router, prefill_util=u)[0] for u in utils]
-        for a, b in zip(rankings, rankings[1:]):
-            assert b < a, f"ranking did not decrease with prefill_util: {rankings}"
+    def test_higher_decode_blocks_yields_higher_ranking_cost(self, router):
+        """Per model: kv_native_score += w_decode × decode_blocks; decode_blocks↑ → ranking_cost↑."""
+        # Vary decode_blocks while holding prefill_blocks fixed.
+        prefill_blocks_fixed = 0.5 * 500 / 16
+        decode_block_vals = [0, 20, 40, 60, 80, 100]
+        costs = [
+            _score(
+                router,
+                kv_native_score=0.55 * prefill_blocks_fixed + 0.30 * d,
+            )[0]
+            for d in decode_block_vals
+        ]
+        for a, b in zip(costs, costs[1:]):
+            assert b > a, f"ranking_cost did not increase with decode_blocks: {costs}"
+
+    def test_higher_memory_pressure_yields_higher_ranking_cost(self, router):
+        """Per model: ranking_cost += w_mem * memory_pressure; pressure↑ → ranking_cost↑."""
+        pressures = [0.0, 0.25, 0.5, 0.75, 1.0]
+        costs = [_score(router, memory_pressure=p)[0] for p in pressures]
+        for a, b in zip(costs, costs[1:]):
+            assert b > a, f"ranking_cost did not increase with memory_pressure: {costs}"
+
+    def test_zero_kv_native_score_yields_minimum_ranking_cost(self, router):
+        """kv_native_score=0 (full cache hit, no decode load) yields strictly lower
+        ranking_cost than kv_native_score computed from a fully-uncached worker."""
+        r_hit, _ = _score(router, kv_native_score=0.0, memory_pressure=0.0, prefill_cost=0.0)
+        # Full miss: all tokens uncached, many decode blocks
+        r_miss, _ = _score(
+            router,
+            kv_native_score=0.55 * (1.0 * 500 / 16) + 0.30 * 50,
+            memory_pressure=0.0,
+            prefill_cost=1.0,
+        )
+        assert r_hit < r_miss
 
 
 # ---------------------------------------------------------------------------
@@ -123,10 +162,10 @@ class TestRankingMonotonicity:
 
 class TestStickinessOneShot:
     def test_stickiness_zero_reuse_budget_zero(self, router):
-        """reuse_budget=0 → stickiness=0 regardless of other inputs."""
+        """reuse_budget=0 → stickiness_benefit=0 regardless of other inputs."""
         cases = [
-            dict(overlap=1.0, is_sticky=True, iat=50, memory_pressure=0.0),
-            dict(overlap=0.5, is_sticky=False, iat=1000, memory_pressure=0.9),
+            dict(prefill_cost=0.0, is_sticky=True, iat=50, memory_pressure=0.0),
+            dict(prefill_cost=0.5, is_sticky=False, iat=1000, memory_pressure=0.9),
         ]
         for kw in cases:
             _, s = _score(router, reuse_budget=0, **kw)
@@ -139,7 +178,7 @@ class TestStickinessOneShot:
 
 class TestStickinessBudget:
     def test_stickiness_positive_with_nonzero_reuse(self, router):
-        _, s = _score(router, reuse_budget=1, overlap=0.8, is_sticky=False, iat=250)
+        _, s = _score(router, reuse_budget=1, prefill_cost=0.2, is_sticky=False, iat=250)
         assert s > 0.0
 
     def test_stickiness_increases_with_reuse_budget(self, router):
@@ -152,9 +191,9 @@ class TestStickinessBudget:
         budgets = [1, 5, 10, 20, 40, 50]
         stickiness_vals = [
             router._score_worker(
-                wid=0, overlap=0.7, kv_util=0.1, prefill_util=0.0,
+                wid=0, kv_native_score=0.55 * (0.3 * 500 / 16) + 0.30 * 3,
                 memory_pressure=0.0, osl=250, iat=200,
-                latency_sensitivity=2.0, is_sticky=False,
+                is_sticky=False, prefill_cost=0.3,
                 reuse_budget=b, reuse_total=reuse_total,
             )[1]
             for b in budgets
@@ -171,22 +210,23 @@ class TestStickinessBudget:
         fraction, so doubling the remaining budget doubles the stickiness.
         """
         reuse_total = 100
+        kv_ns = 0.55 * (0.3 * 500 / 16)  # decode_blocks=0 → pure prefill component
         _, s_quarter = router._score_worker(
-            wid=0, overlap=0.7, kv_util=0.0, prefill_util=0.0,
+            wid=0, kv_native_score=kv_ns,
             memory_pressure=0.0, osl=250, iat=250,
-            latency_sensitivity=2.0, is_sticky=False,
+            is_sticky=False, prefill_cost=0.3,
             reuse_budget=25, reuse_total=reuse_total,
         )
         _, s_half = router._score_worker(
-            wid=0, overlap=0.7, kv_util=0.0, prefill_util=0.0,
+            wid=0, kv_native_score=kv_ns,
             memory_pressure=0.0, osl=250, iat=250,
-            latency_sensitivity=2.0, is_sticky=False,
+            is_sticky=False, prefill_cost=0.3,
             reuse_budget=50, reuse_total=reuse_total,
         )
         _, s_full = router._score_worker(
-            wid=0, overlap=0.7, kv_util=0.0, prefill_util=0.0,
+            wid=0, kv_native_score=kv_ns,
             memory_pressure=0.0, osl=250, iat=250,
-            latency_sensitivity=2.0, is_sticky=False,
+            is_sticky=False, prefill_cost=0.3,
             reuse_budget=100, reuse_total=reuse_total,
         )
         # Linear through origin: s at fraction f == f * s_full.
@@ -209,10 +249,10 @@ class TestStickinessBudget:
 
 class TestStickinessMemoryPressure:
     def test_high_memory_pressure_reduces_stickiness(self, router):
-        """future_value = overlap * (1 - memory_pressure); pressure↑ → stickiness↓."""
+        """future_value = (1 - prefill_cost) * (1 - memory_pressure); pressure↑ → stickiness↓."""
         pressures = [0.0, 0.3, 0.6, 0.9]
         stickiness_vals = [
-            _score(router, memory_pressure=p, overlap=0.8,
+            _score(router, memory_pressure=p, prefill_cost=0.2,
                    reuse_budget=5, is_sticky=False, iat=200)[1]
             for p in pressures
         ]
@@ -222,7 +262,7 @@ class TestStickinessMemoryPressure:
     def test_full_memory_pressure_kills_non_sticky_stickiness(self, router):
         """At memory_pressure=1.0 and is_sticky=False, future_value=0 → stickiness=0."""
         _, s = _score(
-            router, memory_pressure=1.0, overlap=0.9,
+            router, memory_pressure=1.0, prefill_cost=0.1,
             reuse_budget=10, is_sticky=False, iat=50,
         )
         assert s == pytest.approx(0.0, abs=1e-9)
@@ -234,56 +274,81 @@ class TestStickinessMemoryPressure:
 
 class TestStickinessIAT:
     def test_low_iat_yields_higher_stickiness_than_high_iat(self, router):
-        _, s_low = _score(router, iat=50, reuse_budget=5, overlap=0.7, is_sticky=False)
-        _, s_high = _score(router, iat=1000, reuse_budget=5, overlap=0.7, is_sticky=False)
+        _, s_low = _score(router, iat=50, reuse_budget=5, prefill_cost=0.3, is_sticky=False)
+        _, s_high = _score(router, iat=1000, reuse_budget=5, prefill_cost=0.3, is_sticky=False)
         assert s_low > s_high
 
     def test_stickiness_monotone_decreasing_with_iat(self, router):
         iats = [50, 100, 200, 400, 700, 1000, 2000]
-        vals = [_score(router, iat=i, reuse_budget=5, overlap=0.7, is_sticky=False)[1]
+        vals = [_score(router, iat=i, reuse_budget=5, prefill_cost=0.3, is_sticky=False)[1]
                 for i in iats]
         for a, b in zip(vals, vals[1:]):
             assert a >= b, f"stickiness not decreasing with IAT: {vals}"
 
 
 # ---------------------------------------------------------------------------
-# 7. Lambda scaling: doubling lambda_stickiness doubles contribution
+# 7. Lambda scaling: cost formula uses subtraction for stickiness
 # ---------------------------------------------------------------------------
 
 class TestLambdaScaling:
-    def test_doubling_lambda_stickiness_doubles_stickiness_term(self, mock_kv_router):
-        """score = λ₁*ranking + λ₂*stickiness; doubling λ₂ doubles stickiness part."""
+    def test_doubling_lambda_stickiness_increases_subtraction(self, mock_kv_router):
+        """cost = λ₁*ranking_cost - λ₂*stickiness_benefit; doubling λ₂ reduces cost more."""
         r1 = _make_router(mock_kv_router, lambda_ranking=1.0, lambda_stickiness=1.0)
         r2 = _make_router(mock_kv_router, lambda_ranking=1.0, lambda_stickiness=2.0)
 
         kw = dict(
-            wid=0, overlap=0.7, kv_util=0.2, prefill_util=0.0,
+            wid=0, kv_native_score=0.55 * (0.3 * 500 / 16) + 0.30 * 6,
             memory_pressure=0.0, osl=250, iat=100,
-            latency_sensitivity=2.0, is_sticky=True, reuse_budget=4,
+            is_sticky=True, prefill_cost=0.3, reuse_budget=4,
         )
         rank1, stick1 = r1._score_worker(**kw)
         rank2, stick2 = r2._score_worker(**kw)
 
-        # ranking is independent of lambda values
+        # ranking_cost and stickiness_benefit are independent of lambda values
         assert rank1 == pytest.approx(rank2, abs=1e-9)
-        # stickiness raw value also independent of lambda
         assert stick1 == pytest.approx(stick2, abs=1e-9)
 
-        score1 = r1.lambda_ranking * rank1 + r1.lambda_stickiness * stick1
-        score2 = r2.lambda_ranking * rank2 + r2.lambda_stickiness * stick2
-        extra = (r2.lambda_stickiness - r1.lambda_stickiness) * stick1
-        assert score2 == pytest.approx(score1 + extra, abs=1e-9)
+        # Cost composition: λ₁*ranking - λ₂*stickiness
+        cost1 = r1.lambda_ranking * rank1 - r1.lambda_stickiness * stick1
+        cost2 = r2.lambda_ranking * rank2 - r2.lambda_stickiness * stick2
+        # Doubling lambda_stickiness subtracts more → cost2 < cost1
+        assert cost2 < cost1, (
+            f"Doubling lambda_stickiness should reduce cost: cost1={cost1:.4f}, cost2={cost2:.4f}"
+        )
+        # The difference should equal the extra stickiness subtraction
+        extra_subtraction = (r2.lambda_stickiness - r1.lambda_stickiness) * stick1
+        assert cost2 == pytest.approx(cost1 - extra_subtraction, abs=1e-9)
 
-    def test_zero_lambda_stickiness_means_only_ranking_counts(self, mock_kv_router):
+    def test_zero_lambda_stickiness_means_only_ranking_cost_counts(self, mock_kv_router):
         r = _make_router(mock_kv_router, lambda_ranking=1.0, lambda_stickiness=0.0)
         kw = dict(
-            wid=0, overlap=0.7, kv_util=0.2, prefill_util=0.0,
+            wid=0, kv_native_score=0.55 * (0.3 * 500 / 16) + 0.30 * 6,
             memory_pressure=0.0, osl=250, iat=50,
-            latency_sensitivity=2.0, is_sticky=True, reuse_budget=10,
+            is_sticky=True, prefill_cost=0.3, reuse_budget=10,
         )
-        ranking, stickiness = r._score_worker(**kw)
-        effective_score = r.lambda_ranking * ranking + r.lambda_stickiness * stickiness
-        assert effective_score == pytest.approx(ranking, abs=1e-9)
+        ranking_cost, stickiness_benefit = r._score_worker(**kw)
+        effective_cost = r.lambda_ranking * ranking_cost - r.lambda_stickiness * stickiness_benefit
+        assert effective_cost == pytest.approx(ranking_cost, abs=1e-9)
+
+    def test_high_stickiness_benefit_makes_worker_cheaper(self, mock_kv_router):
+        """A worker with stickiness_benefit > 0 should have lower cost than without."""
+        r = _make_router(mock_kv_router, lambda_ranking=1.0, lambda_stickiness=1.0)
+
+        kv_ns = 0.55 * (0.4 * 500 / 16) + 0.30 * 6
+        rank_base, stick_none = r._score_worker(
+            wid=0, kv_native_score=kv_ns,
+            memory_pressure=0.0, osl=250, iat=250,
+            is_sticky=False, prefill_cost=0.4, reuse_budget=0,
+        )
+        rank_sticky, stick_val = r._score_worker(
+            wid=0, kv_native_score=kv_ns,
+            memory_pressure=0.0, osl=250, iat=100,
+            is_sticky=True, prefill_cost=0.4, reuse_budget=5,
+        )
+        cost_no_sticky = r.lambda_ranking * rank_base - r.lambda_stickiness * stick_none
+        cost_sticky = r.lambda_ranking * rank_sticky - r.lambda_stickiness * stick_val
+        # sticky worker has lower cost (more preferred in argmin)
+        assert cost_sticky < cost_no_sticky
 
 
 # ---------------------------------------------------------------------------
@@ -291,22 +356,23 @@ class TestLambdaScaling:
 # ---------------------------------------------------------------------------
 
 class TestFiniteScores:
-    @pytest.mark.parametrize("overlap,kv_util,prefill_util,memory_pressure,osl,iat,lat_sens,is_sticky,reuse", [
-        (0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, False, 0),
-        (1.0, 1.0, 1.0, 1.0, 1024, 10000, 5.0, True, 100),
-        (0.5, 0.5, 0.5, 0.5, 512, 500, 2.0, False, 5),
-        (0.0, 1.0, 0.0, 1.0, 0, 1000, 1.0, True, 0),
-        (1.0, 0.0, 1.0, 0.0, 1024, 50, 5.0, False, 50),
+    @pytest.mark.parametrize("prefill_cost,decode_blocks,memory_pressure,osl,iat,is_sticky,reuse", [
+        (0.0, 0,    0.0, 0,    0,     False, 0),
+        (1.0, 1000, 1.0, 1024, 10000, True,  100),
+        (0.5, 50,   0.5, 512,  500,   False, 5),
+        (0.0, 1000, 1.0, 0,    1000,  True,  0),
+        (1.0, 0,    0.0, 1024, 50,    False, 50),
     ])
-    def test_score_is_finite(self, router, overlap, kv_util, prefill_util,
-                             memory_pressure, osl, iat, lat_sens, is_sticky, reuse):
+    def test_score_is_finite(self, router, prefill_cost, decode_blocks,
+                             memory_pressure, osl, iat, is_sticky, reuse):
+        kv_ns = 0.55 * (prefill_cost * 500 / 16) + 0.30 * decode_blocks
         r, s = router._score_worker(
-            wid=0, overlap=overlap, kv_util=kv_util, prefill_util=prefill_util,
+            wid=0, kv_native_score=kv_ns,
             memory_pressure=memory_pressure, osl=osl, iat=iat,
-            latency_sensitivity=lat_sens, is_sticky=is_sticky, reuse_budget=reuse,
+            is_sticky=is_sticky, prefill_cost=prefill_cost, reuse_budget=reuse,
         )
-        assert math.isfinite(r), f"ranking not finite: overlap={overlap}"
-        assert math.isfinite(s), f"stickiness not finite: overlap={overlap}"
+        assert math.isfinite(r), f"ranking_cost not finite: prefill_cost={prefill_cost}"
+        assert math.isfinite(s), f"stickiness_benefit not finite: prefill_cost={prefill_cost}"
 
 
 # ---------------------------------------------------------------------------
@@ -346,26 +412,26 @@ def _mgmt_server(mock_kv_router, **router_kwargs):
 
 
 # ---------------------------------------------------------------------------
-# 9. Management server: config hot-reload
+# 9. Management server: config hot-reload with new param names
 # ---------------------------------------------------------------------------
 
 @_skip_no_aiohttp
 class TestManagementHotReload:
     @pytest.mark.asyncio
-    async def test_hot_reload_updates_all_nine_params(self, mock_kv_router):
-        """POST /config applies all 9 tunable params directly to the live router."""
+    async def test_hot_reload_updates_all_params(self, mock_kv_router):
+        """POST /config applies all cost-based tunable params directly to the live router."""
         mgmt, r = _mgmt_server(mock_kv_router)
 
         new_params = {
             "lambda_ranking": 2.5,
             "lambda_stickiness": 0.8,
-            "w_cache": 0.6,
-            "w_queue": 0.1,
-            "w_osl_load": 0.15,
-            "w_sensitivity": 0.15,
+            "w_prefill": 0.6,
+            "w_decode": 0.25,
+            "w_mem": 0.15,
             "alpha_reuse": 0.5,
             "sticky_bonus": 0.4,
             "epsilon": 0.07,
+            "temperature": 0.3,
         }
         resp = await mgmt._set_config(_make_mock_request(new_params))
         body = _parse_response(resp)
@@ -373,37 +439,37 @@ class TestManagementHotReload:
         assert body["status"] == "applied"
         assert r.lambda_ranking == pytest.approx(2.5)
         assert r.lambda_stickiness == pytest.approx(0.8)
-        assert r.w_cache == pytest.approx(0.6)
-        assert r.w_queue == pytest.approx(0.1)
-        assert r.w_osl_load == pytest.approx(0.15)
-        assert r.w_sensitivity == pytest.approx(0.15)
+        assert r.w_prefill == pytest.approx(0.6)
+        assert r.w_decode == pytest.approx(0.25)
+        assert r.w_mem == pytest.approx(0.15)
         assert r.alpha_reuse == pytest.approx(0.5)
         assert r.sticky_bonus == pytest.approx(0.4)
         assert r.epsilon == pytest.approx(0.07)
+        assert r.temperature == pytest.approx(0.3)
 
     @pytest.mark.asyncio
     async def test_hot_reload_partial_update_leaves_other_params_unchanged(self, mock_kv_router):
         """Sending a subset of params only mutates those params."""
         mgmt, r = _mgmt_server(mock_kv_router)
-        original_w_cache = r.w_cache
+        original_w_prefill = r.w_prefill
 
         resp = await mgmt._set_config(_make_mock_request({"lambda_ranking": 3.0}))
         body = _parse_response(resp)
 
         assert body["status"] == "applied"
         assert r.lambda_ranking == pytest.approx(3.0)
-        assert r.w_cache == pytest.approx(original_w_cache)
+        assert r.w_prefill == pytest.approx(original_w_prefill)
 
     @pytest.mark.asyncio
     async def test_get_config_returns_new_param_names(self, mock_kv_router):
-        """GET /config response contains all 9 new param names (no old names)."""
+        """GET /config response contains all new cost-based param names (no old names)."""
         mgmt, _ = _mgmt_server(mock_kv_router)
         resp = await mgmt._get_config(MagicMock())
         body = _parse_response(resp)
 
         new_keys = {
             "lambda_ranking", "lambda_stickiness",
-            "w_cache", "w_queue", "w_osl_load", "w_sensitivity",
+            "w_prefill", "w_decode", "w_mem",
             "alpha_reuse", "sticky_bonus", "epsilon",
         }
         assert new_keys.issubset(set(body.keys()))
@@ -411,6 +477,8 @@ class TestManagementHotReload:
         old_keys = {
             "lints_weight", "enable_lints", "enable_softmax", "physics_cache_weight",
             "affinity_base", "switch_base", "idle_boost",
+            # Renamed params that must not appear under old names
+            "w_cache", "w_queue", "w_osl_load", "w_sensitivity",
         }
         for k in old_keys:
             assert k not in body, f"removed key still present in /config: {k}"

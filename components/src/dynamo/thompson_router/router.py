@@ -1,17 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """
-KvThompsonRouter -- Two-term scoring router using native KvRouter (pyo3).
+KvThompsonRouter -- Cost-based scoring router using native KvRouter (pyo3).
 
 Uses Dynamo's native KvRouter for KV cache state (overlap scores, load signals)
-and scores workers with a clean two-term model:
+and scores workers with a cost-based two-term model (lower is better):
 
-    score(w) = λ₁ × ranking(w) + λ₂ × stickiness(w)
+    cost(w) = λ₁ × ranking_cost(w) - λ₂ × stickiness_benefit(w)
 
-  ranking(w):    "best worker for THIS request" — cache overlap, queue availability,
-                 load-aware interaction terms, optional bandit residual.
-  stickiness(w): "future value of keeping this prefix here" — session context
-                 (reuse budget, IAT urgency) × per-worker future cache value.
+  ranking_cost(w):       "cost to serve THIS request on worker w" — prefill cost,
+                         decode load, memory pressure, optional bandit residual.
+  stickiness_benefit(w): "future value of keeping this prefix here" — session
+                         context (reuse budget, IAT urgency) × per-worker cache value.
+
+Load signals come from the native KvRouter's in-process tracking
+(potential_decode_blocks, potential_prefill_tokens) rather than the async
+WorkerLoadMonitor, ensuring accurate per-worker differentiation.
+
+Selection uses argmin (temperature=0) or negated-softmax with temperature,
+matching the native KV-aware router's convention.
 
 The router is instantiated by a processor or standalone handler and called
 in-process -- no NATS RPC.
@@ -33,14 +40,14 @@ logger = logging.getLogger(__name__)
 TUNABLE_ROUTER_PARAMS = [
     "lambda_ranking",
     "lambda_stickiness",
-    "w_cache",
-    "w_queue",
-    "w_osl_load",
-    "w_sensitivity",
+    "w_prefill",
+    "w_decode",
+    "w_mem",
     "alpha_reuse",
     "sticky_bonus",
     "stickiness_overlap_cap",
     "epsilon",
+    "temperature",
 ]
 
 
@@ -194,11 +201,10 @@ class KvThompsonRouter:
         self.lambda_ranking = float(kt.get("lambda_ranking", 1.0))
         self.lambda_stickiness = float(kt.get("lambda_stickiness", 1.0))
 
-        # --- Ranking term weights ---
-        self.w_cache = float(kt.get("w_cache", 0.55))
-        self.w_queue = float(kt.get("w_queue", 0.15))
-        self.w_osl_load = float(kt.get("w_osl_load", 2.0))
-        self.w_sensitivity = float(kt.get("w_sensitivity", 0.10))
+        # --- Ranking cost weights ---
+        self.w_prefill = float(kt.get("w_prefill", 0.55))
+        self.w_decode = float(kt.get("w_decode", 0.30))
+        self.w_mem = float(kt.get("w_mem", 0.15))
 
         # --- Stickiness term params ---
         self.alpha_reuse = float(kt.get("alpha_reuse", 0.25))
@@ -207,6 +213,7 @@ class KvThompsonRouter:
 
         # --- Bandit residual (disabled by default) ---
         self.epsilon = float(kt.get("epsilon", 0.05))
+        self.temperature = float(kt.get("temperature", 0.0))
         beta_decay = float(kt.get("beta_decay", 0.995))
         latency_ema_alpha = float(kt.get("latency_ema_alpha", 0.2))
 
@@ -231,12 +238,12 @@ class KvThompsonRouter:
 
         logger.info(
             "KvThompsonRouter initialized (λ_ranking=%.2f, λ_stickiness=%.2f, "
-            "w_cache=%.2f, w_queue=%.2f, w_osl_load=%.2f, w_sensitivity=%.2f, "
-            "alpha_reuse=%.2f, sticky_bonus=%.2f, epsilon=%.3f, "
+            "w_prefill=%.2f, w_decode=%.2f, w_mem=%.2f, "
+            "alpha_reuse=%.2f, sticky_bonus=%.2f, epsilon=%.3f, temperature=%.3f, "
             "worker_load_monitor=%s)",
             self.lambda_ranking, self.lambda_stickiness,
-            self.w_cache, self.w_queue, self.w_osl_load, self.w_sensitivity,
-            self.alpha_reuse, self.sticky_bonus, self.epsilon,
+            self.w_prefill, self.w_decode, self.w_mem,
+            self.alpha_reuse, self.sticky_bonus, self.epsilon, self.temperature,
             "enabled" if self.worker_load_monitor is not None else "disabled",
         )
 
@@ -269,7 +276,10 @@ class KvThompsonRouter:
         loads_by_wid: dict[int, dict] = {}
         last_worker = self._prefix_workers.get(prefix_id)
         worker_details: list[dict] = []
-        worker_util = self._get_worker_utilization()
+
+        # Get kv_total_blocks for memory_pressure normalization
+        kv_total_blocks = self._get_kv_total_blocks()
+        block_size = self.kv_router_block_size or 16
 
         # Decay reuse_budget: subtract requests already seen for this prefix
         requests_seen = self._prefix_request_counts.get(prefix_id, 0)
@@ -277,12 +287,24 @@ class KvThompsonRouter:
         # Track this request
         self._prefix_request_counts[prefix_id] = requests_seen + 1
 
+        # --- Pass 1: Compute raw kv_native_score + per-worker signals ---
+        # Need all scores before normalization.
+        per_worker: list[dict] = []
         for load_info in loads:
             wid = load_info["worker_id"]
             worker_ids.append(wid)
             loads_by_wid[wid] = load_info
             self.beta_learner.add_worker(wid)
 
+            # KV-native score: matches native router formula in block units
+            # potential_prefill_tokens includes active_tokens(decay) + new_tokens()
+            # potential_decode_blocks includes active_blocks() + new_blocks()
+            potential_prefill = load_info.get("potential_prefill_tokens", 0)
+            potential_decode = load_info.get("potential_decode_blocks", 0)
+            prefill_blocks = potential_prefill / max(1, block_size)
+            kv_native_score = self.w_prefill * prefill_blocks + self.w_decode * potential_decode
+
+            # Overlap (for stickiness and worker_details)
             if indexer_overlap is not None:
                 overlap = indexer_overlap.scores.get(wid, 0.0)
                 cached_blocks = indexer_overlap.raw_block_counts.get(wid, 0)
@@ -290,92 +312,90 @@ class KvThompsonRouter:
                     0, tokens_in - cached_blocks * self.kv_router_block_size
                 )
             else:
-                raw_prefill = load_info.get("potential_prefill_tokens", 0)
-                prefill_tokens = min(raw_prefill, max(1, tokens_in))
+                prefill_tokens = min(potential_prefill, max(1, tokens_in))
                 overlap = 1.0 - prefill_tokens / max(1, tokens_in)
-
-            util = worker_util.get(wid, {})
-            kv_util = util.get("kv_util", 0.0)
-            prefill_util = util.get("prefill_util", 0.0)
-
-            # Fallback: when WorkerLoadMonitor has no useful kv_util data,
-            # use the number of prefixes assigned to this worker as a load
-            # proxy.  This is always accurate (we track it ourselves) and
-            # provides per-worker differentiation that decode_blocks cannot
-            # (decode_blocks from get_potential_loads is the same for all
-            # workers — it's a per-request estimate, not per-worker state).
-            if kv_util == 0.0 and prefill_util == 0.0:
-                n_workers = max(1, len(loads))
-                # Count how many prefixes are assigned to this worker
-                prefixes_on_worker = sum(
-                    1 for pw in self._prefix_workers.values() if pw == wid
-                )
-                # Normalize: if this worker has more than its fair share, kv_util > 0
-                fair_share = max(1, len(self._prefix_workers)) / n_workers
-                if fair_share > 0 and prefixes_on_worker > 0:
-                    kv_util = min(1.0, prefixes_on_worker / (2.0 * fair_share))
-                    self._monitor_fallback_count += 1
-                    if self._monitor_fallback_count <= 5:
-                        logger.warning(
-                            "LOAD_FALLBACK: wid=%d no monitor data, using "
-                            "prefix_count=%d (fair_share=%.1f) as kv_util=%.3f.",
-                            wid, prefixes_on_worker, fair_share, kv_util,
-                        )
 
             # Memory pressure: tree_size / total_kv_blocks (eviction risk)
             memory_pressure = 0.0
-            if indexer_overlap is not None and self.worker_load_monitor is not None:
+            if indexer_overlap is not None and kv_total_blocks > 0:
                 tree_size = indexer_overlap.tree_sizes.get(wid, 0)
                 if tree_size > 0:
-                    try:
-                        wid_state = self.worker_load_monitor.get_worker(wid)
-                        if wid_state is not None:
-                            total_cap = sum(
-                                m.get("kv_total_blocks", 0)
-                                for m in wid_state.values()
-                            )
-                            if total_cap > 0:
-                                memory_pressure = min(1.0, tree_size / total_cap)
-                    except Exception:
-                        pass
+                    memory_pressure = min(1.0, tree_size / kv_total_blocks)
 
+            per_worker.append({
+                "wid": wid,
+                "kv_native_score": kv_native_score,
+                "overlap": overlap,
+                "prefill_tokens": prefill_tokens,
+                "prefill_blocks": prefill_blocks,
+                "potential_decode_blocks": potential_decode,
+                "memory_pressure": memory_pressure,
+            })
+
+        # --- Normalize kv_native_score to [0, 1] across workers ---
+        # This makes additive terms (epsilon, stickiness) meaningful:
+        # epsilon=0.1 means "explore up to 10% of best-vs-worst gap."
+        if per_worker:
+            raw_scores_list = [pw["kv_native_score"] for pw in per_worker]
+            score_min = min(raw_scores_list)
+            score_max = max(raw_scores_list)
+            score_range = score_max - score_min
+            for pw in per_worker:
+                pw["norm_score"] = (
+                    (pw["kv_native_score"] - score_min) / score_range
+                    if score_range > 0
+                    else 0.0
+                )
+
+        # --- Pass 2: Score workers with normalized signals ---
+        for pw in per_worker:
+            wid = pw["wid"]
             is_sticky = (last_worker is not None and wid == last_worker)
 
-            ranking, stickiness = self._score_worker(
+            ranking_cost, stickiness_benefit = self._score_worker(
                 wid=wid,
-                overlap=overlap,
-                kv_util=kv_util,
-                prefill_util=prefill_util,
-                memory_pressure=memory_pressure,
+                kv_native_score=pw["norm_score"],
+                memory_pressure=pw["memory_pressure"],
                 osl=osl,
                 iat=iat,
-                latency_sensitivity=latency_sensitivity,
                 is_sticky=is_sticky,
+                prefill_cost=1.0 - pw["overlap"],
                 reuse_budget=effective_reuse_budget,
                 reuse_total=reuse_budget,
             )
-            score = self.lambda_ranking * ranking + self.lambda_stickiness * stickiness
-            raw_scores.append(score)
+            cost = self.lambda_ranking * ranking_cost - self.lambda_stickiness * stickiness_benefit
+            raw_scores.append(cost)
 
             worker_details.append(
                 {
                     "id": wid,
-                    "kv_overlap": round(overlap, 4),
-                    "prefill_tokens": prefill_tokens,
-                    "kv_util": round(kv_util, 4),
-                    "prefill_util": round(prefill_util, 4),
-                    "memory_pressure": round(memory_pressure, 4),
+                    "kv_overlap": round(pw["overlap"], 4),
+                    "prefill_tokens": pw["prefill_tokens"],
+                    "prefill_blocks": round(pw["prefill_blocks"], 2),
+                    "potential_decode_blocks": pw["potential_decode_blocks"],
+                    "kv_native_score": round(pw["kv_native_score"], 2),
+                    "norm_score": round(pw["norm_score"], 4),
+                    "memory_pressure": round(pw["memory_pressure"], 4),
                     "is_sticky": is_sticky,
-                    "ranking_score": round(ranking, 4),
-                    "stickiness_score": round(stickiness, 4),
-                    "final_score": round(score, 4),
+                    "ranking_score": round(ranking_cost, 4),
+                    "stickiness_score": round(stickiness_benefit, 4),
+                    "final_score": round(cost, 4),
                 }
             )
 
         if not worker_ids:
             chosen = native_pick
+        elif self.temperature == 0.0:
+            best_idx = int(np.argmin(raw_scores))
+            chosen = worker_ids[best_idx]
         else:
-            best_idx = int(np.argmax(raw_scores))
+            # Negated softmax: lower cost → higher selection probability
+            neg_scores = [-s / self.temperature for s in raw_scores]
+            max_neg = max(neg_scores)
+            exp_scores = [math.exp(s - max_neg) for s in neg_scores]
+            total = sum(exp_scores)
+            probs = [e / total for e in exp_scores]
+            best_idx = int(np.random.choice(len(worker_ids), p=probs))
             chosen = worker_ids[best_idx]
 
         self._prefix_workers[prefix_id] = chosen
@@ -397,9 +417,9 @@ class KvThompsonRouter:
         # Per-decision logging
         logger.debug(
             "DECISION: prefix=%s osl=%d iat=%dms reuse=%d/%d tokens_in=%d "
-            "lat_sens=%.1f chosen=%d native=%d agreed=%s",
+            "chosen=%d native=%d agreed=%s",
             prefix_id[:16], osl, iat, effective_reuse_budget, reuse_budget, tokens_in,
-            latency_sensitivity, chosen, native_pick, chosen == native_pick,
+            chosen, native_pick, chosen == native_pick,
         )
 
         chosen_detail = next((wd for wd in worker_details if wd["id"] == chosen), {})
@@ -425,142 +445,82 @@ class KvThompsonRouter:
     def _score_worker(
         self,
         wid: int,
-        overlap: float,
-        kv_util: float,
-        prefill_util: float,
+        kv_native_score: float,
         memory_pressure: float,
         osl: int,
         iat: int,
-        latency_sensitivity: float,
         is_sticky: bool,
+        prefill_cost: float,
         reuse_budget: int,
         reuse_total: int = 0,
     ) -> tuple[float, float]:
-        """Two-term scoring: ranking (this request) + stickiness (future value).
+        """Cost-based two-term scoring (lower is better).
 
-        Returns (ranking_score, stickiness_score) as separate values so the
-        caller can apply λ₁ and λ₂.
+        Returns (ranking_cost, stickiness_benefit) as separate values so the
+        caller can compose: cost = λ₁ × ranking_cost - λ₂ × stickiness_benefit.
+
+        The ranking cost is anchored by the KV-native router's exact formula
+        (overlap_weight × prefill_blocks + decode_blocks), extended with
+        memory pressure and bandit exploration.
         """
-        # --- Ranking term: best worker for THIS request --- #
-        osl_norm = min(osl, 1024) / 1024.0
-        lat_sens_norm = min(latency_sensitivity, 5.0) / 5.0
+        # --- Ranking cost: KV-native score + memory pressure ---
+        # kv_native_score = w_prefill × (potential_prefill_tokens / block_size)
+        #                 + potential_decode_blocks
+        # Both terms in block units, exactly matching the native KV router.
+        # memory_pressure is in [0,1] so w_mem scales it to block-comparable units.
+        ranking_cost = kv_native_score + self.w_mem * memory_pressure
 
-        # Base ranking from cache and queue signals
-        base_ranking = (
-            self.w_cache * overlap
-            + self.w_queue * (1.0 - prefill_util)
-            + self.w_sensitivity * (lat_sens_norm * (1.0 - kv_util))
-        )
-
-        # Load discount: exponential gate that suppresses the ranking score
-        # for loaded workers.  Multiplicative so it can overcome any cache
-        # advantage — a fully loaded worker with perfect overlap still gets
-        # a near-zero ranking.
-        #
-        # osl_norm modulates: long-output requests are penalized more harshly
-        # because they occupy the worker for longer.
-        #
-        # w_osl_load controls steepness:
-        #   w_osl_load=1.0: gentle (discount=0.47 at kv_util=0.5)
-        #   w_osl_load=2.0: moderate (discount=0.22 at kv_util=0.5)
-        #   w_osl_load=3.0: aggressive (discount=0.11 at kv_util=0.5)
-        load_discount = math.exp(
-            -self.w_osl_load * kv_util * (1.0 + osl_norm)
-        )
-        ranking = base_ranking * load_discount
-
+        # --- Bandit residual: bounded exploration term ---
+        # Subtracted from cost so positive samples reduce cost (favor worker).
         if self.epsilon > 0:
-            ranking += self.epsilon * math.tanh(self.beta_learner.sample(wid)) * load_discount
+            ranking_cost -= self.epsilon * math.tanh(self.beta_learner.sample(wid))
 
-        # --- Stickiness term: future value of this prefix on this worker --- #
-        # Discounted by the same load_discount as ranking, so a heavily loaded
-        # worker loses both its cache advantage AND its stickiness advantage.
-        # This allows prefixes to migrate away from overloaded workers.
+        # --- Stickiness benefit: future value of keeping this prefix here ---
+        # Positive values reduce cost when subtracted in the score composition.
+        # prefill_cost is in [0,1] (1 - overlap), used here for cache affinity.
         if reuse_budget <= 0:
-            stickiness = 0.0
+            stickiness_benefit = 0.0
         else:
             iat_urgency = self._iat_factor(iat)
-            # Cap the overlap contribution to stickiness so a 99%-overlap
-            # worker isn't 3.7x stickier than a 27%-overlap worker.
-            # The ranking term still uses raw overlap for THIS request's
-            # cache benefit, but the FUTURE value is bounded — a worker
-            # above the cap has "enough" cache to be worth sticking to.
-            capped_overlap = min(overlap, self.stickiness_overlap_cap)
+            # Cap so a 99%-overlap worker isn't disproportionately stickier.
+            capped_overlap = min(1.0 - prefill_cost, self.stickiness_overlap_cap)
             future_value = capped_overlap * (1.0 - memory_pressure)
             # Linear decay: fraction of remaining requests in the session.
-            # reuse_budget decays from reuse_total down to 0 as requests arrive.
-            # This replaces tanh(α × reuse_budget) which saturated at ~1.0
-            # from the very first request.
             session_weight = min(1.0, reuse_budget / max(1, reuse_total)) * iat_urgency
-            stickiness = session_weight * (
+            stickiness_benefit = session_weight * (
                 future_value + (self.sticky_bonus if is_sticky else 0.0)
-            ) * load_discount
+            )
 
-        if math.isnan(ranking) or math.isinf(ranking):
-            ranking = -1e9
-        if math.isnan(stickiness) or math.isinf(stickiness):
-            stickiness = 0.0
+        if math.isnan(ranking_cost) or math.isinf(ranking_cost):
+            ranking_cost = 1e9
+        if math.isnan(stickiness_benefit) or math.isinf(stickiness_benefit):
+            stickiness_benefit = 0.0
 
-        return (ranking, stickiness)
+        return (ranking_cost, stickiness_benefit)
 
     # -------------------- Worker Load Utilities -------------------- #
 
-    def _get_worker_utilization(self) -> dict[int, dict]:
-        """Get live utilization ratios from WorkerLoadMonitor.
+    def _get_kv_total_blocks(self) -> int:
+        """Get kv_total_blocks from WorkerLoadMonitor for decode_load normalization.
 
-        Returns { worker_id: { "kv_util": float, "prefill_util": float } }
-        where both values are in [0, 1].
+        Returns the total KV block capacity for the first worker found
+        (all workers in a homogeneous cluster have the same capacity).
+        Falls back to a large default if the monitor is unavailable.
         """
         if self.worker_load_monitor is None:
-            if self._monitor_fallback_count == 0:
-                logger.info(
-                    "MONITOR_DISABLED: WorkerLoadMonitor is None — "
-                    "ranking scores will use fallback values."
-                )
-            return {}
+            return 34_000  # reasonable default for 8B model on 80GB GPU
 
-        result: dict[int, dict] = {}
         try:
             all_states = self.worker_load_monitor.get_all()
-            for wid, dp_map in all_states.items():
-                total_active_blocks = 0
-                total_capacity_blocks = 0
-                total_active_prefill = 0
-                total_max_batched = 0
-
+            for _wid, dp_map in all_states.items():
                 for _dp_rank, metrics in dp_map.items():
-                    active = metrics.get("active_decode_blocks", 0)
                     capacity = metrics.get("kv_total_blocks", 0)
-                    prefill = metrics.get("active_prefill_tokens", 0)
-                    max_batch = metrics.get("max_num_batched_tokens", 0)
+                    if capacity > 0:
+                        return capacity
+        except Exception:
+            pass
 
-                    total_active_blocks += active
-                    total_capacity_blocks += capacity
-                    total_active_prefill += prefill
-                    total_max_batched += max_batch
-
-                kv_util = (
-                    total_active_blocks / total_capacity_blocks
-                    if total_capacity_blocks > 0
-                    else 0.0
-                )
-                prefill_util = (
-                    total_active_prefill / total_max_batched
-                    if total_max_batched > 0
-                    else 0.0
-                )
-                result[wid] = {
-                    "kv_util": min(1.0, kv_util),
-                    "prefill_util": min(1.0, prefill_util),
-                }
-        except Exception as e:
-            logger.warning(
-                "MONITOR_ERROR: WorkerLoadMonitor.get_all() raised %s — "
-                "all workers will use fallback values this round.",
-                e,
-            )
-
-        return result
+        return 34_000
 
     # -------------------- Static Helpers -------------------- #
 

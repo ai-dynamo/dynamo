@@ -3,8 +3,8 @@
 
 """Unit tests for KvThompsonRouter scoring, selection, and feedback.
 
-Covers the two-term scoring model:
-    score(w) = lambda_ranking * ranking(w) + lambda_stickiness * stickiness(w)
+Covers the two-term cost-based scoring model (lower is better):
+    cost(w) = lambda_ranking * ranking_cost(w) - lambda_stickiness * stickiness_benefit(w)
 
 All removed concepts (LinTSLearner, _physics_score, _build_features, enable_*,
 load_mod, affinity/switch penalties, softmax, cold_start, etc.) are absent.
@@ -82,16 +82,16 @@ def router_epsilon(mock_kv_router):
 
 class TestInit:
     def test_default_config_params(self, router):
-        """All nine tunable params exist on the router with expected defaults."""
+        """All tunable params exist on the router with expected defaults."""
         assert router.lambda_ranking == 1.0
         assert router.lambda_stickiness == 1.0
-        assert router.w_cache == 0.55
-        assert router.w_queue == 0.15
-        assert router.w_osl_load == 2.0
-        assert router.w_sensitivity == 0.10
+        assert router.w_prefill == 0.55
+        assert router.w_decode == 0.30
+        assert router.w_mem == 0.15
         assert router.alpha_reuse == 0.25
         assert router.sticky_bonus == 0.3
         assert router.epsilon == 0.05
+        assert router.temperature == 0.0
 
     def test_config_dict_overrides_all_params(self, mock_kv_router):
         """Config dict via kv_thompson key overrides every tunable param."""
@@ -99,32 +99,33 @@ class TestInit:
             "kv_thompson": {
                 "lambda_ranking": 2.0,
                 "lambda_stickiness": 0.5,
-                "w_cache": 0.4,
-                "w_queue": 0.2,
-                "w_osl_load": 0.1,
-                "w_sensitivity": 0.3,
+                "w_prefill": 0.4,
+                "w_decode": 0.2,
+                "w_mem": 0.1,
                 "alpha_reuse": 0.5,
                 "sticky_bonus": 0.6,
                 "epsilon": 0.05,
+                "temperature": 0.5,
             }
         }
         r = KvThompsonRouter(mock_kv_router, config=cfg)
         assert r.lambda_ranking == 2.0
         assert r.lambda_stickiness == 0.5
-        assert r.w_cache == 0.4
-        assert r.w_queue == 0.2
-        assert r.w_osl_load == 0.1
-        assert r.w_sensitivity == 0.3
+        assert r.w_prefill == 0.4
+        assert r.w_decode == 0.2
+        assert r.w_mem == 0.1
         assert r.alpha_reuse == 0.5
         assert r.sticky_bonus == 0.6
         assert r.epsilon == 0.05
+        assert r.temperature == 0.5
 
     def test_tunable_params_list_matches_new_design(self):
-        """TUNABLE_ROUTER_PARAMS contains exactly the 9 new config keys."""
+        """TUNABLE_ROUTER_PARAMS contains exactly the expected cost-based config keys."""
         expected = {
             "lambda_ranking", "lambda_stickiness",
-            "w_cache", "w_queue", "w_osl_load", "w_sensitivity",
+            "w_prefill", "w_decode", "w_mem",
             "alpha_reuse", "sticky_bonus", "stickiness_overlap_cap", "epsilon",
+            "temperature",
         }
         assert set(TUNABLE_ROUTER_PARAMS) == expected
         assert len(TUNABLE_ROUTER_PARAMS) == 10
@@ -136,6 +137,8 @@ class TestInit:
             "load_mod", "affinity_base", "switch_base", "cold_start_boost",
             "idle_boost", "queue_penalty_weight", "physics_cache_weight",
             "_physics_score", "_build_features", "_select_from_scores",
+            # Old param names that were replaced
+            "w_cache", "w_queue", "w_osl_load", "w_sensitivity",
         ]
         for attr in removed:
             assert not hasattr(router, attr), f"removed attr still present: {attr}"
@@ -188,7 +191,8 @@ class TestPickWorkerReturnType:
 
     @pytest.mark.asyncio
     async def test_worker_details_contain_new_score_keys(self, router):
-        """Each worker_details entry must have ranking_score and stickiness_score."""
+        """Each worker_details entry must have prefill_blocks, potential_decode_blocks,
+        kv_native_score, ranking_score, and stickiness_score."""
         decision = await router.pick_worker(
             token_ids=[1, 2, 3],
             prefix_id="px1",
@@ -201,6 +205,26 @@ class TestPickWorkerReturnType:
             assert "ranking_score" in wd
             assert "stickiness_score" in wd
             assert "final_score" in wd
+            assert "prefill_blocks" in wd
+            assert "potential_decode_blocks" in wd
+            assert "kv_native_score" in wd
+
+    @pytest.mark.asyncio
+    async def test_worker_details_no_old_field_names(self, router):
+        """worker_details must not contain old field names kv_util, prefill_util,
+        prefill_cost (standalone), or decode_load."""
+        decision = await router.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="px1",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
+        )
+        for wd in decision.worker_details:
+            assert "kv_util" not in wd, "old field kv_util still present in worker_details"
+            assert "prefill_util" not in wd, "old field prefill_util still present in worker_details"
+            assert "decode_load" not in wd, "removed field decode_load still present in worker_details"
 
     @pytest.mark.asyncio
     async def test_latency_sensitivity_param_accepted(self, router):
@@ -225,14 +249,12 @@ class TestScoreWorker:
     def test_returns_two_float_tuple(self, router):
         result = router._score_worker(
             wid=0,
-            overlap=0.5,
-            kv_util=0.3,
-            prefill_util=0.2,
+            kv_native_score=0.55 * (0.5 * 500 / 16) + 0.30 * 5,  # representative value
             memory_pressure=0.0,
             osl=250,
             iat=250,
-            latency_sensitivity=2.0,
             is_sticky=False,
+            prefill_cost=0.5,
             reuse_budget=0,
         )
         assert isinstance(result, tuple)
@@ -243,14 +265,12 @@ class TestScoreWorker:
     def test_stickiness_zero_when_reuse_budget_zero(self, router):
         _, stickiness = router._score_worker(
             wid=0,
-            overlap=0.9,
-            kv_util=0.1,
-            prefill_util=0.0,
+            kv_native_score=0.55 * (0.1 * 500 / 16) + 0.30 * 3,
             memory_pressure=0.0,
             osl=250,
             iat=50,
-            latency_sensitivity=2.0,
             is_sticky=True,
+            prefill_cost=0.1,
             reuse_budget=0,
         )
         assert stickiness == 0.0
@@ -258,117 +278,134 @@ class TestScoreWorker:
     def test_stickiness_positive_for_sticky_worker_with_reuse(self, router):
         _, stickiness = router._score_worker(
             wid=0,
-            overlap=0.8,
-            kv_util=0.2,
-            prefill_util=0.0,
+            kv_native_score=0.55 * (0.2 * 500 / 16) + 0.30 * 6,
             memory_pressure=0.0,
             osl=250,
             iat=100,
-            latency_sensitivity=2.0,
             is_sticky=True,
+            prefill_cost=0.2,
             reuse_budget=3,
         )
         assert stickiness > 0.0
 
     def test_sticky_bonus_adds_to_stickiness(self, router):
-        """is_sticky=True yields higher stickiness than is_sticky=False, same inputs."""
+        """is_sticky=True yields higher stickiness_benefit than is_sticky=False, same inputs."""
         common = dict(
             wid=0,
-            overlap=0.7,
-            kv_util=0.2,
-            prefill_util=0.0,
+            kv_native_score=0.55 * (0.3 * 500 / 16) + 0.30 * 6,
             memory_pressure=0.0,
             osl=250,
             iat=100,
-            latency_sensitivity=2.0,
+            prefill_cost=0.3,
             reuse_budget=5,
         )
         _, s_sticky = router._score_worker(**common, is_sticky=True)
         _, s_nonsticky = router._score_worker(**common, is_sticky=False)
         assert s_sticky > s_nonsticky
 
-    def test_ranking_increases_with_overlap(self, router):
-        """Higher cache overlap → higher ranking score."""
+    def test_ranking_cost_increases_with_kv_native_score_low(self, router):
+        """Higher kv_native_score (more prefill work) → higher ranking_cost."""
+        # Low kv_native_score: small prefill_blocks + few decode_blocks
         r_low, _ = router._score_worker(
-            wid=0, overlap=0.1, kv_util=0.3, prefill_util=0.2,
+            wid=0, kv_native_score=0.55 * (0.1 * 500 / 16) + 0.30 * 9,
             memory_pressure=0.0, osl=250, iat=250,
-            latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+            is_sticky=False, prefill_cost=0.1, reuse_budget=0,
         )
         r_high, _ = router._score_worker(
-            wid=0, overlap=0.9, kv_util=0.3, prefill_util=0.2,
+            wid=0, kv_native_score=0.55 * (0.9 * 500 / 16) + 0.30 * 9,
             memory_pressure=0.0, osl=250, iat=250,
-            latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+            is_sticky=False, prefill_cost=0.9, reuse_budget=0,
         )
         assert r_high > r_low
 
-    def test_ranking_decreases_with_kv_util_via_osl_load(self, router):
-        """Higher kv_util → lower ranking (load penalty dominates sensitivity at equal lat_sens)."""
+    def test_ranking_cost_increases_with_kv_native_score_high(self, router):
+        """Higher kv_native_score (more decode load) → higher ranking_cost."""
+        # kv_native_score = w_prefill * prefill_blocks + w_decode * decode_blocks
+        # Vary decode_blocks component while holding prefill_blocks fixed.
+        prefill_blocks = 0.5 * 500 / 16  # fixed prefill component
         r_low, _ = router._score_worker(
-            wid=0, overlap=0.5, kv_util=0.1, prefill_util=0.0,
+            wid=0, kv_native_score=0.55 * prefill_blocks + 0.30 * 10,
             memory_pressure=0.0, osl=512, iat=250,
-            latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+            is_sticky=False, prefill_cost=0.5, reuse_budget=0,
         )
         r_high, _ = router._score_worker(
-            wid=0, overlap=0.5, kv_util=0.9, prefill_util=0.0,
+            wid=0, kv_native_score=0.55 * prefill_blocks + 0.30 * 90,
             memory_pressure=0.0, osl=512, iat=250,
-            latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+            is_sticky=False, prefill_cost=0.5, reuse_budget=0,
         )
-        assert r_low > r_high
+        assert r_high > r_low
 
-    def test_final_score_is_lambda_weighted_sum(self, router):
-        """score = lambda_ranking * ranking + lambda_stickiness * stickiness."""
+    def test_final_cost_formula(self, router):
+        """cost = lambda_ranking * ranking_cost - lambda_stickiness * stickiness_benefit."""
         router.lambda_ranking = 2.0
         router.lambda_stickiness = 3.0
-        ranking, stickiness = router._score_worker(
-            wid=0, overlap=0.6, kv_util=0.2, prefill_util=0.1,
+        ranking_cost, stickiness_benefit = router._score_worker(
+            wid=0, kv_native_score=0.55 * (0.4 * 500 / 16) + 0.30 * 6,
             memory_pressure=0.0, osl=250, iat=150,
-            latency_sensitivity=2.0, is_sticky=True, reuse_budget=4,
+            is_sticky=True, prefill_cost=0.4, reuse_budget=4,
         )
-        expected = 2.0 * ranking + 3.0 * stickiness
-        # Verify the formula is correct (not just the individual terms)
-        assert math.isfinite(expected)
-        assert math.isfinite(2.0 * ranking + 3.0 * stickiness)
+        expected_cost = 2.0 * ranking_cost - 3.0 * stickiness_benefit
+        assert math.isfinite(expected_cost)
+        assert math.isfinite(2.0 * ranking_cost - 3.0 * stickiness_benefit)
 
     def test_stickiness_scales_with_iat_urgency(self, router):
         """Lower IAT (rapid fire) → higher stickiness urgency."""
+        kv_ns = 0.55 * (0.3 * 500 / 16) + 0.30 * 6
         _, s_rapid = router._score_worker(
-            wid=0, overlap=0.7, kv_util=0.2, prefill_util=0.0,
+            wid=0, kv_native_score=kv_ns,
             memory_pressure=0.0, osl=250, iat=50,
-            latency_sensitivity=2.0, is_sticky=False, reuse_budget=5,
+            is_sticky=False, prefill_cost=0.3, reuse_budget=5,
         )
         _, s_slow = router._score_worker(
-            wid=0, overlap=0.7, kv_util=0.2, prefill_util=0.0,
+            wid=0, kv_native_score=kv_ns,
             memory_pressure=0.0, osl=250, iat=1000,
-            latency_sensitivity=2.0, is_sticky=False, reuse_budget=5,
+            is_sticky=False, prefill_cost=0.3, reuse_budget=5,
         )
         assert s_rapid > s_slow
 
     def test_stickiness_decreases_with_memory_pressure(self, router):
-        """High memory pressure reduces future_value, thus stickiness."""
+        """High memory pressure reduces future_value, thus stickiness_benefit."""
+        kv_ns = 0.55 * (0.2 * 500 / 16) + 0.30 * 6
         _, s_low_pressure = router._score_worker(
-            wid=0, overlap=0.8, kv_util=0.2, prefill_util=0.0,
+            wid=0, kv_native_score=kv_ns,
             memory_pressure=0.0, osl=250, iat=100,
-            latency_sensitivity=2.0, is_sticky=False, reuse_budget=5,
+            is_sticky=False, prefill_cost=0.2, reuse_budget=5,
         )
         _, s_high_pressure = router._score_worker(
-            wid=0, overlap=0.8, kv_util=0.2, prefill_util=0.0,
+            wid=0, kv_native_score=kv_ns,
             memory_pressure=0.9, osl=250, iat=100,
-            latency_sensitivity=2.0, is_sticky=False, reuse_budget=5,
+            is_sticky=False, prefill_cost=0.2, reuse_budget=5,
         )
         assert s_low_pressure > s_high_pressure
 
     def test_scores_finite_at_boundary_inputs(self, router):
         """Extreme valid inputs produce finite scores (no NaN/inf)."""
         boundary_cases = [
-            dict(overlap=0.0, kv_util=0.0, prefill_util=0.0, memory_pressure=0.0,
-                 osl=0, iat=0, latency_sensitivity=0.0, is_sticky=False, reuse_budget=0),
-            dict(overlap=1.0, kv_util=1.0, prefill_util=1.0, memory_pressure=1.0,
-                 osl=1024, iat=10000, latency_sensitivity=5.0, is_sticky=True, reuse_budget=100),
+            dict(kv_native_score=0.0, memory_pressure=0.0,
+                 osl=0, iat=0, is_sticky=False, prefill_cost=0.0, reuse_budget=0),
+            dict(kv_native_score=0.55 * (1.0 * 500 / 16) + 0.30 * 1000,
+                 memory_pressure=1.0,
+                 osl=1024, iat=10000, is_sticky=True, prefill_cost=1.0, reuse_budget=100),
         ]
         for inputs in boundary_cases:
             r, s = router._score_worker(wid=0, **inputs)
-            assert math.isfinite(r), f"ranking not finite for {inputs}"
-            assert math.isfinite(s), f"stickiness not finite for {inputs}"
+            assert math.isfinite(r), f"ranking_cost not finite for {inputs}"
+            assert math.isfinite(s), f"stickiness_benefit not finite for {inputs}"
+
+    def test_lower_kv_native_score_means_lower_ranking_cost(self, router):
+        """kv_native_score=0.0 (full cache hit, no decode load) has lower ranking_cost
+        than a worker with substantial prefill work."""
+        r_cache_hit, _ = router._score_worker(
+            wid=0, kv_native_score=0.0,
+            memory_pressure=0.0, osl=250, iat=250,
+            is_sticky=False, prefill_cost=0.0, reuse_budget=0,
+        )
+        r_no_cache, _ = router._score_worker(
+            wid=0, kv_native_score=0.55 * (1.0 * 500 / 16),
+            memory_pressure=0.0, osl=250, iat=250,
+            is_sticky=False, prefill_cost=1.0, reuse_budget=0,
+        )
+        assert r_cache_hit < r_no_cache
 
 
 # ---------------------------------------------------------------------------
@@ -377,14 +414,14 @@ class TestScoreWorker:
 
 class TestEpsilonBetaLearner:
     def test_epsilon_zero_excludes_beta_contribution(self, mock_kv_router):
-        """With epsilon=0, repeated calls with same inputs yield same ranking."""
+        """With epsilon=0, repeated calls with same inputs yield same ranking_cost."""
         router = KvThompsonRouter(mock_kv_router, config={"kv_thompson": {"epsilon": 0.0}})
         router.beta_learner.add_worker(0)
         scores = [
             router._score_worker(
-                wid=0, overlap=0.5, kv_util=0.3, prefill_util=0.0,
+                wid=0, kv_native_score=0.55 * (0.5 * 500 / 16) + 0.30 * 9,
                 memory_pressure=0.0, osl=250, iat=250,
-                latency_sensitivity=2.0, is_sticky=False, reuse_budget=0,
+                is_sticky=False, prefill_cost=0.5, reuse_budget=0,
             )[0]
             for _ in range(10)
         ]
@@ -517,13 +554,17 @@ class TestUpdateFeedback:
 
 
 # ---------------------------------------------------------------------------
-# Worker distribution across multiple calls
+# Worker distribution across multiple calls (cost-based: argmin)
 # ---------------------------------------------------------------------------
 
 class TestWorkerDistribution:
     @pytest.mark.asyncio
-    async def test_highest_overlap_wins_first_call(self, mock_kv_router):
-        """With epsilon=0, the highest-overlap worker wins the first request."""
+    async def test_lowest_cost_wins_first_call(self, mock_kv_router):
+        """With epsilon=0, the worker with lowest prefill_cost wins the first request.
+
+        Worker 2 has prefill_tokens=0 → prefill_cost=0.0 (full cache hit).
+        This is the cheapest worker and should be selected by argmin.
+        """
         r = KvThompsonRouter(mock_kv_router, config={"kv_thompson": {"epsilon": 0.0}})
         d = await r.pick_worker(
             token_ids=list(range(600)),
@@ -533,20 +574,19 @@ class TestWorkerDistribution:
             iat=250,
             tokens_in=600,
         )
-        # Worker 2 has prefill_tokens=0 (highest overlap) and should win
+        # Worker 2 has prefill_tokens=0 → lowest prefill_cost → lowest ranking_cost
         assert d.chosen == 2
 
     @pytest.mark.asyncio
     async def test_multiple_workers_reachable_across_different_prefixes(self, mock_kv_router):
         """Different prefix contexts can lead to different workers being chosen."""
         r = KvThompsonRouter(mock_kv_router, config=None)
-        # Override loads so each worker looks best for different conditions
+        # Override loads so each worker looks identical (tie on costs)
         mock_kv_router.get_potential_loads.return_value = [
-            _make_load(0, prefill_tokens=0),    # overlap=1.0 for short requests
-            _make_load(1, prefill_tokens=0),    # also overlap=1.0
-            _make_load(2, prefill_tokens=0),    # also overlap=1.0
+            _make_load(0, prefill_tokens=0),
+            _make_load(1, prefill_tokens=0),
+            _make_load(2, prefill_tokens=0),
         ]
-        # With identical overlap all workers score the same; native_pick=0 is fallback
         d = await r.pick_worker(
             token_ids=[1, 2],
             prefix_id="px_tie",
@@ -556,6 +596,30 @@ class TestWorkerDistribution:
             tokens_in=10,
         )
         assert d.chosen in {0, 1, 2}
+
+    @pytest.mark.asyncio
+    async def test_argmin_selects_worker_with_highest_decode_load_last(self, mock_kv_router):
+        """Worker with highest decode_load should have highest ranking_cost and be avoided."""
+        mock_kv_router.get_potential_loads.return_value = [
+            _make_load(0, prefill_tokens=0, decode_blocks=100),
+            _make_load(1, prefill_tokens=0, decode_blocks=100),
+            _make_load(2, prefill_tokens=0, decode_blocks=10000),  # very busy
+        ]
+        r = KvThompsonRouter(
+            mock_kv_router,
+            config={"kv_thompson": {"epsilon": 0.0}},
+            worker_load_monitor=None,
+        )
+        d = await r.pick_worker(
+            token_ids=[1, 2, 3],
+            prefix_id="load_test",
+            reuse_budget=0,
+            osl=250,
+            iat=250,
+            tokens_in=100,
+        )
+        # Worker 2 has much higher decode_load → highest ranking_cost → should NOT be chosen
+        assert d.chosen != 2
 
 
 # ---------------------------------------------------------------------------
@@ -764,17 +828,17 @@ class TestLinearSessionWeight:
     def test_full_budget_gives_session_weight_one(self, router):
         """reuse_budget == reuse_total → session_weight = 1.0 (before iat_urgency)."""
         # At iat=250, iat_urgency = 1.0, so stickiness is purely session_weight * future_value.
-        # We can verify by comparing two calls where reuse_budget == reuse_total vs half.
         reuse_total = 13
+        kv_ns = 0.55 * (0.5 * 500 / 16)  # decode_blocks=0 → pure prefill component
         _, s_full = router._score_worker(
-            wid=0, overlap=0.5, kv_util=0.0, prefill_util=0.0,
-            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
-            is_sticky=False, reuse_budget=reuse_total, reuse_total=reuse_total,
+            wid=0, kv_native_score=kv_ns,
+            memory_pressure=0.0, osl=250, iat=250,
+            is_sticky=False, prefill_cost=0.5, reuse_budget=reuse_total, reuse_total=reuse_total,
         )
         _, s_half = router._score_worker(
-            wid=0, overlap=0.5, kv_util=0.0, prefill_util=0.0,
-            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
-            is_sticky=False, reuse_budget=reuse_total // 2, reuse_total=reuse_total,
+            wid=0, kv_native_score=kv_ns,
+            memory_pressure=0.0, osl=250, iat=250,
+            is_sticky=False, prefill_cost=0.5, reuse_budget=reuse_total // 2, reuse_total=reuse_total,
         )
         # Full budget should be approximately double the half-budget stickiness
         assert s_full > 0.0
@@ -792,20 +856,21 @@ class TestLinearSessionWeight:
         equal stickiness steps.
         """
         reuse_total = 13
+        kv_ns = 0.55 * (0.4 * 500 / 16)  # decode_blocks=0 → pure prefill component
         _, s_full = router._score_worker(
-            wid=0, overlap=0.6, kv_util=0.0, prefill_util=0.0,
-            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
-            is_sticky=False, reuse_budget=13, reuse_total=reuse_total,
+            wid=0, kv_native_score=kv_ns,
+            memory_pressure=0.0, osl=250, iat=250,
+            is_sticky=False, prefill_cost=0.4, reuse_budget=13, reuse_total=reuse_total,
         )
         _, s_half = router._score_worker(
-            wid=0, overlap=0.6, kv_util=0.0, prefill_util=0.0,
-            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
-            is_sticky=False, reuse_budget=7, reuse_total=reuse_total,
+            wid=0, kv_native_score=kv_ns,
+            memory_pressure=0.0, osl=250, iat=250,
+            is_sticky=False, prefill_cost=0.4, reuse_budget=7, reuse_total=reuse_total,
         )
         _, s_near_zero = router._score_worker(
-            wid=0, overlap=0.6, kv_util=0.0, prefill_util=0.0,
-            memory_pressure=0.0, osl=250, iat=250, latency_sensitivity=2.0,
-            is_sticky=False, reuse_budget=1, reuse_total=reuse_total,
+            wid=0, kv_native_score=kv_ns,
+            memory_pressure=0.0, osl=250, iat=250,
+            is_sticky=False, prefill_cost=0.4, reuse_budget=1, reuse_total=reuse_total,
         )
         # 7/13 ≈ 0.538 → s_half ≈ 0.538 * s_full
         assert s_half == pytest.approx(s_full * (7 / 13), rel=0.02), (
@@ -832,12 +897,11 @@ class TestLinearSessionWeight:
         # Old formula: tanh(alpha * reuse_budget), independent of reuse_total
         tanh_at_1 = _math.tanh(alpha_reuse * 1)
         tanh_at_13 = _math.tanh(alpha_reuse * 13)
-        old_ratio = tanh_at_1 / tanh_at_13  # near 1 saturation means large ratio
+        old_ratio = tanh_at_1 / tanh_at_13  # near 1 saturation means large ratio  # noqa: F841
 
         # New formula: linear fraction
         linear_at_1 = 1 / reuse_total
-        linear_at_13 = 13 / reuse_total
-        new_ratio = linear_at_1 / linear_at_13
+        linear_at_13 = 13 / reuse_total  # noqa: F841
 
         # The old tanh gives relatively more weight to budget=1 (saturated behavior).
         # The new linear gives relatively less weight to budget=1.
