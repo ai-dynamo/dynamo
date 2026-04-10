@@ -8,36 +8,46 @@
 x-backend-base: &backend-base
   image: ${FASTVIDEO_IMAGE:-nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13}
   restart: on-failure
-  command: python -m dynamo.fastvideo
+  command: >
+    python -m dynamo.fastvideo
+      --model-path ${MODEL:-FastVideo/LTX2-Distilled-Diffusers}
   environment:
-    - DYN_DISCOVERY_BACKEND=file
-    - DYN_FILE_KV=/tmp/dynamo-discovery
-    - LD_LIBRARY_PATH=
-    - TORCHINDUCTOR_CACHE_DIR=/cache/torchinductor
-    - TRITON_CACHE_DIR=/cache/triton
-  volumes:
-    - dynamo-discovery:/tmp/dynamo-discovery
-    - huggingface-cache:/root/.cache/huggingface
+    - DYN_DISCOVERY_BACKEND=etcd
+    - ETCD_ENDPOINTS=http://etcd:2379
+  # Optional: reuse a local Hugging Face cache to avoid re-downloading
+  # weights across `docker compose down` / `up`. The host path must be
+  # writable by UID 1000 inside the container. Uncomment to enable:
+  # volumes:
+  #   - ${HOME}/.cache/huggingface:/home/dynamo/.cache/huggingface
+  cap_add:
+    - SYS_PTRACE
   ipc: host
   shm_size: 8g
   ulimits:
     memlock: -1
     stack: 67108864
   depends_on:
+    - etcd
     - frontend
 
 services:
+  etcd:
+    image: bitnamilegacy/etcd:3.6.1
+    restart: on-failure
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+
   frontend:
     image: ${FASTVIDEO_IMAGE:-nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13}
     restart: on-failure
     command: >
       python -m dynamo.frontend
         --http-port 8000
-        --discovery-backend file
+        --discovery-backend etcd
     environment:
-      - DYN_FILE_KV=/tmp/dynamo-discovery
-    volumes:
-      - dynamo-discovery:/tmp/dynamo-discovery
+      - ETCD_ENDPOINTS=http://etcd:2379
+    depends_on:
+      - etcd
     ports:
       - "8000:8000"
 
@@ -112,7 +122,3 @@ services:
         reservations:
           devices:
             - { driver: nvidia, device_ids: ["7"], capabilities: [gpu] }
-
-volumes:
-  dynamo-discovery:
-  huggingface-cache:

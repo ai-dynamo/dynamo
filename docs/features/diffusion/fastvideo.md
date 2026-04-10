@@ -99,7 +99,19 @@ docker pull nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13
 COMPOSE_PROFILES=4 docker compose up
 ```
 
-The Compose file defaults to `nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13` and exposes the API on `http://localhost:8000`. Override the image for top-of-tree or private builds with `FASTVIDEO_IMAGE=<custom-image> COMPOSE_PROFILES=4 docker compose up`.
+The Compose file defaults to `nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13` and exposes the API on `http://localhost:8000`. Override the image for top-of-tree or private builds with `FASTVIDEO_IMAGE=<custom-image> COMPOSE_PROFILES=4 docker compose up`. The Compose example starts a local `etcd` sidecar for service discovery, which avoids host filesystem ownership issues between the frontend and worker containers.
+
+By default, the Compose example downloads model weights into the container's
+own writable cache directory. If you want to reuse an existing local Hugging
+Face cache across container recreations, add a bind mount in
+`examples/backends/fastvideo/launch/docker-compose.yml`, for example:
+
+```yaml
+- ${HOME}/.cache/huggingface:/home/dynamo/.cache/huggingface
+```
+
+The host cache directory must be writable by UID `1000` inside the container
+(`dynamo`).
 
 ### Option 2: Host-Local Script
 
