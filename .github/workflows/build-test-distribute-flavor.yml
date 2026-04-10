@@ -210,7 +210,6 @@ jobs:
         shell: bash
         run: |
           PLATFORM="${{ inputs.platform }}"
-          DEVICE="${{ inputs.device }}"
           # Emit a JSON array of {arch, runner} objects for platforms actually being built
           # "linux/amd64,linux/arm64" -> both runners
           # "linux/amd64"             -> amd64 runner only (covers EFA and other single-arch)
