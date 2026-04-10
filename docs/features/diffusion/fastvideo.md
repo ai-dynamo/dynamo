@@ -14,7 +14,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 ## Overview
 
 - **Default model:** `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` — a single-GPU-friendly Wan 2.1 text-to-video model that keeps the built-in backend examples and smoke tests approachable.
-- **Alternate models:** You can still serve other FastVideo-compatible checkpoints, including `FastVideo/LTX2-Distilled-Diffusers`, by overriding `--model-path`.
+- **Alternate models:** You serve other FastVideo-compatible checkpoints, including `FastVideo/LTX2-Distilled-Diffusers`, by overriding `--model-path`.
 - **Optimized inference:** The built-in backend exposes explicit runtime flags such as `--torch-compile`, `--fp4-quantization`, `--attention-backend`, and CPU offload controls instead of bundling them into a single profile.
 - **Response format:** Uses Dynamo's shared video protocol types and returns one complete MP4 payload per request. By default, responses use `data[0].url` and store output via Dynamo media storage. Set `"response_format": "b64_json"` when you want inline base64 video data instead.
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.

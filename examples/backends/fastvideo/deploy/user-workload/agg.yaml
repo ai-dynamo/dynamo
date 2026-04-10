@@ -28,7 +28,7 @@ spec:
         mainContainer:
           image: my-registry/fastvideo-runtime:my-tag
           imagePullPolicy: IfNotPresent
-          workingDir: /opt/app
+          workingDir: /workspace
           command:
             - python
             - -m
@@ -68,7 +68,7 @@ spec:
         mainContainer:
           image: my-registry/fastvideo-runtime:my-tag
           imagePullPolicy: IfNotPresent
-          workingDir: /opt/app
+          workingDir: /workspace
           securityContext:
             capabilities:
               add:
