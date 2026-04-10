@@ -83,7 +83,7 @@ impl Client {
                     })?;
 
                 let lease_id = if config.attach_lease {
-                    create_lease(connector.clone(), 10, token)
+                    create_lease(connector.clone(), config.lease_ttl, token)
                         .await
                         .with_context(|| {
                             format!(
@@ -570,6 +570,10 @@ pub struct ClientOptions {
     /// If true, the client will attach a lease to the primary [`CancellationToken`].
     #[builder(default = "true")]
     pub attach_lease: bool,
+
+    /// Lease TTL in seconds
+    #[builder(default = "default_lease_ttl()")]
+    pub lease_ttl: u64,
 }
 
 impl Default for ClientOptions {
@@ -601,6 +605,7 @@ impl Default for ClientOptions {
             etcd_url: default_servers(),
             etcd_connect_options: connect_options,
             attach_lease: true,
+            lease_ttl: default_lease_ttl(),
         }
     }
 }
@@ -613,6 +618,13 @@ fn default_servers() -> Vec<String> {
             .collect(),
         Err(_) => vec!["http://localhost:2379".to_string()],
     }
+}
+
+fn default_lease_ttl() -> u64 {
+    std::env::var(env_etcd::ETCD_LEASE_TTL)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10)
 }
 
 /// A cache for etcd key-value pairs that watches for changes

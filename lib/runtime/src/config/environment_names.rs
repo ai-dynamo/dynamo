@@ -154,6 +154,9 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
+    /// ETCD lease TTL in seconds (default: 10)
+    pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
+
     /// ETCD authentication environment variables
     pub mod auth {
         /// Username for ETCD authentication
