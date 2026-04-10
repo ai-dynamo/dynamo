@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # GLM-5 NVFP4 — Disaggregated Prefill/Decode on GB200
 
 Serves [nvidia/GLM-5-NVFP4](https://huggingface.co/nvidia/GLM-5-NVFP4) using SGLang with
-disaggregated prefill/decode and EAGLE speculative decoding via Dynamo on GB200 NVL4 nodes.
+disaggregated prefill/decode and EAGLE speculative decoding via Dynamo on GB200 nodes.
 
 ## Topology
 
@@ -17,7 +17,7 @@ disaggregated prefill/decode and EAGLE speculative decoding via Dynamo on GB200 
 
 ## Prerequisites
 
-- GB200 NVL4 nodes with RDMA networking
+- GB200 nodes with RDMA networking
 - Dynamo operator installed
 - dynamo-platform HelmRelease deployed
 - Shared NFS PVC for model weights
@@ -38,15 +38,16 @@ docker buildx build \
 
 ## Step 2: Download the Model
 
-Create a HuggingFace token secret and download the model weights:
+Create the PVC, HuggingFace token secret, and download the model weights:
 
 ```bash
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN=<your-hf-token> -n <your-namespace>
+kubectl apply -f recipes/glm-5-nvfp4/model-cache/model-cache.yaml
 
-# Edit model-cache/model-download.yaml to set your namespace and PVC name
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=<your-hf-token>
+
 kubectl apply -f recipes/glm-5-nvfp4/model-cache/model-download.yaml
-kubectl wait --for=condition=complete job/glm5-nvfp4-download -n <your-namespace> --timeout=3600s
+kubectl wait --for=condition=complete job/model-download --timeout=3600s
 ```
 
 ## Step 3: Deploy
@@ -55,7 +56,6 @@ Edit `sglang/disagg/deploy.yaml` and replace all `<placeholder>` values:
 
 - `<your-namespace>` — your Kubernetes namespace
 - `<your-registry>/sglang-dynamo-glm5:latest` — your built container image
-- `<your-model-pvc>` — PVC name containing model weights at `/models/nvidia-GLM-5-NVFP4`
 
 ```bash
 kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml

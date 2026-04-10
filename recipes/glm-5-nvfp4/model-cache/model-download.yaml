@@ -3,48 +3,46 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: glm5-nvfp4-download
-  namespace: <your-namespace>
+  name: model-download
 spec:
-  backoffLimit: 1
+  backoffLimit: 3
   completions: 1
   parallelism: 1
   template:
+    metadata:
+      labels:
+        app: model-download
     spec:
       restartPolicy: Never
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        seccompProfile:
-          type: RuntimeDefault
       containers:
-      - name: download
-        image: python:3.12-slim
-        securityContext:
-          allowPrivilegeEscalation: false
-        command:
-        - /bin/sh
-        - -c
-        - |
-          set -eu
-          pip install -q huggingface_hub
-          huggingface-cli download nvidia/GLM-5-NVFP4 \
-            --local-dir /models/nvidia-GLM-5-NVFP4 \
-            --token "$HF_TOKEN"
-          echo "Download complete."
-        env:
-        - name: HF_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: hf-token-secret
-              key: HF_TOKEN
-        - name: HF_HUB_ENABLE_HF_TRANSFER
-          value: "1"
-        volumeMounts:
-        - name: model-cache
-          mountPath: /models
+        - name: model-download
+          image: python:3.10-slim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: MODEL_NAME
+              value: nvidia/GLM-5-NVFP4
+            - name: HF_HOME
+              value: /model-store
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub hf_transfer
+              hf download $MODEL_NAME
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-store
       volumes:
       - name: model-cache
         persistentVolumeClaim:
-          claimName: <your-model-pvc>
+          claimName: model-cache

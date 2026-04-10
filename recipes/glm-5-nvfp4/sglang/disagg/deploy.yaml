@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# GLM-5 (NVFP4) disaggregated prefill/decode on GB200 NVL4 via SGLang + Dynamo
+# GLM-5 (NVFP4) disaggregated prefill/decode on GB200 via SGLang + Dynamo
 #
 # Prerequisites:
 #   - dynamo-platform HelmRelease applied
@@ -25,6 +25,8 @@ spec:
         secretKeyRef:
           name: hf-token-secret
           key: HF_TOKEN
+    - name: HF_HOME
+      value: /model-store
 
   services:
     Frontend:
@@ -49,12 +51,12 @@ spec:
           name: ""
           resources: {}
           volumeMounts:
-            - mountPath: /models
+            - mountPath: /model-store
               name: model-cache
         volumes:
           - name: model-cache
             persistentVolumeClaim:
-              claimName: <your-model-pvc>
+              claimName: model-cache
 
     decode:
       componentType: worker
@@ -76,7 +78,7 @@ spec:
             - >-
               ulimit -l unlimited && ulimit -n 1048576 &&
               exec python3 -m dynamo.sglang
-              --model-path /models/nvidia-GLM-5-NVFP4
+              --model-path nvidia/GLM-5-NVFP4
               --served-model-name nvidia/GLM-5-NVFP4
               --trust-remote-code
               --quantization modelopt_fp4
@@ -163,7 +165,7 @@ spec:
             periodSeconds: 60
             timeoutSeconds: 5
           volumeMounts:
-            - mountPath: /models
+            - mountPath: /model-store
               name: model-cache
           workingDir: /workspace/
         resourceClaims:
@@ -172,7 +174,7 @@ spec:
         volumes:
           - name: model-cache
             persistentVolumeClaim:
-              claimName: <your-model-pvc>
+              claimName: model-cache
 
     prefill:
       componentType: worker
@@ -190,7 +192,7 @@ spec:
             - >-
               ulimit -l unlimited && ulimit -n 1048576 &&
               exec python3 -m dynamo.sglang
-              --model-path /models/nvidia-GLM-5-NVFP4
+              --model-path nvidia/GLM-5-NVFP4
               --served-model-name nvidia/GLM-5-NVFP4
               --trust-remote-code
               --quantization modelopt_fp4
@@ -270,13 +272,13 @@ spec:
             periodSeconds: 60
             timeoutSeconds: 5
           volumeMounts:
-            - mountPath: /models
+            - mountPath: /model-store
               name: model-cache
           workingDir: /workspace/
         volumes:
           - name: model-cache
             persistentVolumeClaim:
-              claimName: <your-model-pvc>
+              claimName: model-cache
 ---
 # ComputeDomain enables MNNVL scheduling for the 5-node decode+prefill group.
 apiVersion: resource.nvidia.com/v1beta1

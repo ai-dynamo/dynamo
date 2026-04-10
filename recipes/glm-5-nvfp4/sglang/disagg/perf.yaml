@@ -38,9 +38,11 @@ spec:
         - name: CONCURRENCY
           value: "512"
         - name: ARTIFACT_DIR
-          value: /models/perf/glm5-disagg-isl1k-osl8k
+          value: /model-store/perf/glm5-disagg-isl1k-osl8k
         - name: TOKENIZER
-          value: /models/nvidia-GLM-5-NVFP4
+          value: nvidia/GLM-5-NVFP4
+        - name: HF_HOME
+          value: /model-store
         - name: PYTHONUNBUFFERED
           value: "1"
         - name: COLUMNS
@@ -89,9 +91,9 @@ spec:
           ls -la "$ARTIFACT_DIR"
         volumeMounts:
         - name: model-cache
-          mountPath: /models
+          mountPath: /model-store
         workingDir: /workspace
       volumes:
       - name: model-cache
         persistentVolumeClaim:
-          claimName: <your-model-pvc>
+          claimName: model-cache
