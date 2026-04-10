@@ -66,7 +66,7 @@ pub fn watch_and_extract_field<T, V, F>(
 ) -> tokio::sync::watch::Receiver<std::collections::HashMap<u64, V>>
 where
     T: for<'de> Deserialize<'de> + 'static,
-    V: Clone + Send + Sync + 'static,
+    V: Clone + PartialEq + Send + Sync + 'static,
     F: Fn(T) -> V + Send + 'static,
 {
     use futures::StreamExt;
@@ -115,7 +115,7 @@ where
                     state.insert(key, value);
 
                     let collapsed = collapse_by_instance_id(&state);
-                    if tx.send(collapsed).is_err() {
+                    if *tx.borrow() != collapsed && tx.send(collapsed).is_err() {
                         tracing::debug!("watch_and_extract_field receiver dropped, stopping");
                         break;
                     }
@@ -134,7 +134,7 @@ where
                     state.remove(&id);
 
                     let collapsed = collapse_by_instance_id(&state);
-                    if tx.send(collapsed).is_err() {
+                    if *tx.borrow() != collapsed && tx.send(collapsed).is_err() {
                         tracing::debug!("watch_and_extract_field receiver dropped, stopping");
                         break;
                     }
