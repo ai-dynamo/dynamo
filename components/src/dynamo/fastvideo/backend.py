@@ -251,6 +251,13 @@ class FastVideoHandler:
             raise ValueError("response_format must be one of: b64_json, url")
         return resolved
 
+    def _validate_request_support(self, request: NvCreateVideoRequest) -> None:
+        if request.input_reference is not None:
+            raise ValueError(
+                "FastVideo backend does not support input_reference "
+                "(image-to-video) requests"
+            )
+
     def _generate_mp4(
         self,
         *,
@@ -333,6 +340,7 @@ class FastVideoHandler:
                 raise RuntimeError("FastVideo generator is not initialized")
 
             req = NvCreateVideoRequest(**request)
+            self._validate_request_support(req)
             nvext = req.nvext or VideoNvExt()
 
             width, height = self._parse_size(req.size)

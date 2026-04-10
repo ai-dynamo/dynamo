@@ -100,6 +100,18 @@ sudo apt install python3-dev libxcb1
 uv pip install --prerelease=allow "ai-dynamo[vllm]"
 ```
 
+**FastVideo**
+
+```bash
+sudo apt install python3-dev
+uv pip install --prerelease=allow "ai-dynamo[fastvideo]"
+```
+
+FastVideo installs the upstream framework from a Git URL and pulls a beta
+`flash-attn-4` dependency, so the released FastVideo container remains the
+smoothest setup path. See the [FastVideo guide](../features/diffusion/fastvideo.md)
+for container-based deployment and backend-specific runtime details.
+
 ## Run Dynamo
 
 ### Discovery Backend

@@ -16,7 +16,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 - **Default model:** `FastVideo/LTX2-Distilled-Diffusers` — a distilled variant of the LTX-2 Diffusion Transformer (Lightricks), reducing inference from 50+ steps to just 5.
 - **Two-stage pipeline:** Stage 1 generates video at target resolution; Stage 2 refines with a distilled LoRA for improved fidelity and texture.
 - **Optimized inference:** The built-in backend exposes explicit runtime flags such as `--torch-compile`, `--fp4-quantization`, `--attention-backend`, and CPU offload controls instead of bundling them into a single profile.
-- **Response format:** Uses Dynamo's shared video protocol types and returns one complete MP4 payload per request as `data[0].b64_json` by default. Requests may also set `"response_format": "url"` to store output via Dynamo media storage.
+- **Response format:** Uses Dynamo's shared video protocol types and returns one complete MP4 payload per request. By default, responses use `data[0].url` and store output via Dynamo media storage. Set `"response_format": "b64_json"` when you want inline base64 video data instead.
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 - **Deployment mode:** FastVideo currently supports aggregated deployment only. Disaggregated serving is not supported yet.
 
@@ -262,7 +262,8 @@ kubectl port-forward -n ${NAMESPACE} svc/fastvideo-agg-frontend 8000:8000
 > [!NOTE]
 > If this is the first request after startup, expect it to take longer while warmup completes. See [Warmup Time](#warmup-time) for details.
 
-Send a request and decode the response:
+By default, FastVideo returns a URL in `data[0].url`. For a self-contained local
+smoke test, request inline base64 output explicitly and decode it:
 
 ```bash
 curl -s -X POST http://localhost:8000/v1/videos \
@@ -271,6 +272,7 @@ curl -s -X POST http://localhost:8000/v1/videos \
     "model": "FastVideo/LTX2-Distilled-Diffusers",
     "prompt": "A cinematic drone shot over a snowy mountain range at sunrise",
     "size": "1920x1088",
+    "response_format": "b64_json",
     "seconds": 5,
     "nvext": {
       "fps": 24,
@@ -287,6 +289,11 @@ jq -r '.data[0].b64_json' response.json | base64 --decode > output.mp4
 # macOS
 jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 ```
+
+If you omit `"response_format": "b64_json"`, the backend uses its default
+`"url"` mode and returns `data[0].url`. In local runs without
+`--media-output-http-url`, that URL is typically a filesystem-backed path under
+`--media-output-fs-url` (default: `file:///tmp/dynamo_media`).
 
 ## Worker Configuration Reference
 

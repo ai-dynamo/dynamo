@@ -37,6 +37,11 @@ class _FakeGenerator:
         return {"generation_time": 1.0, "e2e_latency": 1.5}
 
 
+class _GeneratorShouldNotRun:
+    def generate_video(self, prompt: str, **kwargs) -> dict[str, float]:
+        raise AssertionError("generate_video should not be called")
+
+
 def test_parse_fastvideo_args_uses_builtin_defaults():
     config = parse_fastvideo_args(["--model-path", "org/model"])
 
@@ -189,6 +194,33 @@ async def test_fastvideo_handler_generates_minimal_video_response():
     context_id = _FakeContext().id()
     expected_url = f"{config.media_output_fs_url}/videos/{context_id}.mp4"
     assert response["data"] == [{"url": expected_url, "b64_json": None}]
+
+
+@pytest.mark.asyncio
+async def test_fastvideo_handler_rejects_input_reference_requests():
+    config = parse_fastvideo_args(["--model-path", "org/model"])
+    handler = FastVideoHandler(config, generator=_GeneratorShouldNotRun())
+
+    results = []
+    async for result in handler.generate(
+        {
+            "prompt": "A test prompt",
+            "model": "org/model",
+            "input_reference": "/tmp/reference.png",
+        },
+        _FakeContext(),
+    ):
+        results.append(result)
+
+    assert len(results) == 1
+    response = results[0]
+    assert response["status"] == "failed"
+    assert response["progress"] == 0
+    assert response["data"] == []
+    assert (
+        response["error"] == "FastVideo backend does not support input_reference "
+        "(image-to-video) requests"
+    )
 
 
 def test_fastvideo_handler_builds_generator_kwargs_from_generator_args_file_and_generator_args_json(
