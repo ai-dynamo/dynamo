@@ -17,7 +17,7 @@ from typing import Any, Dict
 import sglang as sgl
 
 from dynamo._core import Context
-from dynamo.common.backend.engine import LLMEngine, EngineConfig
+from dynamo.common.backend.engine import EngineConfig, LLMEngine
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.engine_utils import build_completion_usage, normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager

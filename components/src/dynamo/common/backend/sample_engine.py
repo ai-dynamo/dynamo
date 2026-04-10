@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator
 from dynamo._core import Context
 from dynamo.common.engine_utils import build_completion_usage
 
-from .engine import LLMEngine, EngineConfig
+from .engine import EngineConfig, LLMEngine
 from .worker import WorkerConfig
 
 
