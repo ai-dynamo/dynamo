@@ -435,7 +435,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         // Resolve session affinity: if the request has a session_id, inject the
         // pinned worker_id into backend_instance_id before worker selection.
+        // Skip entirely for non-session requests to keep them off the sticky path.
         if let Some(ref sticky) = self.sticky_sessions
+            && request
+                .routing
+                .as_ref()
+                .and_then(|r| r.session_control.as_ref())
+                .is_some()
             && request
                 .routing
                 .as_ref()
