@@ -590,12 +590,8 @@ class NativePlannerBase:
         pm.predicted_input_sequence_tokens.set(diag.predicted_isl or 0)
         pm.predicted_output_sequence_tokens.set(diag.predicted_osl or 0)
 
-        pm.engine_prefill_capacity_requests_per_second.set(
-            diag.engine_rps_prefill or 0
-        )
-        pm.engine_decode_capacity_requests_per_second.set(
-            diag.engine_rps_decode or 0
-        )
+        pm.engine_prefill_capacity_requests_per_second.set(diag.engine_rps_prefill or 0)
+        pm.engine_decode_capacity_requests_per_second.set(diag.engine_rps_decode or 0)
 
         pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
         pm.throughput_scaling_decision.state(diag.throughput_decision_reason or "unset")
