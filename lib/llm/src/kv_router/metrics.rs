@@ -56,10 +56,19 @@ use prometheus::{HistogramOpts, IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
 
-/// Exponential buckets for routing overhead histograms:
-/// from 0.0001 ms (0.1 µs) to ~13.1 ms, factor 2, 18 steps.
+/// Custom buckets for routing overhead histograms (milliseconds).
+///
+/// Covers 0.1 ms to 1000 ms with log-spaced boundaries, providing good
+/// resolution in the typical 0.1-10 ms range while extending high enough
+/// to capture tail latency from async indexer queries and scheduling under load.
+///
+/// Previous config used `exponential_buckets(0.0001, 2.0, 18)` which topped
+/// out at ~13.1 ms, clipping `histogram_quantile()` output for any overhead
+/// beyond that boundary and hiding long-tail behavior.
 fn overhead_buckets() -> Vec<f64> {
-    prometheus::exponential_buckets(0.0001, 2.0, 18).expect("exponential buckets should not fail")
+    vec![
+        0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0,
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +599,7 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
 
     #[test]
     fn test_routing_overhead_saturating_sub() {
-        let buckets = prometheus::exponential_buckets(0.0001, 2.0, 18).unwrap();
+        let buckets = overhead_buckets();
         let make = |name: &str| {
             prometheus::Histogram::with_opts(
                 prometheus::HistogramOpts::new(name, "test").buckets(buckets.clone()),
