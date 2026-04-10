@@ -446,7 +446,6 @@ class TestAggRegressionModel:
         assert thpt == 0.0
 
 
-
 # ── Discovery backfill tests ────────────────────────────────────────
 
 
