@@ -142,16 +142,24 @@ pub fn load_and_validate_tensors(
     Ok((device_tensors, reference_shape, reference_strides, per_layer_bspb))
 }
 
-fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
+/// Returns (agent, posix_available).
+fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<(NixlAgent, bool)> {
     let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
     if use_gds {
         let (_, gds_params) = agent.get_plugin_params("GDS_MT")?;
         agent.create_backend("GDS_MT", &gds_params)?;
     }
-    let (_, posix_params) = agent.get_plugin_params("POSIX")?;
-    agent.create_backend("POSIX", &posix_params)?;
-
-    Ok(agent)
+    let posix_available = match agent.get_plugin_params("POSIX") {
+        Ok((_, posix_params)) => {
+            agent.create_backend("POSIX", &posix_params)?;
+            true
+        }
+        Err(e) => {
+            tracing::warn!("POSIX backend not available ({}); disk cache will be disabled", e);
+            false
+        }
+    };
+    Ok((agent, posix_available))
 }
 
 // Helper: perform allocation and build transfer handler (factored from previous code)
@@ -164,7 +172,18 @@ async fn perform_allocation_and_build_handler(
     device_id: usize,
     scheduler_client: Option<TransferSchedulerClient>,
 ) -> anyhow::Result<BlockTransferHandler> {
-    let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
+    let (agent, posix_available) = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
+    let num_disk_blocks = if posix_available {
+        leader_meta.num_disk_blocks
+    } else if leader_meta.num_disk_blocks > 0 {
+        tracing::warn!(
+            "Disabling disk cache ({} blocks requested) because POSIX backend is unavailable",
+            leader_meta.num_disk_blocks
+        );
+        0
+    } else {
+        0
+    };
     let pool_config = PoolConfig {
         enable_pool: true,
         max_concurrent_transfers: max_concurrent_transfers(),
@@ -215,11 +234,11 @@ async fn perform_allocation_and_build_handler(
     } else {
         None
     };
-    // disk
-    let disk_blocks = if leader_meta.num_disk_blocks > 0 {
+    // disk (skipped when POSIX backend is unavailable)
+    let disk_blocks = if num_disk_blocks > 0 {
         let disk_allocator = Arc::new(DiskAllocator);
         let disk_layout = layout_builder
-            .num_blocks(leader_meta.num_disk_blocks)
+            .num_blocks(num_disk_blocks)
             .build()?
             .allocate_layout(worker_config.disk_layout_type, disk_allocator)?;
         Some(KvbmWorker::make_layout::<_, BasicMetadata>(
