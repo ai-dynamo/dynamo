@@ -110,6 +110,14 @@ func IsK8sDiscoveryEnabled(discoveryBackend configv1alpha1.DiscoveryBackend, ann
 	return GetDiscoveryBackend(discoveryBackend, annotations) == configv1alpha1.DiscoveryBackendKubernetes
 }
 
+// GetKubeDiscoveryMode returns the kube discovery mode from annotations, defaulting to pod mode.
+func GetKubeDiscoveryMode(annotations map[string]string) configv1alpha1.KubeDiscoveryMode {
+	if mode, exists := annotations[commonconsts.KubeAnnotationDynamoKubeDiscoveryMode]; exists {
+		return configv1alpha1.KubeDiscoveryMode(mode)
+	}
+	return configv1alpha1.KubeDiscoveryModePod
+}
+
 // EphemeralDeploymentEventFilter returns a predicate that filters events based on namespace configuration.
 func EphemeralDeploymentEventFilter(config *configv1alpha1.OperatorConfiguration, runtimeConfig *RuntimeConfig) predicate.Predicate {
 	return predicate.NewPredicateFuncs(func(o client.Object) bool {

@@ -888,6 +888,7 @@ func TestGenerateComponentContext(t *testing.T) {
 				tt.namespace,
 				tt.numberOfNodes,
 				tt.discoveryBackend,
+				configv1alpha1.KubeDiscoveryModePod,
 			)
 
 			assert.Equal(t, tt.expectedDynamoNamespace, ctx.DynamoNamespace,
@@ -896,7 +897,7 @@ func TestGenerateComponentContext(t *testing.T) {
 			assert.Equal(t, tt.expectedParentDGDName, ctx.ParentGraphDeploymentName)
 			assert.Equal(t, tt.expectedParentDGDNamespace, ctx.ParentGraphDeploymentNamespace)
 			assert.Equal(t, tt.numberOfNodes, ctx.numberOfNodes)
-			assert.Equal(t, tt.discoveryBackend, ctx.DiscoveryBackend)
+			assert.Equal(t, tt.discoveryBackend, ctx.Discovery.Backend)
 		})
 	}
 }
@@ -5421,8 +5422,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 						Args:    []string{"-m", "dynamo.worker"},
 						Env: []corev1.EnvVar{
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
-							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
-							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
+							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"}, {Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
@@ -6874,6 +6874,7 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
 		},
 		"Worker",
+		configv1alpha1.DiscoveryBackendKubernetes,
 	)
 	require.NoError(t, err)
 	annotations := map[string]string{}
@@ -6908,6 +6909,7 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
 		},
 		"Worker",
+		configv1alpha1.DiscoveryBackendKubernetes,
 	)
 	require.NoError(t, err)
 	annotations := map[string]string{}
@@ -6944,6 +6946,7 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd"},
 		},
 		"Worker",
+		configv1alpha1.DiscoveryBackendKubernetes,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, "default-test-dgd", labels[commonconsts.KubeLabelDynamoNamespace])
@@ -7054,14 +7057,14 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeWorker,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx := generateComponentContext(component, "dgd", "ns", 1, "kubernetes")
+	compCtx := generateComponentContext(component, "dgd", "ns", 1, "kubernetes", configv1alpha1.KubeDiscoveryModePod)
 	assert.Equal(t, "abc123", compCtx.WorkerHashSuffix)
 
 	// Worker without hash label
 	component2 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
 	}
-	compCtx2 := generateComponentContext(component2, "dgd", "ns", 1, "kubernetes")
+	compCtx2 := generateComponentContext(component2, "dgd", "ns", 1, "kubernetes", configv1alpha1.KubeDiscoveryModePod)
 	assert.Empty(t, compCtx2.WorkerHashSuffix)
 
 	// Frontend never gets WorkerHashSuffix, even with the label
@@ -7069,7 +7072,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeFrontend,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx3 := generateComponentContext(component3, "dgd", "ns", 1, "kubernetes")
+	compCtx3 := generateComponentContext(component3, "dgd", "ns", 1, "kubernetes", configv1alpha1.KubeDiscoveryModePod)
 	assert.Empty(t, compCtx3.WorkerHashSuffix)
 }
 

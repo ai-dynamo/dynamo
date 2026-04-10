@@ -1002,7 +1002,7 @@ func GenerateBasePodSpec(
 	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, component.Annotations))
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, component.Annotations), controller_common.GetKubeDiscoveryMode(component.Annotations))
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -1196,7 +1196,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend configv1alpha1.DiscoveryBackend) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend configv1alpha1.DiscoveryBackend, discoveryMode configv1alpha1.KubeDiscoveryMode) ComponentContext {
 	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
@@ -1208,10 +1208,13 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
-		DiscoveryBackend:               discoveryBackend,
-		DynamoNamespace:                dynamoNamespace,
-		EPPConfig:                      component.EPPConfig,
-		WorkerHashSuffix:               workerHashSuffix,
+		Discovery: DiscoveryContext{
+			Backend: discoveryBackend,
+			Mode:    discoveryMode,
+		},
+		DynamoNamespace:  dynamoNamespace,
+		EPPConfig:        component.EPPConfig,
+		WorkerHashSuffix: workerHashSuffix,
 	}
 	return componentContext
 }
@@ -1230,7 +1233,7 @@ func generateFrontendSidecar(
 		ComponentType:                  commonconsts.ComponentTypeFrontend,
 		ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
-		DiscoveryBackend:               parentContext.DiscoveryBackend,
+		Discovery:                      parentContext.Discovery,
 		DynamoNamespace:                parentContext.DynamoNamespace,
 	}
 
@@ -1297,6 +1300,7 @@ func GeneratePodSpecForComponent(
 var dgdPropagatedAnnotationKeys = []string{
 	commonconsts.KubeAnnotationEnableMetrics,
 	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
+	commonconsts.KubeAnnotationDynamoKubeDiscoveryMode,
 	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
 	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
 }
@@ -1424,6 +1428,7 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
 			}
+
 			if operatorConfig.Checkpoint.Enabled {
 				if err := checkpoint.InjectCheckpointIntoPodSpec(
 					ctx,
@@ -1457,7 +1462,7 @@ func GenerateGrovePodCliqueSet(
 			if !isMultinode {
 				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
 			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName, discoveryBackend)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1517,6 +1522,7 @@ func generateLabels(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	componentName string,
+	discoveryBackend configv1alpha1.DiscoveryBackend,
 ) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
@@ -1545,6 +1551,7 @@ func generateLabels(
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
 	}
+	// Re-apply system labels after user merge to prevent override
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
@@ -1554,6 +1561,11 @@ func generateLabels(
 	}
 	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+	// Discovery labels on pod template — needed for Pod reflector filtering in container mode
+	if discoveryBackend == configv1alpha1.DiscoveryBackendKubernetes {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 	return labels, nil
 }

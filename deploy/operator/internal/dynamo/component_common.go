@@ -43,13 +43,19 @@ func ComponentDefaultsFactory(componentType string) ComponentDefaults {
 // BaseComponentDefaults provides common defaults shared by all components
 type BaseComponentDefaults struct{}
 
+// DiscoveryContext holds resolved discovery settings for a component.
+type DiscoveryContext struct {
+	Backend configv1alpha1.DiscoveryBackend
+	Mode    configv1alpha1.KubeDiscoveryMode
+}
+
 type ComponentContext struct {
 	numberOfNodes                  int32
 	DynamoNamespace                string
 	ComponentType                  string
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
-	DiscoveryBackend               configv1alpha1.DiscoveryBackend
+	Discovery                      DiscoveryContext
 	EPPConfig                      *v1alpha1.EPPConfig
 	WorkerHashSuffix               string
 }
@@ -121,10 +127,23 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	}
 
 	// Set discovery backend env var to "kubernetes" unless explicitly set to "etcd"
-	if context.DiscoveryBackend != "etcd" {
+	if context.Discovery.Backend != "etcd" {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
 			Value: "kubernetes",
+		})
+	}
+
+	// Container mode: inject CONTAINER_NAME and DYN_KUBE_DISCOVERY_MODE.
+	// In failover pods, buildEngineContainer overrides CONTAINER_NAME to "engine-0"/"engine-1".
+	if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "CONTAINER_NAME",
+			Value: container.Name,
+		})
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "DYN_KUBE_DISCOVERY_MODE",
+			Value: string(configv1alpha1.KubeDiscoveryModeContainer),
 		})
 	}
 
