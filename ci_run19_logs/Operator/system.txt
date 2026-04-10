@@ -1,4 +1,0 @@
-2026-04-09T07:40:32.4590000Z Evaluating operator.if
-2026-04-09T07:40:32.4590000Z Evaluating: (success() && (false))
-2026-04-09T07:40:32.4590000Z Expanded: (true && false)
-2026-04-09T07:40:32.4590000Z Result: false

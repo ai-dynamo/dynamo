@@ -1,4 +1,0 @@
-2026-04-09T09:20:07.5570000Z Evaluating frontend-image.if
-2026-04-09T09:20:07.5570000Z Evaluating: (success() && (false))
-2026-04-09T09:20:07.5570000Z Expanded: (true && false)
-2026-04-09T09:20:07.5570000Z Result: false

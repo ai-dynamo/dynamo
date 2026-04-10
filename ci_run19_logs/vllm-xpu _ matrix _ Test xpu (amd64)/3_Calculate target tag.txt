@@ -1,9 +1,0 @@
-﻿2026-04-09T09:07:37.2689391Z ##[group]Run RUNTIME_IMAGE=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:a8da9361c5f9a7a107143fd3fc583414c3e755dd-vllm-runtime-xpu
-2026-04-09T09:07:37.2692924Z [36;1mRUNTIME_IMAGE=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:a8da9361c5f9a7a107143fd3fc583414c3e755dd-vllm-runtime-xpu[0m
-2026-04-09T09:07:37.2696049Z [36;1mTEST_IMAGE=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:a8da9361c5f9a7a107143fd3fc583414c3e755dd-vllm-runtime-***-xpu[0m
-2026-04-09T09:07:37.2698177Z [36;1mecho "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT[0m
-2026-04-09T09:07:37.2699713Z [36;1mecho "***_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT[0m
-2026-04-09T09:07:37.2728379Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
-2026-04-09T09:07:37.2729819Z env:
-2026-04-09T09:07:37.2730571Z   FRAMEWORK: vllm
-2026-04-09T09:07:37.2731335Z ##[endgroup]

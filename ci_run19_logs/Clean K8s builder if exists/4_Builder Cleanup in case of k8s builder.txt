@@ -1,5 +1,0 @@
-﻿2026-04-09T09:34:39.8929447Z ##[group]Run docker buildx rm b-24178560279-2 || true
-2026-04-09T09:34:39.8929978Z [36;1mdocker buildx rm b-24178560279-2 || true[0m
-2026-04-09T09:34:39.8950838Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
-2026-04-09T09:34:39.8951313Z ##[endgroup]
-2026-04-09T09:34:40.0811912Z b-24178560279-2 removed

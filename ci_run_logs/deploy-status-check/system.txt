@@ -1,4 +1,0 @@
-2026-04-09T09:20:08.0610000Z Evaluating deploy-status-check.if
-2026-04-09T09:20:08.0610000Z Evaluating: (success() && (false))
-2026-04-09T09:20:08.0610000Z Expanded: (false && false)
-2026-04-09T09:20:08.0610000Z Result: false
