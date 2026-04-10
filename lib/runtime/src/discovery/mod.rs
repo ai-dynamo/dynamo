@@ -299,7 +299,7 @@ pub enum DiscoverySpec {
         /// Transport type and routing information
         transport: TransportType,
         /// Optional execution device for this endpoint instance.
-        /// Used by hetero routing to distinguish CPU and CUDA workers.
+        /// Used by hetero routing to distinguish CPU and XPU workers.
         device_type: Option<DeviceType>,
     },
     Model {

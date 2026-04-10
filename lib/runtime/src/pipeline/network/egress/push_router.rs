@@ -425,11 +425,11 @@ where
 
     /// Issue a request using device-aware weighted routing.
     ///
-    /// Instances are partitioned by device type (CPU vs non-CPU), then the router
+    /// Instances are partitioned by device type (CPU vs XPU), then the router
     /// applies a budget policy and selects the least-loaded instance within the
     /// chosen group.
     ///
-    /// If only one device class exists (all CPU or all non-CPU), this naturally
+    /// If only one device class exists (all CPU or all XPU), this naturally
     /// degenerates to least-loaded routing over the available instances.
     pub async fn device_aware_weighted(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let state = self.occupancy_state()?;
@@ -458,7 +458,7 @@ where
             .collect();
 
         // Apply budget-based routing to determine which group to send to
-        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+        let xpu_to_cpu_ratio = std::env::var("DYN_ENCODER_XPU_TO_CPU_RATIO")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v >= 1)
@@ -467,7 +467,7 @@ where
             state.as_ref(),
             &instance_ids,
             &device_type_map,
-            cuda_to_cpu_ratio,
+            xpu_to_cpu_ratio,
         );
 
         // Select least-loaded within the chosen group
@@ -1069,9 +1069,9 @@ mod tests {
 
         let instance_ids = vec![1, 2, 3];
         let device_type_map = HashMap::from([
-            (1, Some(DeviceType::Cuda)),
-            (2, Some(DeviceType::Cuda)),
-            (3, Some(DeviceType::Cuda)),
+            (1, Some(DeviceType::Xpu)),
+            (2, Some(DeviceType::Xpu)),
+            (3, Some(DeviceType::Xpu)),
         ]);
 
         let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 8);
@@ -1103,8 +1103,8 @@ mod tests {
         let device_type_map = HashMap::from([
             (1, Some(DeviceType::Cpu)),
             (2, Some(DeviceType::Cpu)),
-            (3, Some(DeviceType::Cuda)),
-            (4, Some(DeviceType::Cuda)),
+            (3, Some(DeviceType::Xpu)),
+            (4, Some(DeviceType::Xpu)),
         ]);
 
         let candidates = device_aware_candidate_group(&state, &instance_ids, &device_type_map, 2);

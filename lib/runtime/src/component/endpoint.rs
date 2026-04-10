@@ -19,8 +19,9 @@ use crate::{
 };
 
 fn endpoint_device_type() -> Option<DeviceType> {
-    // Common CUDA masks that explicitly disable GPU visibility.
-    if std::env::var("CUDA_VISIBLE_DEVICES")
+    // Check for XPU visibility masks that explicitly disable XPU visibility.
+    // ZE_AFFINITY_MASK is used by Intel oneAPI Level Zero runtime.
+    if std::env::var("ZE_AFFINITY_MASK")
         .ok()
         .map(|v| {
             let l = v.trim().to_ascii_lowercase();
@@ -31,20 +32,20 @@ fn endpoint_device_type() -> Option<DeviceType> {
         return Some(DeviceType::Cpu);
     }
 
-    // Container runtimes often use NVIDIA_VISIBLE_DEVICES to gate GPU visibility.
-    if std::env::var("NVIDIA_VISIBLE_DEVICES")
+    // ONEAPI_DEVICE_SELECTOR can also indicate CPU-only mode.
+    if std::env::var("ONEAPI_DEVICE_SELECTOR")
         .ok()
         .map(|v| {
             let l = v.trim().to_ascii_lowercase();
-            l == "none" || l == "void"
+            l == "none" || l == "void" || l.contains("cpu")
         })
         .unwrap_or(false)
     {
         return Some(DeviceType::Cpu);
     }
 
-    // Default: no explicit CPU override means this endpoint is CUDA-capable.
-    Some(DeviceType::Cuda)
+    // Default: no explicit CPU override means this endpoint is XPU-capable.
+    Some(DeviceType::Xpu)
 }
 
 #[derive(Educe, Builder, Dissolve)]

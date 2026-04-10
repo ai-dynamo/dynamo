@@ -233,7 +233,7 @@ class FrontendArgGroup(ArgGroup):
             help="How to route the request. power-of-two picks 2 random workers and "
             "routes to the one with fewer in-flight requests. least-loaded routes to "
             "the worker with the fewest active requests. device-aware-weighted routes "
-            "based on worker device type (CPU/CUDA). In disaggregated prefill mode, "
+            "based on worker device type (CPU/XPU). In disaggregated prefill mode, "
             "both power-of-two and least-loaded skip bootstrap optimization and fall "
             "back to the synchronous prefill path.",
             choices=[

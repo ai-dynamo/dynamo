@@ -81,7 +81,7 @@ pub enum TransportType {
 #[serde(rename_all = "snake_case")]
 pub enum DeviceType {
     Cpu,
-    Cuda,
+    Xpu,
 }
 
 #[derive(Default)]
