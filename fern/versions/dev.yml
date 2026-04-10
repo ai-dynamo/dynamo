@@ -199,8 +199,8 @@ navigation:
             path: ../pages-dev/backends/trtllm/trtllm-reference-guide.md
           - page: Examples
             path: ../pages-dev/backends/trtllm/trtllm-examples.md
-          - page: Prometheus Metrics
-            path: ../pages-dev/backends/trtllm/trtllm-prometheus.md
+          - page: Observability
+            path: ../pages-dev/backends/trtllm/trtllm-observability.md
           - page: Video Diffusion (Experimental)
             path: ../pages-dev/backends/trtllm/trtllm-video-diffusion.md
           - page: Known Issues and Mitigations
