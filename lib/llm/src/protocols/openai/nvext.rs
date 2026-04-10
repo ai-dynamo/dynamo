@@ -13,6 +13,7 @@ pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
 pub const HEADER_DP_RANK: &str = "x-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 /// Apply routing overrides from HTTP headers to nvext.
 ///
@@ -44,6 +45,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .get(HEADER_PREFILL_DP_RANK)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
+    let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
     if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
     {

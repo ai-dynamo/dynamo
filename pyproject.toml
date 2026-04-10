@@ -246,6 +246,7 @@ markers = [
     "stress: marks tests as stress tests",
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",
+    "none: marks tests that do not require a framework-specific runtime",
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
