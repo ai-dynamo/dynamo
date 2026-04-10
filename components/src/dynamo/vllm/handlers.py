@@ -33,7 +33,6 @@ from dynamo.common.multimodal.embedding_transfer import (
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.video_loader import VideoLoader
-from dynamo.runtime import DistributedRuntime
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -48,7 +47,7 @@ from dynamo.llm import (
     unregister_model,
 )
 from dynamo.llm.exceptions import EngineShutdown
-from dynamo.runtime import Client
+from dynamo.runtime import Client, DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import Config
@@ -628,7 +627,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.error(f"Failed to wake up engine: {e}")
                 return {"status": "error", "message": str(e)}
 
-    
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
 
@@ -648,7 +646,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         await self.engine_client.stop_profile()
         return {"status": "ok", "message": "Profiling stopped"}
-
 
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
