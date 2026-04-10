@@ -41,42 +41,28 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Get merge base
+    - name: Get merge base for push events
       id: merge-base
+      if: github.event_name != 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.gh_token }}
       run: |
-        # Use the GitHub Compare API to get the true merge-base SHA.
-        # This avoids fetch-depth: 0 (fetches all 1600+ branches, ~3 min).
+        # For push to pull-request/N branches, use the GitHub Compare API
+        # to get the true merge-base SHA. This avoids fetch-depth: 0
+        # (which fetches all 1600+ branches, ~3 min).
         #
-        # For pull_request events we also output head_sha (the PR head)
-        # because actions/checkout creates a merge commit — diffing
-        # merge-base vs merge-commit would include unrelated base changes.
-        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-          BASE="${{ github.event.pull_request.base.ref }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-        elif [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
+        # For pull_request events this step is skipped — tj-actions uses
+        # the GitHub REST API directly (use_rest_api: true).
+        if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
           BASE=$(gh pr view "${BASH_REMATCH[1]}" --json baseRefName -q '.baseRefName')
-          HEAD="${{ github.sha }}"
-        fi
-
-        if [[ -n "${BASE:-}" ]]; then
-          BASE_SHA=$(gh api "repos/${{ github.repository }}/compare/${BASE}...${HEAD}" \
+          BASE_SHA=$(gh api "repos/${{ github.repository }}/compare/${BASE}...${{ github.sha }}" \
             --jq '.merge_base_commit.sha')
           echo "Merge base: $BASE_SHA"
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
-
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            git fetch --no-tags --depth=1 origin "$HEAD"
-            echo "head_sha=$HEAD" >> "$GITHUB_OUTPUT"
-          else
-            echo "head_sha=" >> "$GITHUB_OUTPUT"
-          fi
         else
           echo "base_sha=" >> "$GITHUB_OUTPUT"
-          echo "head_sha=" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Check for changes
@@ -84,8 +70,9 @@ runs:
       id: filter
       with:
         files_yaml_from_source_file: .github/filters.yaml
-        base_sha: ${{ steps.merge-base.outputs.base_sha }}
-        sha: ${{ steps.merge-base.outputs.head_sha }}
+        token: ${{ inputs.gh_token }}
+        use_rest_api: ${{ github.event_name == 'pull_request' }}
+        base_sha: ${{ steps.merge-base.outputs.base_sha || '' }}
         skip_initial_fetch: ${{ steps.merge-base.outputs.base_sha != '' }}
 
     - name: Debug changed files
