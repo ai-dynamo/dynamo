@@ -223,8 +223,6 @@ impl ErrorMessage {
 
         // Check for Cancelled anywhere in the error chain → HTTP 499 (Client Closed Request)
         if super::metrics::request_was_cancelled(err.as_ref()) {
-            // Use 499 (nginx convention for client-closed-request). This is not a server
-            // error — the client disconnected before we could send a response.
             let code = StatusCode::from_u16(499).unwrap();
             tracing::debug!("Request cancelled before response: {err}");
             return (
