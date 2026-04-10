@@ -7,17 +7,23 @@ use serde::Deserialize;
 
 use super::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryStream};
 
-/// Collapse composite-keyed state into a flat HashMap<u64, V>.
+/// Collapse state keyed by full `DiscoveryInstanceId` into a flat HashMap<u64, V>.
 /// When multiple entries share the same instance_id (e.g., base model +
-/// LoRA adapters on the same worker), the base model (suffix=None) is
-/// preferred. If no base model exists, an arbitrary LoRA entry is used.
+/// LoRA adapters on the same worker, or the same worker on different endpoints),
+/// the base model (suffix=None) is preferred. If no base model exists, an
+/// arbitrary LoRA entry is used.
 fn collapse_by_instance_id<V: Clone>(
-    state: &std::collections::HashMap<(u64, Option<String>), V>,
+    state: &std::collections::HashMap<DiscoveryInstanceId, V>,
 ) -> std::collections::HashMap<u64, V> {
     let mut result = std::collections::HashMap::new();
-    for ((id, suffix), val) in state {
-        if suffix.is_none() || !result.contains_key(id) {
-            result.insert(*id, val.clone());
+    for (id, val) in state {
+        let instance_id = id.instance_id();
+        let model_suffix = match id {
+            DiscoveryInstanceId::Model(mid) => mid.model_suffix.as_ref(),
+            _ => None,
+        };
+        if model_suffix.is_none() || !result.contains_key(&instance_id) {
+            result.insert(instance_id, val.clone());
         }
     }
     result
@@ -69,21 +75,19 @@ where
     let (tx, rx) = tokio::sync::watch::channel(HashMap::new());
 
     tokio::spawn(async move {
-        // Internal state keyed by (instance_id, model_suffix) to correctly
-        // track base models and LoRA adapters sharing the same instance_id.
+        // Internal state keyed by full DiscoveryInstanceId to correctly
+        // distinguish entries across namespaces, components, endpoints, and
+        // model suffixes — even when they share the same raw instance_id.
         // Collapsed to HashMap<u64, V> for consumers, preferring suffix=None
         // (base model) when multiple entries exist for the same instance_id.
-        let mut state: HashMap<(u64, Option<String>), V> = HashMap::new();
+        let mut state: HashMap<DiscoveryInstanceId, V> = HashMap::new();
         let mut stream = stream;
 
         while let Some(result) = stream.next().await {
             match result {
                 Ok(DiscoveryEvent::Added(instance)) => {
                     let instance_id = instance.instance_id();
-                    let model_suffix = match &instance {
-                        DiscoveryInstance::Model { model_suffix, .. } => model_suffix.clone(),
-                        _ => None,
-                    };
+                    let key = instance.id();
 
                     // Deserialize the full instance into type T
                     let deserialized: T = match instance.deserialize_model() {
@@ -103,12 +107,11 @@ where
 
                     tracing::debug!(
                         instance_id,
-                        ?model_suffix,
+                        ?key,
                         state_len = state.len(),
                         "watch_and_extract_field: inserting instance"
                     );
 
-                    let key = (instance_id, model_suffix);
                     state.insert(key, value);
 
                     let collapsed = collapse_by_instance_id(&state);
@@ -118,24 +121,17 @@ where
                     }
                 }
                 Ok(DiscoveryEvent::Removed(id)) => {
-                    let instance_id = id.instance_id();
-                    let model_suffix = match &id {
-                        DiscoveryInstanceId::Model(mid) => mid.model_suffix.clone(),
-                        _ => None,
-                    };
-
-                    let key = (instance_id, model_suffix.clone());
-                    let had_entry = state.contains_key(&key);
+                    let had_entry = state.contains_key(&id);
 
                     tracing::debug!(
-                        instance_id,
-                        ?model_suffix,
+                        instance_id = id.instance_id(),
+                        ?id,
                         had_entry,
                         state_len = state.len(),
                         "watch_and_extract_field: removing instance"
                     );
 
-                    state.remove(&key);
+                    state.remove(&id);
 
                     let collapsed = collapse_by_instance_id(&state);
                     if tx.send(collapsed).is_err() {
@@ -268,5 +264,62 @@ mod tests {
             let state = rx.borrow();
             assert_eq!(state.get(&42).map(|s| s.as_str()), Some("lora-b"));
         }
+    }
+
+    /// Same worker (instance_id) registered on two different endpoints must not
+    /// alias when watched via AllModels. Removing the registration from one
+    /// endpoint must leave the other intact in the collapsed view.
+    #[tokio::test]
+    async fn test_all_models_cross_endpoint_no_alias() {
+        let registry = SharedMockRegistry::new();
+        // Same instance_id for both — simulates a single worker serving two endpoints
+        let discovery = MockDiscovery::new(Some(7), registry.clone());
+
+        let stream = discovery
+            .list_and_watch(DiscoveryQuery::AllModels, None)
+            .await
+            .unwrap();
+        let rx = watch_and_extract_field(stream, |card: FakeCard| card.display_name);
+
+        // Register on endpoint "ep-a"
+        let ep_a = discovery
+            .register(DiscoverySpec::Model {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "ep-a".to_string(),
+                card_json: serde_json::json!({ "display_name": "model-on-ep-a" }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+
+        // Register on endpoint "ep-b"
+        discovery
+            .register(DiscoverySpec::Model {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "ep-b".to_string(),
+                card_json: serde_json::json!({ "display_name": "model-on-ep-b" }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+
+        poll_until(
+            &rx,
+            |s| s.contains_key(&7),
+            "Worker 7 should appear after registrations",
+        )
+        .await;
+
+        // Remove the ep-a registration — ep-b should keep worker 7 alive.
+        discovery.unregister(ep_a).await.unwrap();
+
+        poll_until(
+            &rx,
+            |s| s.get(&7).map(|v| v.as_str()) == Some("model-on-ep-b"),
+            "Worker 7 should still be present via ep-b after removing ep-a",
+        )
+        .await;
     }
 }
