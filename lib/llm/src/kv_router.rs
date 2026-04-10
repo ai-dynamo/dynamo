@@ -46,8 +46,6 @@ pub mod push_router;
 pub mod scheduler;
 pub mod sequence;
 pub mod sticky_sessions;
-pub mod subscriber;
-pub mod worker_query;
 
 pub use agent_controller::AgentController;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};

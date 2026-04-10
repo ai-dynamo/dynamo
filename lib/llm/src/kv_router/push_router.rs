@@ -178,25 +178,36 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.record_metrics();
 
-        // Fire deferred session close if finish() was never called
-        // (e.g., client disconnect mid-stream).
-        if let Some(close) = self.deferred_close.take() {
-            close.execute(&self.context_id);
+        let deferred_close = self.deferred_close.take();
+        let needs_free = !self.freed && self.scheduler_tracked;
+
+        if deferred_close.is_none() && !needs_free {
+            return;
         }
 
-        if !self.freed && self.scheduler_tracked {
-            let chooser = self.chooser.clone();
-            let context_id = self.context_id.clone();
-            let Ok(handle) = tokio::runtime::Handle::try_current() else {
-                tracing::warn!("No tokio runtime for drop guard free of request {context_id}");
-                return;
-            };
-            handle.spawn(async move {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "No tokio runtime for drop guard cleanup of request {}",
+                self.context_id
+            );
+            return;
+        };
+
+        // Mirror finish(): free the scheduler slot first, then fire the
+        // deferred session close so the worker's KV isn't released while
+        // generation teardown is still in progress.
+        let chooser = self.chooser.clone();
+        let context_id = self.context_id.clone();
+        handle.spawn(async move {
+            if needs_free {
                 if let Err(e) = chooser.free(&context_id).await {
                     tracing::warn!("Failed to free request {context_id} (drop guard): {e}");
                 }
-            });
-        }
+            }
+            if let Some(close) = deferred_close {
+                close.execute(&context_id);
+            }
+        });
     }
 }
 
