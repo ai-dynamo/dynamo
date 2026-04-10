@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import pytest
 from gpu_memory_service.client.torch import allocator as allocator_module
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.none,
     pytest.mark.gpu_0,
 ]
 

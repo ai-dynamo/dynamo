@@ -11,8 +11,9 @@ use dynamo_kv_router::{
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, PrefillLoadHint, RouterEvent, RouterRequest,
-        RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        compute_block_hash_for_seq,
     },
 };
 use dynamo_runtime::{
@@ -31,17 +32,14 @@ use tracing::Instrument;
 use validator::Validate;
 
 pub mod indexer;
-mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
 pub mod scheduler;
 pub mod sequence;
-pub mod subscriber;
-pub mod worker_query;
 
-pub use indexer::Indexer;
+pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
@@ -82,6 +80,28 @@ pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
     format!("worker_kv_indexer_query_dp{dp_rank}")
 }
 
+fn log_routing_input_hashes(
+    request_id: Option<&str>,
+    block_size: u32,
+    tokens: &[u32],
+    local_hashes: &[LocalBlockHash],
+) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+
+    let local_hash_ids: Vec<u64> = local_hashes.iter().map(|hash| hash.0).collect();
+
+    tracing::debug!(
+        request_id = request_id.unwrap_or(""),
+        isl_tokens = tokens.len(),
+        block_size,
+        num_blocks = local_hashes.len(),
+        local_hashes = ?local_hash_ids,
+        "[ROUTING_INPUT] request local hashes"
+    );
+}
+
 // for router discovery registration
 pub const KV_ROUTER_ENDPOINT: &str = "router-discovery";
 
@@ -111,12 +131,14 @@ where
 {
     indexer: Indexer,
     scheduler: KvScheduler<Sel>,
+    workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
     is_eagle: bool,
+    _served_indexer_handle: Option<ServedIndexerHandle>,
 }
 
 impl<Sel> KvRouter<Sel>
@@ -142,7 +164,13 @@ where
         let cancellation_token = component.drt().primary_token();
         let min_initial_workers = min_initial_workers_from_env()?;
 
-        let indexer = Indexer::new(component, &kv_router_config, block_size, model_name).await?;
+        let indexer = Indexer::new(
+            component,
+            &kv_router_config,
+            block_size,
+            model_name.as_deref(),
+        )
+        .await?;
 
         if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
             let mut startup_watch = workers_with_configs.clone();
@@ -168,12 +196,11 @@ where
         )
         .await?;
 
-        // Start KV event subscription if needed — skip when using a remote indexer
-        // (the standalone indexer handles its own event subscription).
-        if kv_router_config.remote_indexer_component.is_some() {
+        // Start KV event subscription if needed — skip when using a remote indexer.
+        if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            subscriber::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
+            indexer::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
                 .await?;
         } else {
             tracing::info!(
@@ -183,16 +210,35 @@ where
             );
         }
 
+        let served_indexer_handle = if kv_router_config.serve_indexer {
+            let model_name = model_name.clone().ok_or_else(|| {
+                anyhow::anyhow!("model_name is required when serve_indexer is configured")
+            })?;
+            Some(
+                ensure_served_indexer_service(
+                    component.clone(),
+                    ServedIndexerMode::from_use_kv_events(kv_router_config.use_kv_events),
+                    model_name,
+                    indexer.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
         tracing::info!("KV Routing initialized");
         Ok(Self {
             indexer,
             scheduler,
+            workers_with_configs,
             block_size,
             kv_router_config,
             prefill_load_estimator,
             cancellation_token,
             client,
             is_eagle,
+            _served_indexer_handle: served_indexer_handle,
         })
     }
 
@@ -256,6 +302,7 @@ where
 
         let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
             .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, hash_options));
+        log_routing_input_hashes(context_id, self.block_size, tokens, &block_hashes);
         let hash_elapsed = start.elapsed();
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
@@ -428,6 +475,13 @@ where
         self.scheduler.worker_type()
     }
 
+    /// Return the worker's unique global DP rank when it owns exactly one rank.
+    pub fn unique_dp_rank_for_worker(&self, worker_id: WorkerId) -> Option<u32> {
+        let configs = self.workers_with_configs.borrow();
+        let config = configs.get(&worker_id)?;
+        (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
+    }
+
     pub fn add_output_block(
         &self,
         request_id: &str,
@@ -458,6 +512,7 @@ where
                 is_eagle: Some(self.is_eagle),
             },
         );
+        log_routing_input_hashes(None, self.block_size, tokens, &block_hashes);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
         Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
     }

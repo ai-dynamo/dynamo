@@ -7,9 +7,9 @@
 //! streaming events, error shapes, and count-tokens types.
 
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+
 /// Anthropic-style cache control hint for prefix pinning with TTL.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct CacheControl {
     #[serde(rename = "type")]
     pub control_type: CacheControlType,
@@ -18,7 +18,7 @@ pub struct CacheControl {
     pub ttl: Option<String>,
 }
 
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CacheControlType {
     #[default]
