@@ -19,12 +19,12 @@ from .engine import LLMEngine
 from .worker import Worker
 
 
-async def worker(engine_cls: type[LLMEngine], argv: list[str] | None = None):
+async def _start(engine_cls: type[LLMEngine], argv: list[str] | None = None):
     engine = await engine_cls.from_args(argv)
-    worker = Worker(engine)
-    await worker.run()
+    w = Worker(engine)
+    await w.run()
 
 
 def run(engine_cls: type[LLMEngine], argv: list[str] | None = None):
     """Entry point for per-backend unified_main.py files."""
-    uvloop.run(worker(engine_cls, argv))
+    uvloop.run(_start(engine_cls, argv))

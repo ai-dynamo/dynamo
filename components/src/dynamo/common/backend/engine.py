@@ -39,14 +39,14 @@ class LLMEngine(ABC):
         5. cleanup()       -- called once on shutdown, release all resources
     """
 
-    backend_config: WorkerConfig
+    worker_config: WorkerConfig
 
     @classmethod
     @abstractmethod
     async def from_args(cls, argv: list[str] | None = None) -> LLMEngine:
         """Parse CLI args and construct the engine (not yet started).
 
-        Implementations must set ``backend_config`` on the returned instance.
+        Implementations must set ``worker_config`` on the returned instance.
 
         Args:
             argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.

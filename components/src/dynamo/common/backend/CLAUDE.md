@@ -13,7 +13,7 @@ from_args(argv)  ->  init()  ->  generate() / abort()  ->  cleanup()
 ```
 
 1. `from_args(argv)` -- classmethod factory. Parses CLI args, constructs the
-   engine, and sets `backend_config`. Engine is NOT started yet.
+   engine, and sets `worker_config`. Engine is NOT started yet.
 2. `init()` -- starts the engine, returns `EngineConfig`. After this returns
    `generate()` MUST be ready to accept calls.
 3. `generate(request, context)` -- streaming inference, called concurrently.
@@ -34,7 +34,7 @@ from_args(argv)  ->  init()  ->  generate() / abort()  ->  cleanup()
 - **Exactly two classes.** `Worker` owns runtime lifecycle.
   `LLMEngine` owns inference. Do not add intermediate base classes or mixins.
 
-- **Engine owns its config.** `LLMEngine.from_args()` sets `backend_config`
+- **Engine owns its config.** `LLMEngine.from_args()` sets `worker_config`
   on the instance. `Worker` reads it from the engine -- it does not
   accept a separate config argument.
 
@@ -73,7 +73,7 @@ Use `build_completion_usage()` and `normalize_finish_reason()` from
 1. Create `<backend>/llm_engine.py` subclassing `LLMEngine`
 2. Implement `from_args()`, `init()`, `generate()`, `cleanup()` (required)
    and `abort()` (optional)
-3. `from_args()` must parse args, construct the engine, and set `backend_config`
+3. `from_args()` must parse args, construct the engine, and set `worker_config`
 4. Create `<backend>/unified_main.py` calling `run(<YourEngine>)`
 5. Use `sample_engine.py` as the reference implementation
 

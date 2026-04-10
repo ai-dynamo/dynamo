@@ -11,7 +11,7 @@ all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
 
 ```
 LLMEngine (ABC)                <-- engine boundary (engine.py)
-    |   - from_args(argv) -> LLMEngine  (factory: parse args, set backend_config)
+    |   - from_args(argv) -> LLMEngine  (factory: parse args, set worker_config)
     |   - init() -> EngineConfig        (start engine, return metadata)
     |   - generate(request, context)    (streaming inference)
     |   - abort(context)                (cancel request, optional)
@@ -23,7 +23,7 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     +-- SampleLLMEngine        <-- sample_engine.py
 
 Worker                  <-- runtime integration (worker.py)
-    - reads engine.backend_config
+    - reads engine.worker_config
     - creates DistributedRuntime
     - sets up endpoints, signal handlers
     - calls engine.init(), registers model
@@ -74,9 +74,9 @@ from dynamo.common.engine_utils import build_completion_usage
 class MyEngine(LLMEngine):
     @classmethod
     async def from_args(cls, argv=None):
-        # Parse CLI args, construct engine, set backend_config.
+        # Parse CLI args, construct engine, set worker_config.
         engine = cls(...)
-        engine.backend_config = WorkerConfig(
+        engine.worker_config = WorkerConfig(
             namespace="dynamo", component="my-backend", ...
         )
         return engine

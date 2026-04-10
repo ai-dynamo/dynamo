@@ -80,7 +80,7 @@ class WorkerConfig:
 
 class Worker:
     def __init__(self, engine: LLMEngine):
-        self.config = engine.backend_config
+        self.config = engine.worker_config
         self.engine = engine
 
     async def generate(

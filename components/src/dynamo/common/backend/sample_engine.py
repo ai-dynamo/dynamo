@@ -52,7 +52,7 @@ class SampleLLMEngine(LLMEngine):
             max_tokens=args.max_tokens,
             delay=args.delay,
         )
-        engine.backend_config = WorkerConfig(
+        engine.worker_config = WorkerConfig(
             namespace=args.namespace,
             component=args.component,
             endpoint=args.endpoint,

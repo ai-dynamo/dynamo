@@ -50,7 +50,7 @@ class VllmLLMEngine(LLMEngine):
             ) = config.model
 
         engine = cls(config.engine_args)
-        engine.backend_config = WorkerConfig.from_runtime_config(
+        engine.worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,

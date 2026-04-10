@@ -48,7 +48,7 @@ class SglangLLMEngine(LLMEngine):
         )
 
         engine = cls(server_args)
-        engine.backend_config = WorkerConfig.from_runtime_config(
+        engine.worker_config = WorkerConfig.from_runtime_config(
             dynamo_args,
             model_name=server_args.model_path,
             served_model_name=server_args.served_model_name,

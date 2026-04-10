@@ -91,7 +91,7 @@ class TrtllmLLMEngine(LLMEngine):
             max_num_tokens=config.max_num_tokens,
             kv_block_size=config.kv_block_size,
         )
-        engine.backend_config = WorkerConfig.from_runtime_config(
+        engine.worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,
