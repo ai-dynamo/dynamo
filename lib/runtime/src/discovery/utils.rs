@@ -7,6 +7,22 @@ use serde::Deserialize;
 
 use super::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryStream};
 
+/// Collapse composite-keyed state into a flat HashMap<u64, V>.
+/// When multiple entries share the same instance_id (e.g., base model +
+/// LoRA adapters on the same worker), the base model (suffix=None) is
+/// preferred. If no base model exists, an arbitrary LoRA entry is used.
+fn collapse_by_instance_id<V: Clone>(
+    state: &std::collections::HashMap<(u64, Option<String>), V>,
+) -> std::collections::HashMap<u64, V> {
+    let mut result = std::collections::HashMap::new();
+    for ((id, suffix), val) in state {
+        if suffix.is_none() || !result.contains_key(id) {
+            result.insert(*id, val.clone());
+        }
+    }
+    result
+}
+
 /// Helper to watch a discovery stream and extract a specific field into a HashMap
 ///
 /// This helper spawns a background task that:
@@ -38,23 +54,6 @@ use super::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryStr
 ///     // Use config...
 /// }
 /// ```
-
-/// Collapse composite-keyed state into a flat HashMap<u64, V>.
-/// When multiple entries share the same instance_id (e.g., base model +
-/// LoRA adapters on the same worker), the base model (suffix=None) is
-/// preferred. If no base model exists, an arbitrary LoRA entry is used.
-fn collapse_by_instance_id<V: Clone>(
-    state: &std::collections::HashMap<(u64, Option<String>), V>,
-) -> std::collections::HashMap<u64, V> {
-    let mut result = std::collections::HashMap::new();
-    for ((id, suffix), val) in state {
-        if suffix.is_none() || !result.contains_key(id) {
-            result.insert(*id, val.clone());
-        }
-    }
-    result
-}
-
 pub fn watch_and_extract_field<T, V, F>(
     stream: DiscoveryStream,
     extractor: F,
