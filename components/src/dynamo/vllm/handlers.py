@@ -1270,7 +1270,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             engine_input = {
                 "type": "multimodal",
-                "_externally_processed": True,
+                "externally_processed": True,
                 "prompt_token_ids": expanded_token_ids,
                 "mm_kwargs": {
                     metadata.modality: [kwargs_item],
