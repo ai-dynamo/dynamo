@@ -55,7 +55,7 @@ def test_sample_deployment(
     dynamo_dynamic_ports,
     predownload_models,
 ):
-    """Test sample backend deployment using DynamoBackend."""
+    """Test sample backend deployment using the unified Worker."""
     config = dataclasses.replace(
         sample_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )

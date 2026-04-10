@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
-            echo "  --unified            Use unified_main entry point (DynamoBackend)"
+            echo "  --unified            Use unified_main entry point (Worker)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Any additional options are passed through to dynamo.trtllm."
