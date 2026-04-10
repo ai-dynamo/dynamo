@@ -34,7 +34,7 @@ jobs:
       rust: ${{ steps.changes.outputs.rust }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check for changes
         id: changes
         uses: ./.github/actions/changed-files
@@ -55,7 +55,7 @@ jobs:
     permissions:
       contents: read
     steps:
-    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       timeout-minutes: 3
@@ -70,7 +70,7 @@ jobs:
     permissions:
       contents: read
     steps:
-    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
         lfs: true
     - name: Set up system dependencies
@@ -126,7 +126,7 @@ jobs:
     permissions:
       contents: read
     steps:
-    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       with:
         lfs: true
     - name: Verify Cargo lock file is in sync
