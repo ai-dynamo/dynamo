@@ -38,7 +38,7 @@ flowchart TB
 
 ### Disaggregated GAIE (1P1D, 2 nodes, 16 GPUs)
 
-Prefill and decode on separate GPU pools. The EPP routes prefill and decode requests independently. KV cache transfers between nodes over NIXL/RoCE RDMA.
+Prefill and decode on separate GPU pools. The EPP selects both a prefill and a decode worker, but the **decode pod is the primary target** — the Gateway sends the request to decode, and the decode sidecar coordinates with prefill internally. KV cache transfers between nodes over NIXL/RoCE RDMA.
 
 ```mermaid
 flowchart TB
@@ -50,9 +50,15 @@ flowchart TB
 
     HR -->|"backendRef"| IP["InferencePool v1 (disagg)<br/>selector: prefill+decode pods<br/>targetPort: 8000"]
 
-    IP <-->|"ext_proc gRPC"| EPP["Dynamo EPP<br/>DYN_ENFORCE_DISAGG=true<br/><br/>Prefill profile:<br/>  prefill-filter → dyn-prefill-scorer → picker<br/>Decode profile:<br/>  decode-filter → dyn-decode-scorer → picker<br/><br/>Sets: x-worker-instance-id<br/>+ x-prefill-instance-id"]
+    IP <-->|"ext_proc gRPC"| EPP["Dynamo EPP<br/>DYN_ENFORCE_DISAGG=true<br/><br/>1. Runs prefill profile:<br/>  prefill-filter → dyn-prefill-scorer → picker<br/>  (sets x-prefill-instance-id)<br/>2. Runs decode profile (primary):<br/>  decode-filter → dyn-decode-scorer → picker<br/>  (sets x-worker-instance-id)"]
 
-    IP -->|"x-prefill-instance-id<br/>to prefill pod"| PF_SC
+    IP -->|"x-worker-instance-id<br/>+ x-prefill-instance-id<br/>to decode pod (primary)"| DC_SC
+
+    subgraph DC_POD["Decode Pod — Node 2 (8x B200)"]
+        DC_SC["Frontend Sidecar<br/>:8000, --router-mode direct"]
+        DC_WK["Decode Worker<br/>--disaggregation-mode decode<br/>TP=8, DP=8, EP=8, DP-attention<br/>NVFP4 · EAGLE: steps=2, topk=1, draft=3"]
+        DC_SC -->|"direct route"| DC_WK
+    end
 
     subgraph PF_POD["Prefill Pod — Node 1 (8x B200)"]
         PF_SC["Frontend Sidecar<br/>:8000, --router-mode direct"]
@@ -60,11 +66,7 @@ flowchart TB
         PF_SC -->|"direct route"| PF_WK
     end
 
-    subgraph DC_POD["Decode Pod — Node 2 (8x B200)"]
-        DC_SC["Frontend Sidecar<br/>:8000, --router-mode direct"]
-        DC_WK["Decode Worker<br/>--disaggregation-mode decode<br/>TP=8, DP=8, EP=8, DP-attention<br/>NVFP4 · EAGLE: steps=2, topk=1, draft=3"]
-        DC_SC -->|"direct route"| DC_WK
-    end
+    DC_WK -->|"triggers prefill<br/>via x-prefill-instance-id"| PF_SC
 
     PF_WK ===|"KV-cache transfer<br/>NIXL over 8x RoCE RDMA<br/>GPUDirect"| DC_WK
 
