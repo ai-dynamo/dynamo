@@ -35,6 +35,7 @@ from dynamo.common.multimodal.embedding_transfer import (
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.runtime import DistributedRuntime
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.otel_tracing import build_trace_headers
@@ -623,6 +624,40 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"Failed to wake up engine: {e}")
                 return {"status": "error", "message": str(e)}
+
+    
+    async def start_profile(self, body: dict) -> dict:
+        """Start profiling on the engine.
+
+        Args:
+            body: Dict with profiling parameters. Supported keys:
+                - profile_prefix (str|None): Optional prefix for profile output files.
+        """
+        profile_prefix = body.get("profile_prefix")
+        await self.engine_client.start_profile(profile_prefix=profile_prefix)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop profiling on the engine.
+
+        Args:
+            body: Unused, but required for handler signature.
+        """
+        await self.engine_client.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+
+    def register_engine_routes(self, runtime: DistributedRuntime) -> None:
+        """Register all engine routes for this handler.
+
+        Args:
+            runtime: The DistributedRuntime instance to register routes on.
+        """
+        runtime.register_engine_route("start_profile", self.start_profile)
+        runtime.register_engine_route("stop_profile", self.stop_profile)
+        runtime.register_engine_route("sleep", self.sleep)
+        runtime.register_engine_route("wake_up", self.wake_up)
+        runtime.register_engine_route("scale_elastic_ep", self.scale_elastic_ep)
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:

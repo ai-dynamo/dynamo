@@ -330,13 +330,8 @@ class WorkerFactory:
                 component_name=config.component,
             )
 
-        # Register sleep/wake_up engine routes
-        runtime.register_engine_route("sleep", handler.sleep)
-        runtime.register_engine_route("wake_up", handler.wake_up)
-        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
-        logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
-        )
+        # Register engine routes
+        handler.register_engine_routes(runtime)
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -564,14 +559,9 @@ class WorkerFactory:
                 component_name=config.component,
             )
 
-        # Register sleep/wake_up engine routes
-        runtime.register_engine_route("sleep", handler.sleep)
-        runtime.register_engine_route("wake_up", handler.wake_up)
-        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
-        logger.info(
-            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep"
-        )
-
+        # Register engine routes
+        handler.register_engine_routes(runtime)
+        
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
