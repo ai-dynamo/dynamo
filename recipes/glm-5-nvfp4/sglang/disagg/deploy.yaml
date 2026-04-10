@@ -3,24 +3,15 @@
 # GLM-5 (NVFP4) disaggregated prefill/decode on GB200 NVL4 via SGLang + Dynamo
 #
 # Prerequisites:
-#   - dynamo-platform HelmRelease applied (etcd + nats)
+#   - dynamo-platform HelmRelease applied
 #   - Model weights at /models/nvidia-GLM-5-NVFP4 on shared NFS PVC
 #   - Container built from recipes/glm-5-nvfp4/Dockerfile
-#   - ComputeDomain and ResourceClaimTemplate created (see below)
 #   - HF_TOKEN secret created: kubectl create secret generic hf-token-secret \
 #       --from-literal=HF_TOKEN=<your-token> -n <namespace>
 #
 # Topology: 5 nodes total
 #   decode:  4 nodes x 4 GPUs = TP16 / DP16 / EP16 (EAGLE speculative decode)
 #   prefill: 1 node  x 4 GPUs = TP4
-#
-# To deploy:
-#   1. Create ComputeDomain:    kubectl apply -f deploy.yaml
-#   2. Get ComputeDomain UID:   kubectl get computedomain glm5-compute-domain -n <ns> -o jsonpath='{.metadata.uid}'
-#   3. Update domainID below to match the UID, then re-apply.
-#
-# IMPORTANT: After creating the ComputeDomain, update the `domainID` field in the
-# ResourceClaimTemplate below to match the ComputeDomain's metadata.uid.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -34,12 +25,6 @@ spec:
         secretKeyRef:
           name: hf-token-secret
           key: HF_TOKEN
-    - name: GLOO_SOCKET_IFNAME
-      value: eth0
-    - name: NCCL_SOCKET_IFNAME
-      value: eth0
-    - name: NATS_SERVER
-      value: nats://dynamo-platform-nats.<your-namespace>.svc.cluster.local:4222
 
   services:
     Frontend:
@@ -53,10 +38,6 @@ spec:
             - -m
             - dynamo.frontend
             - --no-decode-fallback
-            - --discovery-backend
-            - kubernetes
-            - --request-plane
-            - nats
           env:
             - name: POD_UID
               valueFrom:
@@ -70,14 +51,6 @@ spec:
           volumeMounts:
             - mountPath: /models
               name: model-cache
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.product: NVIDIA-GB200
-        tolerations:
-          - {key: dedicated, operator: Equal, value: user-workload, effect: NoSchedule}
-          - {key: dedicated, operator: Equal, value: user-workload, effect: NoExecute}
-          - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
-          - {key: kubernetes.io/arch, operator: Exists, effect: NoSchedule}
         volumes:
           - name: model-cache
             persistentVolumeClaim:
@@ -89,30 +62,12 @@ spec:
       replicas: 1
       multinode:
         nodeCount: 4
-      annotations:
-        networking.gke.io/default-interface: eth0
-        networking.gke.io/interfaces: |
-          [
-            {"interfaceName":"eth0","network":"default"},
-            {"interfaceName":"rdma0","network":"rdma-0"},
-            {"interfaceName":"rdma1","network":"rdma-1"},
-            {"interfaceName":"rdma2","network":"rdma-2"},
-            {"interfaceName":"rdma3","network":"rdma-3"}
-          ]
       resources:
         limits:
           gpu: "4"
-          custom:
-            networking.gke.io.networks/rdma-0: "1"
-            networking.gke.io.networks/rdma-1: "1"
-            networking.gke.io.networks/rdma-2: "1"
-            networking.gke.io.networks/rdma-3: "1"
         claims:
           - name: compute-domain-channel
       extraPodSpec:
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.product: NVIDIA-GB200
         mainContainer:
           command:
             - bash
@@ -148,8 +103,6 @@ spec:
               --stream-interval 50
               --incremental-streaming-output
               --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}'
-              --request-plane nats
-              --discovery-backend kubernetes
               --host 0.0.0.0
               --disaggregation-mode decode
               --disaggregation-transfer-backend nixl
@@ -216,11 +169,6 @@ spec:
         resourceClaims:
           - name: compute-domain-channel
             resourceClaimTemplateName: glm5-compute-domain-channel
-        tolerations:
-          - {key: dedicated, operator: Equal, value: user-workload, effect: NoSchedule}
-          - {key: dedicated, operator: Equal, value: user-workload, effect: NoExecute}
-          - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
-          - {key: kubernetes.io/arch, operator: Exists, effect: NoSchedule}
         volumes:
           - name: model-cache
             persistentVolumeClaim:
@@ -230,28 +178,10 @@ spec:
       componentType: worker
       subComponentType: prefill
       replicas: 1
-      annotations:
-        networking.gke.io/default-interface: eth0
-        networking.gke.io/interfaces: |
-          [
-            {"interfaceName":"eth0","network":"default"},
-            {"interfaceName":"rdma0","network":"rdma-0"},
-            {"interfaceName":"rdma1","network":"rdma-1"},
-            {"interfaceName":"rdma2","network":"rdma-2"},
-            {"interfaceName":"rdma3","network":"rdma-3"}
-          ]
       resources:
         limits:
           gpu: "4"
-          custom:
-            networking.gke.io.networks/rdma-0: "1"
-            networking.gke.io.networks/rdma-1: "1"
-            networking.gke.io.networks/rdma-2: "1"
-            networking.gke.io.networks/rdma-3: "1"
       extraPodSpec:
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.product: NVIDIA-GB200
         mainContainer:
           command:
             - bash
@@ -282,8 +212,6 @@ spec:
               --stream-interval 50
               --incremental-streaming-output
               --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 32}'
-              --request-plane nats
-              --discovery-backend kubernetes
               --host 0.0.0.0
               --disaggregation-mode prefill
               --disaggregation-transfer-backend nixl
@@ -345,20 +273,12 @@ spec:
             - mountPath: /models
               name: model-cache
           workingDir: /workspace/
-        tolerations:
-          - {key: dedicated, operator: Equal, value: user-workload, effect: NoSchedule}
-          - {key: dedicated, operator: Equal, value: user-workload, effect: NoExecute}
-          - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
-          - {key: kubernetes.io/arch, operator: Exists, effect: NoSchedule}
         volumes:
           - name: model-cache
             persistentVolumeClaim:
               claimName: <your-model-pvc>
 ---
-# ComputeDomain enables MNNVL scheduling for the 4-node decode group.
-# After applying, retrieve the UID and update the domainID in the
-# ResourceClaimTemplate below:
-#   kubectl get computedomain glm5-compute-domain -n <ns> -o jsonpath='{.metadata.uid}'
+# ComputeDomain enables MNNVL scheduling for the 5-node decode+prefill group.
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
@@ -377,7 +297,6 @@ metadata:
   name: glm5-compute-domain-channel
   namespace: <your-namespace>
 spec:
-  metadata: {}
   spec:
     devices:
       config:
@@ -386,7 +305,6 @@ spec:
           parameters:
             allocationMode: Single
             apiVersion: resource.nvidia.com/v1beta1
-            domainID: <compute-domain-uid>  # Replace with ComputeDomain metadata.uid
             kind: ComputeDomainChannelConfig
         requests:
         - channel

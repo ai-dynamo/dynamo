@@ -55,13 +55,3 @@ RUN pip install --no-cache-dir /tmp/*.whl && \
     pip install --no-cache-dir -e ".[sglang]" --no-deps && \
     rm -f /tmp/*.whl
 
-# Install etcd and etcdctl
-RUN curl -fsSL "https://github.com/etcd-io/etcd/releases/download/v3.6.7/etcd-v3.6.7-linux-${ARCH}.tar.gz" | \
-    tar xz -C /usr/bin --strip-components=1 \
-        "etcd-v3.6.7-linux-${ARCH}/etcd" \
-        "etcd-v3.6.7-linux-${ARCH}/etcdctl"
-
-# Install nats-server
-RUN curl -fsSL "https://github.com/nats-io/nats-server/releases/download/v2.12.4/nats-server-v2.12.4-linux-${ARCH}.tar.gz" | \
-    tar xz -C /usr/bin --strip-components=1 \
-        "nats-server-v2.12.4-linux-${ARCH}/nats-server"

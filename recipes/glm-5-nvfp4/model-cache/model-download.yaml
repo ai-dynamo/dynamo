@@ -12,12 +12,17 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      tolerations:
-        - {key: dedicated, operator: Equal, value: user-workload, effect: NoSchedule}
-        - {key: dedicated, operator: Equal, value: user-workload, effect: NoExecute}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: download
         image: python:3.12-slim
+        securityContext:
+          allowPrivilegeEscalation: false
         command:
         - /bin/sh
         - -c

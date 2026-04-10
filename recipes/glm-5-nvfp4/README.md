@@ -19,14 +19,13 @@ disaggregated prefill/decode and EAGLE speculative decoding via Dynamo on GB200 
 
 - GB200 NVL4 nodes with RDMA networking
 - Dynamo operator installed
-- dynamo-platform HelmRelease deployed (NATS only — etcd not required)
-- Kubernetes service discovery enabled
+- dynamo-platform HelmRelease deployed
 - Shared NFS PVC for model weights
 
 ## Step 1: Build the Container
 
-The container requires custom flashinfer binaries and patches to the dynamo sglang
-package for compatibility with sglang 0.5.10. Build and push before deploying.
+This recipe currently requires using unreleased versions of sglang and dynamo.
+Use the command below to build and push a container with the necessary dependencies.
 
 ```bash
 docker buildx build \
@@ -57,18 +56,6 @@ Edit `sglang/disagg/deploy.yaml` and replace all `<placeholder>` values:
 - `<your-namespace>` — your Kubernetes namespace
 - `<your-registry>/sglang-dynamo-glm5:latest` — your built container image
 - `<your-model-pvc>` — PVC name containing model weights at `/models/nvidia-GLM-5-NVFP4`
-
-Then apply to create the ComputeDomain and get its UID:
-
-```bash
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
-
-# Get the auto-generated ComputeDomain UID
-kubectl get computedomain glm5-compute-domain -n <your-namespace> \
-  -o jsonpath='{.metadata.uid}'
-```
-
-Update `<compute-domain-uid>` in `deploy.yaml` with the UID from above, then re-apply:
 
 ```bash
 kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
@@ -117,9 +104,8 @@ Uses `--kv-cache-dtype fp8_e4m3` (NSA backend auto-selects this on SM100/GB200).
 Saves ~50% KV memory vs BF16.
 
 ### Discovery
-Uses `--discovery-backend kubernetes` (no etcd required). Worker registration
-is tied to pod lifetime via Kubernetes EndpointSlices, preventing TTL expiry
-issues under high load.
+Uses Kubernetes service discovery. Worker registration is tied to pod lifetime
+via Kubernetes EndpointSlices, preventing TTL expiry issues under high load.
 
 ## Performance (ISL=1k, OSL=8k, concurrency=512)
 
