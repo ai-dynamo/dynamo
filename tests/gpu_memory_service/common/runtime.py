@@ -16,7 +16,7 @@ import pynvml
 import requests
 
 from tests.gpu_memory_service.common.gms import GMSServer
-from tests.utils.constants import DefaultPort, FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DefaultPort
 from tests.utils.engine_process import EngineProcess
 from tests.utils.managed_process import DynamoFrontendProcess
 from tests.utils.payloads import check_health_generate, check_models_api
