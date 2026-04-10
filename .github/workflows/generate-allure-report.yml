@@ -53,26 +53,53 @@ jobs:
             echo "No allure results found. Skipping report generation."
           fi
 
-      - name: Inject workflow label into allure results
+      - name: Inject workflow label and CI link into allure results
         if: steps.check-results.outputs.has_results == 'true'
         env:
           WORKFLOW_LABEL: ${{ inputs.workflow_label }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.run_id }}
         run: |
-          # The conftest.py hook doesn't fire for all tests, so inject
-          # dynamo_workflow label into all result files to ensure workflow
-          # tiles in the unified dashboard capture every test.
+          # Inject dynamo_workflow label (for dashboard filtering) and CI run link
+          # (for tracing test failures to the originating workflow run) into all
+          # result files. Uses the triggering run_id, not the generating run,
+          # so imported results in the unified dashboard link to the correct run.
           python3 -c "
           import json, glob, sys
-          wf = sys.argv[1]
+          wf, run_url = sys.argv[1], sys.argv[2]
           for f in glob.glob('allure-results/*-result.json'):
               with open(f, 'r') as fh:
                   data = json.load(fh)
               labels = data.setdefault('labels', [])
               if not any(l.get('name') == 'dynamo_workflow' for l in labels):
                   labels.append({'name': 'dynamo_workflow', 'value': wf})
+              links = data.setdefault('links', [])
+              if not any(l.get('name') == 'CI Run' for l in links):
+                  links.append({'name': 'CI Run', 'url': run_url, 'type': 'custom'})
               with open(f, 'w') as fh:
                   json.dump(data, fh)
-          " "$WORKFLOW_LABEL"
+          " "$WORKFLOW_LABEL" "$RUN_URL"
+
+      - name: Redact secrets from allure results
+        if: steps.check-results.outputs.has_results == 'true'
+        run: |
+          # Defense-in-depth: strip HF tokens that may leak via pytest tracebacks
+          # (--showlocals dumps local variable values into allure statusDetails.trace).
+          # The primary fix is inlining env var lookups in tests/conftest.py; this
+          # catches any tokens that slip through via other code paths or log attachments.
+          # Uses binary mode to safely handle both text and binary attachments.
+          python3 -c "
+          import re, glob
+          pattern = re.compile(rb'hf_[A-Za-z0-9]{20,}')
+          replacement = b'<HF_TOKEN_REDACTED>'
+          for f in glob.glob('allure-results/*-result.json') + glob.glob('allure-results/*-attachment.*'):
+              with open(f, 'rb') as fh:
+                  content = fh.read()
+              sanitized = pattern.sub(replacement, content)
+              if sanitized != content:
+                  with open(f, 'wb') as fh:
+                      fh.write(sanitized)
+                  print(f'Redacted token in {f}')
+          "
 
       - name: Install Allure 2 CLI
         if: steps.check-results.outputs.has_results == 'true'
@@ -92,7 +119,7 @@ jobs:
         env:
           SUBDIR: ${{ inputs.subdir }}
         run: |
-          git fetch origin gh-pages:gh-pages 2>/dev/null || echo "No gh-pages branch yet"
+          git fetch --depth=1 origin gh-pages:gh-pages 2>/dev/null || echo "No gh-pages branch yet"
 
           # Restore history for Allure 2 report (at allure/v2/${SUBDIR}/)
           if git show "gh-pages:allure/v2/${SUBDIR}/history" 2>/dev/null; then
@@ -121,8 +148,8 @@ jobs:
           # Copy this workflow's results (exclude Allure 2 history dir)
           rsync -a --exclude='history' allure-results/ unified-workspace/allure-results/
 
-          # Fetch stored results from other workflows on gh-pages
-          git fetch origin gh-pages:gh-pages 2>/dev/null || true
+          # Fetch stored results from other workflows on gh-pages (redundant if already fetched above, harmless)
+          git fetch --depth=1 origin gh-pages:gh-pages 2>/dev/null || true
           for dir in pr post-merge nightly release; do
             if [ "$dir" = "$SUBDIR" ]; then continue; fi
             if git show "gh-pages:dashboard-results/${dir}" 2>/dev/null; then
@@ -155,52 +182,65 @@ jobs:
           git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Reuse the checkout token for push access
           git config http.https://github.com/.extraheader "AUTHORIZATION: basic $(echo -n "x-access-token:${{ github.token }}" | base64)"
 
-          # Pull existing gh-pages content or start fresh
-          if git ls-remote --exit-code origin gh-pages &>/dev/null; then
-            git fetch origin gh-pages
-            git checkout gh-pages
-          else
-            git checkout --orphan gh-pages
-          fi
+          # Apply all report files on top of the latest gh-pages state.
+          # Extracted as a function so it can be re-run on push conflict.
+          apply_changes() {
+            if git ls-remote --exit-code origin gh-pages &>/dev/null; then
+              git fetch --depth=1 origin gh-pages
+              git checkout -B gh-pages FETCH_HEAD
+            else
+              git checkout --orphan gh-pages
+              git rm -rf . 2>/dev/null || true
+            fi
 
-          # Deploy Allure 2 report
-          mkdir -p "allure/v2/${SUBDIR}"
-          rm -rf "allure/v2/${SUBDIR}/"*
-          cp -r "${GITHUB_WORKSPACE}/allure-report/"* "allure/v2/${SUBDIR}/"
+            # Deploy Allure 2 report
+            mkdir -p "allure/v2/${SUBDIR}"
+            rm -rf "allure/v2/${SUBDIR}/"*
+            cp -r "${GITHUB_WORKSPACE}/allure-report/"* "allure/v2/${SUBDIR}/"
 
-          # Store raw results for unified dashboard aggregation (exclude Allure 2 history)
-          mkdir -p "dashboard-results/${SUBDIR}"
-          rm -rf "dashboard-results/${SUBDIR}/"*
-          rsync -a --exclude='history' "${GITHUB_WORKSPACE}/allure-results/" "dashboard-results/${SUBDIR}/"
+            # Store raw results for unified dashboard aggregation (exclude Allure 2 history)
+            mkdir -p "dashboard-results/${SUBDIR}"
+            rm -rf "dashboard-results/${SUBDIR}/"*
+            rsync -a --exclude='history' "${GITHUB_WORKSPACE}/allure-results/" "dashboard-results/${SUBDIR}/"
 
-          # Deploy unified dashboard (per-workflow tabs generated by allurerc.mjs plugins)
-          mkdir -p allure
-          cp -r "${GITHUB_WORKSPACE}/allure-all-report/"* allure/
-          # Persist history.jsonl for trend charts (written by Allure 3 at process.cwd())
-          if [ -f "${GITHUB_WORKSPACE}/history.jsonl" ]; then
-            cp "${GITHUB_WORKSPACE}/history.jsonl" allure/history.jsonl
-          fi
+            # Deploy unified dashboard (per-workflow tabs generated by allurerc.mjs plugins)
+            # Clean plugin tabs first — each run generates fresh files with unique UUIDs,
+            # and cp -r merges rather than replaces, causing unbounded file accumulation.
+            rm -rf allure/pr allure/postMerge allure/nightly allure/release \
+                   allure/vllm allure/sglang allure/trtllm \
+                   allure/post-merge
+            mkdir -p allure
+            cp -r "${GITHUB_WORKSPACE}/allure-all-report/"* allure/
+            # Persist history.jsonl for trend charts (written by Allure 3 at process.cwd())
+            if [ -f "${GITHUB_WORKSPACE}/history.jsonl" ]; then
+              cp "${GITHUB_WORKSPACE}/history.jsonl" allure/history.jsonl
+            fi
 
-          # Commit and push
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No changes to deploy"
-          else
+            # Stage and commit
+            git add -A
+            if git diff --cached --quiet; then
+              echo "No changes to deploy"
+              return 1
+            fi
             git commit -m "Deploy Allure reports for ${SUBDIR} (run ${{ github.run_id }})"
-            # Retry push with rebase to handle concurrent gh-pages updates
-            for i in 1 2 3; do
-              if git push origin gh-pages; then
-                break
-              fi
-              echo "Push failed, retrying with rebase (attempt $i/3)..."
-              git fetch origin gh-pages
-              git rebase origin/gh-pages
-            done
-          fi
+          }
+
+          # Apply changes and push with retry on conflict.
+          # Concurrent deploys can cause push rejection — retry by fetching
+          # the latest gh-pages and re-applying all changes on top.
+          for attempt in 1 2 3; do
+            apply_changes || exit 0  # exit 0 if no changes
+            if git push origin gh-pages; then
+              echo "Deploy successful (attempt $attempt)"
+              exit 0
+            fi
+            echo "Push failed (attempt $attempt/3), waiting 5s before retrying..."
+            sleep 5
+          done
+          echo "::error::Deploy failed after 3 attempts"
+          exit 1
 
       - name: Print report URLs
         if: steps.check-results.outputs.has_results == 'true'

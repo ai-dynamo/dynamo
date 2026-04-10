@@ -6,15 +6,16 @@ from __future__ import annotations
 import pytest
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.client.session import _GMSClientSession
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     CommitResponse,
     HandshakeResponse,
 )
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.none,
     pytest.mark.gpu_0,
 ]
 

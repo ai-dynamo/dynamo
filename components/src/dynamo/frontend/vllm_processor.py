@@ -269,6 +269,7 @@ class VllmProcessor:
             },
             "eos_token_ids": self._get_eos_token_ids(),
             "annotations": [],
+            "routing": request.get("routing"),
         }
 
         # Forward multimodal URLs so the backend handler can load the media.
