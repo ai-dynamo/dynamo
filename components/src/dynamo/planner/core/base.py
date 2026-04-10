@@ -495,9 +495,9 @@ class NativePlannerBase:
         decode_stats: Optional[dict] = None,
     ) -> None:
         pm = self.prometheus_metrics
-        pm.engine_queued_prefill_tokens._metrics.clear()
-        pm.engine_queued_decode_kv_tokens._metrics.clear()
-        pm.engine_inflight_decode_kv_tokens._metrics.clear()
+        pm.engine_queued_prefill_tokens.clear()
+        pm.engine_queued_decode_kv_tokens.clear()
+        pm.engine_inflight_decode_kv_tokens.clear()
 
         if prefill_stats:
             for (wid, dp), fpm in prefill_stats.items():

@@ -11,7 +11,7 @@ based on the previous tick's ``ScheduledTick`` requirements.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -123,11 +123,7 @@ class PlannerEffects:
 
     scale_to: Optional[ScalingDecision] = None
     next_tick: Optional[ScheduledTick] = None
-    diagnostics: TickDiagnostics = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.diagnostics is None:
-            self.diagnostics = TickDiagnostics()
+    diagnostics: TickDiagnostics = field(default_factory=TickDiagnostics)
 
 
 @dataclass

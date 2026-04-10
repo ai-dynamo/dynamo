@@ -357,6 +357,7 @@ class LoadScalingMixin:
         self, estimates: list[float], sla: float, num_workers: int, label: str
     ) -> Optional[int]:
         if not estimates:
+            self._diag_load_reason = "insufficient_data"
             return None
 
         sensitivity = self._config.load_scaling_down_sensitivity / 100.0

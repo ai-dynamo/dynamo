@@ -301,3 +301,28 @@ class TestDiagnosticsRecorder:
             cfg = _make_config(tmp_dir)
             recorder = DiagnosticsRecorder(config=cfg)
             assert recorder.finalize() is None
+
+    def test_record_without_fpm_data(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cfg = _make_config(tmp_dir)
+            recorder = DiagnosticsRecorder(config=cfg)
+
+            tick_input = TickInput(
+                now_s=1000.0,
+                worker_counts=WorkerCounts(ready_num_prefill=2, ready_num_decode=3),
+                fpm_observations=None,
+            )
+            effects = PlannerEffects(
+                diagnostics=TickDiagnostics(load_decision_reason="no_fpm_data"),
+            )
+            observed = Metrics(ttft=100.0, itl=10.0, num_req=50, isl=800, osl=120)
+            recorder.record(tick_input, effects, observed, 1.0)
+
+            assert len(recorder._snapshots) == 1
+            snap = recorder._snapshots[0]
+            assert snap.prefill_engines == []
+            assert snap.decode_engines == []
+
+            filepath = recorder.generate_report()
+            assert filepath is not None
+            assert os.path.exists(filepath)

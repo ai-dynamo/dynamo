@@ -89,6 +89,7 @@ class DiagnosticsRecorder:
     _last_report_s: float = 0.0
     _report_count: int = 0
     _interval_s: float = 0.0
+    _max_snapshots: int = 50000
 
     def __post_init__(self) -> None:
         if self.config.report_interval_hours is not None:
@@ -182,6 +183,8 @@ class DiagnosticsRecorder:
             gpu_hours=gpu_hours,
         )
         self._snapshots.append(snap)
+        if len(self._snapshots) > self._max_snapshots:
+            self._snapshots = self._snapshots[-self._max_snapshots :]
 
     def should_generate_report(self, now_s: float) -> bool:
         if not self.enabled or not self._snapshots:
