@@ -62,7 +62,8 @@ class _Abortable(Protocol):
     """Structural type for objects that support abort(). Satisfied by both
     GenerationResult and _DeferredAbort."""
 
-    def abort(self) -> None: ...
+    def abort(self) -> None:
+        ...
 
 
 class _DeferredAbort:
