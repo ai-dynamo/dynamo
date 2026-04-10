@@ -10,6 +10,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
@@ -66,6 +67,9 @@ func buildCheckpointJob(
 	}
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
+	}
+	if podTemplate.Spec.ServiceAccountName == "" {
+		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(ckpt.Name)
 	}
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)

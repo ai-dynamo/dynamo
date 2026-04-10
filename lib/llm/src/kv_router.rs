@@ -131,6 +131,7 @@ where
 {
     indexer: Indexer,
     scheduler: KvScheduler<Sel>,
+    workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -230,6 +231,7 @@ where
         Ok(Self {
             indexer,
             scheduler,
+            workers_with_configs,
             block_size,
             kv_router_config,
             prefill_load_estimator,
@@ -471,6 +473,13 @@ where
     /// Used for Prometheus metric labeling.
     pub fn worker_type(&self) -> &'static str {
         self.scheduler.worker_type()
+    }
+
+    /// Return the worker's unique global DP rank when it owns exactly one rank.
+    pub fn unique_dp_rank_for_worker(&self, worker_id: WorkerId) -> Option<u32> {
+        let configs = self.workers_with_configs.borrow();
+        let config = configs.get(&worker_id)?;
+        (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
     }
 
     pub fn add_output_block(

@@ -6,6 +6,7 @@ package protocol
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -61,10 +62,26 @@ func PrepareRestorePodSpec(
 	if isCheckpointReady {
 		container.Command = []string{"sleep", "infinity"}
 		container.Args = nil
-		container.StartupProbe = nil
-		container.LivenessProbe = nil
-		container.ReadinessProbe = nil
+		ensureRestoreStartupProbe(container)
 	}
+}
+
+func ensureRestoreStartupProbe(container *corev1.Container) {
+	startup := container.StartupProbe
+	if startup == nil {
+		startup = container.LivenessProbe
+		if startup == nil {
+			startup = container.ReadinessProbe
+		}
+	}
+	if startup == nil {
+		return
+	}
+
+	startup = startup.DeepCopy()
+	startup.FailureThreshold = math.MaxInt32
+	startup.SuccessThreshold = 1
+	container.StartupProbe = startup
 }
 
 func ValidateRestorePodSpec(
