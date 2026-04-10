@@ -93,12 +93,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
 
+            # stop_token_ids are passed to the engine so it can stop generation
+            # proactively (matching vLLM/TRT-LLM handlers). Stop strings are NOT
+            # passed — the Rust Decoder handles string-based stop matching.
+            stop_token_ids = stop_conditions.get("stop_token_ids_hidden")
+
             param_mapping = {
                 "temperature": sampling_opts.get("temperature"),
                 "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
+                "stop_token_ids": stop_token_ids,
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")
                 ),
