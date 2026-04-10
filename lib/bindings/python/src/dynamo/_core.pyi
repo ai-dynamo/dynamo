@@ -431,15 +431,17 @@ class WorkerMetricsPublisher:
 
     def publish(
         self,
-        dp_rank: Optional[int],
-        active_decode_blocks: int,
+        dp_rank: Optional[int] = None,
+        active_decode_blocks: int | None = None,
+        kv_used_blocks: int | None = None,
     ) -> None:
         """
         Publish worker metrics for load monitoring.
 
         Args:
             dp_rank: Data parallel rank of the worker (None defaults to 0)
-            active_decode_blocks: Number of active KV cache blocks
+            active_decode_blocks: Optional scheduler-compatible decode-block signal
+            kv_used_blocks: Optional authoritative total KV blocks currently in use
         """
         ...
 
@@ -1159,6 +1161,17 @@ class RouterConfig:
         """
         ...
 
+class AicPerfConfig:
+    def __init__(
+        self,
+        aic_backend: str,
+        aic_system: str,
+        aic_model_path: str,
+        aic_tp_size: int = 1,
+        aic_backend_version: Optional[str] = None,
+    ) -> None:
+        ...
+
 class KvRouterConfig:
     """Values for KV router"""
 
@@ -1172,6 +1185,8 @@ class KvRouterConfig:
         router_track_active_blocks: bool = True,
         router_track_output_blocks: bool = False,
         router_assume_kv_reuse: bool = True,
+        router_track_prefill_tokens: bool = True,
+        router_prefill_load_model: str = "none",
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
@@ -1200,6 +1215,10 @@ class KvRouterConfig:
                 sequence length (agent_hints.osl in nvext).
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
+            router_track_prefill_tokens: Include prompt-side prefill tokens in active load accounting (default: True).
+            router_prefill_load_model: Prompt-side prefill load model (default: "none").
+                "none" keeps static prompt load accounting.
+                "aic" decays the oldest active prefill request using AIC-predicted duration.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
@@ -1221,6 +1240,21 @@ class KvRouterConfig:
     @staticmethod
     def from_json(config_json: str) -> "KvRouterConfig":
         ...
+
+    def dump_json(self) -> str: ...
+
+    def copy(self) -> "KvRouterConfig": ...
+
+    @property
+    def overlap_score_weight(self) -> float: ...
+
+    @overlap_score_weight.setter
+    def overlap_score_weight(self, value: float) -> None: ...
+
+    def with_overrides(
+        self,
+        overlap_score_weight: Optional[float] = None,
+    ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:
     def __init__(
@@ -1264,6 +1298,9 @@ class MockEngineArgs:
         aic_backend_version: Optional[str] = None,
         aic_tp_size: Optional[int] = None,
         aic_model_path: Optional[str] = None,
+        aic_moe_tp_size: Optional[int] = None,
+        aic_moe_ep_size: Optional[int] = None,
+        aic_attention_dp_size: Optional[int] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
@@ -1281,6 +1318,8 @@ class MockEngineArgs:
     def from_json(config_json: str) -> "MockEngineArgs":
         ...
 
+    def copy(self) -> "MockEngineArgs": ...
+
     def dump_json(self) -> str: ...
 
     @property
@@ -1289,11 +1328,20 @@ class MockEngineArgs:
     @property
     def num_gpu_blocks(self) -> int: ...
 
+    @num_gpu_blocks.setter
+    def num_gpu_blocks(self, value: int) -> None: ...
+
     @property
     def max_num_seqs(self) -> Optional[int]: ...
 
     @property
     def max_num_batched_tokens(self) -> Optional[int]: ...
+
+    @property
+    def enable_prefix_caching(self) -> bool: ...
+
+    @enable_prefix_caching.setter
+    def enable_prefix_caching(self, value: bool) -> None: ...
 
     @property
     def enable_local_indexer(self) -> bool: ...
@@ -1303,6 +1351,60 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def aic_backend(self) -> Optional[str]: ...
+
+    @aic_backend.setter
+    def aic_backend(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_system(self) -> Optional[str]: ...
+
+    @aic_system.setter
+    def aic_system(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_backend_version(self) -> Optional[str]: ...
+
+    @aic_backend_version.setter
+    def aic_backend_version(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_tp_size(self) -> Optional[int]: ...
+
+    @aic_tp_size.setter
+    def aic_tp_size(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_model_path(self) -> Optional[str]: ...
+
+    @aic_model_path.setter
+    def aic_model_path(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_moe_tp_size(self) -> Optional[int]: ...
+
+    @aic_moe_tp_size.setter
+    def aic_moe_tp_size(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_moe_ep_size(self) -> Optional[int]: ...
+
+    @aic_moe_ep_size.setter
+    def aic_moe_ep_size(self, value: Optional[int]) -> None: ...
+
+    @property
+    def aic_attention_dp_size(self) -> Optional[int]: ...
+
+    @aic_attention_dp_size.setter
+    def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
+
+    @property
+    def worker_type(self) -> str: ...
+
+    @worker_type.setter
+    def worker_type(self, value: str) -> None: ...
 
     def is_prefill(self) -> bool: ...
 
@@ -1314,6 +1416,17 @@ class MockEngineArgs:
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
+        num_gpu_blocks: Optional[int] = None,
+        aic_backend: Optional[str] = None,
+        aic_system: Optional[str] = None,
+        aic_backend_version: Optional[str] = None,
+        aic_tp_size: Optional[int] = None,
+        aic_model_path: Optional[str] = None,
+        aic_moe_tp_size: Optional[int] = None,
+        aic_moe_ep_size: Optional[int] = None,
+        aic_attention_dp_size: Optional[int] = None,
+        enable_prefix_caching: Optional[bool] = None,
+        worker_type: Optional[str] = None,
     ) -> "MockEngineArgs": ...
 
 async def register_model(
@@ -1423,6 +1536,7 @@ def run_mocker_trace_replay(
     prefill_engine_args: Optional[MockEngineArgs] = None,
     decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
+    aic_perf_config: Optional[AicPerfConfig] = None,
     num_workers: int = 1,
     num_prefill_workers: int = 1,
     num_decode_workers: int = 1,
@@ -1430,6 +1544,7 @@ def run_mocker_trace_replay(
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
+    trace_block_size: int = 512,
 ) -> Dict[str, Any]:
     """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs."""
     ...
@@ -1442,6 +1557,7 @@ def run_mocker_synthetic_trace_replay(
     prefill_engine_args: Optional[MockEngineArgs] = None,
     decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
+    aic_perf_config: Optional[AicPerfConfig] = None,
     num_workers: int = 1,
     num_prefill_workers: int = 1,
     num_decode_workers: int = 1,
@@ -1686,6 +1802,7 @@ class KvRouter:
         endpoint: Endpoint,
         block_size: int,
         kv_router_config: KvRouterConfig,
+        aic_perf_config: Optional[AicPerfConfig] = None,
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -1694,6 +1811,7 @@ class KvRouter:
             endpoint: The endpoint to connect to for routing requests
             block_size: The KV cache block size
             kv_router_config: Configuration for the KV router
+            aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
         """
         ...
 
@@ -1905,6 +2023,7 @@ class EntrypointArgs:
         is_prefill: bool = False,
         migration_limit: int = 0,
         chat_engine_factory: Optional[Callable] = None,
+        aic_perf_config: Optional[AicPerfConfig] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -1931,6 +2050,7 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             migration_limit: Maximum number of request migrations (0=disabled)
             chat_engine_factory: Optional Python chat completions engine factory callback
+            aic_perf_config: Optional AIC perf-model configuration for default KV routing
         """
         ...
 

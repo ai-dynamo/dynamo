@@ -9,7 +9,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default values
@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL" 2>/dev/null || true)
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --no-curl "Launching Embedding Worker" "$MODEL" "$HTTP_PORT"
@@ -68,8 +68,8 @@ python3 -m dynamo.sglang \
   --tp 1 \
   --trust-remote-code \
   --use-sglang-tokenizer \
-  ${GPU_MEM_FRACTION:+--mem-fraction-static "$GPU_MEM_FRACTION"} \
   --enable-metrics \
+  $GPU_MEM_ARGS \
   "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

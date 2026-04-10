@@ -146,7 +146,10 @@ async def worker() -> None:
         (
             config.namespace,
             config.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity()
+        ) = snapshot_controller.reload_restore_identity(
+            config.namespace,
+            config.discovery_backend,
+        )
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).

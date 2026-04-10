@@ -10,7 +10,7 @@
 
 [package]
 name = "dynamo-protocols"
-description = "Protocol types for OpenAI-compatible inference APIs, forked from async-openai."
+description = "Protocol types for OpenAI-compatible inference APIs with inference-serving extensions."
 license = "Apache-2.0 AND MIT"
 version.workspace = true
 edition.workspace = true
@@ -19,43 +19,34 @@ homepage.workspace = true
 repository.workspace = true
 readme.workspace = true
 
-[features]
-realtime = ["dep:tokio-tungstenite"]
-# Bring your own types
-byot = []
-
 [dependencies]
-futures = { workspace = true }
-rand = { workspace = true }
-reqwest = { workspace = true }
+# Upstream OpenAI types (types-only, no HTTP client)
+async-openai = { version = "0.34", default-features = false, features = [
+    "chat-completion-types",
+    "response-types",
+    "completion-types",
+    "embedding-types",
+    "image-types",
+] }
+
+# Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+derive_builder = { workspace = true }
+
+# Type support
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-stream = { workspace = true }
-tokio-util = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
-derive_builder = { workspace = true }
-bytes = { workspace = true }
+futures = { workspace = true }
 
-eventsource-stream = "0.2.3"
-async-openai-macros = "0.1.0"
-backoff = { version = "0.4.0", features = ["tokio"] }
-base64 = "0.22.1"
-reqwest-eventsource = "0.6.0"
-secrecy = { version = "0.10.3", features = ["serde"] }
-tokio-tungstenite = { version = "0.26.1", optional = true, default-features = false }
-utoipa = { version = "5.3", features = ["url", "uuid"] }
+
 
 [dev-dependencies]
+tokio = { workspace = true }
 tokio-test = "0.4.4"
 serde_json = { workspace = true }
-
-[[test]]
-name = "bring-your-own-type"
-required-features = ["byot"]
 
 [package.metadata.docs.rs]
 all-features = true

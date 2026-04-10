@@ -40,10 +40,13 @@ impl PrefillRouter {
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
-            let dp_rank = req.routing.as_ref().and_then(|r| r.dp_rank).unwrap_or(0);
+            let dp_rank = req
+                .routing
+                .as_ref()
+                .and_then(|r| r.prefill_dp_rank.or(r.dp_rank));
             tracing::debug!(
                 worker_id = id,
-                dp_rank = dp_rank,
+                dp_rank = ?dp_rank,
                 "Using pre-selected prefill worker for bootstrap"
             );
             (id, dp_rank)
@@ -95,7 +98,7 @@ impl PrefillRouter {
 
         tracing::debug!(
             worker_id = worker_id,
-            dp_rank = dp_rank,
+            dp_rank = ?dp_rank,
             bootstrap_host = %host,
             bootstrap_port = port,
             bootstrap_room = bootstrap_room,
@@ -120,7 +123,7 @@ impl PrefillRouter {
     ///
     /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
     /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
-    /// the prefill route must finish `record_worker_full` before the phase can change to Decode.
+    /// the prefill route must finish worker recording before the phase can change to Decode.
     ///
     /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     pub(super) async fn execute_prefill(
@@ -128,7 +131,7 @@ impl PrefillRouter {
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
+    ) -> Result<(PrefillResult, Option<(u64, Option<u32>)>), PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
@@ -140,7 +143,7 @@ impl PrefillRouter {
                 )
             })?;
 
-        // Release the phase barrier now that routing completed and record_worker_full already ran.
+        // Release the phase barrier now that routing completed and worker recording already ran.
         // Decode may proceed without waiting for prefill output streaming to finish.
         drop(phase_transition_permit);
 
@@ -198,8 +201,7 @@ impl PrefillRouter {
                     let dp_rank = worker_id_json
                         .get("prefill_dp_rank")
                         .and_then(|v| v.as_u64())
-                        .map(|r| r as u32)
-                        .unwrap_or(0);
+                        .map(|r| r as u32);
                     Some((worker_id, dp_rank))
                 });
         Ok((
@@ -262,7 +264,7 @@ impl PrefillRouter {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Result<(u64, u32)> {
+    ) -> Result<(u64, Option<u32>)> {
         let prefill_router = self
             .prefill_router
             .get()
@@ -284,7 +286,7 @@ impl PrefillRouter {
                         allowed_worker_ids,
                     )
                     .await?;
-                Ok((worker.worker_id, worker.dp_rank))
+                Ok((worker.worker_id, Some(worker.dp_rank)))
             }
             InnerPrefillRouter::SimpleRouter(r) => {
                 let worker_id = if update_states {
@@ -293,7 +295,7 @@ impl PrefillRouter {
                     r.peek_next_worker()
                 }
                 .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-                Ok((worker_id, 0))
+                Ok((worker_id, None))
             }
         }
     }

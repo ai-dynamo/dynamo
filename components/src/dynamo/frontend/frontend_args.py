@@ -8,6 +8,10 @@ from typing import Any, Dict, Optional
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.arg_group import ArgGroup
+from dynamo.common.configuration.groups.aic_perf_args import (
+    AicPerfArgGroup,
+    AicPerfConfigBase,
+)
 from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
     KvRouterConfigBase,
@@ -39,7 +43,7 @@ def validate_model_path(value: str) -> str:
     return value
 
 
-class FrontendConfig(KvRouterConfigBase):
+class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
     """Configuration for the Dynamo frontend."""
 
     interactive: bool
@@ -100,6 +104,41 @@ class FrontendConfig(KvRouterConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        if self.router_prefill_load_model == "aic":
+            if self.router_mode != "kv":
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires --router-mode=kv"
+                )
+            if self.chat_processor != "dynamo":
+                raise ValueError(
+                    "--router-prefill-load-model=aic currently requires "
+                    "--dyn-chat-processor=dynamo"
+                )
+            missing = [
+                flag
+                for flag, value in (
+                    ("--aic-backend", self.aic_backend),
+                    ("--aic-system", self.aic_system),
+                    ("--aic-model-path", self.aic_model_path),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires " + ", ".join(missing)
+                )
+            if not self.router_track_prefill_tokens:
+                raise ValueError(
+                    "--router-prefill-load-model=aic requires "
+                    "--router-track-prefill-tokens"
+                )
+        if self.serve_indexer:
+            if self.router_mode != "kv":
+                raise ValueError("--serve-indexer requires --router-mode=kv")
+            if self.use_remote_indexer:
+                raise ValueError(
+                    "--serve-indexer and --use-remote-indexer are mutually exclusive"
+                )
 
 
 @register_encoder(FrontendConfig)
@@ -163,6 +202,14 @@ class FrontendArgGroup(ArgGroup):
             help="HTTP port for the engine (u16).",
             arg_type=int,
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--serve-indexer",
+            env_var="DYN_SERVE_INDEXER",
+            default=False,
+            help="Serve this frontend's local KV indexers over the request plane.",
+            dest="serve_indexer",
+        )
         add_argument(
             g,
             flag_name="--tls-cert-path",
@@ -216,6 +263,7 @@ class FrontendArgGroup(ArgGroup):
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)
+        AicPerfArgGroup().add_arguments(parser)
 
         add_argument(
             g,

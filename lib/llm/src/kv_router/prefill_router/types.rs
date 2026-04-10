@@ -36,7 +36,7 @@ pub(super) enum PrefillOutcome {
 pub(super) enum PrefillResolveDecision {
     Resolved {
         worker_id: u64,
-        dp_rank: u32,
+        dp_rank: Option<u32>,
         bootstrap_info: BootstrapInfo,
     },
     Unavailable,
