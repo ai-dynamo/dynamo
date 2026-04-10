@@ -34,6 +34,16 @@ if TYPE_CHECKING:
 # Rust counterpart: lib/runtime/src/metrics.rs create_metric() function
 # Label constants defined in: lib/runtime/src/metrics/prometheus_names.rs labels module
 
+# Single source of truth for embedding cache metric names (used by tests).
+EMBEDDING_CACHE_METRIC_NAMES = [
+    f"{name_prefix.COMPONENT}_embedding_cache_hits_total",
+    f"{name_prefix.COMPONENT}_embedding_cache_misses_total",
+    f"{name_prefix.COMPONENT}_embedding_cache_evictions_total",
+    f"{name_prefix.COMPONENT}_embedding_cache_utilization",
+    f"{name_prefix.COMPONENT}_embedding_cache_current_bytes",
+    f"{name_prefix.COMPONENT}_embedding_cache_entries",
+]
+
 
 def register_engine_metrics_callback(
     endpoint: Endpoint,

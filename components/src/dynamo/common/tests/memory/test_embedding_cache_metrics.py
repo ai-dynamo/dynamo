@@ -12,22 +12,15 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
-from dynamo.common.utils.prometheus import register_embedding_cache_metrics
+from dynamo.common.utils.prometheus import (
+    EMBEDDING_CACHE_METRIC_NAMES,
+    register_embedding_cache_metrics,
+)
 
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.integration,
-]
-
-# All metric names emitted by register_embedding_cache_metrics
-_METRIC_NAMES = [
-    "dynamo_component_embedding_cache_hits_total",
-    "dynamo_component_embedding_cache_misses_total",
-    "dynamo_component_embedding_cache_evictions_total",
-    "dynamo_component_embedding_cache_utilization",
-    "dynamo_component_embedding_cache_current_bytes",
-    "dynamo_component_embedding_cache_entries",
 ]
 
 
@@ -181,7 +174,7 @@ class TestLabelsAndCompleteness:
         cache.get("k")
         cache.get("absent")
         text = callback()
-        for name in _METRIC_NAMES:
+        for name in EMBEDDING_CACHE_METRIC_NAMES:
             assert (
                 _parse_metric(text, name) is not None
             ), f"metric {name} missing from output"
