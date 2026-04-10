@@ -16,7 +16,7 @@ import pynvml
 import requests
 
 from tests.gpu_memory_service.common.gms import GMSServer
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import DefaultPort, FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.engine_process import EngineProcess
 from tests.utils.managed_process import DynamoFrontendProcess
 from tests.utils.payloads import check_health_generate, check_models_api
@@ -247,7 +247,7 @@ class VLLMWithGMSProcess(GMSEngineProcess):
         engine_id: str,
         read_only_weights: bool = False,
     ):
-        reserved_ports = allocate_ports(3)
+        reserved_ports = allocate_ports(3, DefaultPort.SYSTEM1.value)
         self.kv_event_port = reserved_ports[1]
         self.nixl_port = reserved_ports[2]
         try:
@@ -318,7 +318,7 @@ class SGLangWithGMSProcess(GMSEngineProcess):
         engine_id: str,
         read_only_weights: bool = False,
     ):
-        reserved_ports = allocate_ports(2)
+        reserved_ports = allocate_ports(2, DefaultPort.SYSTEM1.value)
         self.serve_port = reserved_ports[1]
         try:
             super().__init__(
