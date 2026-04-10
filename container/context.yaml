@@ -126,6 +126,7 @@ fastvideo:
     runtime_image: nvcr.io/nvidia/cuda-dl-base
     base_image_tag: 25.12-py3
     runtime_image_tag: 25.12-cuda13.1-runtime-ubuntu24.04
+  nixl_ref: 0.10.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "false"
   enable_kvbm: "false"

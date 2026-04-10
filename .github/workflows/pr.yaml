@@ -228,9 +228,6 @@ jobs:
       build_timeout_minutes: 60
     secrets: inherit
 
-  # ============================================================================
-  # DEV PIPELINES
-  # ============================================================================
   sglang-dev-build:
     name: sglang-dev
     needs: [changed-files]
@@ -599,10 +596,9 @@ jobs:
       copy_timeout_minutes: 10
     secrets: inherit
 
-   # ============================================================================
-   # DEPLOYMENT JOBS
-   # Deploy operator and run end-to-end tests on Kubernetes cluster
-   # ============================================================================
+  # ============================================================================
+  # DEPLOY TEST PIPELINES
+  # ============================================================================
 
   deploy-operator:
     if: |
@@ -717,15 +713,14 @@ jobs:
     needs:
       - changed-files
       - operator
-      - vllm-build
-      - vllm-dev-build
-      - sglang-build
-      - sglang-dev-build
-      - trtllm-build
-      - trtllm-dev-build
-      - fastvideo-build
-      - fastvideo-dev-build
-      - planner-build
+      - planner-test
+      - vllm-copy-to-acr
+      - vllm-multi-gpu-test
+      - sglang-copy-to-acr
+      - sglang-multi-gpu-test
+      - trtllm-copy-to-acr
+      - trtllm-multi-gpu-test
+      - fastvideo-copy-to-acr
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
