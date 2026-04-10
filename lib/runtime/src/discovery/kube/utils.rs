@@ -2,23 +2,84 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-/// Hash a pod name to get a consistent instance ID
+use crate::config::environment_names::kube_discovery;
+
+/// Mask to clear top 11 bits, ensuring the instance ID can be safely
+/// round-tripped through IEEE-754 f64 (JSON number).
+const INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
+
+/// The operator's standard name for single-container pods.
+/// Containers with this name use pod-level identity even in container mode,
+/// ensuring backward compatibility with pod-mode CRs.
+const MAIN_CONTAINER_NAME: &str = "main";
+
+/// Kubernetes discovery granularity determines whether identity is per-pod or per-container.
+///
+/// - `Pod`: one identity per pod (backward-compatible default). Uses EndpointSlice
+///   reflector and `hash(pod_name)` for instance ID.
+/// - `Container`: one identity per container. Uses Pod reflector. Containers named
+///   "main" use pod-level identity for cross-compatibility. Other containers
+///   (e.g., "engine-0") get `hash("{pod}-{container}")` identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KubeDiscoveryGranularity {
+    Pod,
+    Container,
+}
+
+impl KubeDiscoveryGranularity {
+    /// Read granularity from `DYN_KUBE_DISCOVERY_GRANULARITY` env var.
+    /// Defaults to `Pod` if unset or unrecognized.
+    pub fn from_env() -> Self {
+        match std::env::var(kube_discovery::DYN_KUBE_DISCOVERY_GRANULARITY).as_deref() {
+            Ok("container") => Self::Container,
+            _ => Self::Pod,
+        }
+    }
+
+    /// CR name for this discovery participant.
+    ///
+    /// - Pod mode: returns `pod_name`.
+    /// - Container mode with `container_name == "main"`: returns `pod_name`
+    ///   (backward compat — "main" is the operator's default single-container name).
+    /// - Container mode with any other name: returns `"{pod_name}-{container_name}"`.
+    pub fn cr_name(&self, pod_name: &str, container_name: &str) -> String {
+        match self {
+            Self::Pod => pod_name.to_string(),
+            Self::Container if container_name == MAIN_CONTAINER_NAME => pod_name.to_string(),
+            Self::Container => format!("{}-{}", pod_name, container_name),
+        }
+    }
+
+    /// Deterministic instance ID. Hashes the `cr_name` output so the two
+    /// are always derived from the same key.
+    pub fn instance_id(&self, pod_name: &str, container_name: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.cr_name(pod_name, container_name).hash(&mut hasher);
+        hasher.finish() & INSTANCE_ID_MASK
+    }
+}
+
+/// Hash a pod name to get a consistent instance ID (pod-level granularity).
+///
+/// This is the backward-compatible function used by external consumers
+/// (e.g., C bindings / EPP).
 pub fn hash_pod_name(pod_name: &str) -> u64 {
-    // Clear top 11 bits to ensure it can be safely rounded to IEEE-754 f64
-    const INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
     let mut hasher = DefaultHasher::new();
     pod_name.hash(&mut hasher);
     hasher.finish() & INSTANCE_ID_MASK
 }
 
-/// Extract endpoint information from an EndpointSlice
-/// Returns (instance_id, pod_name) tuples for ready endpoints
+/// Extract endpoint information from an EndpointSlice (pod-level granularity).
+///
+/// Returns `(instance_id, pod_name)` tuples for ready endpoints.
+/// Used by the daemon in `Pod` granularity mode.
 pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String)> {
     let mut result = Vec::new();
 
@@ -43,20 +104,55 @@ pub(super) fn extract_endpoint_info(slice: &EndpointSlice) -> Vec<(u64, String)>
         }
 
         let instance_id = hash_pod_name(pod_name);
-
         result.push((instance_id, pod_name.to_string()));
     }
 
     result
 }
 
+/// Extract ready containers from a Pod (container-level granularity).
+///
+/// Returns `(instance_id, cr_name)` tuples for each container whose
+/// `containerStatuses[].ready` is `true`. Containers named "main" produce
+/// pod-level identity for backward compatibility. Init containers and sidecars
+/// that never call `register()` are naturally excluded by the daemon's
+/// CR correlation step (no matching CR → not included in snapshot).
+pub(super) fn extract_ready_containers(pod: &Pod) -> Vec<(u64, String)> {
+    let pod_name = match pod.metadata.name.as_deref() {
+        Some(name) => name,
+        None => return vec![],
+    };
+
+    let container_statuses = match pod
+        .status
+        .as_ref()
+        .and_then(|s| s.container_statuses.as_ref())
+    {
+        Some(statuses) => statuses,
+        None => return vec![],
+    };
+
+    let g = KubeDiscoveryGranularity::Container;
+    container_statuses
+        .iter()
+        .filter(|cs| cs.ready)
+        .map(|cs| {
+            let id = g.instance_id(pod_name, &cs.name);
+            let name = g.cr_name(pod_name, &cs.name);
+            (id, name)
+        })
+        .collect()
+}
+
 /// Pod information extracted from environment
 #[derive(Debug, Clone)]
 pub(super) struct PodInfo {
     pub pod_name: String,
+    pub container_name: String,
     pub pod_namespace: String,
     pub pod_uid: String,
     pub system_port: u16,
+    pub granularity: KubeDiscoveryGranularity,
 }
 
 /// Default path for Kubernetes Downward API volume mount
@@ -89,6 +185,8 @@ impl PodInfo {
     /// - `POD_NAME`: Name of the pod (required)
     /// - `POD_UID`: UID of the pod (required for CR owner reference)
     /// - `POD_NAMESPACE`: Namespace of the pod (defaults to "default")
+    /// - `CONTAINER_NAME`: Name of this container (required when granularity is Container)
+    /// - `DYN_KUBE_DISCOVERY_GRANULARITY`: "container" or "pod" (default: "pod")
     pub fn from_env() -> Result<Self> {
         let podinfo_path = Path::new(DEFAULT_PODINFO_PATH);
 
@@ -104,6 +202,21 @@ impl PodInfo {
                     tracing::warn!("POD_NAMESPACE not set, defaulting to 'default'");
                     "default".to_string()
                 });
+
+        let granularity = KubeDiscoveryGranularity::from_env();
+
+        let container_name = match granularity {
+            KubeDiscoveryGranularity::Container => {
+                std::env::var("CONTAINER_NAME").map_err(|_| {
+                    anyhow::anyhow!(
+                        "CONTAINER_NAME is required when DYN_KUBE_DISCOVERY_GRANULARITY=container"
+                    )
+                })?
+            }
+            KubeDiscoveryGranularity::Pod => {
+                std::env::var("CONTAINER_NAME").unwrap_or_else(|_| "main".to_string())
+            }
+        };
 
         // Log where we got the pod info from for debugging
         if podinfo_path.join("pod_name").exists() {
@@ -121,9 +234,11 @@ impl PodInfo {
 
         Ok(Self {
             pod_name,
+            container_name,
             pod_namespace,
             pod_uid,
             system_port,
+            granularity,
         })
     }
 }
@@ -133,8 +248,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hash_json_serialization_roundtrip() {
-        // Verify that JSON serialization/deserialization preserves exact values
+    fn test_pod_mode_instance_id_matches_hash_pod_name() {
+        let pod_names = ["worker-0", "worker-99999", "fake-name-1-0-worker-nrdfv"];
+        for pod_name in &pod_names {
+            assert_eq!(
+                KubeDiscoveryGranularity::Pod.instance_id(pod_name, "anything"),
+                hash_pod_name(pod_name),
+                "Pod mode instance_id must equal hash_pod_name for '{}'",
+                pod_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_pod_mode_cr_name_is_pod_name() {
+        assert_eq!(
+            KubeDiscoveryGranularity::Pod.cr_name("worker-0", "engine-0"),
+            "worker-0"
+        );
+    }
+
+    #[test]
+    fn test_container_mode_main_uses_pod_naming() {
+        let g = KubeDiscoveryGranularity::Container;
+        // "main" container should use pod-level naming
+        assert_eq!(g.cr_name("worker-0", "main"), "worker-0");
+        assert_eq!(g.instance_id("worker-0", "main"), hash_pod_name("worker-0"));
+    }
+
+    #[test]
+    fn test_container_mode_non_main_uses_container_naming() {
+        let g = KubeDiscoveryGranularity::Container;
+        assert_eq!(g.cr_name("worker-0", "engine-0"), "worker-0-engine-0");
+        // Should differ from pod-level hash
+        assert_ne!(
+            g.instance_id("worker-0", "engine-0"),
+            hash_pod_name("worker-0")
+        );
+    }
+
+    #[test]
+    fn test_container_mode_instance_id_differs_by_container() {
+        let g = KubeDiscoveryGranularity::Container;
+        let id0 = g.instance_id("worker-0", "engine-0");
+        let id1 = g.instance_id("worker-0", "engine-1");
+        assert_ne!(id0, id1);
+    }
+
+    #[test]
+    fn test_container_mode_instance_id_differs_by_pod() {
+        let g = KubeDiscoveryGranularity::Container;
+        let id0 = g.instance_id("worker-0", "engine-0");
+        let id1 = g.instance_id("worker-1", "engine-0");
+        assert_ne!(id0, id1);
+    }
+
+    #[test]
+    fn test_instance_id_json_roundtrip() {
         let pod_names = [
             "worker-0",
             "worker-99999",
@@ -143,21 +313,20 @@ mod tests {
         ];
 
         for pod_name in &pod_names {
-            let original_hash = hash_pod_name(pod_name);
-            let json = serde_json::to_string(&original_hash).unwrap();
-            let deserialized_hash: u64 = serde_json::from_str(&json).unwrap();
+            let original = hash_pod_name(pod_name);
+            let json = serde_json::to_string(&original).unwrap();
+            let deserialized: u64 = serde_json::from_str(&json).unwrap();
 
             assert_eq!(
-                original_hash, deserialized_hash,
-                "JSON roundtrip changed hash value for pod_name={:?}: {} -> {} (json: {})",
-                pod_name, original_hash, deserialized_hash, json
+                original, deserialized,
+                "JSON roundtrip changed value for pod_name={:?}: {} -> {} (json: {})",
+                pod_name, original, deserialized, json
             );
         }
     }
 
     #[test]
-    fn test_hash_in_struct_serialization() {
-        // Test serialization when the hash is embedded in a struct
+    fn test_instance_id_in_struct_serialization() {
         #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
         struct WorkerInfo {
             instance_id: u64,

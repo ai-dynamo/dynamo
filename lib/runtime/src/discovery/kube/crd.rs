@@ -45,30 +45,33 @@ impl DynamoWorkerMetadataSpec {
 
 /// Build a DynamoWorkerMetadata CR with owner reference set to the pod
 /// # Arguments
-/// * `pod_name` - Name of the pod (used as CR name and in owner reference)
-/// * `pod_uid` - UID of the pod (for owner reference - enables garbage collection)
+/// * `cr_name` - Name of the CR (e.g., pod name in pod mode, or `"{pod}-{container}"` in container mode)
+/// * `pod_name` - Name of the owning pod (for owner reference - enables garbage collection)
+/// * `pod_uid` - UID of the owning pod (for owner reference)
 /// * `metadata` - The DiscoveryMetadata to serialize into the CR's data field
 ///
 /// # Returns
 /// A `DynamoWorkerMetadata` CR ready to be applied to the cluster
 pub fn build_cr(
+    cr_name: &str,
     pod_name: &str,
     pod_uid: &str,
     metadata: &DiscoveryMetadata,
 ) -> Result<DynamoWorkerMetadata> {
     let data = serde_json::to_value(metadata)?;
     let spec = DynamoWorkerMetadataSpec::new(data);
-    let mut cr = DynamoWorkerMetadata::new(pod_name, spec);
+    let mut cr = DynamoWorkerMetadata::new(cr_name, spec);
 
-    // Set owner reference to the pod for automatic garbage collection
+    // Set owner reference to the pod for automatic garbage collection.
+    // When the pod is deleted, all owned CRs are GC'd.
+    // In pod mode (cr_name == pod_name), this is the controlling owner (1:1).
+    // In container mode (cr_name != pod_name), multiple CRs share one pod owner.
     cr.metadata.owner_references = Some(vec![OwnerReference {
         api_version: "v1".to_string(),
         kind: "Pod".to_string(),
         name: pod_name.to_string(),
         uid: pod_uid.to_string(),
-        // Mark pod as the controlling owner - CR will be garbage collected when pod is deleted
-        controller: Some(true),
-        // Don't block pod deletion - allow CR cleanup to happen asynchronously
+        controller: Some(cr_name == pod_name),
         block_owner_deletion: Some(false),
     }]);
 

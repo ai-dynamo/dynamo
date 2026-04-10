@@ -5,6 +5,7 @@ use crate::CancellationToken;
 use crate::discovery::{DiscoveryMetadata, MetadataSnapshot};
 use anyhow::Result;
 use futures::StreamExt;
+use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
     Api, Client as KubeClient,
@@ -16,9 +17,38 @@ use tokio::sync::Notify;
 use tokio::time::{Duration, timeout};
 
 use super::crd::DynamoWorkerMetadata;
-use super::utils::{PodInfo, extract_endpoint_info};
+use super::utils::{
+    KubeDiscoveryGranularity, PodInfo, extract_endpoint_info, extract_ready_containers,
+};
 
 const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+
+/// Holds the readiness reflector store, abstracting over the K8s resource type.
+/// Both variants produce `Vec<(instance_id, cr_correlation_key)>` via `ready_entries()`.
+enum ReadinessReader {
+    /// EndpointSlice-based: one entry per ready pod (pod granularity)
+    EndpointSlice(reflector::Store<EndpointSlice>),
+    /// Pod-based: one entry per ready container (container granularity)
+    Pod(reflector::Store<Pod>),
+}
+
+impl ReadinessReader {
+    /// Extract `(instance_id, cr_key)` tuples from the current reflector state.
+    fn ready_entries(&self) -> Vec<(u64, String)> {
+        match self {
+            Self::EndpointSlice(reader) => reader
+                .state()
+                .iter()
+                .flat_map(|s| extract_endpoint_info(s.as_ref()))
+                .collect(),
+            Self::Pod(reader) => reader
+                .state()
+                .iter()
+                .flat_map(|p| extract_ready_containers(p.as_ref()))
+                .collect(),
+        }
+    }
+}
 
 /// Discovers and aggregates metadata from DynamoWorkerMetadata CRs in the cluster
 #[derive(Clone)]
@@ -44,57 +74,95 @@ impl DiscoveryDaemon {
 
     /// Run the discovery daemon
     ///
-    /// Watches both EndpointSlices (to know which pods are ready) and
-    /// DynamoWorkerMetadata CRs (to get the metadata for each pod).
-    /// A pod is included in the snapshot only if:
-    /// 1. It appears as ready in an EndpointSlice
-    /// 2. It has a corresponding DynamoWorkerMetadata CR
+    /// Watches a readiness source (EndpointSlices or Pods depending on granularity)
+    /// and DynamoWorkerMetadata CRs. An entry is included in the snapshot only if:
+    /// 1. It appears as ready in the readiness source
+    /// 2. It has a corresponding DynamoWorkerMetadata CR (matched by CR name)
     pub async fn run(
         self,
         watch_tx: tokio::sync::watch::Sender<Arc<MetadataSnapshot>>,
     ) -> Result<()> {
         tracing::info!("Discovery daemon starting");
 
-        // Create notify for watch-driven updates (shared by both reflectors)
+        // Create notify for watch-driven updates (shared by all reflectors)
         let notify = Arc::new(Notify::new());
 
-        // --- EndpointSlice Reflector ---
-        let endpoint_slices: Api<EndpointSlice> =
-            Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
+        // --- Readiness reflector: EndpointSlice or Pod depending on granularity ---
+        let readiness_reader = match self.pod_info.granularity {
+            KubeDiscoveryGranularity::Pod => {
+                let api: Api<EndpointSlice> =
+                    Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
+                let (reader, writer) = reflector::store();
+                let config = Config::default()
+                    .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
+                    .labels("nvidia.com/dynamo-discovery-enabled=true");
 
-        let (ep_reader, ep_writer) = reflector::store();
+                tracing::info!(
+                    "Daemon watching EndpointSlices (pod granularity) with labels: nvidia.com/dynamo-discovery-backend=kubernetes, nvidia.com/dynamo-discovery-enabled=true"
+                );
 
-        let ep_watch_config = Config::default()
-            .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
-            .labels("nvidia.com/dynamo-discovery-enabled=true");
+                let notify_clone = notify.clone();
+                let stream = reflector(writer, watcher(api, config))
+                    .default_backoff()
+                    .touched_objects()
+                    .for_each(move |res| {
+                        match res {
+                            Ok(obj) => {
+                                tracing::debug!(
+                                    name = obj.metadata.name.as_deref().unwrap_or("?"),
+                                    "EndpointSlice reflector updated"
+                                );
+                                notify_clone.notify_one();
+                            }
+                            Err(e) => {
+                                tracing::warn!("EndpointSlice reflector error: {e}");
+                                notify_clone.notify_one();
+                            }
+                        }
+                        futures::future::ready(())
+                    });
+                tokio::spawn(stream);
 
-        tracing::info!(
-            "Daemon watching EndpointSlices with labels: nvidia.com/dynamo-discovery-backend=kubernetes, nvidia.com/dynamo-discovery-enabled=true"
-        );
+                ReadinessReader::EndpointSlice(reader)
+            }
 
-        let notify_ep = notify.clone();
-        let ep_reflector_stream = reflector(ep_writer, watcher(endpoint_slices, ep_watch_config))
-            .default_backoff()
-            .touched_objects()
-            .for_each(move |res| {
-                match res {
-                    Ok(obj) => {
-                        tracing::debug!(
-                            slice_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
-                            "EndpointSlice reflector updated"
-                        );
-                        notify_ep.notify_one();
-                    }
-                    Err(e) => {
-                        tracing::warn!("EndpointSlice reflector error: {e}");
-                        notify_ep.notify_one();
-                    }
-                }
-                // for_each expects a Future; ready(()) is an immediately-complete one
-                futures::future::ready(())
-            });
+            KubeDiscoveryGranularity::Container => {
+                let api: Api<Pod> =
+                    Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
+                let (reader, writer) = reflector::store();
+                let config = Config::default()
+                    .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
+                    .labels("nvidia.com/dynamo-discovery-enabled=true");
 
-        tokio::spawn(ep_reflector_stream);
+                tracing::info!(
+                    "Daemon watching Pods (container granularity) with labels: nvidia.com/dynamo-discovery-backend=kubernetes, nvidia.com/dynamo-discovery-enabled=true"
+                );
+
+                let notify_clone = notify.clone();
+                let stream = reflector(writer, watcher(api, config))
+                    .default_backoff()
+                    .touched_objects()
+                    .for_each(move |res| {
+                        match res {
+                            Ok(obj) => {
+                                tracing::debug!(
+                                    name = obj.metadata.name.as_deref().unwrap_or("?"),
+                                    "Pod reflector updated"
+                                );
+                                notify_clone.notify_one();
+                            }
+                            Err(e) => {
+                                tracing::warn!("Pod reflector error: {e}");
+                                notify_clone.notify_one();
+                            }
+                        }
+                        futures::future::ready(())
+                    });
+                tokio::spawn(stream);
+
+                ReadinessReader::Pod(reader)
+            }
+        };
 
         // --- DynamoWorkerMetadata CR Reflector ---
         let metadata_crs: Api<DynamoWorkerMetadata> =
@@ -128,7 +196,6 @@ impl DiscoveryDaemon {
                         notify_cr.notify_one();
                     }
                 }
-                // for_each expects a Future; ready(()) is an immediately-complete one
                 futures::future::ready(())
             });
 
@@ -150,7 +217,7 @@ impl DiscoveryDaemon {
 
                     tracing::trace!("Debounce window elapsed, processing snapshot");
 
-                    match self.aggregate_snapshot(&ep_reader, &cr_reader, sequence).await {
+                    match self.aggregate_snapshot(&readiness_reader, &cr_reader, sequence).await {
                         Ok(snapshot) => {
                             if snapshot.has_changes_from(&prev_snapshot) {
                                 prev_snapshot = snapshot.clone();
@@ -180,33 +247,27 @@ impl DiscoveryDaemon {
         Ok(())
     }
 
-    /// Aggregate metadata from EndpointSlices and DynamoWorkerMetadata CRs into a snapshot
+    /// Aggregate metadata from the readiness source and DynamoWorkerMetadata CRs into a snapshot.
     ///
-    /// A pod is included in the snapshot only if:
-    /// 1. It appears as ready in an EndpointSlice
-    /// 2. It has a corresponding DynamoWorkerMetadata CR (CR name = pod name)
+    /// An entry is included only if it appears ready AND has a matching CR (by name).
     async fn aggregate_snapshot(
         &self,
-        ep_reader: &reflector::Store<EndpointSlice>,
+        readiness: &ReadinessReader,
         cr_reader: &reflector::Store<DynamoWorkerMetadata>,
         sequence: u64,
     ) -> Result<MetadataSnapshot> {
         let start = std::time::Instant::now();
 
-        // Extract ready pods from EndpointSlices: (instance_id, pod_name)
-        let ready_pods: Vec<(u64, String)> = ep_reader
-            .state()
-            .iter()
-            .flat_map(|arc_slice| extract_endpoint_info(arc_slice.as_ref()))
-            .collect();
+        // Extract ready entries: (instance_id, cr_key)
+        let ready_entries = readiness.ready_entries();
 
         tracing::trace!(
-            "Daemon found {} ready pods from EndpointSlices",
-            ready_pods.len()
+            "Daemon found {} ready entries (granularity={:?})",
+            ready_entries.len(),
+            self.pod_info.granularity,
         );
 
         // Single read of CR state to extract metadata and generations atomically
-        // We store (metadata, generation) tuples keyed by CR name (= pod name)
         let cr_state = cr_reader.state();
         let mut cr_map: HashMap<String, (Arc<DiscoveryMetadata>, i64)> = HashMap::new();
 
@@ -217,7 +278,6 @@ impl DiscoveryDaemon {
 
             let generation = arc_cr.metadata.generation.unwrap_or(0);
 
-            // Deserialize the data field to DiscoveryMetadata
             match serde_json::from_value::<DiscoveryMetadata>(arc_cr.spec.data.clone()) {
                 Ok(metadata) => {
                     tracing::trace!("Loaded metadata from CR '{cr_name}'");
@@ -235,26 +295,24 @@ impl DiscoveryDaemon {
 
         tracing::trace!("Daemon loaded {} DynamoWorkerMetadata CRs", cr_map.len());
 
-        // Correlate: ready pod + CR exists = include in snapshot
-        // Both instances and generations are keyed by instance_id with matching keys
+        // Correlate: ready entry + CR exists = include in snapshot
         let mut instances: HashMap<u64, Arc<DiscoveryMetadata>> = HashMap::new();
         let mut generations: HashMap<u64, i64> = HashMap::new();
 
-        for (instance_id, pod_name) in ready_pods {
-            // CR name is the pod name
-            if let Some((metadata, generation)) = cr_map.get(&pod_name) {
+        for (instance_id, cr_key) in ready_entries {
+            if let Some((metadata, generation)) = cr_map.get(&cr_key) {
                 instances.insert(instance_id, metadata.clone());
                 generations.insert(instance_id, *generation);
                 tracing::trace!(
-                    "Included pod '{}' (instance_id={:x}, generation={}) in snapshot",
-                    pod_name,
+                    "Included '{}' (instance_id={:x}, generation={}) in snapshot",
+                    cr_key,
                     instance_id,
                     generation
                 );
             } else {
                 tracing::trace!(
-                    "Skipping pod '{}' (instance_id={:x}): no DynamoWorkerMetadata CR found",
-                    pod_name,
+                    "Skipping '{}' (instance_id={:x}): no DynamoWorkerMetadata CR found",
+                    cr_key,
                     instance_id
                 );
             }

@@ -1077,6 +1077,15 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
+	// Inject kube discovery granularity env var into all containers if annotation is set
+	if granularity, ok := opt.dynamoComponentDeployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoKubeDiscoveryGranularity]; ok && granularity != "" {
+		for i := range podSpec.Containers {
+			podSpec.Containers[i].Env = append(podSpec.Containers[i].Env,
+				corev1.EnvVar{Name: "DYN_KUBE_DISCOVERY_GRANULARITY", Value: granularity},
+			)
+		}
+	}
+
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
 	if extraPodMetadata != nil {

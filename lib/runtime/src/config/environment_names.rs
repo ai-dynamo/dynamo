@@ -370,6 +370,15 @@ pub mod zmq_broker {
     pub const ZMQ_BROKER_NAMESPACE: &str = "ZMQ_BROKER_NAMESPACE";
 }
 
+/// Kubernetes discovery environment variables
+pub mod kube_discovery {
+    /// Discovery granularity: "pod" (default) or "container".
+    /// Pod mode uses EndpointSlice reflector with one identity per pod.
+    /// Container mode uses Pod reflector with one identity per container,
+    /// required for failover pods with multiple engine containers.
+    pub const DYN_KUBE_DISCOVERY_GRANULARITY: &str = "DYN_KUBE_DISCOVERY_GRANULARITY";
+}
+
 /// CUDA and GPU environment variables
 pub mod cuda {
     /// Path to custom CUDA fatbin file.
@@ -503,6 +512,8 @@ mod tests {
             zmq_broker::ZMQ_BROKER_XSUB_BIND,
             zmq_broker::ZMQ_BROKER_XPUB_BIND,
             zmq_broker::ZMQ_BROKER_NAMESPACE,
+            // Kube Discovery
+            kube_discovery::DYN_KUBE_DISCOVERY_GRANULARITY,
             // CUDA
             cuda::DYN_FATBIN_PATH,
             // Build
