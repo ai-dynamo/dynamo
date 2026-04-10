@@ -296,6 +296,7 @@ mod tests {
     use futures::StreamExt;
     use serial_test::serial;
 
+    #[derive(Debug)]
     struct MockContext;
     impl MockContext {
         fn new() -> Self { Self }
