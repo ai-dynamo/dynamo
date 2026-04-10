@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""vLLM DynamoEngine implementation for the unified backend.
+"""vLLM LLMEngine implementation for the unified backend.
 
 See dynamo/common/backend/README.md for architecture, response contract,
 and feature gap details.
 """
+
+from __future__ import annotations
 
 import logging
 import os
@@ -17,7 +19,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo._core import Context
-from dynamo.common.backend.engine import DynamoEngine, EngineConfig
+from dynamo.common.backend.engine import LLMEngine, EngineConfig
+from dynamo.common.backend.worker import BackendConfig
 from dynamo.common.engine_utils import build_completion_usage, normalize_finish_reason
 
 from .handlers import build_sampling_params
@@ -25,7 +28,7 @@ from .handlers import build_sampling_params
 logger = logging.getLogger(__name__)
 
 
-class VllmDynamoEngine(DynamoEngine):
+class VllmLLMEngine(LLMEngine):
     def __init__(self, engine_args):
         self.engine_args = engine_args
         self.engine_client = None
@@ -33,6 +36,27 @@ class VllmDynamoEngine(DynamoEngine):
         self._default_sampling_params = None
         self._prometheus_temp_dir = None
         self._model_max_len = None
+
+    @classmethod
+    async def from_args(cls, argv: list[str] | None = None) -> VllmLLMEngine:
+        from dynamo.llm import ModelInput
+        from dynamo.vllm.args import parse_args
+
+        config = parse_args()
+
+        if not config.served_model_name:
+            config.served_model_name = (
+                config.engine_args.served_model_name
+            ) = config.model
+
+        engine = cls(config.engine_args)
+        engine.backend_config = BackendConfig.from_runtime_config(
+            config,
+            model_name=config.model,
+            served_model_name=config.served_model_name,
+            model_input=ModelInput.Tokens,
+        )
+        return engine
 
     async def init(self) -> EngineConfig:
         os.environ["VLLM_NO_USAGE_STATS"] = "1"

@@ -1,32 +1,60 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SGLang DynamoEngine implementation for the unified backend.
+"""SGLang LLMEngine implementation for the unified backend.
 
 See dynamo/common/backend/README.md for architecture, response contract,
 and feature gap details.
 """
 
+from __future__ import annotations
+
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from typing import Any, Dict
 
 import sglang as sgl
 
 from dynamo._core import Context
-from dynamo.common.backend.engine import DynamoEngine, EngineConfig
+from dynamo.common.backend.engine import LLMEngine, EngineConfig
+from dynamo.common.backend.worker import BackendConfig
 from dynamo.common.engine_utils import build_completion_usage, normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 
 logger = logging.getLogger(__name__)
 
 
-class SglangDynamoEngine(DynamoEngine):
+class SglangLLMEngine(LLMEngine):
     def __init__(self, server_args):
         self.server_args = server_args
         self.engine = None
         self._input_param_manager = None
         self._skip_tokenizer_init = server_args.skip_tokenizer_init
+
+    @classmethod
+    async def from_args(cls, argv: list[str] | None = None) -> SglangLLMEngine:
+        from dynamo.llm import ModelInput
+        from dynamo.sglang.args import parse_args
+
+        config = await parse_args(argv if argv is not None else sys.argv[1:])
+        server_args = config.server_args
+        dynamo_args = config.dynamo_args
+
+        model_input = (
+            ModelInput.Text
+            if not server_args.skip_tokenizer_init
+            else ModelInput.Tokens
+        )
+
+        engine = cls(server_args)
+        engine.backend_config = BackendConfig.from_runtime_config(
+            dynamo_args,
+            model_name=server_args.model_path,
+            served_model_name=server_args.served_model_name,
+            model_input=model_input,
+        )
+        return engine
 
     async def init(self) -> EngineConfig:
         self.engine = sgl.Engine(server_args=self.server_args)

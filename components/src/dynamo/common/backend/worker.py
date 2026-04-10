@@ -20,7 +20,7 @@ from dynamo.llm.exceptions import (
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .engine import DynamoEngine
+from .engine import LLMEngine
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +79,8 @@ class BackendConfig:
 
 
 class DynamoBackend:
-    def __init__(self, config: BackendConfig, engine: DynamoEngine):
-        self.config = config
+    def __init__(self, engine: LLMEngine):
+        self.config = engine.backend_config
         self.engine = engine
 
     async def generate(

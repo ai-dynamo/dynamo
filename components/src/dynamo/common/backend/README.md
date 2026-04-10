@@ -10,25 +10,25 @@ all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
 ## Architecture
 
 ```
-DynamoRuntime
+LLMEngine (ABC)                <-- engine boundary (engine.py)
+    |   - from_args(argv) -> LLMEngine  (factory: parse args, set backend_config)
+    |   - init() -> EngineConfig        (start engine, return metadata)
+    |   - generate(request, context)    (streaming inference)
+    |   - abort(context)                (cancel request, optional)
+    |   - cleanup()                     (shutdown)
     |
-    v
-DynamoBackend          <-- runtime integration (model.py)
-    |   - creates DistributedRuntime
-    |   - sets up endpoints, signal handlers
-    |   - registers model with Rust frontend
-    |   - serves generate endpoint
-    |
-    v
-DynamoEngine (ABC)                <-- engine boundary (engine.py)
-    |   - init() -> EngineConfig
-    |   - generate(request, context) -> AsyncGenerator[dict]
-    |   - cleanup()
-    |
-    +-- VllmDynamoEngine          <-- vllm/dynamo_engine.py
-    +-- SglangDynamoEngine        <-- sglang/dynamo_engine.py
-    +-- TrtllmDynamoEngine        <-- trtllm/dynamo_engine.py
-    +-- SampleDynamoEngine        <-- sample_engine.py
+    +-- VllmLLMEngine          <-- vllm/llm_engine.py
+    +-- SglangLLMEngine        <-- sglang/llm_engine.py
+    +-- TrtllmLLMEngine        <-- trtllm/llm_engine.py
+    +-- SampleLLMEngine        <-- sample_engine.py
+
+DynamoBackend                  <-- runtime integration (worker.py)
+    - reads engine.backend_config
+    - creates DistributedRuntime
+    - sets up endpoints, signal handlers
+    - calls engine.init(), registers model
+    - serves generate endpoint with cancellation monitoring
+    - calls engine.cleanup() on shutdown
 ```
 
 ## Quick Start
@@ -60,22 +60,30 @@ python -m dynamo.sglang.unified_main --model-path Qwen/Qwen3-0.6B ...
 python -m dynamo.trtllm.unified_main --model Qwen/Qwen3-0.6B ...
 ```
 
-Each `unified_main.py` reuses the backend's existing `parse_args()` and maps
-its config into `BackendConfig` + the engine-specific `DynamoEngine`
-implementation.
+Each `unified_main.py` calls `run(MyLLMEngine)` from the common
+`main.py` module.
 
 ## Implementing a New Engine
 
-Subclass `DynamoEngine` and implement three required methods (`init`,
-`generate`, `cleanup`) plus the optional `abort` method:
+Subclass `LLMEngine` and implement the required methods:
 
 ```python
-from dynamo.common.backend import DynamoEngine, EngineConfig
+from dynamo.common.backend import LLMEngine, EngineConfig, BackendConfig
 from dynamo.common.engine_utils import build_completion_usage
 
-class MyEngine(DynamoEngine):
+class MyEngine(LLMEngine):
+    @classmethod
+    async def from_args(cls, argv=None):
+        # Parse CLI args, construct engine, set backend_config.
+        engine = cls(...)
+        engine.backend_config = BackendConfig(
+            namespace="dynamo", component="my-backend", ...
+        )
+        return engine
+
     async def init(self) -> EngineConfig:
         # Start the engine, return metadata for model registration.
+        # After this returns, generate() MUST be ready to accept calls.
         return EngineConfig(
             model="my-model",
             context_length=4096,
@@ -96,7 +104,6 @@ class MyEngine(DynamoEngine):
 
     async def abort(self, context):
         # Cancel an in-flight request (optional, default is no-op).
-        # Called when the client disconnects or the request is cancelled.
         await my_engine.cancel(context.id())
 
     async def cleanup(self):
@@ -104,15 +111,15 @@ class MyEngine(DynamoEngine):
         pass
 ```
 
-Then wire it up:
+Then create an entry point:
 
 ```python
-from dynamo.common.backend import DynamoBackend, BackendConfig
+# my_backend/unified_main.py
+from dynamo.common.backend.main import run
+from my_backend.llm_engine import MyEngine
 
-engine = MyEngine(...)
-config = BackendConfig(namespace="dynamo", component="my-backend", ...)
-model = DynamoBackend(config, engine)
-await model.run()  # handles runtime, registration, serving, shutdown
+def main():
+    run(MyEngine)
 ```
 
 See `sample_engine.py` for a complete, runnable reference implementation.
@@ -214,11 +221,12 @@ implementations:
 
 ```
 common/backend/
-    __init__.py          # Re-exports: DynamoEngine, EngineConfig,
+    __init__.py          # Re-exports: LLMEngine, EngineConfig,
                          #   DynamoBackend, BackendConfig
-    engine.py            # DynamoEngine ABC + EngineConfig dataclass
-    model.py             # DynamoBackend + BackendConfig
-    sample_engine.py     # SampleDynamoEngine (reference impl)
+    engine.py            # LLMEngine ABC + EngineConfig dataclass
+    worker.py            # DynamoBackend + BackendConfig
+    main.py              # Common entry point: run(engine_cls)
+    sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
 
 common/engine_utils/
@@ -226,14 +234,14 @@ common/engine_utils/
     request.py           # normalize_request_format()
     response.py          # build_completion_usage(), normalize_finish_reason()
 
-vllm/dynamo_engine.py    # VllmDynamoEngine
-vllm/unified_main.py     # Entry point
+vllm/llm_engine.py       # VllmLLMEngine
+vllm/unified_main.py     # Entry point -> run(VllmLLMEngine)
 
-sglang/dynamo_engine.py  # SglangDynamoEngine
-sglang/unified_main.py   # Entry point
+sglang/llm_engine.py     # SglangLLMEngine
+sglang/unified_main.py   # Entry point -> run(SglangLLMEngine)
 
-trtllm/dynamo_engine.py  # TrtllmDynamoEngine
-trtllm/unified_main.py   # Entry point
+trtllm/llm_engine.py     # TrtllmLLMEngine
+trtllm/unified_main.py   # Entry point -> run(TrtllmLLMEngine)
 ```
 
 ## Feature Gaps

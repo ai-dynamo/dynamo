@@ -10,33 +10,12 @@ See dynamo/common/backend/README.md for architecture, response contract,
 and feature gap details.
 """
 
-import uvloop
-
-from dynamo.common.backend import BackendConfig, DynamoBackend
-from dynamo.llm import ModelInput
-from dynamo.vllm.args import parse_args
-from dynamo.vllm.dynamo_engine import VllmDynamoEngine
-
-
-async def worker():
-    config = parse_args()
-
-    if not config.served_model_name:
-        config.served_model_name = config.engine_args.served_model_name = config.model
-
-    engine = VllmDynamoEngine(config.engine_args)
-    backend_config = BackendConfig.from_runtime_config(
-        config,
-        model_name=config.model,
-        served_model_name=config.served_model_name,
-        model_input=ModelInput.Tokens,
-    )
-    model = DynamoBackend(backend_config, engine)
-    await model.run()
+from dynamo.common.backend.main import run
+from dynamo.vllm.llm_engine import VllmLLMEngine
 
 
 def main():
-    uvloop.run(worker())
+    run(VllmLLMEngine)
 
 
 if __name__ == "__main__":

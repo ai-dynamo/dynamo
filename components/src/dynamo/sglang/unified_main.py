@@ -10,38 +10,12 @@ See dynamo/common/backend/README.md for architecture, response contract,
 and feature gap details.
 """
 
-import sys
-
-import uvloop
-
-from dynamo.common.backend import BackendConfig, DynamoBackend
-from dynamo.llm import ModelInput
-from dynamo.sglang.args import parse_args
-from dynamo.sglang.dynamo_engine import SglangDynamoEngine
-
-
-async def worker():
-    config = await parse_args(sys.argv[1:])
-    server_args = config.server_args
-    dynamo_args = config.dynamo_args
-
-    model_input = (
-        ModelInput.Text if not server_args.skip_tokenizer_init else ModelInput.Tokens
-    )
-
-    engine = SglangDynamoEngine(server_args)
-    backend_config = BackendConfig.from_runtime_config(
-        dynamo_args,
-        model_name=server_args.model_path,
-        served_model_name=server_args.served_model_name,
-        model_input=model_input,
-    )
-    model = DynamoBackend(backend_config, engine)
-    await model.run()
+from dynamo.common.backend.main import run
+from dynamo.sglang.llm_engine import SglangLLMEngine
 
 
 def main():
-    uvloop.run(worker())
+    run(SglangLLMEngine)
 
 
 if __name__ == "__main__":

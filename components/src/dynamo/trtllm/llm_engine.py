@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""TensorRT-LLM DynamoEngine implementation for the unified backend.
+"""TensorRT-LLM LLMEngine implementation for the unified backend.
 
 See dynamo/common/backend/README.md for architecture, response contract,
 and feature gap details.
 """
+
+from __future__ import annotations
 
 import dataclasses
 import logging
@@ -17,7 +19,8 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 
 from dynamo._core import Context
-from dynamo.common.backend.engine import DynamoEngine, EngineConfig
+from dynamo.common.backend.engine import LLMEngine, EngineConfig
+from dynamo.common.backend.worker import BackendConfig
 from dynamo.common.engine_utils import (
     build_completion_usage,
     normalize_finish_reason,
@@ -28,7 +31,7 @@ from dynamo.trtllm.engine import TensorRTLLMEngine
 logger = logging.getLogger(__name__)
 
 
-class TrtllmDynamoEngine(DynamoEngine):
+class TrtllmLLMEngine(LLMEngine):
     def __init__(
         self,
         engine_args: dict[str, Any],
@@ -49,6 +52,52 @@ class TrtllmDynamoEngine(DynamoEngine):
         self._engine: TensorRTLLMEngine | None = None
         self._default_sampling_params = SamplingParams(detokenize=False)
         self._active_requests: dict[str, Any] = {}
+
+    @classmethod
+    async def from_args(cls, argv: list[str] | None = None) -> TrtllmLLMEngine:
+        from tensorrt_llm.llmapi import KvCacheConfig, SchedulerConfig
+        from torch.cuda import device_count
+
+        from dynamo.llm import ModelInput
+        from dynamo.trtllm.args import parse_args
+        from dynamo.trtllm.engine import Backend
+
+        config = parse_args(argv)
+
+        gpus_per_node = config.gpus_per_node or device_count()
+
+        engine_args = {
+            "model": str(config.model),
+            "scheduler_config": SchedulerConfig(),
+            "tensor_parallel_size": config.tensor_parallel_size,
+            "pipeline_parallel_size": config.pipeline_parallel_size,
+            "backend": Backend.PYTORCH,
+            "kv_cache_config": KvCacheConfig(
+                free_gpu_memory_fraction=config.free_gpu_memory_fraction,
+            ),
+            "gpus_per_node": gpus_per_node,
+            "max_num_tokens": config.max_num_tokens,
+            "max_seq_len": config.max_seq_len,
+            "max_beam_width": config.max_beam_width,
+            "max_batch_size": config.max_batch_size,
+        }
+
+        engine = cls(
+            engine_args=engine_args,
+            model_name=config.model,
+            served_model_name=config.served_model_name,
+            max_seq_len=config.max_seq_len,
+            max_batch_size=config.max_batch_size,
+            max_num_tokens=config.max_num_tokens,
+            kv_block_size=config.kv_block_size,
+        )
+        engine.backend_config = BackendConfig.from_runtime_config(
+            config,
+            model_name=config.model,
+            served_model_name=config.served_model_name,
+            model_input=ModelInput.Tokens,
+        )
+        return engine
 
     async def init(self) -> EngineConfig:
         self._engine = TensorRTLLMEngine(self.engine_args)

@@ -1,17 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
+import argparse
 import asyncio
 from collections.abc import AsyncGenerator
 
 from dynamo._core import Context
 from dynamo.common.engine_utils import build_completion_usage
 
-from .engine import DynamoEngine, EngineConfig
+from .engine import LLMEngine, EngineConfig
+from .worker import BackendConfig
 
 
-class SampleDynamoEngine(DynamoEngine):
-    """Reference DynamoEngine implementation.
+class SampleLLMEngine(LLMEngine):
+    """Reference LLMEngine implementation.
 
     Generates rotating token IDs with configurable per-token latency.
     Useful for testing the DynamoBackend lifecycle end-to-end
@@ -27,6 +31,39 @@ class SampleDynamoEngine(DynamoEngine):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.delay = delay
+
+    @classmethod
+    async def from_args(cls, argv: list[str] | None = None) -> SampleLLMEngine:
+        parser = argparse.ArgumentParser(description="Sample Dynamo backend")
+        parser.add_argument("--model-name", default="sample-model")
+        parser.add_argument("--namespace", default="dynamo")
+        parser.add_argument("--component", default="sample")
+        parser.add_argument("--endpoint", default="generate")
+        parser.add_argument("--max-tokens", type=int, default=16)
+        parser.add_argument("--delay", type=float, default=0.01)
+        parser.add_argument("--endpoint-types", default="chat,completions")
+        parser.add_argument("--discovery-backend", default="etcd")
+        parser.add_argument("--request-plane", default="nats")
+        parser.add_argument("--event-plane", default="nats")
+        args = parser.parse_args(argv)
+
+        engine = cls(
+            model_name=args.model_name,
+            max_tokens=args.max_tokens,
+            delay=args.delay,
+        )
+        engine.backend_config = BackendConfig(
+            namespace=args.namespace,
+            component=args.component,
+            endpoint=args.endpoint,
+            model_name=args.model_name,
+            served_model_name=args.model_name,
+            endpoint_types=args.endpoint_types,
+            discovery_backend=args.discovery_backend,
+            request_plane=args.request_plane,
+            event_plane=args.event_plane,
+        )
+        return engine
 
     async def init(self) -> EngineConfig:
         return EngineConfig(
