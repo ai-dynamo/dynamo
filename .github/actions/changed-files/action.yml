@@ -41,24 +41,26 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Get merge base
+    - name: Fetch base branch
       id: merge-base
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.gh_token }}
       run: |
-        # For PR branches, compare against merge-base with PR's target branch
-        # For main/release branches, use default behavior (previous commit)
-        if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
-          PR_NUMBER="${BASH_REMATCH[1]}"
-          BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
-          echo "PR #$PR_NUMBER targets branch: $BASE_BRANCH"
-          BASE_SHA=$(git merge-base "origin/$BASE_BRANCH" HEAD)
-          echo "base_sha=$BASE_SHA" >> $GITHUB_OUTPUT
-          echo "Using merge-base with $BASE_BRANCH: $BASE_SHA"
+        # Fetch only the base branch (1 commit) instead of all 1600+ refs.
+        # Callers only need fetch-depth: 1 (the default shallow clone).
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          BASE_BRANCH="${{ github.event.pull_request.base.ref }}"
+        elif [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
+          BASE_BRANCH=$(gh pr view "${BASH_REMATCH[1]}" --json baseRefName -q '.baseRefName')
+        fi
+
+        if [[ -n "${BASE_BRANCH:-}" ]]; then
+          echo "Fetching base branch: $BASE_BRANCH"
+          git fetch --no-tags --depth=1 origin "$BASE_BRANCH"
+          echo "base_sha=$(git rev-parse "origin/$BASE_BRANCH")" >> $GITHUB_OUTPUT
         else
           echo "base_sha=" >> $GITHUB_OUTPUT
-          echo "Using default comparison (previous commit)"
         fi
 
     - name: Check for changes
