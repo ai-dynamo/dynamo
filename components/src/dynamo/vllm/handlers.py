@@ -1242,21 +1242,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # MultiModalFieldElem wrappers with field metadata that vLLM's
             # internal serializer requires. This is safe because the frontend
             # is a trusted component within the same Dynamo deployment.
-            pickled_item = mm_kwargs_tensors.get("__pickled_kwargs_item__")
-            if pickled_item is None:
+            pickled_items = mm_kwargs_tensors.get("__pickled_kwargs_item__")
+            if not pickled_items:
                 logger.warning(
-                    "[mm-routing] NIXL tensors received but no pickled kwargs item; "
+                    "[mm-routing] NIXL tensors received but no pickled kwargs items; "
                     "falling back to normal path"
                 )
                 return None
-            kwargs_item = pickle.loads(pickled_item)
-            if not isinstance(kwargs_item, MultiModalKwargsItem):
-                logger.warning(
-                    "[mm-routing] Deserialized object is %s, expected "
-                    "MultiModalKwargsItem; falling back to normal path",
-                    type(kwargs_item).__name__,
-                )
-                return None
+            # pickled_items is a list (one per image/feature).
+            kwargs_items = []
+            for pi in pickled_items:
+                item = pickle.loads(pi)
+                if not isinstance(item, MultiModalKwargsItem):
+                    logger.warning(
+                        "[mm-routing] Deserialized object is %s, expected "
+                        "MultiModalKwargsItem; falling back to normal path",
+                        type(item).__name__,
+                    )
+                    return None
+                kwargs_items.append(item)
 
             # Use the expanded token IDs (with image placeholders) from the
             # frontend, not the unexpanded request["token_ids"].
@@ -1273,7 +1277,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "externally_processed": True,
                 "prompt_token_ids": expanded_token_ids,
                 "mm_kwargs": {
-                    metadata.modality: [kwargs_item],
+                    metadata.modality: kwargs_items,
                 },
                 "mm_hashes": {
                     metadata.modality: mm_hashes,
@@ -1287,7 +1291,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
             logger.debug(
                 "[mm-routing] Constructed pre-rendered MultiModalInput from "
-                "pickled kwargs_item, %d hashes, %d placeholders",
+                "%d pickled kwargs_items, %d hashes, %d placeholders",
+                len(kwargs_items),
                 len(mm_hashes),
                 len(mm_placeholders),
             )

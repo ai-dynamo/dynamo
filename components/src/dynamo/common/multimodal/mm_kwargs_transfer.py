@@ -211,9 +211,10 @@ class MmKwargsReceiver:
             ):
                 read_op = await self._connector.begin_read(rm, desc)
                 await read_op.wait_for_completion()
-                # For pickled items, convert tensor bytes back to bytes
+                # For pickled items, convert tensor bytes back to bytes.
+                # Use a list to support multiple items (e.g. 3 images).
                 if name == "__pickled_kwargs_item__":
-                    results[name] = bytes(t.numpy().tobytes())
+                    results.setdefault(name, []).append(bytes(t.numpy().tobytes()))
                 else:
                     results[name] = t
 
