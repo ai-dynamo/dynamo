@@ -19,6 +19,8 @@ instances:
   - url: dynamo.docs.buildwithfern.com/dynamo
     custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com]
 title: NVIDIA Dynamo Documentation
+agents:
+  page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/llms.txt. For full content including API reference and SDK examples, see https://docs.nvidia.com/dynamo/llms-full.txt."
 products:
   - display-name: Dynamo
     slug: /
