@@ -50,8 +50,7 @@ path = "bin/validate_numa_placement.rs"
 required-features = ["cuda"]
 
 [[example]]
-name = "bench_xpu_transfer"
-required-features = ["xpu"]
+name = "bench_transfer"
 
 [dev-dependencies]
 clap = { version = "4.5", features = ["derive"] }

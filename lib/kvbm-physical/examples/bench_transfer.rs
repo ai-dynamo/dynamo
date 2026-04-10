@@ -13,13 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! XPU transfer benchmark via the `kvbm-physical` TransferManager API.
+//! KV-cache transfer benchmark via the `kvbm-physical` TransferManager API.
 //!
-//! Sweeps the same KV-cache test matrix as `kvbench_xpu.rs` (in kvbm-kernels)
-//! but through the full TransferManager stack, measuring end-to-end overhead
-//! compared to direct Level Zero `ze::` calls.
+//! Supports both CUDA and XPU (Level Zero) backends via `--backend cuda|ze`.
 //!
-//! Test matrix (matching kvbench_xpu.rs, minus the `backend` axis):
+//! Test matrix:
 //!   - tokens_per_block (tpb): 16, 32, 64
 //!   - num_blocks (N):         1, 2, 4, 8, 16, 32, 64, 128, 256
 //!   - direction:              d2d, h2d, d2h
@@ -28,25 +26,24 @@
 //!
 //! Model dimensions: Llama 3.1 70B (bf16) -- 80 layers, 8 KV heads, 128 head dim.
 //!
-//! The TransferManager selects the engine internally (FC-to-FC = BCS memcpy,
-//! FC-to/from-LW = CCS vectorized kernel), so the CSV `backend` column is
+//! The TransferManager selects the engine internally (FC-to-FC = BCS/copy memcpy,
+//! FC-to/from-LW = CCS/compute vectorized kernel), so the CSV `backend` column is
 //! always `transfer_mgr`.
-//!
-//! Output: CSV with the same columns as kvbench_xpu.rs for direct comparison.
 //!
 //! Usage:
 //! ```bash
-//! cargo build --example bench_xpu_transfer -p kvbm-physical \
+//! # XPU
+//! cargo build --example bench_transfer -p kvbm-physical \
 //!   --no-default-features --features xpu --release
+//! ./target/release/examples/bench_transfer --backend ze --device 0
 //!
-//! # Full sweep (default: pinned host memory)
-//! ./target/release/examples/bench_xpu_transfer --device 0
-//!
-//! # Full sweep with pinned + system host memory
-//! ./target/release/examples/bench_xpu_transfer --host-mem pinned,system
+//! # CUDA
+//! cargo build --example bench_transfer -p kvbm-physical \
+//!   --no-default-features --features cuda --release
+//! ./target/release/examples/bench_transfer --backend cuda --device 0
 //!
 //! # Quick smoke test
-//! ./target/release/examples/bench_xpu_transfer \
+//! ./target/release/examples/bench_transfer --backend ze \
 //!   --num-blocks 1,4 --tokens-per-block 16 --warmup 3 --iters 10
 //! ```
 
@@ -62,7 +59,7 @@ use kvbm_physical::transfer::{NixlAgent, StorageKind};
 use kvbm_physical::{BlockId, TransferManager, TransferOptions};
 
 // ---------------------------------------------------------------------------
-// Llama 3.1 70B, bf16 KV cache dimensions (same as kvbench_xpu.rs)
+// Llama 3.1 70B, bf16 KV cache dimensions
 // ---------------------------------------------------------------------------
 const NUM_LAYERS: usize = 80;
 const NUM_KV_HEADS: usize = 8;
@@ -71,7 +68,7 @@ const ELEM_SIZE: usize = 2; // bf16
 const OUTER_DIM: usize = 2; // K and V
 
 // ---------------------------------------------------------------------------
-// Enums (matching kvbench_xpu.rs)
+// Enums
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
@@ -157,16 +154,17 @@ impl HostMemKind {
 }
 
 // ---------------------------------------------------------------------------
-// CLI (matching kvbench_xpu.rs parameters)
+// CLI
 // ---------------------------------------------------------------------------
 
-/// KV cache transfer benchmark for Intel XPU via TransferManager.
-///
-/// Produces CSV output compatible with kvbench_xpu.rs for direct
-/// comparison of TransferManager vs raw Level Zero performance.
+/// KV-cache transfer benchmark via TransferManager (CUDA / XPU).
 #[derive(Parser, Debug)]
-#[command(name = "bench_xpu_transfer", about = "KV cache TransferManager benchmark (XPU)")]
+#[command(name = "bench_transfer", about = "KV cache TransferManager benchmark (CUDA/XPU)")]
 struct Cli {
+    /// Device backend: cuda or ze (Level Zero / XPU).
+    #[arg(long)]
+    backend: String,
+
     /// Comma-separated number of blocks to benchmark.
     #[arg(
         long,
@@ -260,6 +258,13 @@ fn build_lw_layout(
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Parse backend
+    let device_backend = match cli.backend.as_str() {
+        "cuda" => DeviceBackend::Cuda,
+        "ze" | "xpu" => DeviceBackend::Ze,
+        other => anyhow::bail!("unknown backend: '{}' (valid: cuda, ze)", other),
+    };
+
     // Parse enums from CLI strings
     let directions: Vec<Direction> = cli
         .direction
@@ -311,10 +316,10 @@ async fn main() -> Result<()> {
 
     // Create device context (shared across all tests)
     let ctx: Arc<dyn DeviceAllocator> =
-        Arc::new(DeviceContext::new(DeviceBackend::Ze, cli.device)?);
+        Arc::new(DeviceContext::new(device_backend, cli.device)?);
 
     // -- Print config ---------------------------------------------------------
-    eprintln!("KV Cache Transfer Benchmark (XPU / TransferManager)");
+    eprintln!("KV Cache Transfer Benchmark ({} / TransferManager)", device_backend.name());
     eprintln!("  Device ordinal: {}", cli.device);
     eprintln!("  Model: Llama 3.1 70B (bf16)");
     eprintln!(
@@ -435,7 +440,7 @@ async fn main() -> Result<()> {
                         // Fresh TransferManager per test to ensure memory is
                         // freed between tests (no unregister_layout API).
                         let manager = TransferManager::builder()
-                            .device_backend(DeviceBackend::Ze)
+                            .device_backend(device_backend)
                             .device_id(cli.device as usize)
                             .build()?;
                         let agent = manager.nixl_agent();
