@@ -452,8 +452,8 @@ class NativePlannerBase:
             self.prometheus_metrics.observed_request_duration_seconds.set(
                 m.request_duration
             )
-            self.prometheus_metrics.observed_isl.set(m.isl)
-            self.prometheus_metrics.observed_osl.set(m.osl)
+            self.prometheus_metrics.observed_input_sequence_tokens.set(m.isl)
+            self.prometheus_metrics.observed_output_sequence_tokens.set(m.osl)
 
         if not m.is_valid():
             logger.info("Metrics contain None or NaN values, skipping")
@@ -587,8 +587,8 @@ class NativePlannerBase:
             if diag.predicted_num_req is not None and interval > 0
             else 0
         )
-        pm.predicted_isl.set(diag.predicted_isl or 0)
-        pm.predicted_osl.set(diag.predicted_osl or 0)
+        pm.predicted_input_sequence_tokens.set(diag.predicted_isl or 0)
+        pm.predicted_output_sequence_tokens.set(diag.predicted_osl or 0)
 
         pm.engine_prefill_requests_per_second.set(diag.engine_rps_prefill or 0)
         pm.engine_decode_requests_per_second.set(diag.engine_rps_decode or 0)

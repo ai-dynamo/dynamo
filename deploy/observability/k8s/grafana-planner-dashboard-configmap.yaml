@@ -770,14 +770,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "dynamo_planner_observed_isl{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_observed_input_sequence_tokens{namespace=~\"$namespace\"}",
               "legendFormat": "ISL",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "dynamo_planner_observed_osl{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_observed_output_sequence_tokens{namespace=~\"$namespace\"}",
               "legendFormat": "OSL",
               "range": true,
               "refId": "B"
@@ -1027,14 +1027,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "dynamo_planner_predicted_isl{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_predicted_input_sequence_tokens{namespace=~\"$namespace\"}",
               "legendFormat": "Predicted ISL",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "dynamo_planner_predicted_osl{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_predicted_output_sequence_tokens{namespace=~\"$namespace\"}",
               "legendFormat": "Predicted OSL",
               "range": true,
               "refId": "B"

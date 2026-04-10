@@ -50,15 +50,15 @@ class TickSnapshot:
     observed_itl_ms: Optional[float] = None
     observed_requests_per_second: Optional[float] = None
     observed_request_duration_seconds: Optional[float] = None
-    observed_isl: Optional[float] = None
-    observed_osl: Optional[float] = None
+    observed_input_sequence_tokens: Optional[float] = None
+    observed_output_sequence_tokens: Optional[float] = None
 
     # Diagnostics from state machine
     estimated_ttft_ms: Optional[float] = None
     estimated_itl_ms: Optional[float] = None
     predicted_requests_per_second: Optional[float] = None
-    predicted_isl: Optional[float] = None
-    predicted_osl: Optional[float] = None
+    predicted_input_sequence_tokens: Optional[float] = None
+    predicted_output_sequence_tokens: Optional[float] = None
     engine_rps_prefill: Optional[float] = None
     engine_rps_decode: Optional[float] = None
     load_decision_reason: Optional[str] = None
@@ -159,8 +159,8 @@ class DiagnosticsRecorder:
                 else None
             ),
             observed_request_duration_seconds=observed.request_duration,
-            observed_isl=observed.isl,
-            observed_osl=observed.osl,
+            observed_input_sequence_tokens=observed.isl,
+            observed_output_sequence_tokens=observed.osl,
             estimated_ttft_ms=diag.estimated_ttft_ms,
             estimated_itl_ms=diag.estimated_itl_ms,
             predicted_requests_per_second=(
@@ -168,8 +168,8 @@ class DiagnosticsRecorder:
                 if diag.predicted_num_req is not None and interval > 0
                 else None
             ),
-            predicted_isl=diag.predicted_isl,
-            predicted_osl=diag.predicted_osl,
+            predicted_input_sequence_tokens=diag.predicted_isl,
+            predicted_output_sequence_tokens=diag.predicted_osl,
             engine_rps_prefill=diag.engine_rps_prefill,
             engine_rps_decode=diag.engine_rps_decode,
             load_decision_reason=diag.load_decision_reason,
@@ -459,7 +459,10 @@ class DiagnosticsRecorder:
         # 5b. Sequence lengths
         fig.add_trace(
             go.Scatter(
-                x=labels, y=_vals("observed_isl"), name="Observed ISL", mode="lines"
+                x=labels,
+                y=_vals("observed_input_sequence_tokens"),
+                name="Observed ISL",
+                mode="lines",
             ),
             row=5,
             col=2,
@@ -467,7 +470,7 @@ class DiagnosticsRecorder:
         fig.add_trace(
             go.Scatter(
                 x=labels,
-                y=_vals("predicted_isl"),
+                y=_vals("predicted_input_sequence_tokens"),
                 name="Predicted ISL",
                 mode="lines",
                 line=dict(dash="dot"),
@@ -477,7 +480,10 @@ class DiagnosticsRecorder:
         )
         fig.add_trace(
             go.Scatter(
-                x=labels, y=_vals("observed_osl"), name="Observed OSL", mode="lines"
+                x=labels,
+                y=_vals("observed_output_sequence_tokens"),
+                name="Observed OSL",
+                mode="lines",
             ),
             row=5,
             col=2,
@@ -485,7 +491,7 @@ class DiagnosticsRecorder:
         fig.add_trace(
             go.Scatter(
                 x=labels,
-                y=_vals("predicted_osl"),
+                y=_vals("predicted_output_sequence_tokens"),
                 name="Predicted OSL",
                 mode="lines",
                 line=dict(dash="dot"),

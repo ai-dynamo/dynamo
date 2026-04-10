@@ -64,12 +64,12 @@ class PlannerPrometheusMetrics:
             f"{PREFIX}_observed_request_duration_seconds",
             "Observed average request duration (seconds)",
         )
-        self.observed_isl = Gauge(
-            f"{PREFIX}_observed_isl",
+        self.observed_input_sequence_tokens = Gauge(
+            f"{PREFIX}_observed_input_sequence_tokens",
             "Observed average input sequence length (tokens)",
         )
-        self.observed_osl = Gauge(
-            f"{PREFIX}_observed_osl",
+        self.observed_output_sequence_tokens = Gauge(
+            f"{PREFIX}_observed_output_sequence_tokens",
             "Observed average output sequence length (tokens)",
         )
 
@@ -78,13 +78,13 @@ class PlannerPrometheusMetrics:
             f"{PREFIX}_predicted_requests_per_second",
             "Predicted request rate for next interval (req/s)",
         )
-        self.predicted_isl = Gauge(
-            f"{PREFIX}_predicted_isl",
-            "Predicted input sequence length for next interval",
+        self.predicted_input_sequence_tokens = Gauge(
+            f"{PREFIX}_predicted_input_sequence_tokens",
+            "Predicted input sequence length for next interval (tokens)",
         )
-        self.predicted_osl = Gauge(
-            f"{PREFIX}_predicted_osl",
-            "Predicted output sequence length for next interval",
+        self.predicted_output_sequence_tokens = Gauge(
+            f"{PREFIX}_predicted_output_sequence_tokens",
+            "Predicted output sequence length for next interval (tokens)",
         )
 
         # -- Predicted replica counts -------------------------------------

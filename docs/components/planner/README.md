@@ -191,7 +191,7 @@ When `PLANNER_PROMETHEUS_PORT` is set, the planner serves its own metrics endpoi
 
 Core gauges on the planner port include replica counts (`dynamo_planner_num_prefill_replicas`, `dynamo_planner_num_decode_replicas`), observed traffic (`dynamo_planner_observed_*`), replica decisions (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), and cumulative `dynamo_planner_gpu_hours`.
 
-Throughput prediction gauges `dynamo_planner_predicted_requests_per_second`, `dynamo_planner_predicted_isl`, and `dynamo_planner_predicted_osl` are wired from throughput-scaling traffic prediction and exposed alongside observed sequence-length metrics.
+Throughput prediction gauges `dynamo_planner_predicted_requests_per_second`, `dynamo_planner_predicted_input_sequence_tokens`, and `dynamo_planner_predicted_output_sequence_tokens` are wired from throughput-scaling traffic prediction and exposed alongside observed sequence-length metrics.
 
 #### Diagnostics metrics
 
