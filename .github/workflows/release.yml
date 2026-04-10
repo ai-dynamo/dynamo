@@ -239,10 +239,10 @@ jobs:
               "${NGC_NAME}:${NGC_VERSION_TAG}"
           done
 
-          # ---- CUDA 13 runtime images (vllm, sglang, trtllm) ----
+          # ---- CUDA 13 runtime images (vllm, sglang, trtllm, fastvideo) ----
           echo ""
-          echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) ==="
-          CUDA13_FRAMEWORKS=("vllm" "sglang" "trtllm")
+          echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm, fastvideo) ==="
+          CUDA13_FRAMEWORKS=("vllm" "sglang" "trtllm" "fastvideo")
           for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
             if [ "${FRAMEWORK}" = "trtllm" ]; then
               NGC_NAME="tensorrtllm-runtime"
@@ -385,6 +385,7 @@ jobs:
           echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`fastvideo-runtime:${NGC_VERSION_TAG}-cuda13\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "EFA runtime images (amd64 only):" >> $GITHUB_STEP_SUMMARY
           echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
@@ -398,4 +399,3 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
-

@@ -41,6 +41,9 @@ docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtl
 
 # vLLM
 docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
+
+# FastVideo
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13
 ```
 
 To run frontend and worker in the same container, either:
@@ -50,7 +53,8 @@ To run frontend and worker in the same container, either:
 
 See [Release Artifacts](../reference/release-artifacts.md#container-images) for available
 versions and backend guides for run instructions: [SGLang](../backends/sglang/README.md) |
-[TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md)
+[TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md) |
+[FastVideo](../features/diffusion/fastvideo.md)
 
 ### Option B: Install from PyPI
 
@@ -163,6 +167,12 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
   --kv-events-config '{"enable_kv_cache_events": false}'
 ```
 
+**FastVideo**
+
+```bash
+python3 -m dynamo.fastvideo --model-path FastVideo/LTX2-Distilled-Diffusers --discovery-backend file
+```
+
 ### KV Events Configuration
 
 For dependency-free local development, disable KV event publishing (avoids NATS):
@@ -182,6 +192,10 @@ curl localhost:8000/v1/chat/completions \
        "messages": [{"role": "user", "content": "Hello!"}],
        "max_tokens": 50}'
 ```
+
+FastVideo uses the video generation endpoint instead of chat completions. See the
+[FastVideo guide](../features/diffusion/fastvideo.md#test-request) for a `/v1/videos`
+request example.
 
 ## Troubleshooting
 

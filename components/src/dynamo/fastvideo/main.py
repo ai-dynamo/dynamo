@@ -19,6 +19,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import parse_fastvideo_args
 from .backend import FastVideoHandler, register_fastvideo_model
+from .health_check import FastVideoHealthCheckPayload
 
 if "FASTVIDEO_LOG_LEVEL" not in os.environ:
     if dyn_log_level := os.environ.get("DYN_LOG"):
@@ -49,6 +50,9 @@ async def run_fastvideo(argv: Sequence[str] | None = None) -> None:
     shutdown_endpoints[:] = [endpoint]
 
     handler = FastVideoHandler(config)
+    health_check_payload = FastVideoHealthCheckPayload(
+        model_path=config.model_path
+    ).to_dict()
     try:
         await handler.initialize()
         await register_fastvideo_model(endpoint, config)
@@ -64,6 +68,7 @@ async def run_fastvideo(argv: Sequence[str] | None = None) -> None:
         await endpoint.serve_endpoint(
             handler.generate,
             graceful_shutdown=True,
+            health_check_payload=health_check_payload,
         )
     finally:
         handler.cleanup()

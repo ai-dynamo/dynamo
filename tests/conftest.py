@@ -327,6 +327,7 @@ def pytest_collection_modifyitems(config, items):
         "trtllm": "tensorrt_llm",
         "vllm": "vllm",
         "sglang": "sglang",
+        "fastvideo": "fastvideo",
         "kvbm": "kvbm",
         "lmcache": "lmcache",
     }

@@ -2,7 +2,7 @@ name: 'Build Flavor'
 description: 'Build a single Dynamo framework image (checkout → login → tag → builder → dockerfile → build → test image → summary)'
 inputs:
   framework:
-    description: 'Framework name (e.g. dynamo, vllm, sglang, trtllm)'
+    description: 'Framework name (e.g. dynamo, vllm, sglang, trtllm, fastvideo)'
     required: true
   builder_flavor:
     description: 'Optional BuildKit routing flavor override (vllm, sglang, trtllm, general)'

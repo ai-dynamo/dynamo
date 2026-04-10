@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       framework:
-        description: 'Framework name (e.g. dynamo, vllm, sglang, trtllm)'
+        description: 'Framework name (e.g. dynamo, vllm, sglang, trtllm, fastvideo)'
         required: true
         type: string
       builder_flavor:

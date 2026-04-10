@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXAMPLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-REPO_DIR="$(cd "${EXAMPLE_DIR}/../.." && pwd)"
+REPO_DIR="$(cd "${EXAMPLE_DIR}/../../.." && pwd)"
 
 : "${PYTHON_BIN:=python3}"
 : "${MODEL:=FastVideo/LTX2-Distilled-Diffusers}"

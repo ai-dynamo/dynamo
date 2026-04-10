@@ -32,6 +32,7 @@ jobs:
       sglang: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.sglang == 'true' }}
       vllm: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.vllm == 'true' }}
       trtllm: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.trtllm == 'true' }}
+      fastvideo: ${{ github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || steps.changes.outputs.fastvideo == 'true' }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -65,7 +66,8 @@ jobs:
       needs.changed-files.outputs.frontend == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
-      needs.changed-files.outputs.trtllm == 'true'
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.fastvideo == 'true'
     runs-on: prod-builder-v3
     name: Build
     timeout-minutes: 60
@@ -203,7 +205,8 @@ jobs:
       needs.changed-files.outputs.frontend == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
-      needs.changed-files.outputs.trtllm == 'true'
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.fastvideo == 'true'
     runs-on: prod-builder-amd-v1
     name: Mypy
     timeout-minutes: 15
@@ -230,12 +233,13 @@ jobs:
               MYPYPATH=components/src:lib/bindings/python/src
 
               # Always check shared (non-backend) code
-              TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d ! -name sglang ! -name vllm ! -name trtllm | sort | tr "\n" " ")
+              TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d ! -name sglang ! -name vllm ! -name trtllm ! -name fastvideo | sort | tr "\n" " ")
 
               # Add only the backends that changed
               ${{ needs.changed-files.outputs.sglang == 'true' && 'TARGETS="$TARGETS components/src/dynamo/sglang"' || ':' }}
               ${{ needs.changed-files.outputs.vllm == 'true' && 'TARGETS="$TARGETS components/src/dynamo/vllm"' || ':' }}
               ${{ needs.changed-files.outputs.trtllm == 'true' && 'TARGETS="$TARGETS components/src/dynamo/trtllm"' || ':' }}
+              ${{ needs.changed-files.outputs.fastvideo == 'true' && 'TARGETS="$TARGETS components/src/dynamo/fastvideo"' || ':' }}
 
               MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
             '
@@ -268,7 +272,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.IMAGE_TAG }}
-          pytest_marks: "pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)"
+          pytest_marks: "pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and (gpu_0)"
           framework: dynamo
           test_type: "pre_merge_parallel"
           platform_arch: amd64
@@ -300,7 +304,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ env.IMAGE_TAG }}
-          pytest_marks: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)"
+          pytest_marks: "pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and (gpu_0)"
           framework: dynamo
           test_type: "pre_merge_sequential"
           platform_arch: amd64

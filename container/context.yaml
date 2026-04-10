@@ -116,3 +116,13 @@ trtllm:
   flash_attn_version: 2.7.4.post1+25.12
   flashinfer_python_ver: 0.6.1
   has_trtllm_context: "0"
+
+fastvideo:
+  cuda13.1:
+    base_image: nvcr.io/nvidia/pytorch
+    runtime_image: nvcr.io/nvidia/cuda-dl-base
+    base_image_tag: 25.12-py3
+    runtime_image_tag: 25.12-cuda13.1-runtime-ubuntu24.04
+  enable_media_ffmpeg: "false"
+  enable_gpu_memory_service: "false"
+  enable_kvbm: "false"

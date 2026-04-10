@@ -5,9 +5,11 @@
 Deployment tests for Kubernetes-based LLM deployments.
 
 These tests verify that deployments can be created, become ready, and respond
-to chat completion requests correctly.
+to framework-appropriate requests correctly.
 """
 
+import base64
+import binascii
 import logging
 import os
 import subprocess
@@ -44,10 +46,28 @@ and across perilous mountain ranges. Describe your first steps into the ruins of
 DEFAULT_MAX_TOKENS = 30
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = 120
+FASTVIDEO_REQUEST_TIMEOUT = 600
 # Minimum response content length to validate that the model is generating meaningful output.
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
 GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
+
+
+def build_video_generation_payload(model: str) -> Dict[str, Any]:
+    """Create a minimal `/v1/videos` payload for deploy smoke tests."""
+    return {
+        "model": model,
+        "prompt": "A cinematic drone shot over snowy mountains at sunrise.",
+        "size": "256x256",
+        "response_format": "b64_json",
+        "nvext": {
+            "fps": 8,
+            "num_frames": 8,
+            "num_inference_steps": 1,
+            "guidance_scale": 1.0,
+            "seed": 10,
+        },
+    }
 
 
 def validate_chat_response(
@@ -110,6 +130,53 @@ def validate_chat_response(
     return data
 
 
+def validate_video_response(
+    response: requests.Response,
+    expected_model: str,
+) -> Dict[str, Any]:
+    """Validate the structure and content of a video generation response."""
+    assert response.status_code == 200, (
+        f"Expected status 200, got {response.status_code}. "
+        f"Response: {response.text[:500]}"
+    )
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
+
+    assert (
+        data.get("object") == "video"
+    ), f"Expected video response object, got {data.get('object')!r}"
+    assert (
+        data.get("status") == "completed"
+    ), f"Expected completed video response, got {data.get('status')!r}"
+    assert (
+        data["model"] == expected_model
+    ), f"Expected model '{expected_model}', got '{data['model']}'"
+    assert data.get("id"), "Video response is missing an id"
+
+    video_data = data.get("data")
+    assert isinstance(video_data, list) and video_data, "Video response data is missing"
+
+    first_video = video_data[0]
+    b64_json = first_video.get("b64_json")
+    if b64_json is not None:
+        try:
+            decoded = base64.b64decode(b64_json, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise AssertionError("Video response b64_json is not valid base64") from exc
+        assert decoded, "Video response b64_json decodes to empty content"
+    else:
+        url = first_video.get("url")
+        assert (
+            isinstance(url, str) and url
+        ), "Video response must include a non-empty b64_json or url"
+
+    logger.info("Video response validation passed: model=%s", data["model"])
+    return data
+
+
 @pytest.mark.framework_only
 @pytest.mark.k8s
 @pytest.mark.deploy
@@ -130,7 +197,7 @@ async def test_deployment(
     2. Waits for all pods to become ready
     3. Port-forwards to the frontend service
     4. Waits for the model to be available
-    5. Sends a test chat completion request
+    5. Sends a test request for the backend's protocol
     6. Validates the response structure and content
 
     Args:
@@ -188,12 +255,23 @@ async def test_deployment(
 
         # Wait for model to be available
         endpoint = deployment_spec.endpoint
+        deploy_payload = None
+        max_attempts = 30
+        attempt_timeouts = None
+        request_timeout = float(DEFAULT_REQUEST_TIMEOUT)
+        if deployment_target.request_kind == "video":
+            deploy_payload = build_video_generation_payload(model)
+            request_timeout = float(FASTVIDEO_REQUEST_TIMEOUT)
+            attempt_timeouts = [request_timeout] * max_attempts
+
         model_ready = wait_for_model_availability(
             url=base_url,
             endpoint=endpoint,
             model=model,
             logger=logger,
-            max_attempts=30,
+            max_attempts=max_attempts,
+            attempt_timeouts=attempt_timeouts,
+            request_payload=deploy_payload,
         )
 
         assert (
@@ -202,23 +280,27 @@ async def test_deployment(
 
         # Send test request
         url = f"{base_url}{endpoint}"
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": TEST_PROMPT}],
-            "max_tokens": DEFAULT_MAX_TOKENS,
-            "temperature": DEFAULT_TEMPERATURE,
-            "stream": False,
-        }
-        response = send_request(
-            url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
-        )
+        if deploy_payload is not None:
+            payload = deploy_payload
+        else:
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": TEST_PROMPT}],
+                "max_tokens": DEFAULT_MAX_TOKENS,
+                "temperature": DEFAULT_TEMPERATURE,
+                "stream": False,
+            }
+        response = send_request(url, payload, timeout=request_timeout, method="POST")
 
         # Validate response
-        validate_chat_response(
-            response=response,
-            expected_model=model,
-            min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
-        )
+        if deploy_payload is not None:
+            validate_video_response(response=response, expected_model=model)
+        else:
+            validate_chat_response(
+                response=response,
+                expected_model=model,
+                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
+            )
 
         logger.info(
             f"Deployment test PASSED for {deployment_target.test_id} "

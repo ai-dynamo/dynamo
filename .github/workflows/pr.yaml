@@ -42,6 +42,7 @@ jobs:
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
+      fastvideo: ${{ steps.changes.outputs.fastvideo }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -60,7 +61,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
+    needs: [changed-files, planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-pipeline, operator]  # THIS list determines blocking jobs
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -69,7 +70,7 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-fastvideo]
     if: always()
     steps:
       - name: "Check all deploy test jobs"
@@ -278,6 +279,31 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # FASTVIDEO PIPELINE
+  # ============================================================================
+  fastvideo-pipeline:
+    name: fastvideo
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.fastvideo == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    with:
+      framework: fastvideo
+      target: runtime
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["13.1"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      copy_timeout_minutes: 10
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and fastvideo and gpu_0'
+      cpu_only_test_timeout_minutes: 30
+      run_single_gpu_tests: true
+      single_gpu_test_markers: 'pre_merge and fastvideo and gpu_1'
+      single_gpu_test_timeout_minutes: 45
+      run_multi_gpu_tests: false
+    secrets: inherit
+
+  # ============================================================================
   # DEV PIPELINES
   # ============================================================================
   vllm-dev-pipeline:
@@ -325,10 +351,25 @@ jobs:
       push_image: false
     secrets: inherit
 
-   # ============================================================================
-   # DEPLOYMENT JOBS
-   # Deploy operator and run end-to-end tests on Kubernetes cluster
-   # ============================================================================
+  fastvideo-dev-pipeline:
+    name: fastvideo-dev
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.fastvideo == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/build-flavor.yml
+    with:
+      framework: fastvideo
+      target: dev
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["13.1"]'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+      push_image: false
+    secrets: inherit
+
+  # ============================================================================
+  # DEPLOYMENT JOBS
+  # Deploy operator and run end-to-end tests on Kubernetes cluster
+  # ============================================================================
 
   deploy-operator:
     if: |
@@ -336,6 +377,7 @@ jobs:
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
+       needs.changed-files.outputs.fastvideo == 'true' ||
        needs.changed-files.outputs.deploy == 'true') &&
       (needs.operator.result == 'success' || needs.operator.result == 'skipped')
     needs: [changed-files, operator]
@@ -408,9 +450,26 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  deploy-test-fastvideo:
+    if: |
+      !cancelled() && !failure() &&
+      (needs.changed-files.outputs.fastvideo == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      needs.deploy-operator.result == 'success' &&
+      needs.fastvideo-pipeline.result == 'success'
+    needs: [changed-files, deploy-operator, fastvideo-pipeline]
+    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    with:
+      framework: fastvideo
+      profiles: '["agg"]'
+      image_suffix: fastvideo-runtime-cuda13
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
   deploy-cleanup:
     if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-fastvideo]
     runs-on: prod-default-small-v2
     steps:
     - uses: actions/checkout@v4
@@ -431,7 +490,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
+    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-pipeline, operator, changed-files]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0

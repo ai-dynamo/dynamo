@@ -57,12 +57,16 @@ class DeploymentTarget:
         framework: The inference framework (vllm, sglang, trtllm, etc.)
         profile: The deployment profile name (agg, disagg, etc.)
         source: Where this target came from (e.g., examples)
+        endpoint: OpenAI-compatible endpoint exercised by the deploy test
+        request_kind: Request protocol used by the deploy test (chat or video)
     """
 
     yaml_path: Path
     framework: str
     profile: str
     source: str = "examples"
+    endpoint: str = "/v1/chat/completions"
+    request_kind: str = "chat"
 
     @property
     def test_id(self) -> str:
@@ -106,6 +110,11 @@ def discover_example_targets(
             continue
 
         framework_name = framework_dir.name
+        endpoint = "/v1/chat/completions"
+        request_kind = "chat"
+        if framework_name == "fastvideo":
+            endpoint = "/v1/videos"
+            request_kind = "video"
 
         for yaml_file in deploy_dir.glob("*.yaml"):
             # Only include files directly in deploy/, not in subdirectories
@@ -119,6 +128,8 @@ def discover_example_targets(
                     framework=framework_name,
                     profile=profile_name,
                     source="examples",
+                    endpoint=endpoint,
+                    request_kind=request_kind,
                 )
             )
 
@@ -313,6 +324,7 @@ def deployment_yaml(deployment_target: DeploymentTarget) -> Path:
 
 @pytest.fixture
 def deployment_spec(
+    deployment_target: DeploymentTarget,
     deployment_yaml: Path,
     image: Optional[str],
     namespace: str,
@@ -327,7 +339,7 @@ def deployment_spec(
     Returns:
         Configured DeploymentSpec ready for deployment
     """
-    spec = DeploymentSpec(str(deployment_yaml))
+    spec = DeploymentSpec(str(deployment_yaml), endpoint=deployment_target.endpoint)
 
     # Set namespace
     spec.namespace = namespace

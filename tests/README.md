@@ -45,6 +45,8 @@ dynamo/
 │       │   └── tests/              # Python unit/integration tests for trtllm backend
 │       ├── sglang/
 │       │   └── tests/              # Python unit/integration tests for sglang backend
+│       ├── fastvideo/
+│       │   └── tests/              # Python unit/integration tests for fastvideo backend
 │       ├── common/
 │       │   └── tests/              # Python unit/integration tests for common utils
 │       ├── planner/
@@ -53,7 +55,7 @@ dynamo/
 │       ├── profiler/
 │       └── ...
 ├── tests/                          # End-to-end and cross-component tests
-│   ├── serve/                      # Serve E2E tests (vllm, sglang, trtllm)
+│   ├── serve/                      # Serve E2E tests (vllm, sglang, trtllm, fastvideo)
 │   ├── kvbm_integration/           # KVBM integration tests
 │   ├── fault_tolerance/            # Fault tolerance, migration, cancellation
 │   ├── deploy/                     # Deployment tests
@@ -115,7 +117,7 @@ Markers are required for all tests. They are used for test selection in CI and l
 | Test Type [required]    | unit, integration, e2e, benchmark, performance, stress, multimodal | Nature of the test               |
 | Hardware [required]     | gpu_0, gpu_1, gpu_2, gpu_4, gpu_8, h100                         | Number/type of GPUs required       |
 | VRAM Requirement        | max_vram_gib(N)                                                              | Peak VRAM in GiB (with 10% safety). The pytest invocation can use `--max-vram-gib=N` to select only tests that fit on the available GPU. Does not prevent running on smaller GPUs (that will OOM). Use `profile_pytest.py` to measure. |
-| Component/Framework     | vllm, trtllm, sglang, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
+| Component/Framework     | vllm, trtllm, sglang, fastvideo, kvbm, kvbm_concurrency, planner, router   | Backend or component specificity   |
 | Infrastructure          | k8s, deploy, fault_tolerance                                     | Infrastructure/environment needs   |
 | Execution               | parallel                                                         | Test can run in parallel with pytest-xdist. Must use dynamic port allocation (`alloc_ports`) and not share resources (e.g. filesystem) |
 | Other                   | slow, skip, xfail, custom_build, model, aiconfigurator           | Special handling                   |
@@ -283,15 +285,17 @@ pytest tests/serve/test_vllm.py::test_serve_deployment[aggregated] -v --tb=short
 pytest tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -v --tb=short
 # trtllm
 pytest tests/serve/test_trtllm.py::test_deployment[aggregated-2] -v --tb=short
+# fastvideo
+python3 -m pytest tests/serve/test_fastvideo.py::test_fastvideo_deployment[aggregated] -v --tb=short
 ```
 
 **Pre-merge CI equivalent** -- this is what [`container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml) runs on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
 ```bash
 # Parallel pre-merge tests (4 workers, CPU-only; typically <5min)
-pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" -n 4 --dist=loadscope -v --tb=short
+python3 -m pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -n 4 --dist=loadscope -v --tb=short
 
 # Sequential pre-merge tests (CPU-only; typically <10min)
-pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu_0" -v --tb=short
+python3 -m pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -v --tb=short
 ```
 
 > **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). Tests not marked `parallel`, and all GPU tests (`gpu_1`, `gpu_2`, etc.), run sequentially (no `-n` flag). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
@@ -301,6 +305,7 @@ pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu
 pytest -m "vllm and e2e and gpu_1" -v --tb=short
 pytest -m "sglang and e2e and gpu_1" -v --tb=short
 pytest -m "trtllm and e2e and gpu_1" -v --tb=short
+python3 -m pytest -m "fastvideo and e2e and gpu_1" -v --tb=short
 ```
 
 **Post-merge equivalent** -- CI runs `(pre_merge or post_merge)` after merge, which adds slower tests on top of the pre_merge set. **Running the full post-merge suite locally can take several hours per framework** (model downloads, GPU inference, multi-GPU coordination). For day-to-day development, before you submit to CI, use the `pre_merge` commands above for quicker feedback. See [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml) for exact markers:
@@ -355,12 +360,12 @@ Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-me
 
 | Stage | Marker expression | Local equivalent |
 |-------|------------------|-----------------|
-| Parallel (xdist, 4 workers) | `pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0` | `pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" -n 4 --dist=loadscope -v --tb=short` |
-| Sequential | `pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu_0` | `pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu_0" -v --tb=short` |
+| Parallel (xdist, 4 workers) | `pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0` | `python3 -m pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -n 4 --dist=loadscope -v --tb=short` |
+| Sequential | `pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0` | `python3 -m pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -v --tb=short` |
 
 ### Post-merge (push to release branches)
 
-Runs per framework (vllm, sglang, trtllm). Each framework goes through: **Build** -> **Test** -> **Copy to registry**. The full post-merge suite takes **several hours per framework** due to model downloads, GPU inference, and multi-GPU tests.
+Runs per framework (vllm, sglang, trtllm, fastvideo). Each framework goes through: **Build** -> **Test** -> **Copy to registry**. The full post-merge suite takes **several hours per framework** due to model downloads, GPU inference, and multi-GPU tests.
 
 | Stage | What it does | Local equivalent |
 |-------|-------------|-----------------|

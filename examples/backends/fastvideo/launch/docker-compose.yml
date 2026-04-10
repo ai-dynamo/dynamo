@@ -3,12 +3,10 @@
 
 # Worker count is controlled by COMPOSE_PROFILES (1-8).
 # COMPOSE_PROFILES=4 starts backend-0..backend-3 on GPUs 0..3.
+# Set FASTVIDEO_IMAGE to override the default released FastVideo runtime image.
 
 x-backend-base: &backend-base
-  build:
-    context: ../../..
-    dockerfile: examples/diffusers/Dockerfile
-  image: dynamo-fastvideo-diffusers:latest
+  image: ${FASTVIDEO_IMAGE:-nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13}
   restart: on-failure
   command: python -m dynamo.fastvideo
   environment:
@@ -30,10 +28,7 @@ x-backend-base: &backend-base
 
 services:
   frontend:
-    build:
-      context: ../../..
-      dockerfile: examples/diffusers/Dockerfile
-    image: dynamo-fastvideo-diffusers:latest
+    image: ${FASTVIDEO_IMAGE:-nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.0.1-cuda13}
     restart: on-failure
     command: >
       python -m dynamo.frontend
