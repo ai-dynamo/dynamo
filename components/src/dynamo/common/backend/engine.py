@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Optional
 from dynamo._core import Context
 
 if TYPE_CHECKING:
-    from .worker import BackendConfig
+    from .worker import WorkerConfig
 
 
 @dataclass
@@ -32,14 +32,14 @@ class LLMEngine(ABC):
         1. from_args(argv) -- parse CLI args, construct engine (NOT started yet)
         2. init()          -- start the engine, return EngineConfig metadata.
                               After init() returns, generate() MUST be ready
-                              to accept calls. DynamoBackend begins serving
+                              to accept calls. Worker begins serving
                               immediately after init().
         3. generate()      -- called for each request (concurrent calls expected)
         4. abort()         -- called when a request is cancelled (optional, default no-op)
         5. cleanup()       -- called once on shutdown, release all resources
     """
 
-    backend_config: BackendConfig
+    backend_config: WorkerConfig
 
     @classmethod
     @abstractmethod
@@ -58,7 +58,7 @@ class LLMEngine(ABC):
         """Start the engine and return registration metadata.
 
         After this returns the engine MUST be ready to accept ``generate()``
-        calls.  ``DynamoBackend`` will register the model and begin serving
+        calls.  ``Worker`` will register the model and begin serving
         immediately.
         """
         ...
@@ -81,7 +81,7 @@ class LLMEngine(ABC):
     async def abort(self, context: Context) -> None:
         """Abort an in-flight request (optional, default no-op).
 
-        Called by DynamoBackend when the client disconnects or
+        Called by Worker when the client disconnects or
         the request is cancelled.  Override to release engine resources
         (KV cache, scheduler slots, etc.).
         """

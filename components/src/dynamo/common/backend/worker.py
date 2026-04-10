@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class BackendConfig:
+class WorkerConfig:
     namespace: str
     component: str = "backend"
     endpoint: str = "generate"
@@ -49,7 +49,7 @@ class BackendConfig:
         served_model_name: Optional[str] = None,
         model_input: Optional[ModelInput] = None,
         **overrides,
-    ) -> "BackendConfig":
+    ) -> "WorkerConfig":
         """Build from any object that carries DynamoRuntimeConfig fields.
 
         Works with vllm.Config, trtllm.Config (inherit DynamoRuntimeConfig
@@ -78,7 +78,7 @@ class BackendConfig:
         return cls(**kwargs)
 
 
-class DynamoBackend:
+class Worker:
     def __init__(self, engine: LLMEngine):
         self.config = engine.backend_config
         self.engine = engine

@@ -20,7 +20,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo._core import Context
 from dynamo.common.backend.engine import LLMEngine, EngineConfig
-from dynamo.common.backend.worker import BackendConfig
+from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.engine_utils import build_completion_usage, normalize_finish_reason
 
 from .handlers import build_sampling_params
@@ -50,7 +50,7 @@ class VllmLLMEngine(LLMEngine):
             ) = config.model
 
         engine = cls(config.engine_args)
-        engine.backend_config = BackendConfig.from_runtime_config(
+        engine.backend_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,

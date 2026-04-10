@@ -1,6 +1,6 @@
 # Backend Module
 
-Two-class abstraction: `DynamoBackend` (runtime integration) and
+Two-class abstraction: `Worker` (runtime integration) and
 `LLMEngine` (ABC for engine-specific logic). See `README.md` for full docs.
 
 ## Engine Lifecycle
@@ -27,19 +27,19 @@ from_args(argv)  ->  init()  ->  generate() / abort()  ->  cleanup()
   that grew across vllm, sglang, and trtllm. Before writing any logic inside
   a `LLMEngine` subclass, check whether the same logic already exists in
   another engine. If it does, extract it into `common/engine_utils/` or
-  `DynamoBackend` and have all engines call the shared version.
+  `Worker` and have all engines call the shared version.
   When adding new features, always ask: "is this engine-specific or common?"
   If two or more engines would need the same code, it is common.
 
-- **Exactly two classes.** `DynamoBackend` owns runtime lifecycle.
+- **Exactly two classes.** `Worker` owns runtime lifecycle.
   `LLMEngine` owns inference. Do not add intermediate base classes or mixins.
 
 - **Engine owns its config.** `LLMEngine.from_args()` sets `backend_config`
-  on the instance. `DynamoBackend` reads it from the engine -- it does not
+  on the instance. `Worker` reads it from the engine -- it does not
   accept a separate config argument.
 
 - **`generate()` delegates to engine with cancellation monitoring.**
-  `DynamoBackend.generate()` runs a background task that watches
+  `Worker.generate()` runs a background task that watches
   `context.async_killed_or_stopped()` and calls `engine.abort(context)` on
   cancellation. It also checks `context.is_stopped()` after each yielded
   chunk. Sampling params, prompt building, and output formatting stay inside
@@ -51,7 +51,7 @@ from_args(argv)  ->  init()  ->  generate() / abort()  ->  cleanup()
   stays clean.
 
 - **No hooks.** If behavior needs to be shared across engines, put it in
-  `DynamoBackend` or `common/engine_utils/`, not in a hook system.
+  `Worker` or `common/engine_utils/`, not in a hook system.
 
 - **Parallel path.** The existing `main.py` / `worker_factory.py` / `init_llm.py`
   entry points remain untouched. The `unified_main.py` files are a separate
@@ -79,7 +79,7 @@ Use `build_completion_usage()` and `normalize_finish_reason()` from
 
 ## Error Handling
 
-`DynamoBackend` wraps lifecycle and generate errors in
+`Worker` wraps lifecycle and generate errors in
 `DynamoException` subclasses (`dynamo.llm.exceptions`). The Rust bridge
 (`engine.rs`) converts these into typed `DynamoError::Backend(...)` for
 proper error chain observability. Engines can raise `DynamoException`
@@ -107,7 +107,7 @@ Standardize on:
 | File | What it does |
 |------|-------------|
 | `engine.py` | `LLMEngine` ABC -- the only interface engines must implement |
-| `worker.py` | `DynamoBackend` -- runtime lifecycle: create runtime, register model, serve endpoint, cleanup |
+| `worker.py` | `Worker` -- runtime lifecycle: create runtime, register model, serve endpoint, cleanup |
 | `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
 | `../engine_utils/request.py` | `normalize_request_format()` -- call this at the top of `generate()` if your engine receives both OpenAI and internal protocol formats |

@@ -22,7 +22,7 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     +-- TrtllmLLMEngine        <-- trtllm/llm_engine.py
     +-- SampleLLMEngine        <-- sample_engine.py
 
-DynamoBackend                  <-- runtime integration (worker.py)
+Worker                  <-- runtime integration (worker.py)
     - reads engine.backend_config
     - creates DistributedRuntime
     - sets up endpoints, signal handlers
@@ -68,7 +68,7 @@ Each `unified_main.py` calls `run(MyLLMEngine)` from the common
 Subclass `LLMEngine` and implement the required methods:
 
 ```python
-from dynamo.common.backend import LLMEngine, EngineConfig, BackendConfig
+from dynamo.common.backend import LLMEngine, EngineConfig, WorkerConfig
 from dynamo.common.engine_utils import build_completion_usage
 
 class MyEngine(LLMEngine):
@@ -76,7 +76,7 @@ class MyEngine(LLMEngine):
     async def from_args(cls, argv=None):
         # Parse CLI args, construct engine, set backend_config.
         engine = cls(...)
-        engine.backend_config = BackendConfig(
+        engine.backend_config = WorkerConfig(
             namespace="dynamo", component="my-backend", ...
         )
         return engine
@@ -150,7 +150,7 @@ Use `build_completion_usage()` and `normalize_finish_reason()` from
 
 ## Request Cancellation
 
-`DynamoBackend.generate()` automatically monitors for client
+`Worker.generate()` automatically monitors for client
 disconnections and request cancellations via `context.async_killed_or_stopped()`.
 When triggered, it:
 
@@ -175,7 +175,7 @@ break on `context.is_stopped()`.
 
 ## Error Handling
 
-`DynamoBackend` wraps errors in `DynamoException` subclasses from
+`Worker` wraps errors in `DynamoException` subclasses from
 `dynamo.llm.exceptions` so the Rust bridge can map them to typed
 `DynamoError::Backend(...)` responses with proper error chains.
 
@@ -222,9 +222,9 @@ implementations:
 ```
 common/backend/
     __init__.py          # Re-exports: LLMEngine, EngineConfig,
-                         #   DynamoBackend, BackendConfig
+                         #   Worker, WorkerConfig
     engine.py            # LLMEngine ABC + EngineConfig dataclass
-    worker.py            # DynamoBackend + BackendConfig
+    worker.py            # Worker + WorkerConfig
     run.py               # Common entry point: run(engine_cls)
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine

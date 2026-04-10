@@ -16,13 +16,13 @@ Each backend's ``unified_main.py`` calls :func:`run` with its
 import uvloop
 
 from .engine import LLMEngine
-from .worker import DynamoBackend
+from .worker import Worker
 
 
 async def worker(engine_cls: type[LLMEngine], argv: list[str] | None = None):
     engine = await engine_cls.from_args(argv)
-    backend = DynamoBackend(engine)
-    await backend.run()
+    worker = Worker(engine)
+    await worker.run()
 
 
 def run(engine_cls: type[LLMEngine], argv: list[str] | None = None):

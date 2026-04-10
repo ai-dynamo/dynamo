@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from .engine import LLMEngine, EngineConfig
-from .worker import BackendConfig, DynamoBackend
+from .worker import WorkerConfig, Worker
 
 __all__ = [
-    "BackendConfig",
+    "WorkerConfig",
     "LLMEngine",
-    "DynamoBackend",
+    "Worker",
     "EngineConfig",
 ]

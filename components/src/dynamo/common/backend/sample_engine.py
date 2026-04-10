@@ -11,14 +11,14 @@ from dynamo._core import Context
 from dynamo.common.engine_utils import build_completion_usage
 
 from .engine import LLMEngine, EngineConfig
-from .worker import BackendConfig
+from .worker import WorkerConfig
 
 
 class SampleLLMEngine(LLMEngine):
     """Reference LLMEngine implementation.
 
     Generates rotating token IDs with configurable per-token latency.
-    Useful for testing the DynamoBackend lifecycle end-to-end
+    Useful for testing the Worker lifecycle end-to-end
     and as a template for engine leads implementing real backends.
     """
 
@@ -52,7 +52,7 @@ class SampleLLMEngine(LLMEngine):
             max_tokens=args.max_tokens,
             delay=args.delay,
         )
-        engine.backend_config = BackendConfig(
+        engine.backend_config = WorkerConfig(
             namespace=args.namespace,
             component=args.component,
             endpoint=args.endpoint,

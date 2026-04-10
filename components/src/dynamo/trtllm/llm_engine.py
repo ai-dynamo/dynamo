@@ -20,7 +20,7 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 
 from dynamo._core import Context
 from dynamo.common.backend.engine import LLMEngine, EngineConfig
-from dynamo.common.backend.worker import BackendConfig
+from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.engine_utils import (
     build_completion_usage,
     normalize_finish_reason,
@@ -91,7 +91,7 @@ class TrtllmLLMEngine(LLMEngine):
             max_num_tokens=config.max_num_tokens,
             kv_block_size=config.kv_block_size,
         )
-        engine.backend_config = BackendConfig.from_runtime_config(
+        engine.backend_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,
