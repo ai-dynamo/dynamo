@@ -1721,9 +1721,6 @@ dependencies = [
  "dynamo-parsers",
  "dynamo-runtime",
  "futures",
- "hyper",
- "hyper-util",
- "mio 1.1.1",
  "once_cell",
  "parking_lot",
  "pyo3",
@@ -1732,7 +1729,6 @@ dependencies = [
  "rmp",
  "serde",
  "serde_json",
- "socket2 0.5.8",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -1768,6 +1764,7 @@ dependencies = [
  "figment",
  "futures",
  "humantime",
+ "hyper",
  "hyper-util",
  "k8s-openapi",
  "kube",
@@ -1775,6 +1772,7 @@ dependencies = [
  "local-ip-address",
  "log",
  "lru",
+ "mio 1.1.1",
  "notify",
  "nuid",
  "once_cell",
@@ -1792,7 +1790,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
- "socket2 0.5.8",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tmq",
  "tokio",
@@ -2667,14 +2665,13 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.17"
+version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c6995591a8f1380fcb4ba966a252a4b29188d51d2b89e3a252f5305be65aea8"
+checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-channel",
- "futures-core",
  "futures-util",
  "http",
  "http-body",
@@ -6257,9 +6254,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "socket2"
-version = "0.5.8"
+version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c970269d99b64e60ec3bd6ad27270092a5394c4e309314b18ae3fe575695fbe8"
+checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
@@ -6395,9 +6392,9 @@ dependencies = [
 
 [[package]]
 name = "system-configuration"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c879d448e9d986b661742763247d3693ed13609438cf3d006f51f5368a5ba6b"
+checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
 dependencies = [
  "bitflags 2.11.0",
  "core-foundation 0.9.4",
@@ -6847,7 +6844,7 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost 0.13.5",
- "socket2 0.5.8",
+ "socket2 0.5.10",
  "tokio",
  "tokio-stream",
  "tower",

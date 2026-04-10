@@ -12,6 +12,9 @@ homepage.workspace = true
 repository.workspace = true
 description = "Dynamo Runtime Library"
 
+[package.metadata.cargo-machete]
+ignored = ["hyper", "mio"]
+
 [features]
 default = []
 integration = []
@@ -55,7 +58,9 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
-hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
+hyper = { workspace = true }
+hyper-util = { workspace = true, features = ["tokio", "server", "server-auto"] }
+mio = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 opentelemetry = { workspace = true }
@@ -85,7 +90,7 @@ once_cell = { version = "1" }
 percent-encoding = { version = "2.3.2" } # also used by tonic, reqwest, axum, etc
 rayon = { version = "1.10" }
 regex = { version = "1" }
-socket2 = { version = "0.5.8" }
+socket2 = { workspace = true }
 tokio-rayon = { version = "2.1" }
 
 # Kubernetes discovery backend

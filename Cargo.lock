@@ -691,7 +691,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 0.4.6",
  "hyper 0.14.32",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-rustls 0.24.2",
  "hyper-rustls 0.27.7",
  "hyper-util",
@@ -866,7 +866,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-util",
  "itoa",
  "matchit 0.8.4",
@@ -948,7 +948,7 @@ dependencies = [
  "fs-err",
  "http 1.4.0",
  "http-body 1.0.1",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-util",
  "pin-project-lite",
  "rustls 0.23.37",
@@ -2591,6 +2591,7 @@ dependencies = [
  "figment",
  "futures",
  "humantime",
+ "hyper 1.8.1",
  "hyper-util",
  "jsonschema",
  "k8s-openapi",
@@ -2599,6 +2600,7 @@ dependencies = [
  "local-ip-address",
  "log",
  "lru 0.12.5",
+ "mio 1.1.1",
  "notify",
  "nuid",
  "once_cell",
@@ -3677,9 +3679,9 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.9.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6299f016b246a94207e63da54dbe807655bf9e00044f73ded42c3ac5305fbcca"
+checksum = "2ab2d4f250c3d7b1c9fcdff1cece94ea4e2dfbec68614f7b87cb205f24ca9d11"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3692,6 +3694,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
+ "pin-utils",
  "smallvec",
  "tokio",
  "want",
@@ -3719,7 +3722,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3c93eb611681b207e1fe55d5a71ecf91572ec8a6705cdb6857f7d8d5242cf58"
 dependencies = [
  "http 1.4.0",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-util",
  "log",
  "rustls 0.23.37",
@@ -3737,7 +3740,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b90d566bffbce6a75bd8b09a05aa8c2cb1fabb6cb348f8840c9e4c90a0d83b0"
 dependencies = [
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-util",
  "pin-project-lite",
  "tokio",
@@ -3756,7 +3759,7 @@ dependencies = [
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "ipnet",
  "libc",
  "percent-encoding",
@@ -4371,7 +4374,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-rustls 0.27.7",
  "hyper-timeout",
  "hyper-util",
@@ -5009,11 +5012,12 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
+checksum = "a69bcab0ad47271a0234d9422b131806bf3968021e5dc9328caf2d4cd58557fc"
 dependencies = [
  "libc",
+ "log",
  "wasi",
  "windows-sys 0.61.2",
 ]
@@ -5031,7 +5035,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-util",
  "log",
  "pin-project-lite",
@@ -5658,7 +5662,7 @@ dependencies = [
  "http-body-util",
  "httparse",
  "humantime",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "itertools 0.14.0",
  "md-5",
  "parking_lot",
@@ -6984,7 +6988,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-rustls 0.27.7",
  "hyper-util",
  "js-sys",
@@ -8489,7 +8493,7 @@ checksum = "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408"
 dependencies = [
  "bytes",
  "libc",
- "mio 1.2.0",
+ "mio 1.1.1",
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
@@ -8711,7 +8715,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-timeout",
  "hyper-util",
  "percent-encoding",
@@ -8740,7 +8744,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-timeout",
  "hyper-util",
  "percent-encoding",
@@ -8769,7 +8773,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-timeout",
  "hyper-util",
  "percent-encoding",
@@ -9574,7 +9578,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.8.1",
  "hyper-util",
  "nix 0.30.1",
  "parking_lot",

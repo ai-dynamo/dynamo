@@ -37,10 +37,6 @@ anyhow = { version = "1" }
 async-trait = { version = "0.1" }
 dashmap = { version = "6.1" }
 futures = { version = "0.3" }
-hyper = { version = "=1.8.1" }
-hyper-util = { version = "=0.1.17" }
-mio = { version = "=1.1.1" }
-socket2 = { version = "=0.5.8" }
 rmp = { version = "0.8" }
 once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
