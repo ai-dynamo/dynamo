@@ -23,8 +23,9 @@ from gpu_memory_service.common.protocol.wire import recv_message, send_message
 from gpu_memory_service.common.utils import fail
 
 from .allocations import AllocationNotFoundError
+from .fsm import Connection, InvalidTransition
 from .gms import GMS
-from .session import Connection, InvalidTransition, OperationNotAllowed
+from .session import OperationNotAllowed
 
 logger = logging.getLogger(__name__)
 

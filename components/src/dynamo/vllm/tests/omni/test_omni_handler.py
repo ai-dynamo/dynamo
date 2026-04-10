@@ -13,6 +13,7 @@ try:
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
+    from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -164,3 +165,90 @@ class TestI2VEngineInputs:
         empty = VideoNvExt()
         assert empty.boundary_ratio is None
         assert empty.guidance_scale_2 is None
+
+
+class TestBuildOriginalPrompt:
+    """build_original_prompt only carries prompt/negative_prompt/multi_modal_data.
+
+    height/width/num_inference_steps live in OmniDiffusionSamplingParams, not the prompt.
+    """
+
+    def test_basic_fields(self):
+        result = build_original_prompt(
+            {"prompt": "a cat"}, nvext={}, height=512, width=512
+        )
+        assert result["prompt"] == "a cat"
+        assert result.get("negative_prompt") is None
+        assert "height" not in result
+        assert "width" not in result
+
+    def test_negative_prompt_from_request(self):
+        result = build_original_prompt(
+            {"prompt": "a cat", "negative_prompt": "blurry"},
+            nvext={"negative_prompt": "ignored"},
+            height=1024,
+            width=1024,
+        )
+        assert result["negative_prompt"] == "blurry"
+
+    def test_multi_modal_data_forwarded(self):
+        img = object()
+        result = build_original_prompt(
+            {"prompt": "x", "multi_modal_data": {"image": img}},
+            nvext={},
+            height=512,
+            width=512,
+        )
+        assert result["multi_modal_data"]["image"] is img
+
+    def test_no_inference_steps_or_guidance(self):
+        result = build_original_prompt(
+            {"prompt": "x"},
+            nvext={"num_inference_steps": 50, "guidance_scale": 7.5},
+            height=512,
+            width=512,
+        )
+        assert "num_inference_steps" not in result
+        assert "guidance_scale" not in result
+
+
+class TestParseOmniRequest:
+    """parse_omni_request: original_prompt only has prompt/negative_prompt,
+    geometry goes into sampling_params_list dict."""
+
+    def test_image_sampling_params_has_geometry(self):
+        request = {
+            "prompt": "a sunset",
+            "size": "512x512",
+            "output_modalities": ["image"],
+        }
+        result = parse_omni_request(request, ["image"])
+        sp = result["sampling_params_list"]
+        assert sp["height"] == 512
+        assert sp["width"] == 512
+
+    def test_image_original_prompt_no_geometry(self):
+        request = {
+            "prompt": "a sunset",
+            "size": "512x512",
+            "output_modalities": ["image"],
+        }
+        result = parse_omni_request(request, ["image"])
+        op = result["original_prompt"]
+        assert op["prompt"] == "a sunset"
+        assert "height" not in op
+        assert "width" not in op
+
+    def test_nvext_params_go_into_sampling_params_not_prompt(self):
+        request = {
+            "prompt": "x",
+            "size": "512x512",
+            "nvext": {"num_inference_steps": 30, "guidance_scale": 4.0},
+        }
+        result = parse_omni_request(request, ["image"])
+        sp = result["sampling_params_list"]
+        assert sp["num_inference_steps"] == 30
+        assert sp["guidance_scale"] == 4.0
+        op = result["original_prompt"]
+        assert "num_inference_steps" not in op
+        assert "guidance_scale" not in op
