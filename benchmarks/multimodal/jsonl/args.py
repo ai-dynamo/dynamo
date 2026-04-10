@@ -71,6 +71,12 @@ def parse_args(description: str = "") -> argparse.Namespace:
         help=f"Path to COCO image_info JSON for --image-mode http (default: {COCO_ANNOTATIONS})",
     )
     parser.add_argument(
+        "--image-overwrite",
+        action="store_true",
+        default=False,
+        help="Regenerate images even if they already exist (default: skip existing)",
+    )
+    parser.add_argument(
         "--image-size",
         type=int,
         nargs=2,
