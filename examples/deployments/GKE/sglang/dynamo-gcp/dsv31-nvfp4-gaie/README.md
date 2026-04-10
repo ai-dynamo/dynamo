@@ -185,7 +185,7 @@ The GAIE DGDs reference a custom Dynamo EPP image at `REGION-docker.pkg.dev/PROJ
 
 ## Deployment Steps
 
-### Option A: Aggregated GAIE (single node, 8 GPUs)
+### Aggregated GAIE (single node, 8 GPUs)
 
 #### 1. Deploy the DynamoGraphDeployment
 
@@ -212,15 +212,9 @@ kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- \
   -d '{"model":"nvidia/DeepSeek-V3.1-NVFP4","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
 ```
 
-#### 3. Tear Down
-
-```bash
-kubectl delete dynamographdeployment sglang-dsv31-nvfp4-agg-gaie -n dynamo-system
-```
-
 ---
 
-### Option B: Disaggregated GAIE 1P1D (2 nodes, 16 GPUs)
+### Disaggregated GAIE 1P1D (2 nodes, 16 GPUs)
 
 #### 1. Deploy the DynamoGraphDeployment
 
@@ -247,11 +241,6 @@ kubectl run curl-test --rm -it --restart=Never --image=curlimages/curl -- \
   -d '{"model":"nvidia/DeepSeek-V3.1-NVFP4","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
 ```
 
-#### 3. Tear Down
-
-```bash
-kubectl delete dynamographdeployment sglang-dsv31-nvfp4-disagg-gaie -n dynamo-system
-```
 
 ---
 
