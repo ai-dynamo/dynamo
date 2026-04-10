@@ -12,7 +12,7 @@ from contextlib import ExitStack
 from typing import Callable
 
 import pytest
-from gpu_memory_service.common.types import ServerState
+from gpu_memory_service.server.fsm import ServerState
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess

@@ -42,6 +42,7 @@ use super::RouteDoc;
 
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -1342,7 +1343,7 @@ impl ResponseMetricCollector {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .prefill_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .prefill_worker_type
                     .as_deref()
@@ -1385,7 +1386,7 @@ impl ResponseMetricCollector {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .decode_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .decode_worker_type
                     .as_deref()
