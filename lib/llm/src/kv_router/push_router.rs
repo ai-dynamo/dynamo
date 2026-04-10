@@ -151,9 +151,15 @@ impl RequestGuard {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
         }
-        self.request_metrics
-            .output_sequence_tokens
-            .observe(self.cumulative_osl as f64);
+        // Only record output sequence length for requests that actually
+        // produced output tokens. Recording zero for failed/cancelled requests
+        // would corrupt histogram averages (sum/count) and percentiles.
+        // Failures are already tracked by requests_total.
+        if self.cumulative_osl > 0 {
+            self.request_metrics
+                .output_sequence_tokens
+                .observe(self.cumulative_osl as f64);
+        }
         self.request_metrics.requests_total.inc();
     }
 }
