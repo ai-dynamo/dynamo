@@ -20,7 +20,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.common.utils.runtime import parse_endpoint
 
-DEFAULT_MODEL_PATH = "FastVideo/LTX2-Distilled-Diffusers"
+DEFAULT_MODEL_PATH = "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 DEFAULT_COMPONENT_NAME = "backend"
 DEFAULT_ENDPOINT_NAME = "generate"
 DEFAULT_ATTENTION_BACKEND = "TORCH_SDPA"

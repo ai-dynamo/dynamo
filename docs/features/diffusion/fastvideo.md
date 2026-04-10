@@ -13,8 +13,8 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 
 ## Overview
 
-- **Default model:** `FastVideo/LTX2-Distilled-Diffusers` — a distilled variant of the LTX-2 Diffusion Transformer (Lightricks), reducing inference from 50+ steps to just 5.
-- **Two-stage pipeline:** Stage 1 generates video at target resolution; Stage 2 refines with a distilled LoRA for improved fidelity and texture.
+- **Default model:** `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` — a single-GPU-friendly Wan 2.1 text-to-video model that keeps the built-in backend examples and smoke tests approachable.
+- **Alternate models:** You can still serve other FastVideo-compatible checkpoints, including `FastVideo/LTX2-Distilled-Diffusers`, by overriding `--model-path`.
 - **Optimized inference:** The built-in backend exposes explicit runtime flags such as `--torch-compile`, `--fp4-quantization`, `--attention-backend`, and CPU offload controls instead of bundling them into a single profile.
 - **Response format:** Uses Dynamo's shared video protocol types and returns one complete MP4 payload per request. By default, responses use `data[0].url` and store output via Dynamo media storage. Set `"response_format": "b64_json"` when you want inline base64 video data instead.
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
@@ -28,7 +28,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 Launch the built-in backend directly:
 
 ```bash
-python -m dynamo.fastvideo --model-path FastVideo/LTX2-Distilled-Diffusers
+python -m dynamo.fastvideo --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers
 ```
 
 The local example flow in `examples/backends/fastvideo/launch/` now shells into this built-in entrypoint rather than maintaining separate worker logic.
@@ -125,7 +125,7 @@ Environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `PYTHON_BIN` | `python3` | Python interpreter |
-| `MODEL` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
+| `MODEL` | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | HuggingFace model path |
 | `NUM_GPUS` | `1` | Number of GPUs |
 | `HTTP_PORT` | `8000` | Frontend HTTP port |
 | `WORKER_EXTRA_ARGS` | — | Extra flags for `dynamo.fastvideo` (for example, `--torch-compile --fp4-quantization --attention-backend FLASH_ATTN`) |
@@ -134,7 +134,7 @@ Environment variables:
 Example:
 
 ```bash
-MODEL=FastVideo/LTX2-Distilled-Diffusers \
+MODEL=Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
 NUM_GPUS=1 \
 HTTP_PORT=8000 \
 WORKER_EXTRA_ARGS="--torch-compile --fp4-quantization --attention-backend FLASH_ATTN" \
@@ -149,7 +149,7 @@ Use the built-in entrypoint directly if you prefer not to use the wrapper script
 ```bash
 PYTHONPATH=<dynamo-root>/components/src \
 python -m dynamo.fastvideo \
-  --model-path FastVideo/LTX2-Distilled-Diffusers \
+  --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
   --discovery-backend file
 ```
 
@@ -199,10 +199,11 @@ export NAMESPACE=<your-namespace>
 kubectl apply -f agg.yaml -n ${NAMESPACE}
 ```
 
-The example deployment manifests pin a lighter model
-(`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`) for faster startup and CI stability.
-To use the backend default (`FastVideo/LTX2-Distilled-Diffusers`), update the
-worker `--model-path` argument in the manifest.
+The example deployment manifests use the backend default
+(`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`) for faster startup and single-GPU
+compatibility. To use another FastVideo-compatible model such as
+`FastVideo/LTX2-Distilled-Diffusers`, update the worker `--model-path`
+argument in the manifest.
 
 The shipped Kubernetes manifests also set
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and add the
@@ -269,7 +270,7 @@ smoke test, request inline base64 output explicitly and decode it:
 curl -s -X POST http://localhost:8000/v1/videos \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "FastVideo/LTX2-Distilled-Diffusers",
+    "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
     "prompt": "A cinematic drone shot over a snowy mountain range at sunrise",
     "size": "1920x1088",
     "response_format": "b64_json",
@@ -301,7 +302,7 @@ If you omit `"response_format": "b64_json"`, the backend uses its default
 
 | Flag | Default | Description |
 |---|---|---|
-| `--model-path` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
+| `--model-path` | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | HuggingFace model path |
 | `--served-model-name` | `--model-path` | Model name registered with Dynamo discovery |
 | `--num-gpus` | `1` | Number of GPUs for distributed inference |
 | `--attention-backend` | `TORCH_SDPA` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |

@@ -9,7 +9,7 @@ EXAMPLE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${EXAMPLE_DIR}/../../.." && pwd)"
 
 : "${PYTHON_BIN:=python3}"
-: "${MODEL:=FastVideo/LTX2-Distilled-Diffusers}"
+: "${MODEL:=Wan-AI/Wan2.1-T2V-1.3B-Diffusers}"
 : "${NUM_GPUS:=1}"
 : "${HTTP_PORT:=8000}"
 : "${DISCOVERY_DIR:=${SCRIPT_DIR}/.runtime/discovery}"

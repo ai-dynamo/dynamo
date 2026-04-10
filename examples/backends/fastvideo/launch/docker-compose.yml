@@ -10,7 +10,7 @@ x-backend-base: &backend-base
   restart: on-failure
   command: >
     python -m dynamo.fastvideo
-      --model-path ${MODEL:-FastVideo/LTX2-Distilled-Diffusers}
+      --model-path ${MODEL:-Wan-AI/Wan2.1-T2V-1.3B-Diffusers}
   environment:
     - DYN_DISCOVERY_BACKEND=etcd
     - ETCD_ENDPOINTS=http://etcd:2379
