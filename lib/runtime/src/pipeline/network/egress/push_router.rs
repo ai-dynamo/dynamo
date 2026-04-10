@@ -661,40 +661,41 @@ where
                 // Request-plane inactivity timeout: emit a ResponseTimeout error item
                 // when the backend stops producing output. This triggers is_inhibited()
                 // → report_instance_down() to quarantine the worker.
-                let stream: Pin<Box<dyn Stream<Item = U> + Send>> =
-                    if let Some(timeout) = self.response_timeout {
-                        Box::pin(async_stream::stream! {
-                            let mut inner = Box::pin(stream);
-                            loop {
-                                tokio::select! {
-                                    biased;
-                                    item = inner.next() => {
-                                        match item {
-                                            Some(item) => yield item,
-                                            None => break,
-                                        }
-                                    }
-                                    _ = tokio::time::sleep(timeout) => {
-                                        tracing::warn!(
-                                            instance_id,
-                                            timeout_secs = timeout.as_secs(),
-                                            "backend response inactivity timeout — quarantining worker"
-                                        );
-                                        client_for_timeout.report_instance_down(instance_id);
-                                        yield U::from_err(
-                                            crate::error::DynamoError::builder()
-                                                .error_type(crate::error::ErrorType::ResponseTimeout)
-                                                .message("backend response inactivity timeout")
-                                                .build()
-                                        );
-                                        break;
+                let stream: Pin<Box<dyn Stream<Item = U> + Send>> = if let Some(timeout) =
+                    self.response_timeout
+                {
+                    Box::pin(async_stream::stream! {
+                        let mut inner = Box::pin(stream);
+                        loop {
+                            tokio::select! {
+                                biased;
+                                item = inner.next() => {
+                                    match item {
+                                        Some(item) => yield item,
+                                        None => break,
                                     }
                                 }
+                                _ = tokio::time::sleep(timeout) => {
+                                    tracing::warn!(
+                                        instance_id,
+                                        timeout_secs = timeout.as_secs(),
+                                        "backend response inactivity timeout — quarantining worker"
+                                    );
+                                    client_for_timeout.report_instance_down(instance_id);
+                                    yield U::from_err(
+                                        crate::error::DynamoError::builder()
+                                            .error_type(crate::error::ErrorType::ResponseTimeout)
+                                            .message("backend response inactivity timeout")
+                                            .build()
+                                    );
+                                    break;
+                                }
                             }
-                        })
-                    } else {
-                        Box::pin(stream)
-                    };
+                        }
+                    })
+                } else {
+                    Box::pin(stream)
+                };
 
                 Ok(ResponseStream::new(stream, engine_ctx))
             }

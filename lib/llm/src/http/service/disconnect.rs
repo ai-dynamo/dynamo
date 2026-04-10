@@ -295,18 +295,30 @@ mod tests {
     #[derive(Debug)]
     struct MockContext;
     impl MockContext {
-        fn new() -> Self { Self }
+        fn new() -> Self {
+            Self
+        }
     }
     #[async_trait::async_trait]
     impl dynamo_runtime::engine::AsyncEngineContext for MockContext {
-        fn id(&self) -> &str { "test" }
+        fn id(&self) -> &str {
+            "test"
+        }
         fn stop(&self) {}
         fn stop_generating(&self) {}
         fn kill(&self) {}
-        fn is_stopped(&self) -> bool { false }
-        fn is_killed(&self) -> bool { false }
-        async fn stopped(&self) { std::future::pending::<()>().await; }
-        async fn killed(&self) { std::future::pending::<()>().await; }
+        fn is_stopped(&self) -> bool {
+            false
+        }
+        fn is_killed(&self) -> bool {
+            false
+        }
+        async fn stopped(&self) {
+            std::future::pending::<()>().await;
+        }
+        async fn killed(&self) {
+            std::future::pending::<()>().await;
+        }
         fn link_child(&self, _: Arc<dyn dynamo_runtime::engine::AsyncEngineContext>) {}
     }
 

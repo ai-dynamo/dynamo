@@ -467,10 +467,7 @@ mod tests {
             ErrorType::ConnectionTimeout.to_string(),
             "ConnectionTimeout"
         );
-        assert_eq!(
-            ErrorType::ResponseTimeout.to_string(),
-            "ResponseTimeout"
-        );
+        assert_eq!(ErrorType::ResponseTimeout.to_string(), "ResponseTimeout");
         assert_eq!(ErrorType::Cancelled.to_string(), "Cancelled");
         assert_eq!(
             ErrorType::Backend(BackendError::Unknown).to_string(),
