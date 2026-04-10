@@ -139,26 +139,8 @@ const (
 	ResourceStateNotReady = "not_ready"
 	ResourceStateUnknown  = "unknown"
 
-	// Checkpoint/restore constants
-	// CROSS-REFERENCE: Some constants below are duplicated in deploy/snapshot/protocol.
-	// If you change a value here, update there too.
-
-	// Kubernetes labels
-	KubeLabelIsCheckpointSource             = "nvidia.com/snapshot-is-checkpoint-source" // Pod label that triggers DaemonSet auto-checkpoint
-	KubeLabelCheckpointID                   = "nvidia.com/snapshot-checkpoint-id"        // Checkpoint identity label; the operator stores the resolved identity hash as the value
-	KubeLabelIsRestoreTarget                = "nvidia.com/snapshot-is-restore-target"    // Pod label that triggers DaemonSet auto-restore
-	KubeAnnotationCheckpointArtifactVersion = "nvidia.com/snapshot-artifact-version"     // Checkpoint artifact generation; changing it triggers a new immutable capture attempt
-	DefaultCheckpointArtifactVersion        = "1"
-	DefaultCheckpointJobTTLSeconds          = int32(300)
-
 	// Environment variables injected into pods
 	EnvReadyForCheckpointFile = "DYN_READY_FOR_CHECKPOINT_FILE" // Ready-for-checkpoint file path — checkpoint job pods
-	// Checkpoint pod-internal constants
-	CheckpointVolumeName = "checkpoint-storage" // Pod-internal volume name for checkpoint PVC
-
-	// SeccompProfilePath is the localhost seccomp profile that blocks io_uring syscalls.
-	// Deployed to nodes by the snapshot DaemonSet init container.
-	SeccompProfilePath = "profiles/block-iouring.json"
 
 	// Pod identity (Downward API) ---
 	// After CRIU restore, env vars contain stale values from the checkpoint pod.
