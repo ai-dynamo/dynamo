@@ -621,10 +621,27 @@ fn default_servers() -> Vec<String> {
 }
 
 fn default_lease_ttl() -> u64 {
-    std::env::var(env_etcd::ETCD_LEASE_TTL)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10)
+    match std::env::var(env_etcd::ETCD_LEASE_TTL) {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ttl) if ttl > 0 => ttl,
+            Ok(_) => {
+                tracing::warn!(
+                    "{} must be >= 1; got 0. Falling back to 10.",
+                    env_etcd::ETCD_LEASE_TTL
+                );
+                10
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Invalid {}='{}' ({err}). Falling back to 10.",
+                    env_etcd::ETCD_LEASE_TTL,
+                    raw
+                );
+                10
+            }
+        },
+        Err(_) => 10,
+    }
 }
 
 /// A cache for etcd key-value pairs that watches for changes
