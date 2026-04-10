@@ -30,6 +30,10 @@ BLOCK_SIZE="${BLOCK_SIZE:-16}"            # Must match vLLM backend KV block siz
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.40}"  # Split GPU between 2 workers
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"   # Reduced for 2 workers on 1 GPU
 NUM_WORKERS="${NUM_WORKERS:-2}"          # Number of backend workers
+# --single-gpu / SINGLE_GPU: Packs all workers onto GPU 0 for functional
+# testing on machines with a single GPU.  Reduces performance by sharing
+# GPU memory between workers.
+SINGLE_GPU="${SINGLE_GPU:-false}"
 
 # KV cache override for parallel-safe GPU memory control
 KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
@@ -58,6 +62,7 @@ echo "NAMESPACE=${NAMESPACE}"
 echo "HTTP_PORT=${HTTP_PORT}"
 echo "BLOCK_SIZE=${BLOCK_SIZE}"
 echo "NUM_WORKERS=${NUM_WORKERS}"
+echo "SINGLE_GPU=${SINGLE_GPU}"
 echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE}"
@@ -130,10 +135,18 @@ COMMON_ENV=(
 for i in $(seq 1 "${NUM_WORKERS}"); do
     WORKER_PORT=$((18079 + i * 2))
     KV_EVENTS_PORT=$((${KV_EVENTS_PORT_BASE:-29080} + i - 1))
+
+    if [[ "${SINGLE_GPU}" == "true" ]]; then
+        GPU_ID=0
+    else
+        GPU_ID=$((i - 1))
+    fi
+
     echo
-    echo "=== Starting vLLM backend worker $i (port ${WORKER_PORT}, kv_events ${KV_EVENTS_PORT}) ==="
+    echo "=== Starting vLLM backend worker $i (GPU ${GPU_ID}, port ${WORKER_PORT}, kv_events ${KV_EVENTS_PORT}) ==="
     env "${COMMON_ENV[@]}" \
         "DYN_SYSTEM_PORT=${WORKER_PORT}" \
+        "CUDA_VISIBLE_DEVICES=${GPU_ID}" \
     python -m dynamo.vllm \
             --model "${MODEL}" \
             --enable-multimodal \
