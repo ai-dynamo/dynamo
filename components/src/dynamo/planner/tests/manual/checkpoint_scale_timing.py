@@ -869,6 +869,13 @@ def _parse_rfc3339(s: str) -> datetime.datetime:
     return datetime.datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
+def _parse_k8s_timestamp(ts: str) -> float | None:
+    """Parse a Kubernetes RFC3339 timestamp to Unix epoch seconds, or None on empty input."""
+    if not ts:
+        return None
+    return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+
+
 def pod_is_ready(pod: dict) -> bool:
     for c in pod.get("status", {}).get("conditions", []):
         if c.get("type") == "Ready" and c.get("status") == "True":
@@ -1127,14 +1134,102 @@ def _extract_model_load_time(pod_name: str, ns: str) -> float | None:
     return None
 
 
+def _get_restore_complete_s(
+    pod: dict, ns: str, pod_created_epoch: float, timeout: int = 600
+) -> float | None:
+    """Return seconds from pod creation to when the pod is ready to serve.
+
+    For snapshot-restore pods (no readiness probe): polls k8s events until
+    RestoreSucceeded appears, then returns creationTimestamp → RestoreSucceeded.
+    The snap pod becomes k8s Ready immediately (sleep infinity, no probe), so
+    we must wait for the event rather than checking once and returning.
+
+    For cold-start pods (have a readiness probe): returns immediately with
+    creationTimestamp → k8s Ready condition, since the probe only passes after
+    the model is fully loaded.
+
+    Both use pod creationTimestamp as the baseline so the numbers are directly
+    comparable in the results table.
+    """
+    pod_name = pod["metadata"]["name"]
+
+    # Distinguish snap vs cold by presence of a readiness probe.
+    containers = pod.get("spec", {}).get("containers", [])
+    has_readiness_probe = any(c.get("readinessProbe") for c in containers)
+
+    if has_readiness_probe:
+        # Cold start: Ready condition fires after model load — use it directly.
+        for c in pod.get("status", {}).get("conditions", []):
+            if c.get("type") == "Ready" and c.get("status") == "True":
+                ready_epoch = _parse_k8s_timestamp(c.get("lastTransitionTime", ""))
+                if ready_epoch:
+                    return ready_epoch - pod_created_epoch
+        return None
+
+    # Snap restore: pod is Ready almost instantly (sleep infinity + no probe),
+    # but CRIU restore runs asynchronously.  Poll until RestoreSucceeded fires.
+    info(f"Waiting for RestoreSucceeded event on {pod_name} (up to {timeout}s) ...")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "events",
+                "-n",
+                ns,
+                "--field-selector",
+                f"involvedObject.name={pod_name}",
+                "-o",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            try:
+                events = json.loads(result.stdout).get("items", [])
+                for ev in events:
+                    if ev.get("reason") == "RestoreSucceeded":
+                        ts = (
+                            ev.get("eventTime")
+                            or ev.get("lastTimestamp")
+                            or ev.get("firstTimestamp", "")
+                        )
+                        event_epoch = _parse_k8s_timestamp(ts)
+                        if event_epoch:
+                            elapsed = event_epoch - pod_created_epoch
+                            info(
+                                f"RestoreSucceeded for {pod_name}: {elapsed:.1f}s from creation"
+                            )
+                            return elapsed
+            except json.JSONDecodeError:
+                pass
+        time.sleep(5)
+
+    warn(f"RestoreSucceeded event not seen for {pod_name} within {timeout}s")
+    return None
+
+
 def _direct_scale_up(
-    cfg: dict, svc_name: str, worker_label: str, dgd_name: str, label: str
-) -> tuple[float, float | None]:
+    cfg: dict,
+    svc_name: str,
+    worker_label: str,
+    dgd_name: str,
+    label: str,
+) -> dict:
     """Scale DGD service to +1 replica by direct patch.
 
-    Returns (container_ready_s, model_load_s) where model_load_s is extracted from
-    the new pod's vLLM log line ("Model loading took ... Y.YY seconds"), or None if
-    the line was not found.
+    Returns a timing breakdown dict with keys:
+    - container_ready_s: startedAt → k8s Ready (near-zero for snap pods)
+    - model_load_s: from vLLM log ("Model loading took Y.YY seconds"), or None
+    - restore_complete_s: creation → inference ready (RestoreSucceeded for snap, Ready for cold)
+    - scheduling_s: patch → pod creationTimestamp (scheduling delay)
+    - container_start_s: creationTimestamp → container startedAt (image pull / init)
+    - k8s_ready_s: startedAt → k8s Ready condition (same as container_ready_s from timestamps)
+    - ready_to_inference_s: Ready → actual inference ready (>0 for snap async CRIU, 0 for cold)
+    - total_s: patch → inference ready (scheduling + restore_complete_s)
 
     The Planner's load-based path returns None (no-op) when the model never saturates
     (slope=0, fallback x_sla=0), so a direct DGD patch is both safe and deterministic.
@@ -1148,6 +1243,8 @@ def _direct_scale_up(
     }
     target = len(existing_pods) + 1
     info(f"Existing Ready workers: {existing_pods} → patching to {target}")
+
+    t0_epoch = time.time()
     _patch_replicas(ns, dgd_name, svc_name, target)
 
     stop_event = threading.Event()
@@ -1164,13 +1261,84 @@ def _direct_scale_up(
         wall = time.monotonic() - t0
         pod_name = pod["metadata"]["name"]
         model_load_s = _extract_model_load_time(pod_name, ns)
+
+        # Extract timestamps for full timeline breakdown.
+        pod_created_epoch = _parse_k8s_timestamp(
+            pod.get("metadata", {}).get("creationTimestamp", "")
+        )
+        container_started_epoch: float | None = None
+        for cs in pod.get("status", {}).get("containerStatuses", []):
+            t = cs.get("state", {}).get("running", {}).get("startedAt")
+            if t:
+                container_started_epoch = _parse_k8s_timestamp(t)
+                break
+        k8s_ready_epoch: float | None = None
+        for c in pod.get("status", {}).get("conditions", []):
+            if c.get("type") == "Ready" and c.get("status") == "True":
+                k8s_ready_epoch = _parse_k8s_timestamp(c.get("lastTransitionTime", ""))
+                break
+
+        scheduling_s: float | None = (
+            pod_created_epoch - t0_epoch if pod_created_epoch else None
+        )
+        container_start_s: float | None = (
+            container_started_epoch - pod_created_epoch
+            if pod_created_epoch and container_started_epoch
+            else None
+        )
+        k8s_ready_s: float | None = (
+            k8s_ready_epoch - container_started_epoch
+            if container_started_epoch and k8s_ready_epoch
+            else None
+        )
+
+        # restore_complete_s: creation → inference ready.
+        # For snap: creation → RestoreSucceeded event (polls k8s events).
+        # For cold: creation → k8s Ready (HTTP probe only passes after model load).
+        restore_complete_s: float | None = None
+        if pod_created_epoch:
+            restore_complete_s = _get_restore_complete_s(pod, ns, pod_created_epoch)
+            if restore_complete_s is not None:
+                info(
+                    f"{label}: restore-complete={restore_complete_s:.1f}s  pod={pod_name}"
+                )
+
+        # ready_to_inference_s: gap between k8s Ready and actual inference ready.
+        # Cold: 0 (k8s Ready IS inference ready — HTTP probe passed).
+        # Snap: RestoreSucceeded fires after k8s Ready (async CRIU restore lag).
+        containers = pod.get("spec", {}).get("containers", [])
+        has_readiness_probe = any(c.get("readinessProbe") for c in containers)
+        ready_to_inference_s: float | None = None
+        if has_readiness_probe:
+            ready_to_inference_s = 0.0
+        elif (
+            restore_complete_s is not None
+            and container_start_s is not None
+            and k8s_ready_s is not None
+        ):
+            ready_to_inference_s = restore_complete_s - container_start_s - k8s_ready_s
+
+        total_s: float | None = (
+            scheduling_s + restore_complete_s
+            if scheduling_s is not None and restore_complete_s is not None
+            else None
+        )
+
         ok(
             f"{label}: container→ready={elapsed:.1f}s  wall={wall:.1f}s  "
-            f"model-load={model_load_s:.2f}s  pod={pod_name}"
-            if model_load_s is not None
-            else f"{label}: container→ready={elapsed:.1f}s  wall={wall:.1f}s  pod={pod_name}"
+            + (f"model-load={model_load_s:.2f}s  " if model_load_s is not None else "")
+            + f"pod={pod_name}"
         )
-        return elapsed, model_load_s
+        return {
+            "container_ready_s": elapsed,
+            "model_load_s": model_load_s,
+            "restore_complete_s": restore_complete_s,
+            "scheduling_s": scheduling_s,
+            "container_start_s": container_start_s,
+            "k8s_ready_s": k8s_ready_s,
+            "ready_to_inference_s": ready_to_inference_s,
+            "total_s": total_s,
+        }
     finally:
         stop_event.set()
 
@@ -1196,7 +1364,9 @@ def build_dgdr_yaml(cfg: dict, phase_mode: str = "auto") -> str:
     image = cfg[
         "image"
     ]  # placeholder image: used for spec.image, profiler, planner, workers
-    frontend_image = cfg.get("frontend_image") or _derive_frontend_image(image)
+    # Default: use the same image for frontend (placeholder has all components).
+    # Override with --frontend-image only when a separate dynamo-frontend image is needed.
+    frontend_image = cfg.get("frontend_image") or image
     ngc_secret = cfg["ngc_secret"]
     hf_secret = cfg["hf_secret"]
     hf_cache_pvc = cfg["hf_cache_pvc"]
@@ -1647,19 +1817,19 @@ def _measure_scale_up_for_deployed(
         wait_for_new_pod_ready(ns, worker_label, existing_names, cfg["deploy_timeout"])
 
     table.update(label, "scaling 1→2…")
-    scale_up_s, model_load_s = _direct_scale_up(
-        cfg, svc_name, worker_label, dgd_name, label
-    )
+    timing = _direct_scale_up(cfg, svc_name, worker_label, dgd_name, label)
 
+    scale_up_s = timing["container_ready_s"]
     table.done(label, f"{scale_up_s:.0f}s container→ready")
     return {
         "name": deployed_info["name"],
         "label": label,
         "tp": deployed_info["tp"],
-        "scale_up_s": scale_up_s,
-        "model_load_s": model_load_s,
         "dgdr_name": deployed_info["dgdr_name"],
         "dgd_name": dgd_name,
+        **timing,
+        # keep scale_up_s as alias for container_ready_s for backward compat
+        "scale_up_s": scale_up_s,
     }
 
 
@@ -1782,7 +1952,7 @@ def run_all_scenarios(cfg: dict, args, workdir: Path) -> list[dict]:
 
 
 def print_results_table(results: list[dict], cfg: dict, workdir: Path) -> None:
-    """Print a side-by-side comparison and save JSON summary."""
+    """Print a full timeline breakdown and save JSON summary."""
     if not results:
         warn("No results to display.")
         return
@@ -1790,35 +1960,204 @@ def print_results_table(results: list[dict], cfg: dict, workdir: Path) -> None:
     cold = next((r for r in results if r["name"] == "cold"), None)
     snap = next((r for r in results if r["name"] == "snap"), None)
 
-    print("\n" + "=" * 68)
-    print("  SCALE-UP TIMING: COLD START vs SNAPSHOT RESTORE")
-    print("=" * 68)
-    print(f"  Model    : {cfg['model']}")
+    W = 72
+
+    def _fmt(v: float | None, unit: str = "s") -> str:
+        return f"{v:.1f}{unit}" if v is not None else "—"
+
+    def _row(phase: str, note: str, cold_v: float | None, snap_v: float | None) -> None:
+        c = _fmt(cold_v)
+        s = _fmt(snap_v)
+        print(f"  {phase:<32}  {note:<24}  {c:>10}  {s:>10}")
+
+    print("\n" + "=" * W)
+    print("  SCALE-UP TIMELINE: COLD START vs SNAPSHOT RESTORE")
+    print("=" * W)
+    print(f"  Model : {cfg['model']}")
     if cold:
-        print(f"  DGDR     : {cold['dgdr_name']}  TP={cold['tp']}")
-    print("-" * 68)
-    print(f"  {'Scenario':<40}  {'container→ready':>13}  {'model-load':>10}")
-    print("-" * 68)
+        print(f"  TP    : {cold['tp']}   DGDR: {cold['dgdr_name']}")
+    print("-" * W)
+    print(f"  {'Phase':<32}  {'Note':<24}  {'Cold':>10}  {'Snapshot':>10}")
+    print("-" * W)
 
-    def _row(r: dict) -> None:
-        ml = r.get("model_load_s")
-        ml_str = f"{ml:.1f}s" if ml is not None else "    n/a"
-        print(f"  {r['label']:<40}  {r['scale_up_s']:>12.1f}s  {ml_str:>10}")
+    cold_k8s = cold.get("k8s_ready_s") if cold else None
+    snap_k8s = snap.get("k8s_ready_s") if snap else None
+    _row("Container → k8s Ready", "readiness probe / sleep", cold_k8s, snap_k8s)
 
-    for r in sorted(results, key=lambda x: {"cold": 0, "snap": 1}.get(x["name"], 9)):
-        _row(r)
+    # Sub-row: vLLM model load (cold only)
+    cold_ml = cold.get("model_load_s") if cold else None
+    snap_ml = snap.get("model_load_s") if snap else None
+    if cold_ml is not None or snap_ml is not None:
+        c = _fmt(cold_ml)
+        s = _fmt(snap_ml)
+        print(
+            f"  {'  ↳ vLLM model load':<32}  {'(from vLLM logs)':<24}  {c:>10}  {s:>10}"
+        )
 
-    if cold and snap and cold["scale_up_s"] > 0 and snap["scale_up_s"] > 0:
-        print("-" * 68)
-        ratio = cold["scale_up_s"] / snap["scale_up_s"]
-        pct = (cold["scale_up_s"] - snap["scale_up_s"]) / cold["scale_up_s"] * 100
-        print(f"  Speedup (cold → snapshot):  {ratio:.1f}x  ({pct:.0f}% faster)")
+    cold_r2i = cold.get("ready_to_inference_s") if cold else None
+    snap_r2i = snap.get("ready_to_inference_s") if snap else None
+    _row("Ready → inference ready", "async CRIU restore lag", cold_r2i, snap_r2i)
 
-    print("=" * 68 + "\n")
+    print("-" * W)
+
+    # Total excludes scheduling + container start (image pull noise; equal in a
+    # pre-pulled/steady-state cluster). Use k8s_ready_s + ready_to_inference_s.
+    def _core_total(r: dict | None) -> float | None:
+        if r is None:
+            return None
+        k = r.get("k8s_ready_s")
+        ri = r.get("ready_to_inference_s")
+        if k is None or ri is None:
+            return None
+        return k + ri
+
+    cold_total = _core_total(cold)
+    snap_total = _core_total(snap)
+    _row("TOTAL  (running → inference)", "", cold_total, snap_total)
+
+    if cold_total and snap_total and cold_total > 0 and snap_total > 0:
+        speedup = cold_total / snap_total
+        if speedup >= 1.0:
+            note = f"snapshot {speedup:.2f}x faster  ({(1 - snap_total/cold_total)*100:.0f}% reduction)"
+        else:
+            note = f"snapshot {1/speedup:.2f}x SLOWER  ({(snap_total/cold_total - 1)*100:.0f}% overhead)"
+        print(f"\n  Speedup (cold ÷ snapshot):  {note}")
+
+    print("=" * W + "\n")
 
     summary_path = workdir / "results_summary.json"
     summary_path.write_text(json.dumps(results, indent=2))
     info(f"Summary saved to {summary_path}")
+
+
+# ---------------------------------------------------------------------------
+# Gantt chart
+# ---------------------------------------------------------------------------
+
+
+def plot_gantt(results: list[dict], cfg: dict, workdir: Path) -> None:
+    """Render a horizontal Gantt chart comparing cold vs snapshot timing phases."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.patches as mpatches
+        import matplotlib.pyplot as plt
+    except ImportError:
+        import warnings
+
+        warnings.warn("matplotlib is not installed — skipping Gantt chart generation")
+        return
+
+    # ---- colour palette ----
+    C_COLD_K8S = "#ff9800"  # orange   — cold container→ready (model load)
+    C_SNAP_K8S = "#66bb6a"  # green    — snap container→ready (sleep ∞)
+    C_CRIU = "#e53935"  # red      — CRIU restore lag
+
+    n = len(results)
+    fig_h = max(3.5, 1.5 * n + 1.5)
+    fig, ax = plt.subplots(figsize=(14 + max(0, n - 2) * 2, fig_h))
+
+    yticks, ylabels = [], []
+
+    for row_idx, res in enumerate(results):
+        y = (n - 1 - row_idx) * 1.2  # top→bottom
+        h = 0.6
+        is_snap = res.get("name", "cold") == "snap"
+
+        x = 0.0
+
+        def bar(start, width, color, hatch=None):
+            if width is None or width <= 0:
+                return
+            ax.barh(
+                y,
+                width,
+                left=start,
+                height=h,
+                color=color,
+                hatch=hatch,
+                edgecolor="white",
+                linewidth=0.5,
+                align="center",
+            )
+
+        # 1. Container → k8s Ready (t=0 is container running; scheduling/image-pull excluded)
+        k8s = res.get("k8s_ready_s")
+        k8s_color = C_SNAP_K8S if is_snap else C_COLD_K8S
+        bar(x, k8s, k8s_color)
+        ml = res.get("model_load_s")
+        if not is_snap and k8s and ml is not None:
+            ax.text(
+                x + k8s / 2,
+                y,
+                f"model load\n{ml:.1f}s",
+                ha="center",
+                va="center",
+                fontsize=6.5,
+                color="white",
+                fontweight="bold",
+            )
+        if k8s:
+            x += k8s
+
+        # 2. CRIU restore lag (snap only)
+        r2i = res.get("ready_to_inference_s")
+        if is_snap:
+            bar(x, r2i, C_CRIU)
+            if r2i:
+                x += r2i
+
+        # 3. "inference ready" vertical dashed line at core total (k8s_ready + ready_to_inference)
+        k8s_v = res.get("k8s_ready_s") or 0.0
+        r2i_v = res.get("ready_to_inference_s") or 0.0
+        core_total = k8s_v + r2i_v
+        if core_total > 0:
+            ax.axvline(
+                x=core_total, color="black", linestyle="--", linewidth=0.9, alpha=0.7
+            )
+            ax.text(
+                core_total + 0.5,
+                y + h * 0.55,
+                f"inference ready\n({core_total:.0f}s)",
+                fontsize=7,
+                va="bottom",
+                ha="left",
+                color="black",
+            )
+
+        yticks.append(y)
+        ylabels.append(res.get("label", res.get("name", f"row {row_idx}")))
+
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(ylabels, fontsize=9)
+    ax.set_xlabel("Seconds from container running", fontsize=10)
+    ax.set_title(
+        f"Scale-Up Timeline: {cfg.get('model', '')}", fontsize=12, fontweight="bold"
+    )
+    ax.margins(y=0.35)
+    ax.grid(axis="x", linestyle=":", alpha=0.4)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    legend_handles = [
+        mpatches.Patch(
+            color=C_COLD_K8S, label="Container → k8s Ready (cold: model load)"
+        ),
+        mpatches.Patch(
+            color=C_SNAP_K8S, label="Container → k8s Ready (snap: sleep ∞, ~1s)"
+        ),
+        mpatches.Patch(
+            color=C_CRIU, label="CRIU restore (k8s Ready → inference ready)"
+        ),
+    ]
+    ax.legend(handles=legend_handles, loc="lower right", fontsize=7.5, framealpha=0.85)
+
+    fig.tight_layout()
+    out = workdir / "timeline_gantt.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    info(f"Gantt chart saved to {out}")
 
 
 # ---------------------------------------------------------------------------
@@ -2056,6 +2395,7 @@ def main():
             results = run_all_scenarios(tp_cfg, args, tp_workdir)
             all_results.append(results)
             print_results_table(results, tp_cfg, tp_workdir)
+            plot_gantt(results, tp_cfg, tp_workdir)
 
     except KeyboardInterrupt:
         warn("Interrupted")

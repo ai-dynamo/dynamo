@@ -231,5 +231,11 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 RUN chmod +x /usr/local/bin/nsrestore
 
+# Install planner/profiler Python dependencies (kubernetes_asyncio, pmdarima, prophet, etc.)
+# These are needed when the placeholder image runs the profiler or planner components.
+COPY requirements.planner.txt /tmp/requirements.planner.txt
+RUN /opt/dynamo/venv/bin/pip install --no-cache-dir -r /tmp/requirements.planner.txt \
+    && rm /tmp/requirements.planner.txt
+
 # Create directories
 RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
