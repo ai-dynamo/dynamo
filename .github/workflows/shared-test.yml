@@ -63,6 +63,20 @@ on:
         required: false
         type: number
         default: 30
+      run_xpu_test:
+        description: 'Whether to run XPU tests'
+        required: false
+        type: boolean
+        default: false
+      xpu_test_marker:
+        description: 'XPU pytest markers'
+        required: false
+        type: string
+      xpu_test_timeout_minutes:
+        description: 'Timeout in minutes for XPU tests'
+        required: false
+        type: number
+        default: 120
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -84,8 +98,8 @@ jobs:
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
-    name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
-    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v1' }}
+    name: ${{ inputs.test_type }} ${{ matrix.cuda_version == 'non_cuda' && 'non-cuda' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
+    runs-on: ${{ matrix.cuda_version == 'non_cuda' && matrix.platform == 'amd64' && inputs.run_xpu_test && 'xpu' || (matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v1') }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -97,7 +111,17 @@ jobs:
         run: |
           CUDA_VERSION="${{ matrix.cuda_version }}"
           CUDA_MAJOR=${CUDA_VERSION%%.*}
-          if [[ "${{ inputs.target_tag_plain }}" == *"planner"* ]]; then
+          if [[ "${{ matrix.cuda_version }}" == "non_cuda" ]]; then
+            CPU_IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}
+            XPU_IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}-xpu
+            echo "cpu_runtime_image=${ECR_REPOSITORY}:${CPU_IMAGE_TAG}" >> $GITHUB_OUTPUT
+            echo "cpu_test_image=${ECR_REPOSITORY}:${CPU_IMAGE_TAG}-test" >> $GITHUB_OUTPUT
+            echo "xpu_runtime_image=${ECR_REPOSITORY}:${XPU_IMAGE_TAG}" >> $GITHUB_OUTPUT
+            echo "xpu_test_image=${ECR_REPOSITORY}:${XPU_IMAGE_TAG}-test" >> $GITHUB_OUTPUT
+            echo "runtime_image=${ECR_REPOSITORY}:${CPU_IMAGE_TAG}" >> $GITHUB_OUTPUT
+            echo "test_image=${ECR_REPOSITORY}:${CPU_IMAGE_TAG}-test" >> $GITHUB_OUTPUT
+            exit 0
+          elif [[ "${{ inputs.target_tag_plain }}" == *"planner"* ]]; then
             IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}
           else
             IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}-cuda${CUDA_MAJOR}
@@ -120,8 +144,17 @@ jobs:
         run: |
           source ./.github/scripts/retry_docker.sh
           start_time=$(date +%s)
-          retry_pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
-          retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          if [[ "${{ matrix.cuda_version }}" == "non_cuda" ]]; then
+            retry_pull ${{ steps.calculate-target-tag.outputs.cpu_runtime_image }}
+            retry_pull ${{ steps.calculate-target-tag.outputs.cpu_test_image }}
+            if [[ "${{ matrix.platform }}" == "amd64" && "${{ inputs.run_xpu_test }}" == "true" ]]; then
+              retry_pull ${{ steps.calculate-target-tag.outputs.xpu_runtime_image }}
+              retry_pull ${{ steps.calculate-target-tag.outputs.xpu_test_image }}
+            fi
+          else
+            retry_pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
+            retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          fi
           retry_pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
@@ -145,11 +178,11 @@ jobs:
             echo "✅ Sanity check passed"
           fi
       - name: Run CPU-only tests (parallelized)
-        if: ${{ inputs.run_cpu_only_tests }}
+        if: ${{ matrix.cuda_version == 'non_cuda' && inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          image_tag: ${{ steps.calculate-target-tag.outputs.cpu_test_image }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_cpu"
@@ -159,7 +192,7 @@ jobs:
           dind_as_sidecar: 'true'
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && matrix.cuda_version != 'non_cuda' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
@@ -170,3 +203,17 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+      - name: Run XPU tests (sequential)
+        timeout-minutes: ${{ inputs.xpu_test_timeout_minutes }}
+        if: ${{ matrix.cuda_version == 'non_cuda' && matrix.platform == 'amd64' && inputs.run_xpu_test }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.xpu_test_image }}
+          pytest_marks: ${{ inputs.xpu_test_marker }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+          device: xpu
