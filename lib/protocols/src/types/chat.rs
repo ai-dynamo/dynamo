@@ -103,8 +103,8 @@ where
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
         serde_json::Value::String(s) => Ok(s),
-        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
-            serde_json::to_string(&value).map_err(|e| D::Error::custom(e.to_string()))
+        v @ serde_json::Value::Object(_) => {
+            serde_json::to_string(&v).map_err(|e| D::Error::custom(e.to_string()))
         }
         other => Err(D::Error::custom(format!(
             "expected string or object for `arguments`, got {other}"
@@ -121,12 +121,9 @@ where
     match value {
         None => Ok(None),
         Some(serde_json::Value::String(s)) => Ok(Some(s)),
-        Some(serde_json::Value::Object(_)) | Some(serde_json::Value::Array(_)) => {
-            let v = value.unwrap();
-            serde_json::to_string(&v)
-                .map(Some)
-                .map_err(|e| D::Error::custom(e.to_string()))
-        }
+        Some(v @ serde_json::Value::Object(_)) => serde_json::to_string(&v)
+            .map(Some)
+            .map_err(|e| D::Error::custom(e.to_string())),
         Some(other) => Err(D::Error::custom(format!(
             "expected string or object for `arguments`, got {other}"
         ))),
@@ -145,7 +142,7 @@ where
 /// Accepts `arguments` as either a JSON string (`"{\"key\":\"value\"}"`) or a
 /// JSON object/array (`{"key": "value"}`); both are normalised to a JSON string
 /// on deserialisation so callers always see the canonical form.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct FunctionCall {
     pub name: String,
     #[serde(deserialize_with = "deserialize_arguments")]
@@ -156,11 +153,7 @@ pub struct FunctionCall {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct FunctionCallStream {
     pub name: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_arguments_opt",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, deserialize_with = "deserialize_arguments_opt")]
     pub arguments: Option<String>,
 }
 
@@ -172,11 +165,8 @@ pub struct FunctionCallStream {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ChatCompletionMessageToolCallChunk {
     pub index: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<FunctionType>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub function: Option<FunctionCallStream>,
 }
 
@@ -841,13 +831,67 @@ mod tests {
     }
 
     #[test]
-    fn function_call_accepts_array_arguments() {
-        let fc: FunctionCall = serde_json::from_value(serde_json::json!({
-            "name": "multi",
+    fn function_call_rejects_integer_arguments() {
+        let result = serde_json::from_value::<FunctionCall>(serde_json::json!({
+            "name": "f",
+            "arguments": 42
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_rejects_boolean_arguments() {
+        let result = serde_json::from_value::<FunctionCall>(serde_json::json!({
+            "name": "f",
+            "arguments": true
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_rejects_null_arguments() {
+        let result = serde_json::from_value::<FunctionCall>(serde_json::json!({
+            "name": "f",
+            "arguments": null
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_rejects_array_arguments() {
+        let result = serde_json::from_value::<FunctionCall>(serde_json::json!({
+            "name": "f",
             "arguments": [1, 2, 3]
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_stream_null_arguments_produces_none() {
+        let fcs: FunctionCallStream = serde_json::from_value(serde_json::json!({
+            "name": "f",
+            "arguments": null
         }))
         .unwrap();
-        assert_eq!(fc.arguments, "[1,2,3]");
+        assert_eq!(fcs.arguments, None);
+    }
+
+    #[test]
+    fn function_call_stream_rejects_integer_arguments() {
+        let result = serde_json::from_value::<FunctionCallStream>(serde_json::json!({
+            "name": "f",
+            "arguments": 42
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn function_call_stream_rejects_boolean_arguments() {
+        let result = serde_json::from_value::<FunctionCallStream>(serde_json::json!({
+            "name": "f",
+            "arguments": true
+        }));
+        assert!(result.is_err());
     }
 
     #[test]
