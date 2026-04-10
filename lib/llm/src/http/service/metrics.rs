@@ -836,7 +836,9 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
-        registry.register(Box::new(self.model_migration_max_seq_len_exceeded_total.clone()))?;
+        registry.register(Box::new(
+            self.model_migration_max_seq_len_exceeded_total.clone(),
+        ))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
         registry.register(Box::new(self.model_rejection_total.clone()))?;
 

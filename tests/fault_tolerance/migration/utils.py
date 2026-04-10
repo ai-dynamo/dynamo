@@ -626,17 +626,18 @@ def run_migration_test(
         )
         terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
 
-    # Step 5: Validate response based on migration setting
-    if migration_limit > 0:
+    # Step 5: Validate response and verify migration occurred.
+    # migration_enabled and not max_seq_len_exceeded -> migration should succeed
+    if migration_limit > 0 and migration_max_seq_len != 1:
         validate_response(request_thread, response_list, validate_delay=stream)
         verify_migration_occurred(frontend)
-        expected_ongoing_request_count = 1
     else:
         try:
             validate_response(request_thread, response_list, validate_delay=stream)
-            pytest.fail("Request succeeded unexpectedly when migration was disabled")
+            pytest.fail(
+                "Request succeeded unexpectedly when migration should have failed"
+            )
         except Exception as e:
-            # Request failed as expected - verify it's a known error type
             error_str = str(e)
             assert (
                 "SSE error event received:" in error_str
@@ -645,15 +646,13 @@ def run_migration_test(
 
         try:
             verify_migration_occurred(frontend)
-            pytest.fail("Migration unexpectedly occurred when disabled")
+            pytest.fail("Migration unexpectedly succeeded")
         except AssertionError as e:
             assert "'Cannot recreate stream: ...' error found in logs" in str(e)
-        expected_ongoing_request_count = 0
 
     # Step 6: Verify migration metrics
-    expect_max_seq_len_to_exceed = migration_limit > 0 and migration_max_seq_len == 1
     verify_migration_metrics(
         frontend.frontend_port,
-        expected_ongoing_request_count=expected_ongoing_request_count,
-        expected_max_seq_len_exceeded_count=1 if expect_max_seq_len_to_exceed else 0,
+        expected_ongoing_request_count=1 if migration_limit > 0 else 0,
+        expected_max_seq_len_exceeded_count=1 if migration_max_seq_len == 1 else 0,
     )

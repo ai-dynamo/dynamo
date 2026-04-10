@@ -115,6 +115,7 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
 }
 
 impl ModelWatcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,

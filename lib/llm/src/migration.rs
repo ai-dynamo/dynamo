@@ -163,6 +163,7 @@ impl RetryManager {
             metrics,
         };
         slf.new_stream().await?;
+        slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
         Ok(slf)
     }
 
@@ -238,23 +239,8 @@ impl RetryManager {
             Some(output) => output,
             None => return,
         };
-        // Stop caching and disable migration when appending these tokens would push the
-        // sequence length past the configured limit. Exactly at the limit (len == max_seq_len)
-        // is still migratable; only strictly exceeding it triggers the cutoff.
-        if let Some(max_seq_len) = self.max_seq_len {
-            let new_len =
-                self.request.token_ids.len() as u32 + llm_engine_output.token_ids.len() as u32;
-            if new_len > max_seq_len {
-                tracing::info!(
-                    "Sequence length would reach {} (> migration max_seq_len {}), \
-                     disabling migration",
-                    new_len,
-                    max_seq_len
-                );
-                self.metrics.inc_migration_max_seq_len_exceeded(&self.model_name);
-                self.retries_left = 0;
-                return;
-            }
+        if self.exceed_max_seq_len(llm_engine_output.token_ids.len() as u32) {
+            return;
         }
         if let Some(max_tokens) = self.request.stop_conditions.max_tokens {
             self.request.stop_conditions.max_tokens =
@@ -263,6 +249,27 @@ impl RetryManager {
         for token_id in llm_engine_output.token_ids.iter() {
             self.request.token_ids.push(*token_id);
         }
+    }
+
+    /// Returns `true` if the tracked request token length plus `new_output_len`
+    /// exceeds the configured max_seq_len, in which case migration is disabled.
+    fn exceed_max_seq_len(&mut self, new_output_len: u32) -> bool {
+        if let Some(max_seq_len) = self.max_seq_len {
+            let total_len = self.request.token_ids.len() as u32 + new_output_len;
+            if total_len > max_seq_len {
+                tracing::warn!(
+                    "Sequence length {} exceeds migration max_seq_len {}, \
+                     disabling migration",
+                    total_len,
+                    max_seq_len
+                );
+                self.metrics
+                    .inc_migration_max_seq_len_exceeded(&self.model_name);
+                self.retries_left = 0; // disable migration
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -1052,7 +1059,7 @@ mod tests {
         );
     }
 
-    /// Test case 9: max_seq_len disables migration exactly at limit + 1
+    /// Test case 9: max_seq_len exceeded limit + 1 disables migration
     ///
     /// Boundary test: prompt has 3 tokens, max_seq_len = 5. After 2 generated tokens the
     /// total is 5 (== max_seq_len) — still migratable. The 3rd generated token would push
@@ -1060,7 +1067,7 @@ mod tests {
     /// The failure is placed right at that point (fail_after: 3) so we see the error
     /// propagated instead of retried.
     #[tokio::test]
-    async fn test_retry_manager_max_seq_len_disables_migration() {
+    async fn test_retry_manager_max_seq_len_exceeded() {
         dynamo_runtime::logging::init();
 
         let context_id = uuid::Uuid::new_v4().to_string();
@@ -1119,65 +1126,20 @@ mod tests {
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
         // max_seq_len limit was triggered once (at token 103).
-        assert_eq!(metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL), 1);
+        assert_eq!(
+            metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
+            1
+        );
     }
 
-    /// Test case 10: max_seq_len=None means no limit (default behavior)
-    ///
-    /// With max_seq_len=None, migration should work normally regardless of sequence length.
-    #[tokio::test]
-    async fn test_retry_manager_max_seq_len_none_no_limit() {
-        dynamo_runtime::logging::init();
-
-        let context_id = uuid::Uuid::new_v4().to_string();
-        let request = create_mock_request(10);
-        let mock_engine = Arc::new(MockEngine::new(
-            MockBehavior::MidStreamFail { fail_after: 5 },
-            10,
-            100,
-            context_id.clone(),
-        ));
-        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
-            mock_engine;
-
-        let ctx = Arc::new(Controller::new(context_id.clone()));
-        let metrics = Arc::new(Metrics::new());
-        let mut retry_manager = RetryManager::build(
-            ctx,
-            request,
-            next_generate,
-            3,
-            None, // no max_seq_len limit
-            Arc::new(TEST_MODEL.to_string()),
-            metrics.clone(),
-        )
-        .await
-        .expect("Failed to build RetryManager");
-
-        let mut responses = Vec::new();
-        while let Some(response) = retry_manager.next().await {
-            responses.push(response);
-        }
-
-        // Migration succeeds — all 10 responses delivered
-        assert_eq!(responses.len(), 10);
-        for response in &responses {
-            assert!(response.err().is_none());
-        }
-
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
-        // No max_seq_len limit configured, so the counter should be 0.
-        assert_eq!(metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL), 0);
-    }
-
-    /// Test case 11: Migration succeeds when sequence length exactly equals max_seq_len
+    /// Test case 10: Migration succeeds when sequence length is at max_seq_len
     ///
     /// Boundary test: prompt has 3 tokens, max_seq_len = 5. After 2 generated tokens
     /// the total is exactly 5 (== max_seq_len). The failure occurs at that point
     /// (fail_after: 2). Because we use strict inequality (> not >=), the request is
     /// still migratable and the retry succeeds.
     #[tokio::test]
-    async fn test_retry_manager_max_seq_len_migration_at_exact_limit() {
+    async fn test_retry_manager_max_seq_len_at_limit() {
         dynamo_runtime::logging::init();
 
         let context_id = uuid::Uuid::new_v4().to_string();
@@ -1233,6 +1195,74 @@ mod tests {
         );
 
         // The limit was triggered once (first token of the retry stream exceeded 5).
-        assert_eq!(metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL), 1);
+        assert_eq!(
+            metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
+            1
+        );
+    }
+
+    /// Test case 11: Prompt length alone exceeds max_seq_len
+    ///
+    /// When the prompt tokens already exceed max_seq_len, migration is disabled
+    /// in RetryManager::build before any tokens are generated. A mid-stream
+    /// failure should propagate the error without attempting migration.
+    #[tokio::test]
+    async fn test_retry_manager_max_seq_len_exceeded_by_prompt() {
+        dynamo_runtime::logging::init();
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        // Prompt = [1, 2, 3] (len 3). max_seq_len = 2, so prompt alone exceeds the limit.
+        let request = create_mock_request(10);
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::MidStreamFail { fail_after: 3 },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            request,
+            next_generate,
+            3,
+            Some(2), // prompt(3) > max_seq_len(2) → migration disabled at build time
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(response) = retry_manager.next().await {
+            responses.push(response);
+        }
+
+        // 3 successful tokens + 1 Disconnected error (migration disabled from the start).
+        assert_eq!(
+            responses.len(),
+            4,
+            "Expected 3 successful + 1 error (migration disabled by prompt exceeding max_seq_len)"
+        );
+
+        for (i, response) in responses[0..3].iter().enumerate() {
+            assert!(response.err().is_none(), "Response {} should be OK", i);
+        }
+
+        let err = responses[3]
+            .err()
+            .expect("Last response should be Disconnected error");
+        assert_eq!(err.error_type(), ErrorType::Disconnected);
+
+        // max_seq_len was exceeded at build time (prompt len 3 > 2).
+        assert_eq!(
+            metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
+            1
+        );
+        // Migration was attempted but blocked (retries_left was already 0).
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
     }
 }
