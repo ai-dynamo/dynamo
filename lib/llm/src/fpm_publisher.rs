@@ -11,6 +11,7 @@
 //! [`crate::kv_router::publisher::KvEventPublisher`], but is much simpler:
 //! no event transformation, no batching, no local indexer — just raw byte relay.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -19,7 +20,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_mocker::scheduler::ForwardPassSnapshot;
+use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
@@ -198,6 +199,20 @@ fn serialize_fpm(
     rmp_serde::to_vec_named(&metrics).map_err(|e| anyhow::anyhow!("FPM serialization failed: {e}"))
 }
 
+/// Live FPM sink that forwards snapshots to the `FpmDirectPublisher`'s
+/// internal serialization pipeline via an mpsc channel.
+struct LiveFpmSink {
+    tx: mpsc::UnboundedSender<ForwardPassSnapshot>,
+}
+
+impl FpmSink for LiveFpmSink {
+    fn publish(&self, snapshot: ForwardPassSnapshot) -> Result<()> {
+        self.tx
+            .send(snapshot)
+            .map_err(|_| anyhow::anyhow!("FPM publisher channel closed"))
+    }
+}
+
 /// Direct FPM publisher for the mocker engine.
 ///
 /// Unlike [`FpmEventRelay`] (which bridges raw ZMQ from a forked vLLM child
@@ -208,16 +223,20 @@ pub struct FpmDirectPublisher {
 }
 
 impl FpmDirectPublisher {
-    /// Create and start a new direct publisher.
+    /// Create and start a new direct publisher, returning per-dp-rank sink handles.
+    ///
+    /// Each returned [`FpmPublisher`] wraps a sink that feeds the shared
+    /// serialization + event-plane publish pipeline. The scheduler passes
+    /// one to each engine via the deferred-sink model.
     ///
     /// - `component`: Dynamo component (provides runtime + discovery scope).
     /// - `worker_id`: Unique worker identifier (typically `connection_id().to_string()`).
-    /// - `fpm_receivers`: One receiver per dp_rank, producing snapshots from the scheduler loop.
+    /// - `dp_size`: Number of data-parallel ranks.
     pub fn new(
         component: Component,
         worker_id: String,
-        fpm_receivers: Vec<mpsc::UnboundedReceiver<ForwardPassSnapshot>>,
-    ) -> Result<Self> {
+        dp_size: u32,
+    ) -> Result<(Self, Vec<FpmPublisher>)> {
         let rt = component.drt().runtime().secondary();
         let cancel = CancellationToken::new();
 
@@ -250,16 +269,20 @@ impl FpmDirectPublisher {
             tracing::info!("FPM direct publisher: shutting down");
         });
 
-        // Per-dp_rank serialization tasks.
+        // Per-dp_rank: create internal channels, return sink handles.
         //
         // Each task forwards active-pass snapshots and emits periodic idle
         // heartbeats (zeroed snapshot, wall_time=0.0) when the scheduler is
         // idle, matching the Python `_FpmPublisherThread` contract.
-        for (dp_rank, mut fpm_rx) in fpm_receivers.into_iter().enumerate() {
+        let mut fpm_publishers = Vec::with_capacity(dp_size as usize);
+        for dp_rank in 0..dp_size {
+            let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel();
+            let sink = Arc::new(LiveFpmSink { tx: fpm_tx }) as Arc<dyn FpmSink>;
+            fpm_publishers.push(FpmPublisher::new(Some(sink)));
+
             let pub_tx = pub_tx.clone();
             let worker_id = worker_id.clone();
             let cancel_ser = cancel.clone();
-            let dp_rank = dp_rank as u32;
 
             rt.spawn(async move {
                 let mut counter: i64 = 0;
@@ -313,7 +336,7 @@ impl FpmDirectPublisher {
             "FPM direct publisher started"
         );
 
-        Ok(Self { cancel })
+        Ok((Self { cancel }, fpm_publishers))
     }
 
     pub fn shutdown(&self) {
@@ -330,7 +353,6 @@ impl Drop for FpmDirectPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_mocker::scheduler::ForwardPassSnapshot;
     use serde::Deserialize;
     use std::collections::HashMap;
 

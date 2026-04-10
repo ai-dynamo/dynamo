@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
 use dynamo_kv_router::indexer::{
@@ -17,8 +17,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use super::{DirectRequest, OutputSignal, SchedulerHandle};
-use crate::common::protocols::KvCacheEventSink;
+use super::{DirectRequest, ForwardPassSnapshot, OutputSignal, SchedulerHandle};
+use crate::common::protocols::{FpmSink, KvCacheEventSink};
 
 pub(crate) struct RouterIndexerHarness {
     indexer: Arc<LocalKvIndexer>,
@@ -205,6 +205,25 @@ pub(crate) fn removed_event_count(events: &[RouterEvent]) -> usize {
         .iter()
         .filter(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
         .count()
+}
+
+/// Test sink that captures FPM snapshots for assertion.
+#[derive(Default)]
+pub(crate) struct CapturingFpmSink {
+    snapshots: Mutex<Vec<ForwardPassSnapshot>>,
+}
+
+impl FpmSink for CapturingFpmSink {
+    fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()> {
+        self.snapshots.lock().unwrap().push(snapshot);
+        Ok(())
+    }
+}
+
+impl CapturingFpmSink {
+    pub(crate) fn take(&self) -> Vec<ForwardPassSnapshot> {
+        std::mem::take(&mut *self.snapshots.lock().unwrap())
+    }
 }
 
 /// Send `num_requests` to a scheduler, collect all output signals, and assert

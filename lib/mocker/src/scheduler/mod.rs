@@ -8,11 +8,12 @@ mod kv_event_sink;
 pub mod sglang;
 pub mod vllm;
 
-use crate::common::protocols::{DirectRequest, KvEventPublishers, OutputSignal};
+pub use crate::common::protocols::ForwardPassSnapshot;
+use crate::common::protocols::{DirectRequest, FpmPublisher, KvEventPublishers, OutputSignal};
 use dynamo_kv_router::protocols::RouterEvent;
 pub(crate) use kv_event_sink::{
-    CapturedRouterEventBuffer, capture_deferred_kv_publish_sink, capture_router_event_sink,
-    publish_deferred_kv_events,
+    CapturedRouterEventBuffer, DeferredFpmBuffer, capture_deferred_kv_publish_sink,
+    capture_router_event_sink, publish_deferred_fpm, publish_deferred_kv_events,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -45,33 +46,6 @@ impl WelfordAcc {
         }
         self.m2 / self.count as f64
     }
-}
-
-/// Per-iteration forward pass snapshot, mirroring the Python `ForwardPassMetrics`
-/// schema in `components/src/dynamo/common/forward_pass_metrics.py`.
-///
-/// Produced by the scheduler core after each `execute_pass_internal()` call.
-/// The runtime-dependent layer (`lib/llm`) wraps this with identity fields
-/// (worker_id, dp_rank, counter_id) and serializes to msgpack for the event plane.
-#[derive(Debug, Clone, Default)]
-pub struct ForwardPassSnapshot {
-    // -- scheduled requests (executed this iteration) --
-    pub num_prefill_requests: u32,
-    pub sum_prefill_tokens: u64,
-    pub var_prefill_length: f64,
-    pub sum_prefill_kv_tokens: u64,
-    pub num_decode_requests: u32,
-    pub sum_decode_kv_tokens: u64,
-    pub var_decode_kv_tokens: f64,
-    // -- queued requests (waiting, not scheduled) --
-    pub num_queued_prefill: u32,
-    pub sum_queued_prefill_tokens: u64,
-    pub var_queued_prefill_length: f64,
-    pub num_queued_decode: u32,
-    pub sum_queued_decode_kv_tokens: u64,
-    pub var_queued_decode_kv_tokens: f64,
-    // -- timing --
-    pub wall_time_secs: f64,
 }
 
 /// Build a [`ForwardPassSnapshot`] from engine-agnostic iterators.
@@ -230,7 +204,7 @@ impl EngineScheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
-        fpm_tx: Option<mpsc::UnboundedSender<ForwardPassSnapshot>>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         match args.engine_type {
             crate::common::protocols::EngineType::Vllm => {
@@ -241,7 +215,7 @@ impl EngineScheduler {
                     kv_event_publishers,
                     cancellation_token,
                     admission_tx,
-                    fpm_tx,
+                    fpm_publisher,
                 ))
             }
             crate::common::protocols::EngineType::Sglang => {
@@ -252,7 +226,7 @@ impl EngineScheduler {
                     kv_event_publishers,
                     cancellation_token,
                     admission_tx,
-                    fpm_tx,
+                    fpm_publisher,
                 ))
             }
         }

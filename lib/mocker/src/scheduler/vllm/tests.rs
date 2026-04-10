@@ -12,7 +12,7 @@ use tokio::time::interval;
 use uuid::Uuid;
 
 use crate::common::protocols::{
-    DirectRequest, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
+    DirectRequest, FpmPublisher, KvCacheEventSink, KvEventPublishers, MockEngineArgs, OutputSignal,
     PreemptionMode, RawKvEvent, RawKvEventSink,
 };
 use crate::common::sequence::ActiveSequence;
@@ -583,7 +583,7 @@ mod live_scheduler {
             Some(output_tx),
             KvEventPublishers::default(),
             None,
-            None,
+            FpmPublisher::default(),
         );
 
         crate::scheduler::test_utils::assert_scheduler_completes_all(
@@ -620,7 +620,7 @@ mod live_scheduler {
             Some(output_tx),
             KvEventPublishers::default(),
             None,
-            None,
+            FpmPublisher::default(),
         );
         let identical_tokens: Vec<u32> = (0..token_length).collect();
 
@@ -678,7 +678,7 @@ mod live_scheduler {
             Some(output_tx),
             KvEventPublishers::default(),
             None,
-            None,
+            FpmPublisher::default(),
         );
         scheduler.receive(DirectRequest {
             tokens: (0..256).collect(),
@@ -735,7 +735,7 @@ mod live_scheduler {
             Some(output_tx),
             KvEventPublishers::new(None, Some(sink.clone())),
             None,
-            None,
+            FpmPublisher::default(),
         );
 
         scheduler.receive(DirectRequest {
@@ -790,7 +790,7 @@ mod live_scheduler {
             Some(output_tx),
             KvEventPublishers::new(Some(sink.clone()), None),
             None,
-            None,
+            FpmPublisher::default(),
         );
 
         for _ in 0..8 {
@@ -836,7 +836,6 @@ mod live_scheduler {
 
 mod forward_pass_metrics {
     use super::*;
-    use crate::scheduler::ForwardPassSnapshot;
 
     /// Helper to build args with specific parameters for FPM tests.
     fn fpm_args() -> MockEngineArgs {
@@ -1215,7 +1214,9 @@ mod forward_pass_metrics {
     }
 
     #[tokio::test]
-    async fn test_fpm_sent_through_channel() {
+    async fn test_fpm_sent_through_sink() {
+        use crate::scheduler::test_utils::CapturingFpmSink;
+
         let args = MockEngineArgs::builder()
             .block_size(4)
             .num_gpu_blocks(16)
@@ -1227,8 +1228,11 @@ mod forward_pass_metrics {
             .build()
             .unwrap();
 
-        let (output_tx, _output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
-        let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel::<ForwardPassSnapshot>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
+        let fpm_sink = Arc::new(CapturingFpmSink::default());
+        let fpm_publisher = crate::common::protocols::FpmPublisher::new(Some(
+            fpm_sink.clone() as Arc<dyn crate::common::protocols::FpmSink>
+        ));
 
         let scheduler = Scheduler::new(
             args,
@@ -1236,7 +1240,7 @@ mod forward_pass_metrics {
             Some(output_tx),
             KvEventPublishers::default(),
             None,
-            Some(fpm_tx),
+            fpm_publisher,
         );
 
         scheduler.receive(DirectRequest {
@@ -1247,12 +1251,19 @@ mod forward_pass_metrics {
             arrival_timestamp_ms: None,
         });
 
-        // Wait for the scheduler to process the request and emit FPM
-        let fpm = tokio::time::timeout(Duration::from_secs(5), fpm_rx.recv())
+        // Wait for at least one output signal — ensures the scheduler has
+        // completed at least one pass and drained the deferred FPM buffer.
+        tokio::time::timeout(Duration::from_secs(5), output_rx.recv())
             .await
-            .expect("timed out waiting for FPM")
-            .expect("FPM channel closed");
+            .expect("timed out waiting for output")
+            .expect("output channel closed");
 
+        let snapshots = fpm_sink.take();
+        assert!(
+            !snapshots.is_empty(),
+            "should have received at least one FPM snapshot"
+        );
+        let fpm = &snapshots[0];
         assert_eq!(fpm.num_prefill_requests, 1);
         assert!(fpm.sum_prefill_tokens > 0);
         assert!(fpm.wall_time_secs > 0.0);

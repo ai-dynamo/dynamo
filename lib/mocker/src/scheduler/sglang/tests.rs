@@ -19,15 +19,14 @@ use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
 use super::request::SglangRequest;
 use crate::common::protocols::{
-    DirectRequest, EngineType, KvEventPublishers, MockEngineArgs, OutputSignal, SglangArgs,
+    DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+    SglangArgs,
 };
 use crate::kv_manager::SglangKvManager;
 use crate::scheduler::test_utils::{
     RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
-use crate::scheduler::{
-    ForwardPassSnapshot, RouterEventVisibility, SchedulerHandle, capture_router_event_sink,
-};
+use crate::scheduler::{RouterEventVisibility, SchedulerHandle, capture_router_event_sink};
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 17;
 
@@ -103,7 +102,7 @@ mod scheduling {
             Some(output_tx),
             KvEventPublishers::default(),
             None,
-            None,
+            FpmPublisher::default(),
         );
 
         let num_requests = 5;
@@ -630,7 +629,7 @@ mod router_events {
             Some(output_tx),
             KvEventPublishers::default(),
             None,
-            None,
+            FpmPublisher::default(),
         );
 
         assert_sglang_scheduler_completes_all(
@@ -850,7 +849,7 @@ mod router_events {
             Some(output_tx),
             KvEventPublishers::new(Some(sink.clone()), None),
             None,
-            None,
+            FpmPublisher::default(),
         );
 
         for _ in 0..8 {
@@ -1268,7 +1267,12 @@ mod forward_pass_metrics {
     }
 
     #[tokio::test]
-    async fn test_fpm_sent_through_channel() {
+    async fn test_fpm_sent_through_sink() {
+        use std::sync::Arc;
+
+        use crate::common::protocols::FpmSink;
+        use crate::scheduler::test_utils::CapturingFpmSink;
+
         let args = MockEngineArgs::builder()
             .engine_type(EngineType::Sglang)
             .block_size(4)
@@ -1284,8 +1288,9 @@ mod forward_pass_metrics {
             .build()
             .unwrap();
 
-        let (output_tx, _output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
-        let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel::<ForwardPassSnapshot>();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
+        let fpm_sink = Arc::new(CapturingFpmSink::default());
+        let fpm_publisher = FpmPublisher::new(Some(fpm_sink.clone() as Arc<dyn FpmSink>));
 
         let scheduler = SglangScheduler::new(
             args,
@@ -1293,7 +1298,7 @@ mod forward_pass_metrics {
             Some(output_tx),
             KvEventPublishers::default(),
             None,
-            Some(fpm_tx),
+            fpm_publisher,
         );
 
         scheduler.receive(DirectRequest {
@@ -1304,12 +1309,19 @@ mod forward_pass_metrics {
             arrival_timestamp_ms: None,
         });
 
-        // Wait for the scheduler to process the request and emit FPM
-        let fpm = tokio::time::timeout(Duration::from_secs(5), fpm_rx.recv())
+        // Wait for at least one output signal — ensures the scheduler has
+        // completed at least one pass and drained the deferred FPM buffer.
+        tokio::time::timeout(Duration::from_secs(5), output_rx.recv())
             .await
-            .expect("timed out waiting for FPM")
-            .expect("FPM channel closed");
+            .expect("timed out waiting for output")
+            .expect("output channel closed");
 
+        let snapshots = fpm_sink.take();
+        assert!(
+            !snapshots.is_empty(),
+            "should have received at least one FPM snapshot"
+        );
+        let fpm = &snapshots[0];
         assert_eq!(fpm.num_prefill_requests, 1);
         assert!(fpm.sum_prefill_tokens > 0);
         assert!(fpm.wall_time_secs > 0.0);
