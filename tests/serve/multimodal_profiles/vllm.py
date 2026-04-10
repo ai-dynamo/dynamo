@@ -85,9 +85,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[
-                    pytest.mark.skip(
-                        reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"
-                    ),
                     pytest.mark.post_merge,
                 ],
                 timeout_s=600,
