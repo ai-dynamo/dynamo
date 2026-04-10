@@ -188,7 +188,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["12.9", "13.0", "cpu", "xpu"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -295,12 +295,15 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["12.9", "13.0", "non-cuda"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0
       gpu_test_markers: pre_merge and vllm and gpu_1
       gpu_test_timeout_minutes: 35
+      run_xpu_test: true
+      xpu_test_marker: pre_merge and vllm and xpu_1
+      xpu_test_timeout_minutes: 120
     secrets: inherit
 
   vllm-multi-gpu-test:
@@ -420,7 +423,7 @@ jobs:
       framework: vllm
       target: runtime
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["12.9", "13.0", "cpu", "xpu"]'
       platform: '["amd64"]'
     secrets: inherit
 
@@ -478,7 +481,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["12.9", "13.0", "cpu", "xpu"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
