@@ -114,6 +114,9 @@ where
 
                     state.insert(key, value);
 
+                    // Only publish if the collapsed worker view actually changed,
+                    // to avoid waking downstream watchers on no-op events
+                    // (e.g., adding a LoRA when base model already represents the worker).
                     let collapsed = collapse_by_instance_id(&state);
                     if *tx.borrow() != collapsed && tx.send(collapsed).is_err() {
                         tracing::debug!("watch_and_extract_field receiver dropped, stopping");
@@ -133,6 +136,9 @@ where
 
                     state.remove(&id);
 
+                    // Only publish if the collapsed worker view actually changed,
+                    // to avoid waking downstream watchers on no-op events
+                    // (e.g., adding a LoRA when base model already represents the worker).
                     let collapsed = collapse_by_instance_id(&state);
                     if *tx.borrow() != collapsed && tx.send(collapsed).is_err() {
                         tracing::debug!("watch_and_extract_field receiver dropped, stopping");
