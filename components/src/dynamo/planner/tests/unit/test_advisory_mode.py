@@ -7,7 +7,8 @@ import json
 import logging
 import math
 import os
-from unittest.mock import MagicMock, Mock, patch
+import tempfile
+from unittest.mock import Mock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -86,17 +87,18 @@ def test_advisory_file_output_auto_fills_log_dir():
         log_dir=None,
     )
     assert config.advisory_file_output is True
-    assert config.log_dir == "/tmp/planner"
+    assert config.log_dir == os.path.join(tempfile.gettempdir(), "planner")
 
 
-def test_advisory_file_output_with_log_dir():
+def test_advisory_file_output_with_log_dir(tmp_path):
+    log_dir = str(tmp_path / "advisory")
     config = PlannerConfig(
         namespace="test-ns",
         advisory_file_output=True,
-        log_dir="/tmp/advisory",
+        log_dir=log_dir,
     )
     assert config.advisory_file_output is True
-    assert config.log_dir == "/tmp/advisory"
+    assert config.log_dir == log_dir
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +107,6 @@ def test_advisory_file_output_with_log_dir():
 
 
 def test_no_operation_true_maps_to_noop(caplog):
-
     with caplog.at_level(logging.WARNING):
         config = PlannerConfig(namespace="test-ns", no_operation=True)
     assert config.scaling_mode == ScalingMode.NOOP
@@ -236,7 +237,6 @@ def _make_base_planner(scaling_mode=ScalingMode.ADVISORY, enable_throughput=True
 
 
 def _set_valid_metrics(planner):
-
     planner.shared_state.last_metrics = Metrics(
         num_req=100.0,
         isl=3000.0,
@@ -251,21 +251,18 @@ def _set_valid_metrics(planner):
 
 
 def test_safe_gauge_set_normal_value():
-
     gauge = Mock()
     BasePlanner._safe_gauge_set(gauge, 5.0)
     gauge.set.assert_called_once_with(5.0)
 
 
 def test_safe_gauge_set_none():
-
     gauge = Mock()
     BasePlanner._safe_gauge_set(gauge, None)
     gauge.set.assert_called_once_with(float("nan"))
 
 
 def test_safe_gauge_set_nan():
-
     gauge = Mock()
     BasePlanner._safe_gauge_set(gauge, float("nan"))
     val = gauge.set.call_args[0][0]

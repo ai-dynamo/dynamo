@@ -241,13 +241,19 @@ class BasePlanner:
 
             # Start Planner HTTP server if port is specified
             if start_prometheus_server and self.prometheus_port != 0:
-                try:
-                    _start_planner_http_server(self.prometheus_port)
-                except Exception as e:
-                    logger.error(f"Failed to start Planner HTTP server: {e}")
+                if config.effective_scaling_mode == ScalingMode.NOOP:
+                    logger.info(
+                        "[NOOP] Scaling mode is noop — skipping HTTP server and metrics."
+                    )
+                else:
+                    try:
+                        _start_planner_http_server(self.prometheus_port)
+                    except Exception as e:
+                        logger.error(f"Failed to start Planner HTTP server: {e}")
+                        raise
 
             # Startup self-check log
-            if start_prometheus_server:
+            if start_prometheus_server and config.effective_scaling_mode != ScalingMode.NOOP:
                 port_source = (
                     "env PLANNER_PROMETHEUS_PORT"
                     if os.environ.get("PLANNER_PROMETHEUS_PORT")
@@ -889,8 +895,9 @@ class BasePlanner:
 
         source: "throughput" or "load"
         """
-        if self.prometheus_metrics is None or self.prometheus_port == 0:
-            return
+        prometheus_enabled = (
+            self.prometheus_metrics is not None and self.prometheus_port != 0
+        )
 
         # Metrics validity gate
         if not self.shared_state.last_metrics.is_valid():
@@ -929,38 +936,40 @@ class BasePlanner:
             reason_code = 6
 
         m = self.prometheus_metrics
-        # Update counters
-        if action == 1:
-            m.advisory_scaleup_total.inc()
-        elif action == -1:
-            m.advisory_scaledown_total.inc()
-        else:
-            m.advisory_hold_total.inc()
+        if prometheus_enabled:
+            # Update counters
+            if action == 1:
+                m.advisory_scaleup_total.inc()
+            elif action == -1:
+                m.advisory_scaledown_total.inc()
+            else:
+                m.advisory_hold_total.inc()
 
-        # Update gauges
-        m.advisory_recommended_p.set(recommended_p)
-        m.advisory_recommended_d.set(recommended_d)
-        m.advisory_current_p.set(current_p)
-        m.advisory_current_d.set(current_d)
-        m.advisory_delta_p.set(delta_p)
-        m.advisory_delta_d.set(delta_d)
-        m.advisory_scaling_action.set(action)
-        m.advisory_action_reason.set(reason_code)
+            # Update gauges
+            m.advisory_recommended_p.set(recommended_p)
+            m.advisory_recommended_d.set(recommended_d)
+            m.advisory_current_p.set(current_p)
+            m.advisory_current_d.set(current_d)
+            m.advisory_delta_p.set(delta_p)
+            m.advisory_delta_d.set(delta_d)
+            m.advisory_scaling_action.set(action)
+            m.advisory_action_reason.set(reason_code)
 
         # SLA estimation (Layer 3)
         sla = self._estimate_sla_with_replicas(recommended_p, recommended_d)
-        self._safe_gauge_set(m.advisory_est_ttft, sla.get("est_ttft"))
-        self._safe_gauge_set(m.advisory_est_itl, sla.get("est_itl"))
         est_ttft = sla.get("est_ttft")
         est_itl = sla.get("est_itl")
-        self._safe_gauge_set(
-            m.advisory_ttft_headroom,
-            self.config.ttft - est_ttft if est_ttft is not None else None,
-        )
-        self._safe_gauge_set(
-            m.advisory_itl_headroom,
-            self.config.itl - est_itl if est_itl is not None else None,
-        )
+        if prometheus_enabled:
+            self._safe_gauge_set(m.advisory_est_ttft, est_ttft)
+            self._safe_gauge_set(m.advisory_est_itl, est_itl)
+            self._safe_gauge_set(
+                m.advisory_ttft_headroom,
+                self.config.ttft - est_ttft if est_ttft is not None else None,
+            )
+            self._safe_gauge_set(
+                m.advisory_itl_headroom,
+                self.config.itl - est_itl if est_itl is not None else None,
+            )
 
         action_str = {1: "scale_up", 0: "hold", -1: "scale_down"}[action]
 
@@ -1068,10 +1077,12 @@ class BasePlanner:
 
             est_itl = None
             if num_d > 0 and hasattr(self, "decode_interpolator"):
-                _, est_itl_raw, _ = (
-                    self.decode_interpolator.find_best_throughput_per_gpu(
-                        self.config.itl, osl
-                    )
+                (
+                    _,
+                    est_itl_raw,
+                    _,
+                ) = self.decode_interpolator.find_best_throughput_per_gpu(
+                    self.config.itl, osl
                 )
                 est_itl = float(est_itl_raw)
 

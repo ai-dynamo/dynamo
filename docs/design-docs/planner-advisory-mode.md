@@ -184,6 +184,10 @@ Note: Prometheus counters reset to zero on Pod restart. Grafana queries must use
 In v1, reason codes provide a quick signal in dashboards. Detailed reasoning
 is in the structured logs (Layer 2).
 
+> **Note (v1 implementation status):** Reason codes 0 (no traffic) and 5 (GPU
+> budget constraint) are reserved for future use and are not emitted in the
+> current implementation. Only codes 1–4 and 6 are active.
+
 **Naming convention**: Advisory metrics use `dynamo_planner_advisory_*` (underscore-separated)
 following the Dynamo naming guideline in `lib/runtime/src/metrics/prometheus_names.rs`.
 Existing Planner metrics (`planner:num_p_workers`, etc.) retain their current naming
@@ -387,6 +391,10 @@ File: {log_dir}/advisory_history.jsonl
  "est_ttft":85.2,"est_itl":12.1,"reason_code":1}
 ```
 
+> **Note (v1 implementation status):** The `raw` block (pre-budget-clipping
+> recommendation) is not yet included in the JSONL output. Currently only
+> `current` and `recommended` (post-budget) are emitted.
+
 **Why a separate file instead of just logs**: Prometheus has a retention window
 (typically 15-30 days). Log pipelines may also rotate. The JSONL file provides a
 permanent, simple-to-parse record that survives both. It reuses the existing
@@ -586,7 +594,7 @@ def _validate_config(self) -> "PlannerConfig":
 
 | File | Scope of Change |
 |------|----------------|
-| `components/src/dynamo/planner/defaults.py` | Add `ScalingMode` enum. Add `scaling_mode`, `advisory_max_step_size`, `advisory_anomaly_threshold`, `advisory_file_output` to `SLAPlannerDefaults` |
+| `components/src/dynamo/planner/config/defaults.py` | Add `ScalingMode` enum. Add `scaling_mode`, `advisory_max_step_size`, `advisory_anomaly_threshold`, `advisory_file_output` to `SLAPlannerDefaults` |
 | `components/src/dynamo/planner/config/planner_config.py` | Add new fields to `PlannerConfig`. Add backward compat validation. Add file output validation |
 | `components/src/dynamo/planner/core/base.py` | Add 15 metrics to `PlannerPrometheusMetrics`. Add `_emit_advisory_metrics()`, `_estimate_sla_with_replicas()`, `_build_path_recommendation()`, `_safe_gauge_set()`, `_write_advisory_jsonl()` to `BasePlanner`. Replace `no_operation` checks with `scaling_mode` branches. Add `/advisory/status` HTTP handler |
 | `components/src/dynamo/planner/core/disagg.py` | Replace 4 `no_operation` checks. Add advisory emission in `_throughput_loop` and `_load_loop` after GPU budget application |

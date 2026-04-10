@@ -16,6 +16,7 @@
 import json
 import logging
 import os
+import tempfile
 from enum import Enum
 from pathlib import Path
 from typing import Literal, Optional
@@ -46,9 +47,9 @@ class PlannerConfig(BaseModel):
         description='Controls pre-deployment sweeping mode for planner in-depth profiling. "none" means no pre-deployment sweep (only load-based scaling). "rapid" uses AI Configurator to simulate engine performance. "thorough" uses real GPUs to measure engine performance (takes several hours).',
     )
 
-    environment: Literal["kubernetes", "virtual", "global-planner"] = (
-        SLAPlannerDefaults.environment
-    )
+    environment: Literal[
+        "kubernetes", "virtual", "global-planner"
+    ] = SLAPlannerDefaults.environment
     namespace: str = Field(
         default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo")
     )
@@ -97,9 +98,9 @@ class PlannerConfig(BaseModel):
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
-    throughput_metrics_source: Literal["frontend", "router"] = (
-        SLAPlannerDefaults.throughput_metrics_source
-    )
+    throughput_metrics_source: Literal[
+        "frontend", "router"
+    ] = SLAPlannerDefaults.throughput_metrics_source
 
     no_correction: bool = SLAPlannerDefaults.no_correction
     model_name: Optional[str] = None
@@ -140,10 +141,11 @@ class PlannerConfig(BaseModel):
 
         # advisory_file_output: auto-fill log_dir if not set
         if self.advisory_file_output and not self.log_dir:
-            self.log_dir = "/tmp/planner"
+            self.log_dir = os.path.join(tempfile.gettempdir(), "planner")
             logger.warning(
                 "advisory_file_output=True but log_dir is not set. "
-                "Auto-filling log_dir='/tmp/planner'."
+                f"Auto-filling log_dir='{self.log_dir}'. "
+                "Set log_dir explicitly for production use."
             )
 
         # advisory_max_step_size must be positive
