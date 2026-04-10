@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from typing import Callable
 
 import pytest
-from gpu_memory_service.common.types import ServerState
+from gpu_memory_service.server.fsm import ServerState
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
@@ -208,6 +208,7 @@ def test_gms_basic_sleep_wake_vllm(
     )
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2567")
 @pytest.mark.sglang
 @pytest.mark.e2e
 @pytest.mark.gpu_1

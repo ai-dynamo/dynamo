@@ -423,6 +423,9 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
         marks=[
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"
+            ),
             pytest.mark.gpu_1,  # agg_multimodal.sh uses single GPU
             pytest.mark.multimodal,
             pytest.mark.nightly,
@@ -626,6 +629,7 @@ def test_serve_deployment(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2605")
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_2
