@@ -8,9 +8,6 @@ on:
     branches:
       - "pull-request/[0-9]+"
       # Note: release/* branches are handled by release.yml workflow
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       run_deploy_operator:
@@ -35,7 +32,7 @@ jobs:
 
 
   changed-files:
-    runs-on: xpu
+    runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       core: ${{ steps.changes.outputs.core }}
@@ -88,7 +85,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
     name: Operator
-    runs-on: xpu
+    runs-on: prod-default-v2
     env:
       IMAGE_REGISTRY: ai-dynamo
       IMAGE_REPOSITORY: dynamo
@@ -103,7 +100,7 @@ jobs:
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
-          arch: 'linux/amd64'
+          arch: 'linux/amd64,linux/arm64'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -308,6 +305,7 @@ jobs:
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  # ============================================================================
   # DEV PIPELINES
   # ============================================================================
   vllm-dev-pipeline:
@@ -324,7 +322,6 @@ jobs:
       build_timeout_minutes: 60
       push_image: false
     secrets: inherit
-
 
   sglang-dev-pipeline:
     name: sglang-dev
@@ -355,7 +352,6 @@ jobs:
       build_timeout_minutes: 60
       push_image: false
     secrets: inherit
-
 
    # ============================================================================
    # DEPLOYMENT JOBS
@@ -478,7 +474,7 @@ jobs:
 
   clean-k8s-builder:
     name: Clean K8s builder if exists
-    runs-on: xpu
+    runs-on: prod-default-small-v2
     if: always()
     needs: [planner-pipeline, vllm-pipeline, vllm-xpu-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
     steps:
