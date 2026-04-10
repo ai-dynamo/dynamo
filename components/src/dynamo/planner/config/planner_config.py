@@ -126,6 +126,19 @@ class PlannerConfig(BaseModel):
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
+    # Diagnostics report settings
+    report_interval_hours: Optional[float] = Field(
+        default=None,
+        description=(
+            "Generate an HTML diagnostics report every N hours (simulated time). "
+            "Set to None to disable periodic report generation."
+        ),
+    )
+    report_output_dir: str = Field(
+        default="./planner_reports",
+        description="Directory for HTML diagnostics reports.",
+    )
+
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
         sqrt = math.isqrt(self.fpm_sample_bucket_size)

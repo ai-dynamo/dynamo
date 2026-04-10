@@ -26,6 +26,7 @@ class LoadScalingMixin:
 
     def _advance_load(self, obs: FpmObservations) -> Optional[ScalingDecision]:
         if not self._config.enable_load_scaling:
+            self._diag_load_reason = "disabled"
             return None
         mode = self._config.mode
         if mode == "agg":
@@ -39,6 +40,7 @@ class LoadScalingMixin:
     ) -> Optional[ScalingDecision]:
         if self._scaling_in_progress(component):
             logger.info(f"Scaling in progress for {component}, observing only")
+            self._diag_load_reason = "scaling_in_progress"
             return None
 
         fpm_stats = obs.prefill if component == "prefill" else obs.decode
@@ -47,8 +49,10 @@ class LoadScalingMixin:
         )
 
         if not fpm_stats:
+            self._diag_load_reason = "no_fpm_data"
             return None
         if not self._reconcile_fpm_worker_count(fpm_stats, num_workers, component):
+            self._diag_load_reason = "worker_count_mismatch"
             return None
 
         desired = (
@@ -59,6 +63,7 @@ class LoadScalingMixin:
         if desired is None:
             return None
 
+        original_desired = desired
         if self._config.enable_throughput_scaling:
             bound = (
                 self._throughput_lower_bound_p
@@ -68,6 +73,17 @@ class LoadScalingMixin:
             desired = max(desired, bound)
 
         desired = self._apply_single_budget(desired, component)
+
+        if desired < num_workers:
+            if desired > original_desired:
+                self._diag_load_reason = "scale_down_capped_by_throughput"
+            else:
+                self._diag_load_reason = "scale_down"
+        elif desired > num_workers:
+            self._diag_load_reason = "scale_up"
+        else:
+            self._diag_load_reason = "no_change"
+
         return (
             ScalingDecision(num_prefill=desired)
             if component == "prefill"
@@ -79,14 +95,17 @@ class LoadScalingMixin:
 
         if not p_stats and not d_stats:
             logger.warning("No FPM data for either prefill or decode, skipping")
+            self._diag_load_reason = "no_fpm_data"
             return None
         if p_stats and not self._reconcile_fpm_worker_count(
             p_stats, self._num_p_workers, "prefill"
         ):
+            self._diag_load_reason = "worker_count_mismatch"
             return None
         if d_stats and not self._reconcile_fpm_worker_count(
             d_stats, self._num_d_workers, "decode"
         ):
+            self._diag_load_reason = "worker_count_mismatch"
             return None
 
         p_desired = (
@@ -105,8 +124,10 @@ class LoadScalingMixin:
 
         if final_p == self._num_p_workers and final_d == self._num_d_workers:
             logger.info("Load-based scaling: no scaling needed")
+            self._diag_load_reason = "no_change"
             return None
 
+        original_p, original_d = final_p, final_d
         if self._config.enable_throughput_scaling:
             final_p = max(final_p, self._throughput_lower_bound_p)
             final_d = max(final_d, self._throughput_lower_bound_d)
@@ -114,6 +135,17 @@ class LoadScalingMixin:
         final_p = max(final_p, self._config.min_endpoint)
         final_d = max(final_d, self._config.min_endpoint)
         final_p, final_d = self._apply_global_budget(final_p, final_d)
+
+        if (final_p > original_p or final_d > original_d) and (
+            original_p < self._num_p_workers or original_d < self._num_d_workers
+        ):
+            self._diag_load_reason = "scale_down_capped_by_throughput"
+        elif final_p > self._num_p_workers or final_d > self._num_d_workers:
+            self._diag_load_reason = "scale_up"
+        elif final_p < self._num_p_workers or final_d < self._num_d_workers:
+            self._diag_load_reason = "scale_down"
+        else:
+            self._diag_load_reason = "no_change"
 
         logger.info(
             f"Load-based disagg scaling: prefill {self._num_p_workers}->{final_p}, "
@@ -124,6 +156,7 @@ class LoadScalingMixin:
     def _advance_load_agg(self, obs: FpmObservations) -> Optional[ScalingDecision]:
         fpm_stats = obs.decode
         if not fpm_stats:
+            self._diag_load_reason = "no_fpm_data"
             return None
         num_workers = self._num_d_workers
 
@@ -131,20 +164,24 @@ class LoadScalingMixin:
             logger.info(
                 f"Scaling in progress ({num_workers} -> {self._expected_num_d}), observing only"
             )
+            self._diag_load_reason = "scaling_in_progress"
             return None
         if not self._reconcile_fpm_worker_count(fpm_stats, num_workers, "agg"):
+            self._diag_load_reason = "worker_count_mismatch"
             return None
         if not self._agg_regression.has_sufficient_data():
             logger.info(
                 f"Agg regression: insufficient data "
                 f"({self._agg_regression.num_observations}/{self._agg_regression.min_observations})"
             )
+            self._diag_load_reason = "insufficient_data"
             return None
 
         d_caps = self._capabilities.decode
         max_tokens = d_caps.max_num_batched_tokens if d_caps else None
         if not max_tokens or max_tokens <= 0:
             logger.warning("max_num_batched_tokens not available, skipping agg scaling")
+            self._diag_load_reason = "insufficient_data"
             return None
 
         p_desired = self._agg_prefill_scaling(fpm_stats, num_workers, max_tokens)
@@ -167,12 +204,24 @@ class LoadScalingMixin:
             desired = max(p_desired, d_desired)
         else:
             logger.info("Agg scaling: no scaling needed")
+            self._diag_load_reason = "no_change"
             return None
 
+        original_desired = desired
         desired = max(desired, self._config.min_endpoint)
         if self._config.enable_throughput_scaling:
             desired = max(desired, self._throughput_lower_bound_d)
         desired = self._apply_single_budget(desired, "decode")
+
+        if desired < num_workers:
+            if desired > original_desired:
+                self._diag_load_reason = "scale_down_capped_by_throughput"
+            else:
+                self._diag_load_reason = "scale_down"
+        elif desired > num_workers:
+            self._diag_load_reason = "scale_up"
+        else:
+            self._diag_load_reason = "no_change"
 
         logger.info(f"Agg load-based scaling: {num_workers} -> {desired}")
         return ScalingDecision(num_decode=desired)
@@ -189,8 +238,10 @@ class LoadScalingMixin:
                 f"TTFT regression: insufficient data "
                 f"({self._prefill_regression.num_observations}/{self._prefill_regression.min_observations})"
             )
+            self._diag_load_reason = "insufficient_data"
             return None
         if num_workers == 0:
+            self._diag_load_reason = "insufficient_data"
             return None
 
         p_caps = self._capabilities.prefill
@@ -199,6 +250,7 @@ class LoadScalingMixin:
             logger.warning(
                 "max_num_batched_tokens not available, skipping prefill load scaling"
             )
+            self._diag_load_reason = "insufficient_data"
             return None
 
         estimates: list[float] = []
@@ -215,6 +267,10 @@ class LoadScalingMixin:
                     f"(queued={fpm.queued_requests.sum_prefill_tokens}, "
                     f"avg_isl={self._prefill_regression.avg_isl:.1f})"
                 )
+
+        if estimates:
+            self._diag_estimated_ttft_ms = max(estimates)
+
         return self._scale_decision(
             estimates, self._config.ttft, num_workers, "prefill TTFT"
         )
@@ -227,8 +283,10 @@ class LoadScalingMixin:
                 f"ITL regression: insufficient data "
                 f"({self._decode_regression.num_observations}/{self._decode_regression.min_observations})"
             )
+            self._diag_load_reason = "insufficient_data"
             return None
         if num_workers == 0:
+            self._diag_load_reason = "insufficient_data"
             return None
 
         estimates: list[float] = []
@@ -245,6 +303,10 @@ class LoadScalingMixin:
                     f"(sched_kv={fpm.scheduled_requests.sum_decode_kv_tokens}, "
                     f"queued_kv={fpm.queued_requests.sum_decode_kv_tokens})"
                 )
+
+        if estimates:
+            self._diag_estimated_itl_ms = max(estimates)
+
         return self._scale_decision(
             estimates, self._config.itl, num_workers, "decode ITL"
         )
@@ -264,6 +326,10 @@ class LoadScalingMixin:
             )
             if est is not None:
                 estimates.append(est * 1000)
+
+        if estimates:
+            self._diag_estimated_ttft_ms = max(estimates)
+
         return self._scale_decision(
             estimates, self._config.ttft, num_workers, "agg TTFT"
         )
@@ -281,6 +347,10 @@ class LoadScalingMixin:
             )
             if est is not None:
                 estimates.append(est * 1000)
+
+        if estimates:
+            self._diag_estimated_itl_ms = max(estimates)
+
         return self._scale_decision(estimates, self._config.itl, num_workers, "agg ITL")
 
     def _scale_decision(
@@ -310,4 +380,5 @@ class LoadScalingMixin:
                 )
                 return desired
 
+        self._diag_load_reason = "no_change"
         return None
