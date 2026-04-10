@@ -42,7 +42,7 @@ jobs:
       fail-fast: false
       matrix:
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
-    name: Copy to ACR cuda${{ matrix.cuda_version }}${{ inputs.override_arch != '' && format(', {0}', inputs.override_arch) || '' }}
+    name: Copy to ACR ${{ matrix.cuda_version == 'xpu' && 'xpu' || matrix.cuda_version == 'cpu' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}${{ inputs.override_arch != '' && format(', {0}', inputs.override_arch) || '' }}
     runs-on: prod-default-small-v2
     steps:
       - name: Checkout repository
@@ -55,7 +55,9 @@ jobs:
         run: |
           CUDA_VERSION="${{ matrix.cuda_version }}"
           CUDA_MAJOR=${CUDA_VERSION%%.*}
-          if [[ "${{ inputs.target_tag_plain }}" == *"planner"* ]]; then
+          if [[ "${{ matrix.cuda_version }}" == "xpu" ]]; then
+            IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}-xpu
+          elif [[ "${{ inputs.target_tag_plain }}" == *"planner"* || "${{ matrix.cuda_version }}" == "cpu" ]]; then
             IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}
           else
             IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}-cuda${CUDA_MAJOR}

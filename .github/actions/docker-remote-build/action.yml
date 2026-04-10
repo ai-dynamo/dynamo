@@ -13,6 +13,10 @@ inputs:
     description: 'Docker platform to build on, ie. linux/amd64'
     required: false
     default: 'linux/amd64'
+  device:
+    description: 'Build device (cuda, xpu, cpu) used for cache key suffix'
+    required: false
+    default: 'cuda'
   cuda_version:
     description: 'CUDA version to use'
     required: true
@@ -70,6 +74,7 @@ runs:
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_JOB: ${{ github.job }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
+        DEVICE: ${{ inputs.device }}
         CUDA_VERSION: ${{ inputs.cuda_version }}
       run: |
         set -x
@@ -85,6 +90,13 @@ runs:
         PLATFORM_SAFE=$(echo "${PLATFORM}" | sed 's|linux/||g; s/,/-/g')
 
         CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
+        if [[ "${{ inputs.target }}" == "frontend" ]]; then
+          CACHE_TAG_SUFFIX=""
+        elif [[ "${DEVICE}" == "cuda" ]]; then
+          CACHE_TAG_SUFFIX="-cuda${CUDA_VERSION_MAJOR}"
+        else
+          CACHE_TAG_SUFFIX="-${DEVICE}"
+        fi
 
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
@@ -101,7 +113,7 @@ runs:
         # Set base cache args and set --cache-to if this is a main commit
         CACHE_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
-          CACHE_TAG="${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
+          CACHE_TAG="${{ inputs.framework }}${CACHE_TAG_SUFFIX}-${PLATFORM_SAFE}-cache"
           CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
           CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG} "
           if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
@@ -111,7 +123,7 @@ runs:
             CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
           fi
         else
-          CACHE_TAG="${{ inputs.target }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM_SAFE}-cache"
+          CACHE_TAG="${{ inputs.target }}${CACHE_TAG_SUFFIX}-${PLATFORM_SAFE}-cache"
           CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "
@@ -348,8 +360,10 @@ runs:
     - name: Upload Comprehensive Build Metrics
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
+      continue-on-error: true
       with:
         name: build-metrics-${{ inputs.framework }}-${{ inputs.target }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: build-metrics/build-${{ inputs.framework }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}.json
         retention-days: 7
+        compression-level: 0
 
