@@ -366,6 +366,8 @@ pub enum ErrorType {
     Overload,
     /// Request cancelled by client or timeout
     Cancelled,
+    /// Backend accepted the request but stopped responding (response inactivity timeout)
+    ResponseTimeout,
     /// Internal server error (500 and other unexpected errors)
     Internal,
     /// Feature not implemented (501)
@@ -1090,6 +1092,7 @@ impl Drop for InflightGuard {
             Status::Error => {
                 let detail = match self.error_type {
                     ErrorType::Cancelled => "cancelled before completion",
+                    ErrorType::ResponseTimeout => "backend stream inactivity timeout",
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
                     ErrorType::NotFound => "model or resource not found",
@@ -1188,6 +1191,7 @@ impl ErrorType {
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
             ErrorType::Overload => frontend_service::error_type::OVERLOAD,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
+            ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
             ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
         }
@@ -2215,6 +2219,7 @@ mod tests {
         assert_eq!(ErrorType::NotFound.as_str(), "not_found");
         assert_eq!(ErrorType::Overload.as_str(), "overload");
         assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
+        assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
         assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
     }
@@ -2324,6 +2329,7 @@ mod tests {
             ErrorType::NotFound,
             ErrorType::Overload,
             ErrorType::Cancelled,
+            ErrorType::ResponseTimeout,
             ErrorType::Internal,
             ErrorType::NotImplemented,
         ];
