@@ -16,8 +16,10 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
+from PIL import Image as PILImage
 from vllm.config import VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.inputs.engine import MultiModalInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -57,6 +59,7 @@ from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
+from .multimodal_utils.hf_processor_bypass import QwenHFProcessorBypass
 from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 from .multimodal_utils.models.qwen import (
     build_qwen_embedding_params,
@@ -421,6 +424,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         # Store shutdown event for graceful shutdown monitoring
         self.shutdown_event = shutdown_event
+
+        # Initialize HF processor bypass for Qwen VL models in aggregated mode.
+        # When enabled, we pre-process images and build a MultiModalInput dict
+        # that vLLM accepts without running its internal _process_multimodal,
+        # saving ~700ms of wrapper overhead per request.
+        self._hf_bypass: QwenHFProcessorBypass | None = None
+        if (
+            enable_multimodal
+            and is_qwen_vl_model(config.model)
+            and encode_worker_client is None
+        ):
+            grid_params = load_qwen_grid_params(config.model)
+            if grid_params is not None:
+                try:
+                    # Pass model dtype so pixel_values are cast to match
+                    # vLLM's postprocessing (avoids dtype mismatch in cache).
+                    model_dtype = getattr(
+                        engine.vllm_config.model_config, "dtype", None
+                    ) if hasattr(engine, "vllm_config") else None
+                    self._hf_bypass = QwenHFProcessorBypass(
+                        config.model, grid_params, target_dtype=model_dtype
+                    )
+                    logger.info(
+                        "HF processor bypass enabled for Qwen VL model %s",
+                        config.model,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to initialize HF processor bypass; "
+                        "falling back to vLLM's _process_multimodal",
+                        exc_info=True,
+                    )
 
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
@@ -1274,7 +1309,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         request_id: str,
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
-    ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
+    ) -> tuple[TokensPrompt | EmbedsPrompt | MultiModalInput | None, int | None, Dict[str, Any] | None]:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
 
@@ -1318,9 +1353,47 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     },
                 )
         # Normal path: use token IDs
+        token_ids: list[int] = request["token_ids"]
+
+        # Fast path: bypass vLLM's _process_multimodal for Qwen VL models.
+        # When available, we pre-process images and build a MultiModalInput
+        # dict directly, skipping vLLM's wrapper overhead (~700ms savings).
+        # Only applies to image-only requests (no video/audio mixing).
+        if self._hf_bypass is not None and multi_modal_data is not None:
+            has_video = "video" in multi_modal_data and multi_modal_data["video"]
+            has_audio = "audio" in multi_modal_data and multi_modal_data["audio"]
+            images = multi_modal_data.get("image")
+            if (
+                images is not None
+                and not isinstance(images, dict)
+                and not has_video
+                and not has_audio
+            ):
+                # Normalize to list
+                if not isinstance(images, list):
+                    images = [images]
+                # Only bypass for PIL images (not pre-computed embeddings)
+                if images and isinstance(images[0], PILImage.Image):
+                    try:
+                        mm_uuids_list = compute_mm_uuids_from_images(images)
+                        prompt = self._hf_bypass.build_mm_input(
+                            token_ids, images, mm_uuids=mm_uuids_list
+                        )
+                        # Set arrival_time so vLLM's process_inputs uses it
+                        prompt["arrival_time"] = time.time()
+                        return prompt, embedding_sequence_length, None
+                    except Exception:
+                        logger.warning(
+                            "HF processor bypass failed for request %s; "
+                            "falling back to vLLM path",
+                            request_id,
+                            exc_info=True,
+                        )
+
+        # Default path: let vLLM handle multimodal processing
         mm_uuids = _compute_mm_uuids(multi_modal_data)
         prompt_kwargs = dict[str, Any](
-            prompt_token_ids=request["token_ids"],
+            prompt_token_ids=token_ids,
             multi_modal_data=multi_modal_data,
         )
         if mm_uuids is not None:
