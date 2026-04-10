@@ -293,7 +293,25 @@ async def init_llm_worker(
     engine_args = arg_map
 
     # Populate default sampling params from the model
-    tokenizer = tokenizer_factory(arg_map["model"])
+    tokenizer_path = arg_map.get("tokenizer") or arg_map["model"]
+    # default args from TRTLLM
+    trust_remote_code = arg_map.get("trust_remote_code", False)
+    use_fast = arg_map.get("tokenizer_mode", "auto") != "slow"
+    # Refer to logics in https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/llmapi/llm_args.py#L2898
+    if arg_map.get("custom_tokenizer") == "glm_moe_dsa":
+        from tensorrt_llm.tokenizer.glm_moe_dsa import GlmMoeDsaTokenizer
+
+        tokenizer = GlmMoeDsaTokenizer.from_pretrained(
+            tokenizer_path,
+            trust_remote_code=trust_remote_code,
+            use_fast=use_fast,
+        )
+    else:
+        tokenizer = tokenizer_factory(
+            tokenizer_path,
+            trust_remote_code=trust_remote_code,
+            use_fast=use_fast,
+        )
     default_sampling_params = SamplingParams()
 
     # Enable perf metrics so prompt_tokens_details can be returned
