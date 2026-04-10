@@ -288,10 +288,27 @@ pub fn monitor_for_disconnects(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::client::HttpRequestContext;
     use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
     use futures::StreamExt;
     use serial_test::serial;
+
+    #[derive(Debug)]
+    struct MockContext;
+    impl MockContext {
+        fn new() -> Self { Self }
+    }
+    #[async_trait::async_trait]
+    impl dynamo_runtime::engine::AsyncEngineContext for MockContext {
+        fn id(&self) -> &str { "test" }
+        fn stop(&self) {}
+        fn stop_generating(&self) {}
+        fn kill(&self) {}
+        fn is_stopped(&self) -> bool { false }
+        fn is_killed(&self) -> bool { false }
+        async fn stopped(&self) { std::future::pending::<()>().await; }
+        async fn killed(&self) { std::future::pending::<()>().await; }
+        fn link_child(&self, _: Arc<dyn dynamo_runtime::engine::AsyncEngineContext>) {}
+    }
 
     fn hanging_stream()
     -> impl futures::Stream<Item = Result<axum::response::sse::Event, axum::Error>> {
@@ -329,7 +346,7 @@ mod tests {
             metrics
                 .clone()
                 .create_inflight_guard(model, Endpoint::ChatCompletions, true, req_id);
-        let context: Arc<dyn AsyncEngineContext> = Arc::new(HttpRequestContext::new());
+        let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         unsafe { std::env::set_var(BACKEND_STREAM_TIMEOUT_ENV, timeout_secs) };
@@ -435,7 +452,7 @@ mod tests {
                 .create_inflight_guard(model, Endpoint::ChatCompletions, true, "phase2");
         assert_eq!(metrics.get_inflight_count(model), 1);
 
-        let ctx_2: Arc<dyn AsyncEngineContext> = Arc::new(HttpRequestContext::new());
+        let ctx_2: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
         let (tx_2, _rx_2) = tokio::sync::oneshot::channel();
         let handle_2 = ConnectionHandle::create_disabled(tx_2);
 
