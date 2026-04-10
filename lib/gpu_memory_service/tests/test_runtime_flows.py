@@ -44,7 +44,7 @@ from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
     pytest.mark.pre_merge,
-    pytest.mark.unit,
+    pytest.mark.integration,
     pytest.mark.none,
     pytest.mark.gpu_1,
 ]
