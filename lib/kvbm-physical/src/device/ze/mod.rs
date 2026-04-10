@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+
 /// Embedded SPIR-V binary for the vectorized_copy kernel.
 /// Compiled offline from kvbm-kernels/opencl/vectorized_copy.cl:
 ///   ocloc compile -file vectorized_copy.cl -spv_only -options "-cl-std=CL2.0"
@@ -290,6 +291,7 @@ impl DeviceContextOps for ZeContext {
             builder = builder.release_threshold(threshold);
         }
         let pool = builder.build()?;
+
         Ok(Box::new(ZeMemPoolWrapper {
             pool,
             buffers: Mutex::new(HashMap::new()),
@@ -323,6 +325,7 @@ struct PendingFree {
 /// has no stream-ordered free API. `free_async` records an event on the stream
 /// and defers the actual return-to-pool until the event signals completion.
 /// Completed pending frees are drained opportunistically on each `alloc_async`.
+///
 struct ZeMemPoolWrapper {
     pool: dynamo_memory::ZeMemPool,
     /// Maps device pointer -> (DeviceBuffer, size) for ownership tracking.
@@ -373,13 +376,13 @@ impl Drop for ZeMemPoolWrapper {
                 let _ = self.pool.free(pf.buffer, pf.ptr, pf.size);
             }
         }
+
     }
 }
 
 impl DeviceMemPoolOps for ZeMemPoolWrapper {
     fn alloc_async(&self, size: usize, _stream: &dyn DeviceStreamOps) -> Result<u64> {
-        // Reclaim any completed pending frees before allocating, so the pool's
-        // free-list is up to date and can satisfy this request without new memory.
+        // Drain completed pending frees so their buffers can be reused.
         self.drain_completed_frees()?;
         let (buffer, ptr) = self.pool.alloc(size)?;
         self.buffers

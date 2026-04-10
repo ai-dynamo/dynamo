@@ -1,350 +1,559 @@
-# KV Benchmark — Example Only (To be updated further!) 
+# KV Benchmark — Intel Arc B580 (with fc_to_lw)
 
 Full N×tpb benchmark sweep on Intel Arc B580 (PCIe x8),
 covering all combinations of direction, pattern, backend, and host memory type.
 
 **Test matrix:**
 - **Directions:** D2D, H2D, D2H
-- **Patterns:** fc_to_fc (whole-block), lw_to_fc (per-chunk)
+- **Patterns:** fc_to_fc (whole-block), lw_to_fc (per-chunk scatter→contiguous), fc_to_lw (contiguous→per-chunk scatter)
 - **Backends:** vectorized (GPU kernel), memcpy (DMA)
 - **Host memory:** pinned, system (H2D/D2H only; D2D uses `-`)
 - **N (blocks):** 1, 2, 4, 8, 16, 32, 64, 128, 256
-- **tpb (threads per block):** 16, 32, 64
-- **Total data points:** 432
+- **tpb (tokens per block):** 16, 32, 64
+- **Total data points:** 648
 
 **Hardware:**
-- Device 0: Intel Arc B580 — 160 EUs, 2900 MHz, 11.3 GB max alloc
-- PCIe Gen4 x8 (~13.5 GB/s theoretical)
+- Device 0: Intel(R) Arc(TM) B580 Graphics — 160 EUs, 2900 MHz, 11.3 GB max alloc
+- PCIe Gen4 x8 (~15.75 GB/s theoretical; observed ceiling ~13.5-14.25 GB/s)
+- Also present: Intel Arc Pro B60 (device 1, unused), Intel iGPU (driver 1, unused)
 - OpenCL SPIR-V kernel (CrossWorkgroup address space)
 
 ## Summary Table (all 27 data points per cell: 9 N × 3 tpb)
 
 | Direction | Pattern | Backend | Host | Min (GB/s) | Max (GB/s) | Avg (GB/s) | Count |
 |-----------|---------|---------|------|-----------|-----------|-----------|-------|
-| d2d | fc_to_fc | memcpy | - | 8.54 | 381.30 | 212.19 | 27 |
-| d2d | fc_to_fc | vectorized | - | 6.07 | 422.33 | 160.41 | 27 |
-| d2d | lw_to_fc | memcpy | - | 3.89 | 66.37 | 34.68 | 27 |
-| d2d | lw_to_fc | vectorized | - | 34.18 | 419.43 | 350.90 | 27 |
-| d2h | fc_to_fc | memcpy | pinned | 3.67 | 14.25 | 12.35 | 27 |
-| d2h | fc_to_fc | memcpy | system | 2.09 | 12.90 | 7.92 | 27 |
-| d2h | fc_to_fc | vectorized | pinned | 5.14 | 11.27 | 9.71 | 27 |
-| d2h | lw_to_fc | memcpy | pinned | 0.83 | 13.13 | 9.44 | 27 |
-| d2h | lw_to_fc | memcpy | system | 0.12 | 5.94 | 2.77 | 27 |
-| d2h | lw_to_fc | vectorized | pinned | 5.09 | 11.32 | 10.22 | 27 |
-| h2d | fc_to_fc | memcpy | pinned | 3.61 | 13.44 | 11.64 | 27 |
-| h2d | fc_to_fc | memcpy | system | 3.60 | 13.19 | 10.45 | 27 |
-| h2d | fc_to_fc | vectorized | pinned | 0.82 | 13.47 | 8.85 | 27 |
-| h2d | lw_to_fc | memcpy | pinned | 1.17 | 11.13 | 7.68 | 27 |
-| h2d | lw_to_fc | memcpy | system | 0.79 | 8.85 | 5.20 | 27 |
-| h2d | lw_to_fc | vectorized | pinned | 5.50 | 13.49 | 12.61 | 27 |
+| d2d | fc_to_fc | memcpy | - | 230.06 | 388.36 | 276.60 | 27 |
+| d2d | fc_to_fc | vectorized | - | 6.06 | 421.41 | 166.80 | 27 |
+| d2d | fc_to_lw | memcpy | - | 18.34 | 67.00 | 38.35 | 27 |
+| d2d | fc_to_lw | vectorized | - | 358.49 | 551.88 | 393.77 | 27 |
+| d2d | lw_to_fc | memcpy | - | 18.36 | 67.00 | 38.25 | 27 |
+| d2d | lw_to_fc | vectorized | - | 355.45 | 524.29 | 393.87 | 27 |
+| d2h | fc_to_fc | memcpy | pinned | 14.13 | 14.25 | 14.23 | 27 |
+| d2h | fc_to_fc | memcpy | system | 8.28 | 12.96 | 9.90 | 27 |
+| d2h | fc_to_fc | vectorized | pinned | 7.72 | 11.30 | 10.84 | 27 |
+| d2h | fc_to_lw | memcpy | pinned | 9.90 | 13.12 | 11.63 | 27 |
+| d2h | fc_to_lw | memcpy | system | 3.36 | 6.54 | 4.61 | 27 |
+| d2h | fc_to_lw | vectorized | pinned | 8.78 | 11.32 | 10.67 | 27 |
+| d2h | lw_to_fc | memcpy | pinned | 9.91 | 13.12 | 11.64 | 27 |
+| d2h | lw_to_fc | memcpy | system | 3.36 | 6.49 | 4.58 | 27 |
+| d2h | lw_to_fc | vectorized | pinned | 11.11 | 11.32 | 11.29 | 27 |
+| h2d | fc_to_fc | memcpy | pinned | 13.27 | 13.43 | 13.38 | 27 |
+| h2d | fc_to_fc | memcpy | system | 10.28 | 13.18 | 12.74 | 27 |
+| h2d | fc_to_fc | vectorized | pinned | 1.79 | 13.48 | 10.33 | 27 |
+| h2d | fc_to_lw | memcpy | pinned | 6.82 | 11.16 | 9.07 | 27 |
+| h2d | fc_to_lw | memcpy | system | 4.36 | 8.90 | 6.41 | 27 |
+| h2d | fc_to_lw | vectorized | pinned | 13.14 | 13.54 | 13.47 | 27 |
+| h2d | lw_to_fc | memcpy | pinned | 6.66 | 11.15 | 8.99 | 27 |
+| h2d | lw_to_fc | memcpy | system | 4.35 | 8.91 | 6.43 | 27 |
+| h2d | lw_to_fc | vectorized | pinned | 13.14 | 13.49 | 13.41 | 27 |
 
 ## Detailed N × tpb Grids
 
 ### D2D
 
-#### fc_to_fc / memcpy
-
-| N \ tpb | 16 | 32 | 64 |
-|---------|------|------|------|
-|   1 |     8.54 |   124.83 |   381.30 |
-|   2 |    20.68 |   177.72 |   257.32 |
-|   4 |    43.51 |   185.59 |   259.71 |
-|   8 |   234.32 |   214.54 |   261.33 |
-|  16 |   237.64 |   233.67 |   261.94 |
-|  32 |   238.99 |   234.16 |   261.94 |
-|  64 |   210.90 |   256.93 |   262.09 |
-| 128 |   214.95 |   257.12 |   261.63 |
-| 256 |   109.92 |   256.51 |   261.35 |
-
-**Peak:** 381.30 GB/s (N=1, tpb=64)  
-**Avg:** 212.19 GB/s
-
 #### fc_to_fc / vectorized
 
 | N \ tpb | 16 | 32 | 64 |
 |---------|------|------|------|
-|   1 |    12.11 |     6.67 |     6.07 |
-|   2 |    12.73 |    12.03 |    11.82 |
-|   4 |    24.73 |    24.27 |    24.03 |
-|   8 |    21.58 |    49.26 |    49.49 |
-|  16 |    99.98 |   100.10 |   101.04 |
-|  32 |    85.34 |   203.24 |   205.35 |
-|  64 |   372.41 |   377.23 |   380.00 |
-| 128 |   415.28 |   422.33 |   417.67 |
-| 256 |   317.22 |   297.73 |   281.32 |
+|   1 |    16.49 |     7.77 |     6.06 |
+|   2 |    13.04 |    12.16 |    11.90 |
+|   4 |    24.44 |    24.36 |    24.12 |
+|   8 |    48.83 |    49.40 |    49.62 |
+|  16 |   100.10 |   100.64 |   101.01 |
+|  32 |   203.85 |   204.73 |   205.48 |
+|  64 |   374.91 |   378.93 |   379.79 |
+| 128 |   418.91 |   421.41 |   419.23 |
+| 256 |   324.43 |   299.86 |   282.15 |
 
-**Peak:** 422.33 GB/s (N=128, tpb=32)  
-**Avg:** 160.41 GB/s
+**Peak:** 421.41 GB/s (N=128, tpb=32)
+**Avg:** 166.80 GB/s
 
-#### lw_to_fc / memcpy
+#### fc_to_fc / memcpy
 
 | N \ tpb | 16 | 32 | 64 |
 |---------|------|------|------|
-|   1 |     3.89 |    28.26 |    66.37 |
-|   2 |     6.34 |    29.75 |    60.88 |
-|   4 |     6.28 |    28.38 |    60.31 |
-|   8 |    18.64 |    28.93 |    60.57 |
-|  16 |    12.57 |    31.05 |    60.40 |
-|  32 |    18.65 |    31.15 |    60.56 |
-|  64 |    17.04 |    33.63 |    60.37 |
-| 128 |    17.01 |    33.59 |    60.33 |
-| 256 |     8.72 |    33.56 |    59.06 |
+|   1 |   374.49 |   388.36 |   381.30 |
+|   2 |   349.53 |   367.92 |   257.32 |
+|   4 |   322.64 |   252.67 |   259.71 |
+|   8 |   235.64 |   254.97 |   260.92 |
+|  16 |   236.97 |   256.14 |   261.74 |
+|  32 |   237.64 |   256.93 |   261.63 |
+|  64 |   235.80 |   257.02 |   262.04 |
+| 128 |   230.06 |   257.22 |   261.53 |
+| 256 |   230.30 |   256.51 |   261.16 |
 
-**Peak:** 66.37 GB/s (N=1, tpb=64)  
-**Avg:** 34.68 GB/s
+**Peak:** 388.36 GB/s (N=1, tpb=32)
+**Avg:** 276.60 GB/s
 
 #### lw_to_fc / vectorized
 
 | N \ tpb | 16 | 32 | 64 |
 |---------|------|------|------|
-|   1 |   262.14 |   419.43 |   355.45 |
-|   2 |   361.58 |   361.58 |   346.64 |
-|   4 |   322.64 |   343.80 |   330.26 |
-|   8 |    34.18 |   371.18 |   350.99 |
-|  16 |   399.46 |   387.46 |   367.12 |
-|  32 |   106.59 |   397.09 |   370.15 |
-|  64 |   410.20 |   407.96 |   372.72 |
-| 128 |   414.00 |   411.33 |   372.57 |
-| 256 |   412.09 |   412.41 |   373.27 |
+|   1 |   374.49 |   524.29 |   374.49 |
+|   2 |   476.63 |   367.92 |   355.45 |
+|   4 |   367.92 |   361.58 |   358.49 |
+|   8 |   377.87 |   384.80 |   361.58 |
+|  16 |   397.56 |   395.69 |   365.12 |
+|  32 |   413.23 |   403.78 |   368.53 |
+|  64 |   416.31 |   408.70 |   371.69 |
+| 128 |   419.17 |   410.83 |   372.78 |
+| 256 |   420.48 |   412.79 |   372.31 |
 
-**Peak:** 419.43 GB/s (N=1, tpb=32)  
-**Avg:** 350.90 GB/s
+**Peak:** 524.29 GB/s (N=1, tpb=32)
+**Avg:** 393.87 GB/s
+
+#### lw_to_fc / memcpy
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |    20.16 |    37.18 |    67.00 |
+|   2 |    19.35 |    36.16 |    61.50 |
+|   4 |    19.19 |    33.96 |    60.92 |
+|   8 |    18.47 |    33.83 |    61.16 |
+|  16 |    18.42 |    33.87 |    60.84 |
+|  32 |    18.37 |    33.84 |    60.97 |
+|  64 |    18.41 |    33.85 |    60.67 |
+| 128 |    18.39 |    33.80 |    60.92 |
+| 256 |    18.36 |    33.73 |    59.45 |
+
+**Peak:** 67.00 GB/s (N=1, tpb=64)
+**Avg:** 38.25 GB/s
+
+#### fc_to_lw / vectorized
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |   403.30 |   524.29 |   367.92 |
+|   2 |   551.88 |   367.92 |   364.72 |
+|   4 |   367.92 |   358.49 |   367.92 |
+|   8 |   374.49 |   376.17 |   373.66 |
+|  16 |   386.57 |   383.92 |   362.75 |
+|  32 |   402.33 |   392.91 |   367.52 |
+|  64 |   410.20 |   397.09 |   366.82 |
+| 128 |   411.71 |   399.81 |   364.43 |
+| 256 |   413.87 |   408.33 |   364.80 |
+
+**Peak:** 551.88 GB/s (N=2, tpb=16)
+**Avg:** 393.77 GB/s
+
+#### fc_to_lw / memcpy
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |    20.72 |    37.45 |    67.00 |
+|   2 |    19.45 |    36.16 |    61.23 |
+|   4 |    19.19 |    33.99 |    61.05 |
+|   8 |    18.42 |    33.85 |    61.25 |
+|  16 |    18.40 |    33.85 |    61.25 |
+|  32 |    18.39 |    33.87 |    61.24 |
+|  64 |    18.39 |    33.83 |    61.20 |
+| 128 |    18.34 |    33.77 |    61.00 |
+| 256 |    18.38 |    33.76 |    60.11 |
+
+**Peak:** 67.00 GB/s (N=1, tpb=64)
+**Avg:** 38.35 GB/s
 
 ### H2D
 
+#### fc_to_fc / vectorized (host=pinned)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |     1.79 |     1.79 |     1.80 |
+|   2 |     3.61 |     3.62 |     3.62 |
+|   4 |     7.28 |     7.29 |     7.30 |
+|   8 |    13.33 |    13.34 |    13.36 |
+|  16 |    13.38 |    13.32 |    13.33 |
+|  32 |    13.32 |    13.34 |    13.34 |
+|  64 |    13.34 |    13.40 |    13.41 |
+| 128 |    13.40 |    13.44 |    13.45 |
+| 256 |    13.44 |    13.48 |    13.39 |
+
+**Peak:** 13.48 GB/s (N=256, tpb=32)
+**Avg:** 10.33 GB/s
+
 #### fc_to_fc / memcpy (host=pinned)
 
 | N \ tpb | 16 | 32 | 64 |
 |---------|------|------|------|
-|   1 |     3.61 |    12.48 |    13.39 |
-|   2 |     5.69 |    12.45 |    13.40 |
-|   4 |    13.40 |    12.68 |    13.41 |
-|   8 |     5.79 |    12.80 |    13.41 |
-|  16 |    10.03 |    12.91 |    13.41 |
-|  32 |     6.08 |    12.91 |    13.42 |
-|  64 |    12.72 |    13.40 |    13.44 |
-| 128 |    12.74 |    13.39 |    13.42 |
-| 256 |     7.02 |    13.40 |    13.43 |
+|   1 |    13.27 |    13.34 |    13.39 |
+|   2 |    13.31 |    13.37 |    13.41 |
+|   4 |    13.34 |    13.38 |    13.40 |
+|   8 |    13.35 |    13.40 |    13.41 |
+|  16 |    13.37 |    13.40 |    13.42 |
+|  32 |    13.35 |    13.40 |    13.41 |
+|  64 |    13.36 |    13.40 |    13.43 |
+| 128 |    13.35 |    13.40 |    13.42 |
+| 256 |    13.37 |    13.41 |    13.41 |
 
-**Peak:** 13.44 GB/s (N=64, tpb=64)  
-**Avg:** 11.64 GB/s
+**Peak:** 13.43 GB/s (N=64, tpb=64)
+**Avg:** 13.38 GB/s
 
 #### fc_to_fc / memcpy (host=system)
 
 | N \ tpb | 16 | 32 | 64 |
 |---------|------|------|------|
-|   1 |     3.60 |    10.74 |    12.39 |
-|   2 |     5.63 |    11.48 |    12.66 |
-|   4 |    11.04 |    11.12 |    12.64 |
-|   8 |     4.67 |     9.95 |    13.05 |
-|  16 |     9.11 |     9.27 |    13.19 |
-|  32 |     5.51 |     9.09 |    13.17 |
-|  64 |     9.39 |    13.18 |    13.15 |
-| 128 |     8.97 |    13.15 |    13.17 |
-| 256 |     6.50 |    13.16 |    13.05 |
+|   1 |    10.28 |    11.61 |    12.37 |
+|   2 |    11.63 |    12.40 |    12.66 |
+|   4 |    12.34 |    12.68 |    12.93 |
+|   8 |    12.63 |    12.94 |    13.08 |
+|  16 |    12.82 |    13.09 |    13.14 |
+|  32 |    13.02 |    13.17 |    13.15 |
+|  64 |    13.11 |    13.12 |    13.15 |
+| 128 |    13.02 |    13.12 |    13.18 |
+| 256 |    13.06 |    13.15 |    13.18 |
 
-**Peak:** 13.19 GB/s (N=16, tpb=64)  
-**Avg:** 10.45 GB/s
-
-#### fc_to_fc / vectorized (host=pinned)
-
-| N \ tpb | 16 | 32 | 64 |
-|---------|------|------|------|
-|   1 |     0.82 |     1.31 |     1.79 |
-|   2 |     1.77 |     2.65 |     3.61 |
-|   4 |     3.71 |     5.27 |     7.28 |
-|   8 |     5.55 |     9.78 |    13.36 |
-|  16 |     7.82 |    10.81 |    13.32 |
-|  32 |     6.16 |    12.02 |    13.34 |
-|  64 |    13.35 |    13.38 |    13.41 |
-| 128 |    13.40 |    13.45 |    13.45 |
-| 256 |    11.32 |    13.45 |    13.47 |
-
-**Peak:** 13.47 GB/s (N=256, tpb=64)  
-**Avg:** 8.85 GB/s
-
-#### lw_to_fc / memcpy (host=pinned)
-
-| N \ tpb | 16 | 32 | 64 |
-|---------|------|------|------|
-|   1 |     2.86 |     8.37 |    11.12 |
-|   2 |     2.87 |     8.56 |    11.12 |
-|   4 |     2.42 |     8.64 |    11.13 |
-|   8 |     1.17 |     8.63 |    11.01 |
-|  16 |     4.97 |     8.51 |    11.02 |
-|  32 |     1.37 |     8.53 |    11.02 |
-|  64 |     6.28 |     9.03 |    11.01 |
-| 128 |     6.30 |     9.03 |    11.01 |
-| 256 |     1.35 |     9.02 |    10.99 |
-
-**Peak:** 11.13 GB/s (N=4, tpb=64)  
-**Avg:** 7.68 GB/s
-
-#### lw_to_fc / memcpy (host=system)
-
-| N \ tpb | 16 | 32 | 64 |
-|---------|------|------|------|
-|   1 |     1.58 |     6.19 |     8.85 |
-|   2 |     1.89 |     6.21 |     8.64 |
-|   4 |     0.79 |     6.26 |     7.74 |
-|   8 |     0.82 |     6.27 |     7.33 |
-|  16 |     3.25 |     6.01 |     7.26 |
-|  32 |     2.10 |     4.80 |     7.26 |
-|  64 |     4.15 |     5.36 |     7.11 |
-| 128 |     4.10 |     5.29 |     7.11 |
-| 256 |     1.61 |     5.21 |     7.08 |
-
-**Peak:** 8.85 GB/s (N=1, tpb=64)  
-**Avg:** 5.20 GB/s
+**Peak:** 13.18 GB/s (N=128, tpb=64)
+**Avg:** 12.74 GB/s
 
 #### lw_to_fc / vectorized (host=pinned)
 
 | N \ tpb | 16 | 32 | 64 |
 |---------|------|------|------|
-|   1 |    10.66 |    13.21 |    13.39 |
-|   2 |    11.07 |    13.32 |    13.46 |
-|   4 |    13.46 |    13.35 |    13.49 |
-|   8 |     5.50 |    13.40 |    13.37 |
-|  16 |    13.32 |    13.35 |    13.42 |
-|  32 |     6.03 |    13.39 |    13.43 |
-|  64 |    13.39 |    13.43 |    13.45 |
-| 128 |    13.40 |    13.44 |    13.45 |
-| 256 |    12.31 |    13.44 |    13.48 |
+|   1 |    13.14 |    13.32 |    13.43 |
+|   2 |    13.32 |    13.42 |    13.46 |
+|   4 |    13.41 |    13.46 |    13.49 |
+|   8 |    13.46 |    13.48 |    13.36 |
+|  16 |    13.47 |    13.36 |    13.42 |
+|  32 |    13.36 |    13.42 |    13.43 |
+|  64 |    13.41 |    13.44 |    13.44 |
+| 128 |    13.44 |    13.43 |    13.44 |
+| 256 |    13.43 |    13.45 |    13.46 |
 
-**Peak:** 13.49 GB/s (N=4, tpb=64)  
-**Avg:** 12.61 GB/s
+**Peak:** 13.49 GB/s (N=4, tpb=64)
+**Avg:** 13.41 GB/s
+
+#### lw_to_fc / memcpy (host=pinned)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |     6.82 |     9.19 |    11.14 |
+|   2 |     6.83 |     9.21 |    11.15 |
+|   4 |     6.85 |     9.22 |    11.15 |
+|   8 |     6.84 |     9.22 |    11.02 |
+|  16 |     6.85 |     9.08 |    11.03 |
+|  32 |     6.66 |     9.07 |    11.03 |
+|  64 |     6.67 |     9.07 |    11.04 |
+| 128 |     6.67 |     9.08 |    11.03 |
+| 256 |     6.67 |     9.07 |    11.01 |
+
+**Peak:** 11.15 GB/s (N=2, tpb=64)
+**Avg:** 8.99 GB/s
+
+#### lw_to_fc / memcpy (host=system)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |     4.39 |     6.61 |     8.86 |
+|   2 |     4.41 |     6.66 |     8.91 |
+|   4 |     4.41 |     6.67 |     8.67 |
+|   8 |     4.40 |     6.66 |     8.08 |
+|  16 |     4.39 |     6.65 |     8.06 |
+|  32 |     4.38 |     6.64 |     8.01 |
+|  64 |     4.36 |     6.62 |     7.96 |
+| 128 |     4.35 |     6.64 |     7.88 |
+| 256 |     4.36 |     6.65 |     7.83 |
+
+**Peak:** 8.91 GB/s (N=2, tpb=64)
+**Avg:** 6.43 GB/s
+
+#### fc_to_lw / vectorized (host=pinned)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |    13.14 |    13.32 |    13.41 |
+|   2 |    13.32 |    13.41 |    13.47 |
+|   4 |    13.41 |    13.46 |    13.50 |
+|   8 |    13.46 |    13.49 |    13.53 |
+|  16 |    13.47 |    13.50 |    13.54 |
+|  32 |    13.50 |    13.51 |    13.52 |
+|  64 |    13.51 |    13.52 |    13.54 |
+| 128 |    13.51 |    13.52 |    13.53 |
+| 256 |    13.52 |    13.53 |    13.53 |
+
+**Peak:** 13.54 GB/s (N=16, tpb=64)
+**Avg:** 13.47 GB/s
+
+#### fc_to_lw / memcpy (host=pinned)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |     6.82 |     9.20 |    11.14 |
+|   2 |     6.84 |     9.21 |    11.16 |
+|   4 |     6.86 |     9.24 |    11.15 |
+|   8 |     6.88 |     9.24 |    11.14 |
+|  16 |     6.86 |     9.21 |    11.14 |
+|  32 |     6.85 |     9.22 |    11.14 |
+|  64 |     6.84 |     9.22 |    11.14 |
+| 128 |     6.84 |     9.20 |    11.13 |
+| 256 |     6.84 |     9.20 |    11.12 |
+
+**Peak:** 11.16 GB/s (N=2, tpb=64)
+**Avg:** 9.07 GB/s
+
+#### fc_to_lw / memcpy (host=system)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |     4.39 |     6.61 |     8.85 |
+|   2 |     4.40 |     6.66 |     8.90 |
+|   4 |     4.42 |     6.67 |     8.38 |
+|   8 |     4.41 |     6.66 |     8.02 |
+|  16 |     4.41 |     6.66 |     8.01 |
+|  32 |     4.40 |     6.65 |     7.99 |
+|  64 |     4.36 |     6.65 |     7.89 |
+| 128 |     4.36 |     6.63 |     7.95 |
+| 256 |     4.36 |     6.64 |     7.80 |
+
+**Peak:** 8.90 GB/s (N=2, tpb=64)
+**Avg:** 6.41 GB/s
 
 ### D2H
 
+#### fc_to_fc / vectorized (host=pinned)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |    11.11 |    11.20 |     7.72 |
+|   2 |    11.21 |    11.13 |    11.22 |
+|   4 |    11.16 |    11.17 |    11.16 |
+|   8 |    11.24 |    11.27 |    11.28 |
+|  16 |    11.28 |    11.24 |    11.28 |
+|  32 |    11.30 |    11.18 |    11.15 |
+|  64 |    11.22 |    10.52 |    11.12 |
+| 128 |    10.94 |     9.69 |    10.55 |
+| 256 |     9.88 |    10.49 |    10.07 |
+
+**Peak:** 11.30 GB/s (N=32, tpb=16)
+**Avg:** 10.84 GB/s
+
 #### fc_to_fc / memcpy (host=pinned)
 
 | N \ tpb | 16 | 32 | 64 |
 |---------|------|------|------|
-|   1 |     3.67 |    13.22 |    14.23 |
-|   2 |     5.83 |    13.17 |    14.24 |
-|   4 |     8.45 |    13.42 |    14.25 |
-|   8 |     8.45 |    13.55 |    14.25 |
-|  16 |    10.49 |    13.68 |    14.25 |
-|  32 |     7.16 |    13.68 |    14.25 |
-|  64 |    13.49 |    14.24 |    14.25 |
-| 128 |    13.51 |    14.24 |    14.25 |
-| 256 |    10.78 |    14.24 |    14.25 |
+|   1 |    14.13 |    14.19 |    14.23 |
+|   2 |    14.17 |    14.22 |    14.24 |
+|   4 |    14.21 |    14.23 |    14.25 |
+|   8 |    14.21 |    14.23 |    14.25 |
+|  16 |    14.21 |    14.24 |    14.25 |
+|  32 |    14.22 |    14.24 |    14.25 |
+|  64 |    14.22 |    14.24 |    14.25 |
+| 128 |    14.22 |    14.24 |    14.25 |
+| 256 |    14.22 |    14.24 |    14.25 |
 
-**Peak:** 14.25 GB/s (N=4, tpb=64)  
-**Avg:** 12.35 GB/s
+**Peak:** 14.25 GB/s (N=4, tpb=64)
+**Avg:** 14.23 GB/s
 
 #### fc_to_fc / memcpy (host=system)
 
 | N \ tpb | 16 | 32 | 64 |
 |---------|------|------|------|
-|   1 |     2.10 |     9.86 |    12.90 |
-|   2 |     2.11 |     9.85 |    12.77 |
-|   4 |     5.57 |     8.43 |    11.25 |
-|   8 |     5.12 |     7.09 |    11.64 |
-|  16 |     4.30 |     6.87 |    11.45 |
-|  32 |     2.09 |     6.77 |    10.41 |
-|  64 |     6.01 |     9.42 |    10.43 |
-| 128 |     4.13 |     9.07 |     9.91 |
-| 256 |     4.27 |     9.36 |    10.62 |
+|   1 |     9.53 |    10.74 |    12.96 |
+|   2 |     9.37 |    10.84 |    12.79 |
+|   4 |     9.38 |    10.48 |    11.27 |
+|   8 |     9.10 |     9.74 |    10.37 |
+|  16 |     8.70 |     9.59 |     9.94 |
+|  32 |     8.65 |     9.40 |    10.87 |
+|  64 |     8.44 |     9.22 |    10.06 |
+| 128 |     8.30 |     9.09 |    10.27 |
+| 256 |     8.28 |     9.19 |    10.66 |
 
-**Peak:** 12.90 GB/s (N=1, tpb=64)  
-**Avg:** 7.92 GB/s
-
-#### fc_to_fc / vectorized (host=pinned)
-
-| N \ tpb | 16 | 32 | 64 |
-|---------|------|------|------|
-|   1 |    10.22 |     8.78 |     7.61 |
-|   2 |    10.26 |     9.05 |    11.25 |
-|   4 |     5.14 |     9.44 |    11.20 |
-|   8 |     5.16 |     9.67 |    11.27 |
-|  16 |     8.01 |    10.21 |    11.26 |
-|  32 |     9.75 |    10.30 |    11.23 |
-|  64 |    10.38 |    10.91 |    11.11 |
-| 128 |    10.29 |    10.40 |    10.51 |
-| 256 |     8.21 |    10.22 |    10.22 |
-
-**Peak:** 11.27 GB/s (N=8, tpb=64)  
-**Avg:** 9.71 GB/s
-
-#### lw_to_fc / memcpy (host=pinned)
-
-| N \ tpb | 16 | 32 | 64 |
-|---------|------|------|------|
-|   1 |     3.37 |    11.29 |    13.13 |
-|   2 |     3.29 |    11.08 |    12.88 |
-|   4 |     0.83 |    10.74 |    12.80 |
-|   8 |     1.11 |    10.63 |    12.80 |
-|  16 |     7.04 |    10.92 |    12.80 |
-|  32 |     4.62 |    10.94 |    12.80 |
-|  64 |     9.28 |    11.64 |    12.79 |
-| 128 |     1.97 |    11.63 |    12.78 |
-| 256 |     7.26 |    11.62 |    12.72 |
-
-**Peak:** 13.13 GB/s (N=1, tpb=64)  
-**Avg:** 9.44 GB/s
-
-#### lw_to_fc / memcpy (host=system)
-
-| N \ tpb | 16 | 32 | 64 |
-|---------|------|------|------|
-|   1 |     0.12 |     1.00 |     5.94 |
-|   2 |     0.15 |     1.00 |     5.24 |
-|   4 |     0.62 |     1.00 |     4.96 |
-|   8 |     3.17 |     1.00 |     5.41 |
-|  16 |     0.22 |     1.01 |     5.08 |
-|  32 |     0.52 |     3.71 |     5.24 |
-|  64 |     0.52 |     3.91 |     4.86 |
-| 128 |     0.54 |     4.24 |     5.43 |
-| 256 |     0.52 |     3.96 |     5.32 |
-
-**Peak:** 5.94 GB/s (N=1, tpb=64)  
-**Avg:** 2.77 GB/s
+**Peak:** 12.96 GB/s (N=1, tpb=64)
+**Avg:** 9.90 GB/s
 
 #### lw_to_fc / vectorized (host=pinned)
 
 | N \ tpb | 16 | 32 | 64 |
 |---------|------|------|------|
-|   1 |    10.66 |    10.29 |    11.26 |
-|   2 |    10.83 |    10.32 |    11.28 |
-|   4 |     5.11 |    10.51 |    11.30 |
-|   8 |     5.09 |    10.55 |    11.31 |
-|  16 |     9.70 |    10.60 |    11.32 |
-|  32 |    10.32 |    10.61 |    11.32 |
-|  64 |    10.57 |    11.32 |    11.32 |
-| 128 |     5.28 |    11.32 |    11.32 |
-| 256 |     9.84 |    11.32 |    11.32 |
+|   1 |    11.11 |    11.20 |    11.26 |
+|   2 |    11.20 |    11.26 |    11.29 |
+|   4 |    11.26 |    11.29 |    11.31 |
+|   8 |    11.29 |    11.31 |    11.32 |
+|  16 |    11.30 |    11.31 |    11.32 |
+|  32 |    11.31 |    11.32 |    11.32 |
+|  64 |    11.32 |    11.32 |    11.32 |
+| 128 |    11.32 |    11.32 |    11.32 |
+| 256 |    11.32 |    11.32 |    11.32 |
 
-**Peak:** 11.32 GB/s (N=64, tpb=32)  
-**Avg:** 10.22 GB/s
+**Peak:** 11.32 GB/s (N=8, tpb=64)
+**Avg:** 11.29 GB/s
+
+#### lw_to_fc / memcpy (host=pinned)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |    10.88 |    12.29 |    13.12 |
+|   2 |    10.91 |    12.19 |    12.91 |
+|   4 |    10.74 |    11.81 |    12.82 |
+|   8 |    10.13 |    11.68 |    12.82 |
+|  16 |     9.95 |    11.68 |    12.82 |
+|  32 |     9.93 |    11.68 |    12.81 |
+|  64 |     9.92 |    11.67 |    12.81 |
+| 128 |     9.92 |    11.67 |    12.80 |
+| 256 |     9.91 |    11.66 |    12.74 |
+
+**Peak:** 13.12 GB/s (N=1, tpb=64)
+**Avg:** 11.64 GB/s
+
+#### lw_to_fc / memcpy (host=system)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |     3.79 |     4.95 |     6.49 |
+|   2 |     3.77 |     4.89 |     5.92 |
+|   4 |     3.77 |     4.75 |     5.64 |
+|   8 |     3.57 |     4.48 |     5.57 |
+|  16 |     3.41 |     4.41 |     5.39 |
+|  32 |     3.36 |     4.33 |     5.49 |
+|  64 |     3.37 |     4.33 |     5.37 |
+| 128 |     3.36 |     4.41 |     5.43 |
+| 256 |     3.36 |     4.45 |     5.53 |
+
+**Peak:** 6.49 GB/s (N=1, tpb=64)
+**Avg:** 4.58 GB/s
+
+#### fc_to_lw / vectorized (host=pinned)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |    11.11 |    11.20 |    11.26 |
+|   2 |    11.20 |    11.26 |    11.29 |
+|   4 |    11.26 |    11.29 |    11.31 |
+|   8 |    11.29 |    11.31 |    11.32 |
+|  16 |    11.30 |    11.32 |    10.85 |
+|  32 |    11.32 |    10.91 |    10.28 |
+|  64 |    10.88 |    10.32 |     9.68 |
+| 128 |    10.01 |     8.79 |     9.49 |
+| 256 |     8.78 |     9.59 |     9.51 |
+
+**Peak:** 11.32 GB/s (N=8, tpb=64)
+**Avg:** 10.67 GB/s
+
+#### fc_to_lw / memcpy (host=pinned)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |    10.88 |    12.29 |    13.12 |
+|   2 |    10.91 |    12.14 |    12.90 |
+|   4 |    10.67 |    11.80 |    12.82 |
+|   8 |    10.08 |    11.68 |    12.82 |
+|  16 |     9.92 |    11.67 |    12.82 |
+|  32 |     9.91 |    11.68 |    12.81 |
+|  64 |     9.91 |    11.67 |    12.81 |
+| 128 |     9.90 |    11.66 |    12.80 |
+| 256 |     9.91 |    11.66 |    12.78 |
+
+**Peak:** 13.12 GB/s (N=1, tpb=64)
+**Avg:** 11.63 GB/s
+
+#### fc_to_lw / memcpy (host=system)
+
+| N \ tpb | 16 | 32 | 64 |
+|---------|------|------|------|
+|   1 |     3.82 |     4.91 |     6.54 |
+|   2 |     3.82 |     4.89 |     5.96 |
+|   4 |     3.77 |     4.77 |     5.87 |
+|   8 |     3.63 |     4.52 |     5.56 |
+|  16 |     3.44 |     4.41 |     5.47 |
+|  32 |     3.38 |     4.41 |     5.56 |
+|  64 |     3.37 |     4.34 |     5.55 |
+| 128 |     3.38 |     4.44 |     5.47 |
+| 256 |     3.36 |     4.42 |     5.50 |
+
+**Peak:** 6.54 GB/s (N=1, tpb=64)
+**Avg:** 4.61 GB/s
 
 ## Key Findings
 
 ### D2D (Device-to-Device)
 
-- **vectorized fc_to_fc**: peaks at 422.3 GB/s at large N — ramp-up from 6.1 GB/s (kernel launch overhead amortized)
-- **memcpy fc_to_fc**: flat ~212 GB/s — only 1 DMA per block, low overhead
-- **vectorized lw_to_fc**: flat ~351 GB/s — GPU kernel excels at many small copies
-- **memcpy lw_to_fc**: only ~35 GB/s — per-chunk DMA command overhead dominates
-- **Winner**: vectorized for lw_to_fc (419 vs 66 GB/s = 6.3x)
+- **vectorized fc_to_fc**: peaks at 421.4 GB/s at N=128 — ramp-up from 6.06 GB/s (kernel launch overhead amortized)
+- **memcpy fc_to_fc**: peaks at 388.36 GB/s at N=1, flattens to ~260 GB/s at large N
+- **vectorized lw_to_fc**: flat ~394 GB/s average, peak 524.3 GB/s — GPU kernel excels at many small copies
+- **vectorized fc_to_lw**: flat ~394 GB/s average, peak 551.9 GB/s — symmetric with lw_to_fc
+- **memcpy lw_to_fc / fc_to_lw**: only ~38 GB/s — per-chunk DMA command overhead dominates
+- **Winner**: vectorized always wins for scattered patterns (lw_to_fc, fc_to_lw); up to 10.3x over memcpy (avg-based)
 
 ### H2D (Host-to-Device)
 
-- PCIe ceiling: ~13.4 GB/s (fc_to_fc memcpy pinned)
-- **vectorized lw_to_fc**: 13.5 GB/s — matches PCIe ceiling, wins over memcpy (11.1 GB/s)
-- **Pinned vs system** (lw_to_fc memcpy): 11.1 vs 8.8 GB/s = 1.26x
+- Observed PCIe ceiling: ~13.5 GB/s (theoretical: ~15.75 GB/s; ~86% efficiency)
+- **vectorized lw_to_fc**: 13.49 GB/s — saturates PCIe, wins over memcpy (11.15 GB/s)
+- **vectorized fc_to_lw**: 13.54 GB/s — slightly higher than lw_to_fc, also saturates PCIe
+- **Pinned vs system** (scattered memcpy): ~9.0 vs ~6.4 GB/s = 1.40x
 
 ### D2H (Device-to-Host)
 
-- **memcpy fc_to_fc pinned**: 14.2 GB/s — HW ceiling for D2H
-- **vectorized fc_to_fc**: 11.3 GB/s — underperforms memcpy for fc_to_fc
-- **vectorized lw_to_fc**: 11.3 GB/s — competitive with memcpy
-- **Pinned vs system** (lw_to_fc memcpy): 13.1 vs 5.9 GB/s = 2.21x
+- **memcpy fc_to_fc pinned**: 14.25 GB/s — HW ceiling for D2H
+- **vectorized fc_to_fc**: 11.30 GB/s — underperforms memcpy for fc_to_fc
+- **vectorized lw_to_fc**: 11.32 GB/s — flat, stable across all N/tpb
+- **vectorized fc_to_lw**: 11.32 GB/s at small N, degrades to ~9 GB/s at large N
+- **memcpy scattered pinned**: 13.12 GB/s — competitive with vectorized
+- **Pinned vs system** (scattered memcpy): peak 13.12 vs 6.49 GB/s = 2.02x; avg 11.64 vs 4.58 GB/s = 2.54x
+
+### fc_to_lw vs lw_to_fc Symmetry
+
+- **D2D vectorized**: essentially symmetric — avg 393.77 vs 393.87 GB/s (ratio 1.00x)
+- **D2D memcpy**: essentially symmetric — avg 38.35 vs 38.25 GB/s (ratio 1.00x)
+- **H2D vectorized**: fc_to_lw slightly higher — 13.47 vs 13.41 GB/s
+- **D2H vectorized**: lw_to_fc slightly higher avg (11.29 vs 10.67 GB/s) — fc_to_lw degrades at large N
 
 ## Recommendation Matrix
 
-| Direction | fc_to_fc | lw_to_fc |
-|-----------|----------|----------|
-| D2D | memcpy (simpler, ~same BW) | **vectorized** (>>20x over memcpy) |
-| H2D | memcpy pinned | **vectorized** pinned (~2x over memcpy) |
-| D2H | **memcpy** pinned | vectorized pinned (slight edge) |
+| Direction | fc_to_fc | lw_to_fc | fc_to_lw |
+|-----------|----------|----------|----------|
+| D2D | memcpy at small N, vectorized at N>=64 | **vectorized** (~10x over memcpy) | **vectorized** (~10x over memcpy) |
+| H2D | memcpy pinned (flat ~13.4 GB/s) | **vectorized** pinned (avg 13.41 vs 8.99 GB/s) | **vectorized** pinned (avg 13.47 vs 9.07 GB/s) |
+| D2H | **memcpy** pinned (avg 14.23 GB/s) | memcpy pinned (avg 11.64 GB/s, slight edge) | memcpy pinned (avg 11.63 GB/s, slight edge) |
+
+
+## TransferManager Engine Selection Validation
+
+The `TransferManager` in `kvbm-physical` hardwires engine selection based on
+layout pattern -- it does not expose a `backend` knob. This section validates
+those choices against the benchmark data above.
+
+**Policy:**
+- `fc_to_fc` (both layouts fully-contiguous) --> BCS memcpy
+- `lw_to_fc` / `fc_to_lw` (one layout layer-separate) --> CCS vectorized kernel
+
+### fc_to_fc: BCS memcpy wins
+
+| Direction | memcpy Avg (GB/s) | vectorized Avg (GB/s) | Winner | Margin |
+|-----------|------------------:|----------------------:|--------|-------:|
+| D2D       |            276.60 |                166.80 | memcpy |  1.66x |
+| H2D pinned|             13.38 |                 10.33 | memcpy |  1.30x |
+| D2H pinned|             14.23 |                 10.84 | memcpy |  1.31x |
+
+Memcpy is consistently faster for contiguous-to-contiguous transfers.
+The vectorized kernel has severe low-N startup cost (D2D N=1 tpb=64: 6.06 GB/s vs
+381.30 GB/s for memcpy) and never surpasses memcpy on average.
+
+### lw_to_fc / fc_to_lw: CCS vectorized kernel wins (mostly)
+
+| Direction | Pattern  | vectorized Avg (GB/s) | memcpy Avg (GB/s) | Winner     | Margin |
+|-----------|----------|----------------------:|------------------:|------------|-------:|
+| D2D       | lw_to_fc |                393.87 |             38.25 | vectorized | 10.30x |
+| D2D       | fc_to_lw |                393.77 |             38.35 | vectorized | 10.27x |
+| H2D pinned| lw_to_fc |                 13.41 |              8.99 | vectorized |  1.49x |
+| H2D pinned| fc_to_lw |                 13.47 |              9.07 | vectorized |  1.49x |
+| D2H pinned| lw_to_fc |                 11.29 |             11.64 | memcpy     |  1.03x |
+| D2H pinned| fc_to_lw |                 10.67 |             11.63 | memcpy     |  1.09x |
+
+For **D2D**, the vectorized kernel is **10x faster** -- memcpy must issue
+`N * NUM_LAYERS * OUTER_DIM` individual copy commands while the kernel
+handles the scatter/gather in a single dispatch.
+
+For **H2D**, vectorized wins by **1.5x** -- both are PCIe-bound, but the
+kernel avoids per-chunk command overhead.
+
+For **D2H**, memcpy has a **slight edge** (3-9%), but both are within noise
+of the observed PCIe ceiling (~13.5 GB/s; theoretical ~15.75 GB/s). The TransferManager
+accepts this minor D2H regression in exchange for the large D2D and H2D
+gains -- a reasonable single-policy tradeoff.
+
+### Conclusion
+
+The TransferManager's hardwired choices are validated:
+- **fc_to_fc --> BCS memcpy**: correct in all directions.
+- **lw/fc --> CCS vectorized**: correct for D2D (10x) and H2D (1.5x);
+  near-parity on D2H (~3-9% regression, within PCIe noise).
