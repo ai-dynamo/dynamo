@@ -248,8 +248,8 @@ impl OpenAIPreprocessor {
 
         // Check if the chat template injected a reasoning start token at the end
         // of the prompt (e.g., Qwen3.5 appends `<think>\n` when enable_thinking
-        // is not explicitly false). If so, the model's completion starts
-        // mid-reasoning and the parser should begin in reasoning mode.
+        // is true). If so, the model's completion starts mid-reasoning and the
+        // parser should begin in reasoning mode.
         let prompt_injected_reasoning = formatted_prompt
             .as_ref()
             .is_some_and(|p| p.trim_end().ends_with("<think>"));

@@ -247,10 +247,11 @@ async fn anthropic_messages(
     //      reasoning mode with stripped_think_start=true, which is critical for
     //      correct `</think>` boundary detection in the streaming path.
     //
-    // The OpenAI path handles this in the preprocessor: it renders the template,
-    // inspects the formatted prompt for a trailing `<think>`, and sets
-    // prompt_injected_reasoning accordingly. The Anthropic path bypasses the
-    // preprocessor, so we infer prompt injection from the reasoning parser config.
+    // The OpenAI path sets enable_thinking=true in the handler and then
+    // detects prompt_injected_reasoning in the preprocessor by inspecting
+    // whether the rendered prompt ends with `<think>`. The Anthropic path
+    // bypasses the preprocessor, so we infer prompt injection from the
+    // reasoning parser config.
     let prompt_injected_reasoning =
         parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled;
 

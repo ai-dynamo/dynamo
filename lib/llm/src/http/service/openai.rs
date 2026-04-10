@@ -1188,6 +1188,19 @@ async fn chat_completions(
             err_response
         })?;
 
+    // When a reasoning parser is configured, set enable_thinking=true in the
+    // chat template args so the model's Jinja template injects a `<think>`
+    // start token into the prompt. Without this, models like Qwen3.5 whose
+    // template checks `enable_thinking` will suppress reasoning output.
+    // Use `or_insert` so an explicit client-supplied value takes precedence.
+    if parsing_options.reasoning_parser.is_some() {
+        let args = request
+            .chat_template_args
+            .get_or_insert_with(Default::default);
+        args.entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+    }
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     let annotations = request.annotations();
@@ -1587,8 +1600,6 @@ async fn responses(
             continuous_usage_stats: false,
         });
 
-    let request = context.map(|mut _req| chat_request);
-
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let (engine, parsing_options) = state
@@ -1599,6 +1610,19 @@ async fn responses(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+
+    // When a reasoning parser is configured, set enable_thinking=true in the
+    // chat template args so the model's Jinja template injects a `<think>`
+    // start token into the prompt (mirrors the chat_completions handler).
+    if parsing_options.reasoning_parser.is_some() {
+        let args = chat_request
+            .chat_template_args
+            .get_or_insert_with(Default::default);
+        args.entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+    }
+
+    let request = context.map(|mut _req| chat_request);
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 

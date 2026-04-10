@@ -895,7 +895,7 @@ impl HFConfig {
         // 1. generation_config.json;
         // 2. config.json, or text_config field in config.json.
         // https://github.com/huggingface/transformers/issues/25395#issuecomment-1671863257
-        let final_eos_token_ids: Vec<TokenIdType> = {
+        let mut final_eos_token_ids: Vec<TokenIdType> = {
                 // Firstly check the generation_config.json
                 crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
                 .inspect_err(
@@ -952,6 +952,43 @@ impl HFConfig {
                     "missing eos_token_id in config.json and generation_config.json, cannot load"
                 )
             })?;
+
+        // Some models (e.g. Qwen3.5) define a chat-specific eos_token in
+        // tokenizer_config.json (e.g. <|im_end|>) that differs from the base
+        // model eos_token_id in config.json (e.g. <|endoftext|>). If we can
+        // resolve the tokenizer's eos_token to a token ID via
+        // added_tokens_decoder, include it so the decoder strips it from output.
+        let tokcfg_path = file_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("tokenizer_config.json");
+        if let Ok(eos_token_str) =
+            crate::file_json_field::<String>(&tokcfg_path, "eos_token")
+        {
+            if let Ok(added_tokens) = crate::file_json_field::<
+                std::collections::HashMap<String, serde_json::Value>,
+            >(&tokcfg_path, "added_tokens_decoder")
+            {
+                for (id_str, info) in &added_tokens {
+                    if let Some(content) = info.get("content").and_then(|v| v.as_str()) {
+                        if content == eos_token_str {
+                            if let Ok(id) = id_str.parse::<TokenIdType>() {
+                                if !final_eos_token_ids.contains(&id) {
+                                    tracing::info!(
+                                        token_id = id,
+                                        token = %eos_token_str,
+                                        "Adding eos_token from tokenizer_config.json"
+                                    );
+                                    final_eos_token_ids.push(id);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         text_config.final_eos_token_ids = final_eos_token_ids;
 
         Ok(Arc::new(config))
