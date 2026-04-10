@@ -398,8 +398,8 @@ class NativePlannerBase:
         num_p, num_d, _ = await self._get_worker_counts_raw()
 
         if self.prometheus_port != 0:
-            self.prometheus_metrics.num_prefill_workers.set(num_p)
-            self.prometheus_metrics.num_decode_workers.set(num_d)
+            self.prometheus_metrics.num_prefill_replicas.set(num_p)
+            self.prometheus_metrics.num_decode_replicas.set(num_d)
             gpu_hours = (
                 (
                     num_p * (self.config.prefill_engine_num_gpu or 0)

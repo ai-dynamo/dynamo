@@ -97,7 +97,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "dynamo_planner_num_prefill_workers{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_num_prefill_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Prefill Workers",
               "range": true,
               "refId": "A"
@@ -156,7 +156,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "dynamo_planner_num_decode_workers{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_num_decode_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Decode Workers",
               "range": true,
               "refId": "A"
@@ -339,14 +339,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "dynamo_planner_num_prefill_workers{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_num_prefill_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Prefill Workers",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "dynamo_planner_num_decode_workers{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_num_decode_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Decode Workers",
               "range": true,
               "refId": "B"
@@ -1494,14 +1494,14 @@ data:
               "type": "prometheus",
               "uid": "${datasource}"
             },
-            "definition": "label_values(dynamo_planner_num_prefill_workers, namespace)",
+            "definition": "label_values(dynamo_planner_num_prefill_replicas, namespace)",
             "hide": 0,
             "includeAll": true,
             "label": "Namespace",
             "multi": true,
             "name": "namespace",
             "options": [],
-            "query": "label_values(dynamo_planner_num_prefill_workers, namespace)",
+            "query": "label_values(dynamo_planner_num_prefill_replicas, namespace)",
             "refresh": 2,
             "regex": "",
             "skipUrlSync": false,

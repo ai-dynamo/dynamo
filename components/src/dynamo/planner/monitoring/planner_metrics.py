@@ -38,13 +38,13 @@ class PlannerPrometheusMetrics:
 
     def __init__(self) -> None:
         # -- Worker counts ------------------------------------------------
-        self.num_prefill_workers = Gauge(
-            f"{PREFIX}_num_prefill_workers",
-            "Current number of prefill workers",
+        self.num_prefill_replicas = Gauge(
+            f"{PREFIX}_num_prefill_replicas",
+            "Current number of prefill replicas",
         )
-        self.num_decode_workers = Gauge(
-            f"{PREFIX}_num_decode_workers",
-            "Current number of decode workers",
+        self.num_decode_replicas = Gauge(
+            f"{PREFIX}_num_decode_replicas",
+            "Current number of decode replicas",
         )
 
         # -- Observed metrics ---------------------------------------------

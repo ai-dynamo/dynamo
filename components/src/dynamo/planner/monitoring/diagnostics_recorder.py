@@ -41,9 +41,9 @@ class TickSnapshot:
 
     timestamp_s: float = 0.0
 
-    # Worker counts
-    num_prefill_workers: Optional[int] = None
-    num_decode_workers: Optional[int] = None
+    # Replica counts
+    num_prefill_replicas: Optional[int] = None
+    num_decode_replicas: Optional[int] = None
 
     # Observed traffic (adapter-level, from Metrics)
     observed_ttft_ms: Optional[float] = None
@@ -141,12 +141,12 @@ class DiagnosticsRecorder:
 
         snap = TickSnapshot(
             timestamp_s=tick_input.now_s,
-            num_prefill_workers=(
+            num_prefill_replicas=(
                 tick_input.worker_counts.ready_num_prefill
                 if tick_input.worker_counts
                 else None
             ),
-            num_decode_workers=(
+            num_decode_replicas=(
                 tick_input.worker_counts.ready_num_decode
                 if tick_input.worker_counts
                 else None
@@ -217,7 +217,7 @@ class DiagnosticsRecorder:
             rows=6,
             cols=2,
             subplot_titles=(
-                "Worker Counts",
+                "Replica Counts",
                 "Request Rate (Observed vs Predicted)",
                 "Observed TTFT vs SLA",
                 "Observed ITL vs SLA",
@@ -243,8 +243,8 @@ class DiagnosticsRecorder:
         fig.add_trace(
             go.Scatter(
                 x=labels,
-                y=_vals("num_prefill_workers"),
-                name="Prefill Workers",
+                y=_vals("num_prefill_replicas"),
+                name="Prefill Replicas",
                 mode="lines+markers",
             ),
             row=1,
@@ -253,8 +253,8 @@ class DiagnosticsRecorder:
         fig.add_trace(
             go.Scatter(
                 x=labels,
-                y=_vals("num_decode_workers"),
-                name="Decode Workers",
+                y=_vals("num_decode_replicas"),
+                name="Decode Replicas",
                 mode="lines+markers",
             ),
             row=1,

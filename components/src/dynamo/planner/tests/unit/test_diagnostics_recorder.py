@@ -259,7 +259,7 @@ class TestDiagnosticsRecorder:
                 content = f.read()
             assert len(content) > 1000
             assert "plotly" in content.lower()
-            assert "Worker Counts" in content
+            assert "Replica Counts" in content
             assert "Observed TTFT vs SLA" in content
             assert "Observed ITL vs SLA" in content
             assert "Estimated TTFT vs SLA" in content
