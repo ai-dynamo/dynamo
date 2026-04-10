@@ -89,7 +89,7 @@ once_cell = { version = "1" }
 percent-encoding = { version = "2.3.2" } # also used by tonic, reqwest, axum, etc
 rayon = { version = "1.10" }
 regex = { version = "1" }
-socket2 = { version = "0.5" }
+socket2 = { version = "0.5.8" }
 tokio-rayon = { version = "2.1" }
 
 # Kubernetes discovery backend
