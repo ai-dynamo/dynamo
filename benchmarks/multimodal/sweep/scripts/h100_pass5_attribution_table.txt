@@ -1,4 +1,10 @@
 
+  === TTFT (ms) — rate=0.4 ===
+                          avg      p50      p90      p99
+  vllm-serve            2481    1946    4498    5637
+  dynamo-fd             2122    2072    2598    3105
+  delta                 -14%     +6%    -42%    -45%
+
   Attribution Breakdown (rate=0.4, all times in ms)
 
                                                      vllm-serve                       dynamo-fd

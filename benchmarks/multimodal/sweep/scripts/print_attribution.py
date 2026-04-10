@@ -39,6 +39,35 @@ def f(v: float | None, w: int = 6) -> str:
     return str(int(round(v))).rjust(w)
 
 
+def print_ttft_comparison(
+    bl_name: str, fd_name: str,
+    bl_ttft: dict[str, float], fd_ttft: dict[str, float],
+    rate: str, out: Any = sys.stdout,
+) -> None:
+    """Print Table 1: TTFT comparison with delta row."""
+    print(file=out)
+    print(f"  === TTFT (ms) — rate={rate} ===", file=out)
+    print(f"  {'':18s} {'avg':>8s} {'p50':>8s} {'p90':>8s} {'p99':>8s}", file=out)
+
+    for name, ttft in [(bl_name, bl_ttft), (fd_name, fd_ttft)]:
+        vals = "".join(f"{int(round(ttft.get(s, 0))):>8d}" for s in STATS)
+        print(f"  {name:<18s}{vals}", file=out)
+
+    # Delta row (fd relative to bl)
+    deltas: list[str] = []
+    for s in STATS:
+        bl_v = bl_ttft.get(s)
+        fd_v = fd_ttft.get(s)
+        if bl_v and fd_v and bl_v > 0:
+            pct = (fd_v - bl_v) / bl_v * 100
+            sign = "+" if pct >= 0 else ""
+            deltas.append(f"{sign}{pct:.0f}%".rjust(8))
+        else:
+            deltas.append("—".rjust(8))
+    print(f"  {'delta':<18s}{''.join(deltas)}", file=out)
+    print(file=out)
+
+
 def print_table(data: dict[str, Any], rate: str, out: Any = sys.stdout) -> None:
     configs = data["configs"]
     config_names = list(configs.keys())
@@ -54,6 +83,10 @@ def print_table(data: dict[str, Any], rate: str, out: Any = sys.stdout) -> None:
     bl_ttft = bl_rate.get("ttft", {})
     fd_ttft = fd_rate.get("ttft", {})
 
+    # --- Table 1: TTFT comparison ---
+    print_ttft_comparison(bl_name, fd_name, bl_ttft, fd_ttft, rate, out)
+
+    # --- Table 2: Attribution breakdown ---
     def row(label: str, bl_name_key: str | None, fd_name_key: str | None, indent: int = 0) -> None:
         prefix = "  " * indent + label
         bl_vals = " ".join(f(g(bl, bl_name_key, s) if bl_name_key else None) for s in STATS)
@@ -73,7 +106,6 @@ def print_table(data: dict[str, Any], rate: str, out: Any = sys.stdout) -> None:
         print(f"  {prefix:<34s} {bl_s} {'':>6s} {'':>6s} {'':>6s}      {fd_s}", file=out)
 
     W = 110
-    print(file=out)
     print(f"  Attribution Breakdown (rate={rate}, all times in ms)", file=out)
     print(file=out)
     print(f"  {'':34s} {bl_name:>26s}      {fd_name:>26s}", file=out)
