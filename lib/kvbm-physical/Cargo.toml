@@ -14,7 +14,7 @@ dynamo-config = { workspace = true }
 dynamo-memory = { workspace = true }
 libc = { workspace = true }
 kvbm-common = { workspace = true }
-kvbm-kernels = { workspace = true }
+kvbm-kernels = { workspace = true, optional = true }
 velo = { workspace = true }
 
 aligned-vec = "0.6.4"
@@ -36,7 +36,7 @@ validator = { workspace = true }
 
 [features]
 default = ["cuda"]
-cuda = []
+cuda = ["dep:kvbm-kernels"]
 collectives = []
 testing = []
 testing-kvbm = []
