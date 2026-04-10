@@ -102,6 +102,7 @@ class TopologyConfig:
     directory: Optional[str] = None  # override profile-level directory
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
     single_gpu: bool = False  # append --single-gpu to script_args
+    env: dict[str, str] = field(default_factory=dict)  # extra env vars for subprocess
 
 
 @dataclass
@@ -187,5 +188,6 @@ def make_multimodal_configs(
             marks=marks,
             delayed_start=topo_cfg.delayed_start,
             request_payloads=profile.request_payloads,
+            env=topo_cfg.env,
         )
     return configs

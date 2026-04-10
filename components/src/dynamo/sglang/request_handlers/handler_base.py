@@ -34,7 +34,6 @@ from dynamo.sglang.publisher import DynamoSglangPublisher
 class SGLangEngineQuiesceController:
     def __init__(self, engine: sgl.Engine):
         self._engine = engine
-        self._quiesced_tags: Optional[list[str]] = None
         self._is_quiesced = False
 
     @property
@@ -55,7 +54,6 @@ class SGLangEngineQuiesceController:
             ReleaseMemoryOccupationReqInput(tags=tags),
             None,
         )
-        self._quiesced_tags = None if tags is None else list(tags)
         self._is_quiesced = True
         return True
 
@@ -68,9 +66,8 @@ class SGLangEngineQuiesceController:
             ResumeMemoryOccupationReqInput,
         )
 
-        request_tags = self._quiesced_tags if tags is None else list(tags)
         await self._engine.tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(tags=request_tags),
+            ResumeMemoryOccupationReqInput(tags=tags),
             None,
         )
         await self._engine.tokenizer_manager.continue_generation(
@@ -79,7 +76,6 @@ class SGLangEngineQuiesceController:
         return True
 
     def mark_resumed(self) -> None:
-        self._quiesced_tags = None
         self._is_quiesced = False
 
 

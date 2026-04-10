@@ -3,7 +3,7 @@
 
 """SGLang-specific patches for GPU Memory Service integration.
 
-- patch_torch_memory_saver: Routes to GMS hybrid implementation
+- patch_torch_memory_saver: Routes weights and kv_cache to GMS
 - patch_model_runner: Fixes memory accounting with pre-loaded weights
 - patch_static_state_for_gms: No-ops named-buffer export/import (GMS preserves them)
 """
@@ -15,7 +15,12 @@ import logging
 from contextlib import contextmanager
 from typing import Optional
 
+import gpu_memory_service.integrations.sglang as gms_sglang
 import torch
+from gpu_memory_service.integrations.sglang.memory_saver import (
+    GMSMemorySaverImpl,
+    get_gms_memory_saver_impl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,25 +62,16 @@ def patch_torch_memory_saver() -> None:
         logger.info(f"[GMS] TorchMemorySaver initializing with hook_mode={hook_mode}")
 
         if hook_mode is None or hook_mode == "gms":
-            # Use our GPU Memory Service implementation
-            from gpu_memory_service.integrations.sglang.memory_saver import (
-                GMSMemorySaverImpl,
-            )
-            from torch_memory_saver.entrypoint import _TorchMemorySaverImpl
-
+            # In GMS mode we install only the strict GMS implementation:
+            # weights + kv_cache go through GMS, generic unsupported tags stay
+            # no-ops/warnings, and cuda_graph remains unsupported.
             # Get device from torch.cuda.current_device() (already set by SGLang)
             device_index = torch.cuda.current_device()
 
-            # Create underlying torch impl for non-GMS tags.
-            torch_impl = _TorchMemorySaverImpl(hook_mode="torch")
-
             # Read lock mode set by setup_gms() (defaults to RW_OR_RO)
-            from gpu_memory_service.integrations.sglang import _gms_lock_mode
-
             gms_impl = GMSMemorySaverImpl(
-                torch_impl=torch_impl,
                 device_index=device_index,
-                mode=_gms_lock_mode,
+                mode=gms_sglang._gms_lock_mode,
             )
 
             # Set _impl directly (accessible via gms_impl property)
@@ -83,7 +79,7 @@ def patch_torch_memory_saver() -> None:
             logger.info(
                 "[GMS] Using GMS mode (device=%d, mode=%s)",
                 device_index,
-                gms_impl.get_mode(),
+                gms_impl.allocators["weights"].granted_lock_type.name,
             )
             del self._impl_ctor_kwargs
         else:
@@ -111,8 +107,6 @@ def patch_torch_memory_saver() -> None:
     torch_memory_saver.configure_subprocess = patched_configure_subprocess
 
     # Add property to access GMS impl directly from the singleton
-    from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverImpl
-
     @property
     def gms_impl(self) -> Optional[GMSMemorySaverImpl]:
         """Get the GMS impl if installed, None otherwise."""
@@ -185,12 +179,8 @@ def patch_model_runner() -> None:
         weights are already resident. Newer SGLang versions changed this API, so
         only rewrite the old total_gpu_memory parameter shape.
         """
-        from gpu_memory_service.integrations.sglang.memory_saver import (
-            get_gms_memory_saver_impl,
-        )
-
         impl = get_gms_memory_saver_impl()
-        if impl is not None and impl.get_imported_weights_bytes() > 0:
+        if impl is not None and impl.imported_weights_bytes > 0:
             total_memory_gib = torch.cuda.get_device_properties(
                 torch.cuda.current_device()
             ).total_memory / (1 << 30)

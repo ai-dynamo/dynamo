@@ -101,7 +101,7 @@ spec:
               readOnly: true
 
     GlobalPlanner:
-      componentType: default
+      componentType: planner
       replicas: 1
       extraPodSpec:
         imagePullSecrets:
