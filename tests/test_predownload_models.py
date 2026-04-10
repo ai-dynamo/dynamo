@@ -38,6 +38,7 @@ import pytest
                 pytest.mark.fastvideo,
                 pytest.mark.e2e,
                 pytest.mark.gpu_1,
+                pytest.mark.model("Wan-AI/Wan2.1-T2V-1.3B-Diffusers"),
                 pytest.mark.timeout(180),
             ],
         ),

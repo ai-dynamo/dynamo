@@ -104,13 +104,24 @@ uv pip install --prerelease=allow "ai-dynamo[vllm]"
 
 ```bash
 sudo apt install python3-dev
+# Example for CUDA 13.x. If you are using a CUDA 12 PyTorch stack locally,
+# install the matching torch/torchvision wheels for that runtime instead.
+uv pip install \
+  --index-strategy unsafe-best-match \
+  --index-url https://download.pytorch.org/whl/cu130 \
+  --torch-backend cu130 \
+  torch==2.9.0 torchvision
 uv pip install --prerelease=allow "ai-dynamo[fastvideo]"
 ```
 
-FastVideo installs the upstream framework from a Git URL and pulls a beta
-`flash-attn-4` dependency, so the released FastVideo container remains the
-smoothest setup path. See the [FastVideo guide](../features/diffusion/fastvideo.md)
-for container-based deployment and backend-specific runtime details.
+FastVideo installs the upstream framework from a Git URL plus a beta
+`flash-attn-4` dependency. Install `torch` and `torchvision` first from the
+PyTorch index that matches your local CUDA runtime, then install
+`ai-dynamo[fastvideo]` so the rest of the dependency resolution stays on the
+stack you selected. The released FastVideo container remains the smoothest
+setup path. See the
+[FastVideo guide](../features/diffusion/fastvideo.md) for container-based
+deployment and backend-specific runtime details.
 
 ## Run Dynamo
 
