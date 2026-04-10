@@ -47,8 +47,8 @@ def parse_args(description: str = "") -> argparse.Namespace:
     parser.add_argument(
         "--image-dir",
         type=Path,
-        default=Path("/tmp/bench_images"),
-        help="Directory to save generated PNG images (default: /tmp/bench_images)",
+        default=Path(__file__).parent / "bench_images",
+        help="Directory to save generated PNG images (default: bench_images/ next to this script)",
     )
     parser.add_argument(
         "--user-text-tokens",
