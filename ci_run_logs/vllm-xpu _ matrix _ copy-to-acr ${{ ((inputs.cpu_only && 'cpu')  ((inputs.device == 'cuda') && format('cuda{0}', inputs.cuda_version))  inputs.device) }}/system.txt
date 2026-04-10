@@ -1,0 +1,10 @@
+2026-04-09T09:47:50.0080000Z Evaluating vllm-xpu-pipeline.if
+2026-04-09T09:47:50.0080000Z Evaluating: success()
+2026-04-09T09:47:50.0080000Z Result: true
+2026-04-09T09:47:50.0080000Z Evaluating vllm-xpu-pipeline.pipeline.if
+2026-04-09T09:47:50.0080000Z Evaluating: success()
+2026-04-09T09:47:50.0080000Z Result: true
+2026-04-09T09:47:50.0080000Z Evaluating vllm-xpu-pipeline.pipeline.job.copy-to-acr.if
+2026-04-09T09:47:50.0080000Z Evaluating: (always() && inputs.copy_to_acr && (needs.build.result == 'success') && (((needs.test.result == 'success') || (needs.test.result == 'skipped'))))
+2026-04-09T09:47:50.0080000Z Expanded: (true && false && (needs.build.result == 'success') && ((needs.test.result == 'success') || (needs.test.result == 'skipped')))
+2026-04-09T09:47:50.0080000Z Result: false

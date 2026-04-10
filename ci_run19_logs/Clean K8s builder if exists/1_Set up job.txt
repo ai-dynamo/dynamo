@@ -1,0 +1,14 @@
+﻿2026-04-09T09:34:27.7914461Z Current runner version: '2.333.1'
+2026-04-09T09:34:27.7920801Z Runner name: 'gnr816789-2'
+2026-04-09T09:34:27.7921476Z Runner group name: 'Default'
+2026-04-09T09:34:27.7922211Z Machine name: 'gnr816789'
+2026-04-09T09:34:27.7923962Z ##[group]GITHUB_TOKEN Permissions
+2026-04-09T09:34:27.7926458Z Contents: read
+2026-04-09T09:34:27.7926902Z Metadata: read
+2026-04-09T09:34:27.7927278Z ##[endgroup]
+2026-04-09T09:34:27.7929671Z Secret source: Actions
+2026-04-09T09:34:27.7930197Z Prepare workflow directory
+2026-04-09T09:34:27.8523984Z Prepare all required actions
+2026-04-09T09:34:27.8563089Z Getting action download info
+2026-04-09T09:34:28.4973403Z Download action repository 'actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955' (SHA:08eba0b27e820071cde6df949e0beb9ba4906955)
+2026-04-09T09:34:34.4162415Z Complete job name: Clean K8s builder if exists

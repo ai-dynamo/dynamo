@@ -1,0 +1,10 @@
+2026-04-09T07:56:41.3900000Z Evaluating vllm-xpu-pipeline.if
+2026-04-09T07:56:41.3900000Z Evaluating: success()
+2026-04-09T07:56:41.3900000Z Result: true
+2026-04-09T07:56:41.3900000Z Evaluating vllm-xpu-pipeline.pipeline.if
+2026-04-09T07:56:41.3900000Z Evaluating: success()
+2026-04-09T07:56:41.3900000Z Result: true
+2026-04-09T07:56:41.3900000Z Evaluating vllm-xpu-pipeline.pipeline.job.multi-gpu-test.if
+2026-04-09T07:56:41.3900000Z Evaluating: (success() && ((inputs.run_multi_gpu_tests && inputs.build_image && ((inputs.platform != 'linux/arm64')))))
+2026-04-09T07:56:41.3900000Z Expanded: (true && (false && inputs.build_image && (inputs.platform != 'linux/arm64')))
+2026-04-09T07:56:41.3900000Z Result: false

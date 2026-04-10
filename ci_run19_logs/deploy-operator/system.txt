@@ -1,0 +1,4 @@
+2026-04-09T07:40:32.4680000Z Evaluating deploy-operator.if
+2026-04-09T07:40:32.4680000Z Evaluating: (success() && (false))
+2026-04-09T07:40:32.4680000Z Expanded: (false && false)
+2026-04-09T07:40:32.4680000Z Result: false

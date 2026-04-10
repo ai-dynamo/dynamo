@@ -1,0 +1,2301 @@
+﻿2026-04-09T09:21:25.1800698Z Current runner version: '2.333.1'
+2026-04-09T09:21:25.1806407Z Runner name: 'gnr816789'
+2026-04-09T09:21:25.1807062Z Runner group name: 'Default'
+2026-04-09T09:21:25.1807816Z Machine name: 'gnr816789'
+2026-04-09T09:21:25.1810405Z ##[group]GITHUB_TOKEN Permissions
+2026-04-09T09:21:25.1812862Z Contents: read
+2026-04-09T09:21:25.1813359Z Metadata: read
+2026-04-09T09:21:25.1813891Z ##[endgroup]
+2026-04-09T09:21:25.1816249Z Secret source: Actions
+2026-04-09T09:21:25.1816956Z Prepare workflow directory
+2026-04-09T09:21:25.2418113Z Prepare all required actions
+2026-04-09T09:21:25.2459646Z Getting action download info
+2026-04-09T09:21:25.7095178Z Download action repository 'actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955' (SHA:08eba0b27e820071cde6df949e0beb9ba4906955)
+2026-04-09T09:21:26.2720414Z Uses: VincyZhang/dynamo/.github/workflows/build-***-distribute-flavor.yml@refs/pull/6/merge (eb0b4f8f8be9df86a608b49c419d90945f70606a)
+2026-04-09T09:21:26.2724796Z ##[group] Inputs
+2026-04-09T09:21:26.2725727Z   framework: vllm
+2026-04-09T09:21:26.2726315Z   device: xpu
+2026-04-09T09:21:26.2726811Z   builder_flavor: 
+2026-04-09T09:21:26.2727334Z   target: runtime
+2026-04-09T09:21:26.2727778Z   platform: linux/amd64
+2026-04-09T09:21:26.2728333Z   cuda_version: 
+2026-04-09T09:21:26.2729268Z   cpu_only: false
+2026-04-09T09:21:26.2730195Z   build_timeout_minutes: 120
+2026-04-09T09:21:26.2730928Z   run_cpu_only_***s: false
+2026-04-09T09:21:26.2731433Z   cpu_only_***_markers: 
+2026-04-09T09:21:26.2732011Z   cpu_only_***_timeout_minutes: 10
+2026-04-09T09:21:26.2732566Z   run_single_gpu_***s: false
+2026-04-09T09:21:26.2733153Z   single_gpu_***_markers: 
+2026-04-09T09:21:26.2733703Z   single_gpu_***_timeout_minutes: 30
+2026-04-09T09:21:26.2734232Z   run_single_xpu_***s: true
+2026-04-09T09:21:26.2734962Z   single_xpu_***_markers: (pre_merge or post_merge) and vllm and (xpu_1 or xpu_2)
+2026-04-09T09:21:26.2735758Z   single_xpu_***_timeout_minutes: 120
+2026-04-09T09:21:26.2736425Z   run_multi_gpu_***s: false
+2026-04-09T09:21:26.2736963Z   multi_gpu_***_markers: 
+2026-04-09T09:21:26.2737457Z   multi_gpu_***_timeout_minutes: 30
+2026-04-09T09:21:26.2738071Z   copy_to_acr: false
+2026-04-09T09:21:26.2738642Z   copy_timeout_minutes: 20
+2026-04-09T09:21:26.2739156Z   builder_name: b-24182595453-1
+2026-04-09T09:21:26.2739677Z   extra_tags: 
+2026-04-09T09:21:26.2740104Z   build_image: true
+2026-04-09T09:21:26.2740595Z   no_cache: false
+2026-04-09T09:21:26.2741057Z   push_image: false
+2026-04-09T09:21:26.2741508Z   no_load: true
+2026-04-09T09:21:26.2742063Z   show_summary: false
+2026-04-09T09:21:26.2742518Z   make_efa: false
+2026-04-09T09:21:26.2743000Z   fresh_builder: false
+2026-04-09T09:21:26.2743577Z   use_sccache: false
+2026-04-09T09:21:26.2744049Z ##[endgroup]
+2026-04-09T09:21:26.2746774Z Complete job name: vllm-xpu / matrix / Build xpu
+2026-04-09T09:21:26.6853398Z ##[group]Run actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+2026-04-09T09:21:26.6854417Z with:
+2026-04-09T09:21:26.6854905Z   lfs: true
+2026-04-09T09:21:26.6855304Z   repository: VincyZhang/dynamo
+2026-04-09T09:21:26.6856051Z   token: ***
+2026-04-09T09:21:26.6856472Z   ssh-strict: true
+2026-04-09T09:21:26.6856871Z   ssh-user: git
+2026-04-09T09:21:26.6857310Z   persist-credentials: true
+2026-04-09T09:21:26.6857783Z   clean: true
+2026-04-09T09:21:26.6858170Z   sparse-checkout-cone-mode: true
+2026-04-09T09:21:26.6858801Z   fetch-depth: 1
+2026-04-09T09:21:26.6859198Z   fetch-tags: false
+2026-04-09T09:21:26.6859595Z   show-progress: true
+2026-04-09T09:21:26.6859997Z   submodules: false
+2026-04-09T09:21:26.6860432Z   set-safe-directory: true
+2026-04-09T09:21:26.6861033Z env:
+2026-04-09T09:21:26.6861386Z   FRAMEWORK: vllm
+2026-04-09T09:21:26.6861762Z ##[endgroup]
+2026-04-09T09:21:26.8109469Z Syncing repository: VincyZhang/dynamo
+2026-04-09T09:21:26.8111429Z ##[group]Getting Git version info
+2026-04-09T09:21:26.8112096Z Working directory is '/home/sdp/actions-runner/_work/dynamo/dynamo'
+2026-04-09T09:21:26.8113036Z [command]/usr/bin/git version
+2026-04-09T09:21:26.8113576Z git version 2.43.0
+2026-04-09T09:21:26.8115221Z [command]/usr/bin/git lfs version
+2026-04-09T09:21:26.8513505Z git-lfs/3.4.1 (GitHub; linux amd64; go 1.22.2)
+2026-04-09T09:21:26.8542671Z ##[endgroup]
+2026-04-09T09:21:26.8557413Z Copying '/home/sdp/.gitconfig' to '/home/sdp/actions-runner/_work/_temp/b350cd53-d8c5-4ca8-b85f-04e80e60fd2c/.gitconfig'
+2026-04-09T09:21:26.8589392Z Temporarily overriding HOME='/home/sdp/actions-runner/_work/_temp/b350cd53-d8c5-4ca8-b85f-04e80e60fd2c' before making global git config changes
+2026-04-09T09:21:26.8592676Z Adding repository directory to the temporary git global config as a safe directory
+2026-04-09T09:21:26.8595597Z [command]/usr/bin/git config --global --add safe.directory /home/sdp/actions-runner/_work/dynamo/dynamo
+2026-04-09T09:21:26.8679769Z [command]/usr/bin/git config --local --get remote.origin.url
+2026-04-09T09:21:26.8733181Z https://github.com/VincyZhang/dynamo
+2026-04-09T09:21:26.8760849Z ##[group]Removing previously created refs, to avoid conflicts
+2026-04-09T09:21:26.8765007Z [command]/usr/bin/git rev-parse --symbolic-full-name --verify --quiet HEAD
+2026-04-09T09:21:26.8819453Z refs/heads/main
+2026-04-09T09:21:26.8834431Z [command]/usr/bin/git checkout --detach
+2026-04-09T09:21:26.9147331Z HEAD is now at 313b0c0e4a ***(cancellation): add timeout_s param, wait_for_stable_frontend, and reduce max-model-len for aggregated mode
+2026-04-09T09:21:27.0273282Z [command]/usr/bin/git branch --delete --force main
+2026-04-09T09:21:27.0344999Z Deleted branch main (was 313b0c0e4a).
+2026-04-09T09:21:27.0352857Z ##[endgroup]
+2026-04-09T09:21:27.0354869Z [command]/usr/bin/git submodule status
+2026-04-09T09:21:27.0944944Z ##[group]Cleaning the repository
+2026-04-09T09:21:27.0956198Z [command]/usr/bin/git clean -ffdx
+2026-04-09T09:21:27.1209717Z [command]/usr/bin/git reset --hard HEAD
+2026-04-09T09:21:27.1378027Z HEAD is now at 313b0c0e4a ***(cancellation): add timeout_s param, wait_for_stable_frontend, and reduce max-model-len for aggregated mode
+2026-04-09T09:21:27.1389914Z ##[endgroup]
+2026-04-09T09:21:27.1392994Z ##[group]Disabling automatic garbage collection
+2026-04-09T09:21:27.1395643Z [command]/usr/bin/git config --local gc.auto 0
+2026-04-09T09:21:27.1437536Z ##[endgroup]
+2026-04-09T09:21:27.1440713Z ##[group]Setting up auth
+2026-04-09T09:21:27.1443477Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-04-09T09:21:27.1479627Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-04-09T09:21:27.1996182Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-04-09T09:21:27.2068027Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-04-09T09:21:27.2696595Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-04-09T09:21:27.2800753Z ##[endgroup]
+2026-04-09T09:21:27.2803150Z [command]/usr/bin/git lfs install --local
+2026-04-09T09:21:27.3644346Z Updated Git hooks.
+2026-04-09T09:21:27.3646716Z Git LFS initialized.
+2026-04-09T09:21:27.3679279Z ##[group]Fetching the repository
+2026-04-09T09:21:27.3706087Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +eb0b4f8f8be9df86a608b49c419d90945f70606a:refs/remotes/pull/6/merge
+2026-04-09T09:21:27.7714545Z From https://github.com/VincyZhang/dynamo
+2026-04-09T09:21:27.7722295Z  + a8da9361c5...eb0b4f8f8b eb0b4f8f8be9df86a608b49c419d90945f70606a -> pull/6/merge  (forced update)
+2026-04-09T09:21:27.7751156Z ##[endgroup]
+2026-04-09T09:21:27.7756657Z ##[group]Determining the checkout info
+2026-04-09T09:21:27.7762669Z ##[endgroup]
+2026-04-09T09:21:27.7767683Z ##[group]Fetching LFS objects
+2026-04-09T09:21:27.7773255Z [command]/usr/bin/git lfs fetch origin refs/remotes/pull/6/merge
+2026-04-09T09:21:27.8420377Z fetch: Fetching reference refs/remotes/pull/6/merge
+2026-04-09T09:21:27.9268331Z ##[endgroup]
+2026-04-09T09:21:27.9273379Z [command]/usr/bin/git sparse-checkout disable
+2026-04-09T09:21:27.9410825Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-04-09T09:21:27.9465809Z ##[group]Checking out the ref
+2026-04-09T09:21:27.9470347Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/6/merge
+2026-04-09T09:21:27.9645393Z Previous HEAD position was 313b0c0e4a ***(cancellation): add timeout_s param, wait_for_stable_frontend, and reduce max-model-len for aggregated mode
+2026-04-09T09:21:27.9736616Z HEAD is now at eb0b4f8f8b Merge c36d9942cae7420120b42a2aa3c77964405680f8 into 2aed48e18c1a725a11f350ed04b5b172ce93ac4d
+2026-04-09T09:21:28.0716514Z ##[endgroup]
+2026-04-09T09:21:28.0827543Z [command]/usr/bin/git log -1 --format=%H
+2026-04-09T09:21:28.0906777Z eb0b4f8f8be9df86a608b49c419d90945f70606a
+2026-04-09T09:21:28.1329392Z ##[group]Run PLATFORM="linux/amd64"
+2026-04-09T09:21:28.1331259Z [36;1mPLATFORM="linux/amd64"[0m
+2026-04-09T09:21:28.1331956Z [36;1m# Convert comma-separated Docker platform string to JSON array[0m
+2026-04-09T09:21:28.1333138Z [36;1m# "linux/amd64,linux/arm64" -> ["linux/amd64","linux/arm64"][0m
+2026-04-09T09:21:28.1333752Z [36;1m# "linux/amd64"             -> ["linux/amd64"][0m
+2026-04-09T09:21:28.1334538Z [36;1mJSON=$(printf '%s\n' ${PLATFORM//,/ } | jq -Rsc '[splits("\n") | select(length>0)]')[0m
+2026-04-09T09:21:28.1335481Z [36;1mecho "arches=${JSON}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.1365264Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:28.1365982Z env:
+2026-04-09T09:21:28.1366414Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.1366860Z ##[endgroup]
+2026-04-09T09:21:28.1671695Z ##[group]Run PLATFORM="linux/amd64"
+2026-04-09T09:21:28.1672843Z [36;1mPLATFORM="linux/amd64"[0m
+2026-04-09T09:21:28.1673627Z [36;1mDEVICE="xpu"[0m
+2026-04-09T09:21:28.1674800Z [36;1m# Emit a JSON array of {arch, runner} objects for platforms actually being built[0m
+2026-04-09T09:21:28.1676004Z [36;1m# "linux/amd64,linux/arm64" -> both runners[0m
+2026-04-09T09:21:28.1677233Z [36;1m# "linux/amd64"             -> amd64 runner only (covers EFA and other single-arch)[0m
+2026-04-09T09:21:28.1678469Z [36;1m# "linux/arm64"             -> arm64 runner only[0m
+2026-04-09T09:21:28.1679373Z [36;1mif [[ "$DEVICE" == "xpu" ]]; then[0m
+2026-04-09T09:21:28.1680427Z [36;1m  echo 'runners=[{"arch":"amd64","runner":"xpu"}]' >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.1681601Z [36;1melif [[ "$PLATFORM" == *"amd64"* && "$PLATFORM" == *"arm64"* ]]; then[0m
+2026-04-09T09:21:28.1683575Z [36;1m  echo 'runners=[{"arch":"amd64","runner":"prod-***er-amd-gpu-v1"},{"arch":"arm64","runner":"prod-***er-arm-v1"}]' >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.1685024Z [36;1melif [[ "$PLATFORM" == *"arm64"* ]]; then[0m
+2026-04-09T09:21:28.1685853Z [36;1m  echo 'runners=[{"arch":"arm64","runner":"prod-***er-arm-v1"}]' >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.1686524Z [36;1melse[0m
+2026-04-09T09:21:28.1687106Z [36;1m  echo 'runners=[{"arch":"amd64","runner":"prod-***er-amd-gpu-v1"}]' >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.1687693Z [36;1mfi[0m
+2026-04-09T09:21:28.1702004Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:28.1702557Z env:
+2026-04-09T09:21:28.1702940Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.1703387Z ##[endgroup]
+2026-04-09T09:21:28.2178737Z Prepare all required actions
+2026-04-09T09:21:28.2179586Z Getting action download info
+2026-04-09T09:21:28.2482780Z ##[group]Run ./.github/actions/build-flavor
+2026-04-09T09:21:28.2483240Z with:
+2026-04-09T09:21:28.2483591Z   framework: vllm
+2026-04-09T09:21:28.2483946Z   device: xpu
+2026-04-09T09:21:28.2484320Z   target: runtime
+2026-04-09T09:21:28.2484716Z   platform: linux/amd64
+2026-04-09T09:21:28.2485086Z   cpu_only: false
+2026-04-09T09:21:28.2485450Z   builder_name: b-24182595453-1
+2026-04-09T09:21:28.2486072Z   aws_default_region: ***
+2026-04-09T09:21:28.2486693Z   aws_account_id: ***
+2026-04-09T09:21:28.2487169Z   azure_acr_hostname: ***
+2026-04-09T09:21:28.2487561Z   azure_acr_user: ***
+2026-04-09T09:21:28.2487971Z   azure_acr_password: ***
+2026-04-09T09:21:28.2488532Z   sccache_s3_bucket: ***
+2026-04-09T09:21:28.2488949Z   aws_access_key_id: ***
+2026-04-09T09:21:28.2489450Z   aws_secret_access_key: ***
+2026-04-09T09:21:28.2489881Z   hf_token: ***
+2026-04-09T09:21:28.2490535Z   use_sccache: false
+2026-04-09T09:21:28.2490917Z   build_timeout_minutes: 120
+2026-04-09T09:21:28.2491320Z   push_image: false
+2026-04-09T09:21:28.2491705Z   no_load: true
+2026-04-09T09:21:28.2492136Z   no_cache: false
+2026-04-09T09:21:28.2492532Z   make_efa: false
+2026-04-09T09:21:28.2492902Z   fresh_builder: false
+2026-04-09T09:21:28.2493307Z   show_summary: false
+2026-04-09T09:21:28.2493695Z env:
+2026-04-09T09:21:28.2494055Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.2494462Z ##[endgroup]
+2026-04-09T09:21:28.2589945Z ##[group]Run if [[ "false" == "true" ]]; then
+2026-04-09T09:21:28.2590569Z [36;1mif [[ "false" == "true" ]]; then[0m
+2026-04-09T09:21:28.2591016Z [36;1m  CUDA_VERSION_RAW=""[0m
+2026-04-09T09:21:28.2591457Z [36;1m  if [[ -z "$CUDA_VERSION_RAW" ]]; then[0m
+2026-04-09T09:21:28.2591987Z [36;1m    # Planner still shares the CUDA-backed wheel builder path today even[0m
+2026-04-09T09:21:28.2592599Z [36;1m    # though the final runtime image is CPU-only. Keep that detail[0m
+2026-04-09T09:21:28.2593158Z [36;1m    # internal to the build action instead of surfacing it in job names.[0m
+2026-04-09T09:21:28.2593697Z [36;1m    CUDA_VERSION_RAW="12.9"[0m
+2026-04-09T09:21:28.2594090Z [36;1m  fi[0m
+2026-04-09T09:21:28.2594478Z [36;1m  CUDA_VERSION=${CUDA_VERSION_RAW%%.*}[0m
+2026-04-09T09:21:28.2595266Z [36;1m  IMAGE_VARIANT_LABEL="cpu"[0m
+2026-04-09T09:21:28.2595678Z [36;1m  IMAGE_TAG_SUFFIX="-cpu"[0m
+2026-04-09T09:21:28.3033810Z [36;1m  BUILDER_CUDA_VERSION=""[0m
+2026-04-09T09:21:28.3034725Z [36;1melif [[ "xpu" == "xpu" ]]; then[0m
+2026-04-09T09:21:28.3035341Z [36;1m  CUDA_VERSION_RAW=""[0m
+2026-04-09T09:21:28.3035891Z [36;1m  CUDA_VERSION=""[0m
+2026-04-09T09:21:28.3036416Z [36;1m  IMAGE_VARIANT_LABEL="xpu"[0m
+2026-04-09T09:21:28.3036954Z [36;1m  IMAGE_TAG_SUFFIX="-xpu"[0m
+2026-04-09T09:21:28.3037479Z [36;1m  BUILDER_CUDA_VERSION=""[0m
+2026-04-09T09:21:28.3037968Z [36;1melse[0m
+2026-04-09T09:21:28.3038529Z [36;1m  CUDA_VERSION_RAW=""[0m
+2026-04-09T09:21:28.3039103Z [36;1m  if [[ -z "$CUDA_VERSION_RAW" ]]; then[0m
+2026-04-09T09:21:28.3039749Z [36;1m    echo "cuda_version is required unless cpu_only=true" >&2[0m
+2026-04-09T09:21:28.3040357Z [36;1m    exit 1[0m
+2026-04-09T09:21:28.3040805Z [36;1m  fi[0m
+2026-04-09T09:21:28.3041235Z [36;1m  CUDA_VERSION=${CUDA_VERSION_RAW%%.*}[0m
+2026-04-09T09:21:28.3041652Z [36;1m  IMAGE_VARIANT_LABEL="cuda${CUDA_VERSION}"[0m
+2026-04-09T09:21:28.3042063Z [36;1m  IMAGE_TAG_SUFFIX="-cuda${CUDA_VERSION}"[0m
+2026-04-09T09:21:28.3042479Z [36;1m  BUILDER_CUDA_VERSION="${CUDA_VERSION_RAW}"[0m
+2026-04-09T09:21:28.3042857Z [36;1mfi[0m
+2026-04-09T09:21:28.3043160Z [36;1mEFA_SUFFIX=""[0m
+2026-04-09T09:21:28.3043503Z [36;1mif [ "false" == "true" ]; then[0m
+2026-04-09T09:21:28.3043878Z [36;1m  EFA_SUFFIX="-efa"[0m
+2026-04-09T09:21:28.3044222Z [36;1mfi[0m
+2026-04-09T09:21:28.3044678Z [36;1mTARGET_TAG_PLAIN="eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime${EFA_SUFFIX}"[0m
+2026-04-09T09:21:28.3045940Z [36;1mTEST_TAG_PLAIN="eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime${EFA_SUFFIX}-***"[0m
+2026-04-09T09:21:28.3046842Z [36;1mDEFAULT_TARGET_IMAGE_URI="***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:${TARGET_TAG_PLAIN}${IMAGE_TAG_SUFFIX}"[0m
+2026-04-09T09:21:28.3047645Z [36;1mTEST_IMAGE_URI="***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:${TEST_TAG_PLAIN}${IMAGE_TAG_SUFFIX}"[0m
+2026-04-09T09:21:28.3048295Z [36;1mecho "default_target_image_uri=${DEFAULT_TARGET_IMAGE_URI}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.3048903Z [36;1mecho "***_image_uri=${TEST_IMAGE_URI}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.3049488Z [36;1mecho "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.3049996Z [36;1mecho "***_tag_plain=${TEST_TAG_PLAIN}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.3050486Z [36;1mecho "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.3051020Z [36;1mecho "effective_cuda_version=${CUDA_VERSION_RAW}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.3051577Z [36;1mecho "builder_cuda_version=${BUILDER_CUDA_VERSION}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.3052107Z [36;1mecho "image_variant_label=${IMAGE_VARIANT_LABEL}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.3052625Z [36;1mecho "image_tag_suffix=${IMAGE_TAG_SUFFIX}" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:28.3068152Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:28.3068631Z env:
+2026-04-09T09:21:28.3068942Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.3069255Z ##[endgroup]
+2026-04-09T09:21:28.3367255Z Prepare all required actions
+2026-04-09T09:21:28.3367893Z Getting action download info
+2026-04-09T09:21:28.3474883Z ##[group]Run ./.github/actions/init-dynamo-builder
+2026-04-09T09:21:28.3475306Z with:
+2026-04-09T09:21:28.3475617Z   builder_name: b-24182595453-1
+2026-04-09T09:21:28.3475942Z   flavor: vllm
+2026-04-09T09:21:28.3476239Z   arch: linux/amd64
+2026-04-09T09:21:28.3476588Z   fresh_builder: false
+2026-04-09T09:21:28.3476925Z   use_runner_docker_builder: true
+2026-04-09T09:21:28.3477287Z   ephemeral_storage: 400Gi
+2026-04-09T09:21:28.3477603Z   namespace: buildkit
+2026-04-09T09:21:28.3477900Z   replicas: 1
+2026-04-09T09:21:28.3478184Z   requests_cpu: 12
+2026-04-09T09:21:28.3478633Z   requests_memory: 26Gi
+2026-04-09T09:21:28.3478934Z   limits_memory: 29Gi
+2026-04-09T09:21:28.3479369Z   tolerations: key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule
+2026-04-09T09:21:28.3479821Z env:
+2026-04-09T09:21:28.3480105Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.3480389Z ##[endgroup]
+2026-04-09T09:21:28.3518218Z ##[group]Run if [[ "true" == "true" ]]; then
+2026-04-09T09:21:28.3518814Z [36;1mif [[ "true" == "true" ]]; then[0m
+2026-04-09T09:21:28.3519274Z [36;1m  echo "Skipping remote BuildKit discovery; forcing local Kubernetes builder fallback."[0m
+2026-04-09T09:21:28.3519766Z [36;1m  echo "worker_addresses=" >> "$GITHUB_OUTPUT"[0m
+2026-04-09T09:21:28.3520118Z [36;1m  exit 0[0m
+2026-04-09T09:21:28.3520382Z [36;1mfi[0m
+2026-04-09T09:21:28.3520753Z [36;1m# Strip linux/ prefix (e.g. linux/amd64,linux/arm64 → amd64,arm64)[0m
+2026-04-09T09:21:28.3521154Z [36;1mARCH="linux/amd64"[0m
+2026-04-09T09:21:28.3521464Z [36;1mARCH="${ARCH//linux\//}"[0m
+2026-04-09T09:21:28.3521781Z [36;1mif [[ "$ARCH" == *","* ]]; then[0m
+2026-04-09T09:21:28.3522127Z [36;1m  # Multi-arch: combine both worker pools[0m
+2026-04-09T09:21:28.3522525Z [36;1m  if [[ -n "$AMD64_ADDRS" && -n "$ARM64_ADDRS" ]]; then[0m
+2026-04-09T09:21:28.3522975Z [36;1m    echo "worker_addresses=${AMD64_ADDRS},${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"[0m
+2026-04-09T09:21:28.3523417Z [36;1m  elif [[ -n "$AMD64_ADDRS" ]]; then[0m
+2026-04-09T09:21:28.3523803Z [36;1m    echo "worker_addresses=${AMD64_ADDRS}" >> "$GITHUB_OUTPUT"[0m
+2026-04-09T09:21:28.3524290Z [36;1m  elif [[ -n "$ARM64_ADDRS" ]]; then[0m
+2026-04-09T09:21:28.3524677Z [36;1m    echo "worker_addresses=${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"[0m
+2026-04-09T09:21:28.3525050Z [36;1m  else[0m
+2026-04-09T09:21:28.3525555Z [36;1m    echo "worker_addresses=" >> "$GITHUB_OUTPUT"[0m
+2026-04-09T09:21:28.3525893Z [36;1m  fi[0m
+2026-04-09T09:21:28.3526173Z [36;1melif [[ "$ARCH" == "arm64" ]]; then[0m
+2026-04-09T09:21:28.3526554Z [36;1m  echo "worker_addresses=${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"[0m
+2026-04-09T09:21:28.3526918Z [36;1melse[0m
+2026-04-09T09:21:28.3527244Z [36;1m  echo "worker_addresses=${AMD64_ADDRS}" >> "$GITHUB_OUTPUT"[0m
+2026-04-09T09:21:28.3527605Z [36;1mfi[0m
+2026-04-09T09:21:28.3542056Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:28.3542420Z env:
+2026-04-09T09:21:28.3542837Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.3543115Z   AMD64_ADDRS: 
+2026-04-09T09:21:28.3543387Z   ARM64_ADDRS: 
+2026-04-09T09:21:28.3543655Z ##[endgroup]
+2026-04-09T09:21:28.3605005Z Skipping remote BuildKit discovery; forcing local Kubernetes builder fallback.
+2026-04-09T09:21:28.3806507Z Prepare all required actions
+2026-04-09T09:21:28.3931712Z ##[group]Run ./.github/actions/bootstrap-buildkit
+2026-04-09T09:21:28.3932088Z with:
+2026-04-09T09:21:28.3932391Z   builder_name: b-24182595453-1
+2026-04-09T09:21:28.3932699Z   fresh_builder: false
+2026-04-09T09:21:28.3932988Z   ephemeral_storage: 400Gi
+2026-04-09T09:21:28.3933285Z   namespace: buildkit
+2026-04-09T09:21:28.3933574Z   replicas: 1
+2026-04-09T09:21:28.3933846Z   requests_cpu: 12
+2026-04-09T09:21:28.3934119Z   requests_memory: 26Gi
+2026-04-09T09:21:28.3934405Z   limits_memory: 29Gi
+2026-04-09T09:21:28.3934813Z   tolerations: key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule
+2026-04-09T09:21:28.3935267Z   use_runner_docker_builder: true
+2026-04-09T09:21:28.3935602Z   skip_bootstrap: false
+2026-04-09T09:21:28.3935888Z env:
+2026-04-09T09:21:28.3936146Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.3936425Z ##[endgroup]
+2026-04-09T09:21:28.3961249Z ##[group]Run docker buildx version
+2026-04-09T09:21:28.3961669Z [36;1mdocker buildx version[0m
+2026-04-09T09:21:28.3975757Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:28.3976150Z env:
+2026-04-09T09:21:28.3976449Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.3976729Z ##[endgroup]
+2026-04-09T09:21:28.5848114Z github.com/docker/buildx v0.31.1 a2675950d46b2cb171b23c2015ca44fb88607531
+2026-04-09T09:21:28.6018619Z ##[group]Run RESOLVED_BUILDER="default"
+2026-04-09T09:21:28.6019888Z [36;1mRESOLVED_BUILDER="default"[0m
+2026-04-09T09:21:28.6021217Z [36;1mecho "Using runner docker builder: ${RESOLVED_BUILDER}"[0m
+2026-04-09T09:21:28.6022611Z [36;1mdocker buildx use "$RESOLVED_BUILDER"[0m
+2026-04-09T09:21:28.6024011Z [36;1mecho "BUILDX_BUILDER_NAME=${RESOLVED_BUILDER}" >> "$GITHUB_ENV"[0m
+2026-04-09T09:21:28.6078351Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:28.6079673Z env:
+2026-04-09T09:21:28.6080483Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.6081368Z ##[endgroup]
+2026-04-09T09:21:28.6157216Z Using runner docker builder: default
+2026-04-09T09:21:28.7851169Z ##[group]Run BUILDER_NAME="${BUILDX_BUILDER_NAME:-b-24182595453-1}"
+2026-04-09T09:21:28.7852905Z [36;1mBUILDER_NAME="${BUILDX_BUILDER_NAME:-b-24182595453-1}"[0m
+2026-04-09T09:21:28.7854259Z [36;1mecho "Bootstrapping buildkit..."[0m
+2026-04-09T09:21:28.7855368Z [36;1mfor i in 1 2 3; do[0m
+2026-04-09T09:21:28.7856653Z [36;1m  if docker buildx inspect "$BUILDER_NAME" --bootstrap; then[0m
+2026-04-09T09:21:28.7858125Z [36;1m    echo "Bootstrap succeeded on attempt $i"[0m
+2026-04-09T09:21:28.7859312Z [36;1m    break[0m
+2026-04-09T09:21:28.7860156Z [36;1m  fi[0m
+2026-04-09T09:21:28.7861017Z [36;1m  if [ "$i" -eq 3 ]; then[0m
+2026-04-09T09:21:28.7862217Z [36;1m    echo "::error::Bootstrap failed after 3 attempts"[0m
+2026-04-09T09:21:28.7863440Z [36;1m    exit 1[0m
+2026-04-09T09:21:28.7864271Z [36;1m  fi[0m
+2026-04-09T09:21:28.7865424Z [36;1m  echo "::warning::Bootstrap attempt $i failed, retrying in 10s..."[0m
+2026-04-09T09:21:28.7866777Z [36;1m  sleep 10[0m
+2026-04-09T09:21:28.7867693Z [36;1mdone[0m
+2026-04-09T09:21:28.7916684Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:28.7916989Z env:
+2026-04-09T09:21:28.7917570Z   FRAMEWORK: vllm
+2026-04-09T09:21:28.7917802Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:28.7918035Z ##[endgroup]
+2026-04-09T09:21:28.7977158Z Bootstrapping buildkit...
+2026-04-09T09:21:29.0427911Z Name:          default
+2026-04-09T09:21:29.0430909Z Driver:        docker
+2026-04-09T09:21:29.0431803Z Last Activity: 2026-04-09 08:38:38 +0000 UTC
+2026-04-09T09:21:29.0432410Z 
+2026-04-09T09:21:29.0432690Z Nodes:
+2026-04-09T09:21:29.0433410Z Name:             default
+2026-04-09T09:21:29.0434197Z Endpoint:         default
+2026-04-09T09:21:29.0435740Z Status:           running
+2026-04-09T09:21:29.0436546Z BuildKit version: v0.22.0
+2026-04-09T09:21:29.0437765Z Platforms:        linux/amd64, linux/amd64/v2, linux/amd64/v3, linux/amd64/v4, linux/386
+2026-04-09T09:21:29.0439292Z Labels:
+2026-04-09T09:21:29.0449246Z  org.mobyproject.buildkit.worker.moby.host-gateway-ip: 172.17.0.1
+2026-04-09T09:21:29.0451418Z GC Policy rule#0:
+2026-04-09T09:21:29.0459126Z  All:            false
+2026-04-09T09:21:29.0461394Z  Filters:        type==source.local,type==exec.cachemount,type==source.git.checkout
+2026-04-09T09:21:29.0462976Z  Keep Duration:  48h0m0s
+2026-04-09T09:21:29.0463984Z  Max Used Space: 5.662GiB
+2026-04-09T09:21:29.0464939Z GC Policy rule#1:
+2026-04-09T09:21:29.0465854Z  All:            false
+2026-04-09T09:21:29.0466908Z  Keep Duration:  1440h0m0s
+2026-04-09T09:21:29.0468114Z  Reserved Space: 40.98GiB
+2026-04-09T09:21:29.0475432Z  Max Used Space: 5.588GiB
+2026-04-09T09:21:29.0479392Z  Min Free Space: 20.49GiB
+2026-04-09T09:21:29.0480724Z GC Policy rule#2:
+2026-04-09T09:21:29.0481744Z  All:            false
+2026-04-09T09:21:29.0482743Z  Reserved Space: 40.98GiB
+2026-04-09T09:21:29.0483867Z  Max Used Space: 5.588GiB
+2026-04-09T09:21:29.0484857Z  Min Free Space: 20.49GiB
+2026-04-09T09:21:29.0485819Z GC Policy rule#3:
+2026-04-09T09:21:29.0486709Z  All:            true
+2026-04-09T09:21:29.0487635Z  Reserved Space: 40.98GiB
+2026-04-09T09:21:29.0488735Z  Max Used Space: 5.588GiB
+2026-04-09T09:21:29.0489741Z  Min Free Space: 20.49GiB
+2026-04-09T09:21:29.0551155Z Bootstrap succeeded on attempt 1
+2026-04-09T09:21:29.0691236Z ##[group]Run ECR_REGISTRY="***.dkr.ecr.***.amazonaws.com"
+2026-04-09T09:21:29.0693054Z [36;1mECR_REGISTRY="***.dkr.ecr.***.amazonaws.com"[0m
+2026-04-09T09:21:29.0694461Z [36;1mACR_REGISTRY="***"[0m
+2026-04-09T09:21:29.0695452Z [36;1mRESULT=""[0m
+2026-04-09T09:21:29.0696527Z [36;1mif [ -n "$EXTRA_TAGS" ]; then[0m
+2026-04-09T09:21:29.0697791Z [36;1m  while IFS= read -r tag; do[0m
+2026-04-09T09:21:29.0698990Z [36;1m    if [ -n "$tag" ]; then[0m
+2026-04-09T09:21:29.0700495Z [36;1m      RESULT+="${ECR_REGISTRY}/ai-dynamo/dynamo:${tag}${IMAGE_TAG_SUFFIX}"$'\n'[0m
+2026-04-09T09:21:29.0701971Z [36;1m    fi[0m
+2026-04-09T09:21:29.0702871Z [36;1m  done <<< "$EXTRA_TAGS"[0m
+2026-04-09T09:21:29.0703850Z [36;1mfi[0m
+2026-04-09T09:21:29.0704656Z [36;1m[0m
+2026-04-09T09:21:29.0705533Z [36;1mif [ -n "$RESULT" ]; then[0m
+2026-04-09T09:21:29.0706707Z [36;1m  echo "tags<<EOF" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:29.0707879Z [36;1m  echo "$RESULT" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:29.0709117Z [36;1m  echo "EOF" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:29.0710134Z [36;1melse[0m
+2026-04-09T09:21:29.0711159Z [36;1m  echo "tags=" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:29.0712187Z [36;1mfi[0m
+2026-04-09T09:21:29.0768094Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:29.0769465Z env:
+2026-04-09T09:21:29.0770283Z   FRAMEWORK: vllm
+2026-04-09T09:21:29.0771219Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:29.0772236Z   EXTRA_TAGS: 
+2026-04-09T09:21:29.0773138Z   IMAGE_TAG_SUFFIX: -xpu
+2026-04-09T09:21:29.0774153Z ##[endgroup]
+2026-04-09T09:21:29.0942797Z ##[group]Run echo "=== Build Container Inputs ==="
+2026-04-09T09:21:29.0943367Z [36;1mecho "=== Build Container Inputs ==="[0m
+2026-04-09T09:21:29.0944351Z [36;1mecho "image_tag: ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu"[0m
+2026-04-09T09:21:29.0945365Z [36;1mecho "framework: vllm"[0m
+2026-04-09T09:21:29.0945768Z [36;1mecho "target: runtime"[0m
+2026-04-09T09:21:29.0946152Z [36;1mecho "platform: linux/amd64"[0m
+2026-04-09T09:21:29.0946561Z [36;1mecho "image_variant: xpu"[0m
+2026-04-09T09:21:29.0946983Z [36;1mecho "effective_build_cuda_version: "[0m
+2026-04-09T09:21:29.0947410Z [36;1mecho "no_cache: false"[0m
+2026-04-09T09:21:29.0947793Z [36;1mecho "extra_tags: "[0m
+2026-04-09T09:21:29.0948171Z [36;1mecho "push_image: false"[0m
+2026-04-09T09:21:29.0948640Z [36;1mecho "no_load: true"[0m
+2026-04-09T09:21:29.0949182Z [36;1mecho "build_timeout_minutes: 120"[0m
+2026-04-09T09:21:29.0972193Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:29.0972658Z env:
+2026-04-09T09:21:29.0972974Z   FRAMEWORK: vllm
+2026-04-09T09:21:29.0973321Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:29.0973689Z ##[endgroup]
+2026-04-09T09:21:29.1034428Z === Build Container Inputs ===
+2026-04-09T09:21:29.1038027Z image_tag: ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu
+2026-04-09T09:21:29.1040306Z framework: vllm
+2026-04-09T09:21:29.1041205Z target: runtime
+2026-04-09T09:21:29.1042102Z platform: linux/amd64
+2026-04-09T09:21:29.1043065Z image_variant: xpu
+2026-04-09T09:21:29.1044070Z effective_build_cuda_version: 
+2026-04-09T09:21:29.1045147Z no_cache: false
+2026-04-09T09:21:29.1046036Z extra_tags: 
+2026-04-09T09:21:29.1046887Z push_image: false
+2026-04-09T09:21:29.1047740Z no_load: true
+2026-04-09T09:21:29.1048799Z build_timeout_minutes: 120
+2026-04-09T09:21:29.1136028Z ##[group]Run echo "Generating Dockerfile for target: runtime and framework: vllm"
+2026-04-09T09:21:29.1138049Z [36;1mecho "Generating Dockerfile for target: runtime and framework: vllm"[0m
+2026-04-09T09:21:29.1139695Z [36;1mMAKE_EFA_FLAG=""[0m
+2026-04-09T09:21:29.1140717Z [36;1mif [ "false" == "true" ]; then[0m
+2026-04-09T09:21:29.1141817Z [36;1m  MAKE_EFA_FLAG="--make-efa"[0m
+2026-04-09T09:21:29.1142872Z [36;1mfi[0m
+2026-04-09T09:21:29.1143807Z [36;1mpython ./container/render.py \[0m
+2026-04-09T09:21:29.1144945Z [36;1m    --target=runtime \[0m
+2026-04-09T09:21:29.1146021Z [36;1m    --framework=vllm \[0m
+2026-04-09T09:21:29.1147084Z [36;1m    --platform=linux/amd64 \[0m
+2026-04-09T09:21:29.1148188Z [36;1m    --device=xpu \[0m
+2026-04-09T09:21:29.1149319Z [36;1m    --cuda-version= \[0m
+2026-04-09T09:21:29.1150453Z [36;1m    ${MAKE_EFA_FLAG} \[0m
+2026-04-09T09:21:29.1151546Z [36;1m    --show-result \[0m
+2026-04-09T09:21:29.1152648Z [36;1m    --output-short-filename[0m
+2026-04-09T09:21:29.1201324Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:29.1202233Z env:
+2026-04-09T09:21:29.1202850Z   FRAMEWORK: vllm
+2026-04-09T09:21:29.1203549Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:29.1204276Z ##[endgroup]
+2026-04-09T09:21:29.1292312Z Generating Dockerfile for target: runtime and framework: vllm
+2026-04-09T09:21:29.2390619Z ##############
+2026-04-09T09:21:29.2392351Z # Dockerfile #
+2026-04-09T09:21:29.2399899Z ##############
+2026-04-09T09:21:29.2401720Z # syntax=docker/dockerfile:1.10.0-labs
+2026-04-09T09:21:29.2404616Z # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+2026-04-09T09:21:29.2406735Z # SPDX-License-Identifier: Apache-2.0
+2026-04-09T09:21:29.2407515Z 
+2026-04-09T09:21:29.2408058Z # === BEGIN templates/args.Dockerfile ===
+2026-04-09T09:21:29.2409440Z ##########################
+2026-04-09T09:21:29.2410552Z #### Build Arguments #####
+2026-04-09T09:21:29.2411698Z ##########################
+2026-04-09T09:21:29.2413228Z # TARGETARCH is set automatically by Docker BuildKit for every --platform build.
+2026-04-09T09:21:29.2415713Z # It must NOT be declared in the global scope (before any FROM) — doing so shadows
+2026-04-09T09:21:29.2417459Z # the automatic per-platform value that BuildKit injects.
+2026-04-09T09:21:29.2418708Z #
+2026-04-09T09:21:29.2420640Z # In each stage that needs it, re-declare with:  ARG TARGETARCH
+2026-04-09T09:21:29.2421889Z #
+2026-04-09T09:21:29.2423029Z # ARCH_ALT (x86_64 / aarch64) is computed inline in RUN steps:
+2026-04-09T09:21:29.2424683Z #   ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
+2026-04-09T09:21:29.2426045Z ARG DEVICE=xpu
+2026-04-09T09:21:29.2426574Z 
+2026-04-09T09:21:29.2427037Z # Python/CUDA configuration
+2026-04-09T09:21:29.2428083Z ARG PYTHON_VERSION=3.12
+2026-04-09T09:21:29.2428818Z 
+2026-04-09T09:21:29.2429305Z # Base and runtime images configuration
+2026-04-09T09:21:29.2430563Z ARG BASE_IMAGE=intel/deep-learning-essentials
+2026-04-09T09:21:29.2432176Z ARG BASE_IMAGE_TAG=2025.3.2-0-devel-ubuntu24.04
+2026-04-09T09:21:29.2433470Z ARG RUNTIME_IMAGE=intel/deep-learning-essentials
+2026-04-09T09:21:29.2434782Z ARG RUNTIME_IMAGE_TAG=2025.3.2-0-devel-ubuntu24.04
+2026-04-09T09:21:29.2435561Z 
+2026-04-09T09:21:29.2436022Z # wheel builder image selection
+2026-04-09T09:21:29.2436658Z 
+2026-04-09T09:21:29.2437305Z ARG WHEEL_BUILDER_IMAGE=${BASE_IMAGE}:${BASE_IMAGE_TAG}
+2026-04-09T09:21:29.2438123Z 
+2026-04-09T09:21:29.2438620Z # Build configuration
+2026-04-09T09:21:29.2439578Z ARG ENABLE_KVBM=true
+2026-04-09T09:21:29.2440512Z ARG CARGO_BUILD_JOBS
+2026-04-09T09:21:29.2441056Z 
+2026-04-09T09:21:29.2441508Z ARG NATS_VERSION=v2.10.28
+2026-04-09T09:21:29.2442515Z ARG ETCD_VERSION=v3.5.21
+2026-04-09T09:21:29.2443114Z 
+2026-04-09T09:21:29.2443576Z ARG ENABLE_MEDIA_FFMPEG=false
+2026-04-09T09:21:29.2444592Z ARG FFMPEG_VERSION=7.1
+2026-04-09T09:21:29.2445162Z 
+2026-04-09T09:21:29.2445571Z # SCCACHE configuration
+2026-04-09T09:21:29.2446523Z ARG USE_SCCACHE
+2026-04-09T09:21:29.2447401Z ARG SCCACHE_BUCKET=""
+2026-04-09T09:21:29.2448334Z ARG SCCACHE_REGION=""
+2026-04-09T09:21:29.2448989Z 
+2026-04-09T09:21:29.2449388Z # NIXL configuration
+2026-04-09T09:21:29.2450335Z ARG NIXL_UCX_REF=v1.20.x
+2026-04-09T09:21:29.2451291Z ARG NIXL_REF=0.10.1
+2026-04-09T09:21:29.2451822Z 
+2026-04-09T09:21:29.2452750Z # Make sure to update the dependency version in pyproject.toml when updating this
+2026-04-09T09:21:29.2454221Z ARG VLLM_REF=v0.17.1
+2026-04-09T09:21:29.2455134Z ARG MAX_JOBS=10
+2026-04-09T09:21:29.2456955Z # FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
+2026-04-09T09:21:29.2458647Z 
+2026-04-09T09:21:29.2459067Z ARG LMCACHE_REF=0.4.2
+2026-04-09T09:21:29.2460135Z ARG VLLM_OMNI_REF=release/v0.19.0rc1
+2026-04-09T09:21:29.2460853Z 
+2026-04-09T09:21:29.2461331Z # --- Base Image Stages
+2026-04-09T09:21:29.2461936Z 
+2026-04-09T09:21:29.2462514Z # === BEGIN templates/dynamo_base.Dockerfile ===
+2026-04-09T09:21:29.2463817Z ##################################
+2026-04-09T09:21:29.2464929Z ########## Base Image ############
+2026-04-09T09:21:29.2466089Z ##################################
+2026-04-09T09:21:29.2466734Z 
+2026-04-09T09:21:29.2467314Z FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dynamo_base
+2026-04-09T09:21:29.2468119Z 
+2026-04-09T09:21:29.2468616Z ARG TARGETARCH
+2026-04-09T09:21:29.2469135Z 
+2026-04-09T09:21:29.2469535Z USER root
+2026-04-09T09:21:29.2470364Z WORKDIR /opt/dynamo
+2026-04-09T09:21:29.2470898Z 
+2026-04-09T09:21:29.2471711Z # Install sccache into the base image so downstream stages can COPY it
+2026-04-09T09:21:29.2473526Z # instead of downloading from GitHub (avoids 502 errors under parallel builds)
+2026-04-09T09:21:29.2475027Z ARG SCCACHE_VERSION=v0.14.0
+2026-04-09T09:21:29.2476459Z RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+2026-04-09T09:21:29.2477993Z     wget --tries=3 --waitretry=5 \
+2026-04-09T09:21:29.2480570Z         "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz" && \
+2026-04-09T09:21:29.2483427Z     tar -xzf "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl.tar.gz" && \
+2026-04-09T09:21:29.2486655Z     mv "sccache-${SCCACHE_VERSION}-${ARCH_ALT}-unknown-linux-musl/sccache" /usr/local/bin/ && \
+2026-04-09T09:21:29.2488271Z     rm -rf sccache*
+2026-04-09T09:21:29.2489224Z 
+2026-04-09T09:21:29.2489717Z # Install uv package manager
+2026-04-09T09:21:29.2491452Z # TODO: Pin uv image to a specific version tag for reproducibility (e.g. ghcr.io/astral-sh/uv:0.10.7)
+2026-04-09T09:21:29.2493718Z COPY --from=ghcr.io/astral-sh/uv:la*** /uv /uvx /bin/
+2026-04-09T09:21:29.2494571Z 
+2026-04-09T09:21:29.2494980Z # Install NATS server
+2026-04-09T09:21:29.2495926Z ARG NATS_VERSION
+2026-04-09T09:21:29.2497195Z RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+2026-04-09T09:21:29.2500164Z     wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${TARGETARCH}.deb && \
+2026-04-09T09:21:29.2503564Z     dpkg -i nats-server-${NATS_VERSION}-${TARGETARCH}.deb && rm nats-server-${NATS_VERSION}-${TARGETARCH}.deb
+2026-04-09T09:21:29.2504911Z 
+2026-04-09T09:21:29.2505318Z # Install etcd
+2026-04-09T09:21:29.2506189Z ARG ETCD_VERSION
+2026-04-09T09:21:29.2508870Z RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${TARGETARCH}.tar.gz -O /tmp/etcd.tar.gz && \
+2026-04-09T09:21:29.2511401Z     mkdir -p /usr/local/bin/etcd && \
+2026-04-09T09:21:29.2511803Z     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
+2026-04-09T09:21:29.2512166Z     rm /tmp/etcd.tar.gz
+2026-04-09T09:21:29.2512439Z ENV PATH=/usr/local/bin/etcd/:$PATH
+2026-04-09T09:21:29.2512603Z 
+2026-04-09T09:21:29.2512716Z # Rust Setup
+2026-04-09T09:21:29.2512967Z ENV RUSTUP_HOME=/usr/local/rustup \
+2026-04-09T09:21:29.2513268Z     CARGO_HOME=/usr/local/cargo \
+2026-04-09T09:21:29.2513556Z     PATH=/usr/local/cargo/bin:$PATH \
+2026-04-09T09:21:29.2513832Z     RUST_VERSION=1.93.1
+2026-04-09T09:21:29.2513983Z 
+2026-04-09T09:21:29.2514316Z # Install Rust — ARCH_ALT (x86_64/aarch64) is derived from TARGETARCH at build time
+2026-04-09T09:21:29.2514787Z RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+2026-04-09T09:21:29.2515205Z     RUSTARCH="${ARCH_ALT}-unknown-linux-gnu" && \
+2026-04-09T09:21:29.2515719Z     wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+2026-04-09T09:21:29.2516188Z     chmod +x rustup-init && \
+2026-04-09T09:21:29.2516697Z     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+2026-04-09T09:21:29.2517182Z     rm rustup-init && \
+2026-04-09T09:21:29.2517456Z     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+2026-04-09T09:21:29.2517624Z 
+2026-04-09T09:21:29.2517814Z # === BEGIN templates/wheel_builder.Dockerfile ===
+2026-04-09T09:21:29.2518138Z ##################################
+2026-04-09T09:21:29.2518470Z ##### Wheel Build Image ##########
+2026-04-09T09:21:29.2518753Z ##################################
+2026-04-09T09:21:29.2518912Z 
+2026-04-09T09:21:29.2519032Z ##################################
+2026-04-09T09:21:29.2519324Z ##### wheel_builder_base #########
+2026-04-09T09:21:29.2519611Z ##################################
+2026-04-09T09:21:29.2520022Z # Shared base for all wheel builds: tools, system deps, and native libraries (except nixl).
+2026-04-09T09:21:29.2520308Z 
+2026-04-09T09:21:29.2520514Z FROM ${WHEEL_BUILDER_IMAGE} AS wheel_builder_base
+2026-04-09T09:21:29.2520702Z 
+2026-04-09T09:21:29.2520820Z # Redeclare ARGs for this stage
+2026-04-09T09:21:29.2521062Z ARG TARGETARCH
+2026-04-09T09:21:29.2521274Z ARG CARGO_BUILD_JOBS
+2026-04-09T09:21:29.2521492Z ARG DEVICE
+2026-04-09T09:21:29.2521611Z 
+2026-04-09T09:21:29.2521715Z WORKDIR /workspace
+2026-04-09T09:21:29.2521843Z 
+2026-04-09T09:21:29.2521975Z RUN apt clean && apt-get update -y && \
+2026-04-09T09:21:29.2522323Z     apt-get install -y --no-install-recommends --fix-missing \
+2026-04-09T09:21:29.2522735Z     curl ca-certificates zip unzip git lsb-release numactl wget vim \
+2026-04-09T09:21:29.2523063Z     libsndfile1 \
+2026-04-09T09:21:29.2523273Z     libsm6 \
+2026-04-09T09:21:29.2523479Z     libxext6 \
+2026-04-09T09:21:29.2523796Z     libgl1 \
+2026-04-09T09:21:29.2524023Z     libaio-dev \
+2026-04-09T09:21:29.2524250Z     linux-libc-dev
+2026-04-09T09:21:29.2524374Z 
+2026-04-09T09:21:29.2524583Z # Set environment variables first so they can be used in COPY commands
+2026-04-09T09:21:29.2524958Z ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
+2026-04-09T09:21:29.2525257Z     RUSTUP_HOME=/usr/local/rustup \
+2026-04-09T09:21:29.2525538Z     CARGO_HOME=/usr/local/cargo \
+2026-04-09T09:21:29.2525820Z     CARGO_TARGET_DIR=/opt/dynamo/target \
+2026-04-09T09:21:29.2526111Z     PATH=/usr/local/cargo/bin:$PATH
+2026-04-09T09:21:29.2526335Z 
+2026-04-09T09:21:29.2526466Z # Copy artifacts from base stage
+2026-04-09T09:21:29.2526758Z COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
+2026-04-09T09:21:29.2527082Z COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
+2026-04-09T09:21:29.2527266Z 
+2026-04-09T09:21:29.2527802Z RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+2026-04-09T09:21:29.2528818Z     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+2026-04-09T09:21:29.2529470Z     add-apt-repository -y ppa:kobuk-team/intel-graphics
+2026-04-09T09:21:29.2529668Z 
+2026-04-09T09:21:29.2529778Z # Fetch UCX patch
+2026-04-09T09:21:29.2530480Z RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/ucx-v1.12.0.patch -O /tmp/ucx.patch
+2026-04-09T09:21:29.2531105Z 
+2026-04-09T09:21:29.2531230Z # Install Intel GPU runtime packages
+2026-04-09T09:21:29.2531527Z RUN apt update -y && apt upgrade -y && \
+2026-04-09T09:21:29.2531919Z     apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd  \
+2026-04-09T09:21:29.2532425Z     libze-intel-gpu-raytracing intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+2026-04-09T09:21:29.2532868Z     apt-get clean && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:29.2533041Z 
+2026-04-09T09:21:29.2533185Z SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+2026-04-09T09:21:29.2533462Z RUN apt-get update -y \
+2026-04-09T09:21:29.2533834Z     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+2026-04-09T09:21:29.2534224Z         # NIXL build dependencies
+2026-04-09T09:21:29.2534479Z         autoconf \
+2026-04-09T09:21:29.2534690Z         automake \
+2026-04-09T09:21:29.2534892Z         cmake \
+2026-04-09T09:21:29.2535099Z         git-lfs \
+2026-04-09T09:21:29.2535320Z         libtool \
+2026-04-09T09:21:29.2535523Z         meson \
+2026-04-09T09:21:29.2535734Z         net-tools \
+2026-04-09T09:21:29.2535958Z         ninja-build \
+2026-04-09T09:21:29.2536192Z         pybind11-dev \
+2026-04-09T09:21:29.2536464Z         # Rust build dependencies
+2026-04-09T09:21:29.2536701Z         clang \
+2026-04-09T09:21:29.2536916Z         libclang-dev \
+2026-04-09T09:21:29.2537169Z         protobuf-compiler \
+2026-04-09T09:21:29.2537414Z     && apt-get clean \
+2026-04-09T09:21:29.2537671Z     && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:29.2537829Z 
+2026-04-09T09:21:29.2537934Z RUN apt-get update -y \
+2026-04-09T09:21:29.2538334Z     && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends \
+2026-04-09T09:21:29.2538779Z         libibverbs-dev \
+2026-04-09T09:21:29.2539016Z         rdma-core \
+2026-04-09T09:21:29.2539239Z         ibverbs-utils \
+2026-04-09T09:21:29.2539474Z         libibumad-dev \
+2026-04-09T09:21:29.2539705Z         libnuma-dev \
+2026-04-09T09:21:29.2539934Z         librdmacm-dev \
+2026-04-09T09:21:29.2540182Z         ibverbs-providers \
+2026-04-09T09:21:29.2540428Z     && apt-get clean \
+2026-04-09T09:21:29.2540687Z     && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:29.2540839Z 
+2026-04-09T09:21:29.2541092Z # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
+2026-04-09T09:21:29.2541465Z RUN set -eux; \
+2026-04-09T09:21:29.2541884Z     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64"); \
+2026-04-09T09:21:29.2542251Z     PROTOC_VERSION=25.3; \
+2026-04-09T09:21:29.2542511Z     case "${ARCH_ALT}" in \
+2026-04-09T09:21:29.2542837Z       x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;; \
+2026-04-09T09:21:29.2543270Z       aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;; \
+2026-04-09T09:21:29.2543694Z       *) echo "Unsupported architecture: ${ARCH_ALT}" >&2; exit 1 ;; \
+2026-04-09T09:21:29.2544006Z     esac; \
+2026-04-09T09:21:29.2544620Z     wget --tries=3 --waitretry=5 -O /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
+2026-04-09T09:21:29.2545195Z     rm -f /usr/local/bin/protoc /usr/bin/protoc; \
+2026-04-09T09:21:29.2545559Z     unzip -o /tmp/protoc.zip -d /usr/local bin/protoc include/*; \
+2026-04-09T09:21:29.2545897Z     chmod +x /usr/local/bin/protoc; \
+2026-04-09T09:21:29.2546213Z     ln -s /usr/local/bin/protoc /usr/bin/protoc; \
+2026-04-09T09:21:29.2546493Z     protoc --version
+2026-04-09T09:21:29.2546629Z 
+2026-04-09T09:21:29.2546779Z # Point build tools explicitly at the modern protoc
+2026-04-09T09:21:29.2547084Z ENV PROTOC=/usr/local/bin/protoc
+2026-04-09T09:21:29.2547244Z 
+2026-04-09T09:21:29.2547358Z # Install uv package manager
+2026-04-09T09:21:29.2547734Z COPY --from=ghcr.io/astral-sh/uv:la*** /uv /uvx /bin/
+2026-04-09T09:21:29.2548142Z ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:${LD_LIBRARY_PATH:-}
+2026-04-09T09:21:29.2548376Z 
+2026-04-09T09:21:29.2548553Z # Create virtual environment for building wheels
+2026-04-09T09:21:29.2548840Z ARG PYTHON_VERSION
+2026-04-09T09:21:29.2549088Z ENV VIRTUAL_ENV=/workspace/.venv
+2026-04-09T09:21:29.2549415Z # Cache uv downloads; uv handles its own locking for this cache.
+2026-04-09T09:21:29.2549768Z RUN --mount=type=cache,target=/root/.cache/uv \
+2026-04-09T09:21:29.2550152Z     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+2026-04-09T09:21:29.2550556Z     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
+2026-04-09T09:21:29.2550946Z     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
+2026-04-09T09:21:29.2551191Z 
+2026-04-09T09:21:29.2551291Z ARG NIXL_UCX_REF
+2026-04-09T09:21:29.2551417Z 
+2026-04-09T09:21:29.2551606Z # sccache binary is pre-installed in dynamo_base; stage it off-PATH so
+2026-04-09T09:21:29.2552005Z # Meson doesn't auto-detect it as a CUDA compiler launcher
+2026-04-09T09:21:29.2552356Z # (https://github.com/mesonbuild/meson/issues/11118).
+2026-04-09T09:21:29.2552745Z # When USE_SCCACHE=true the RUN below symlinks it onto PATH before install.
+2026-04-09T09:21:29.2553157Z COPY --from=dynamo_base /usr/local/bin/sccache /opt/sccache/sccache
+2026-04-09T09:21:29.2553373Z 
+2026-04-09T09:21:29.2553472Z ARG USE_SCCACHE
+2026-04-09T09:21:29.2553685Z ARG SCCACHE_BUCKET
+2026-04-09T09:21:29.2553898Z ARG SCCACHE_REGION
+2026-04-09T09:21:29.2554163Z COPY container/use-sccache.sh /tmp/use-sccache.sh
+2026-04-09T09:21:29.2554469Z RUN if [ "$USE_SCCACHE" = "true" ]; then \
+2026-04-09T09:21:29.2554786Z         ln -s /opt/sccache/sccache /usr/local/bin/sccache && \
+2026-04-09T09:21:29.2555107Z         /tmp/use-sccache.sh install; \
+2026-04-09T09:21:29.2555346Z     fi
+2026-04-09T09:21:29.2555460Z 
+2026-04-09T09:21:29.2555657Z # Set SCCACHE environment variables (RUSTC_WRAPPER is set dynamically by
+2026-04-09T09:21:29.2556063Z # setup-env only when the sccache server starts successfully)
+2026-04-09T09:21:29.2556419Z ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
+2026-04-09T09:21:29.2556760Z     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
+2026-04-09T09:21:29.2556947Z 
+2026-04-09T09:21:29.2557129Z # Always build FFmpeg so libs are available for Rust checks in CI
+2026-04-09T09:21:29.2557486Z # Do not delete the source tarball for legal reasons
+2026-04-09T09:21:29.2557759Z ARG FFMPEG_VERSION
+2026-04-09T09:21:29.2558051Z RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+2026-04-09T09:21:29.2558565Z     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+2026-04-09T09:21:29.2559008Z     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
+2026-04-09T09:21:29.2559366Z     if [ "$USE_SCCACHE" = "true" ]; then \
+2026-04-09T09:21:29.2559666Z         eval $(/tmp/use-sccache.sh setup-env); \
+2026-04-09T09:21:29.2559943Z     fi && \
+2026-04-09T09:21:29.2560210Z     if [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
+2026-04-09T09:21:29.2560617Z     apt-get update -y && apt-get install -y build-essential pkg-config xz-utils; \
+2026-04-09T09:21:29.2561090Z     apt-get clean && rm -rf /var/lib/apt/lists/*; \
+2026-04-09T09:21:29.2561404Z     elif [ "$DEVICE" = "cuda" ]; then \
+2026-04-09T09:21:29.2561688Z     dnf install -y pkg-config xz; \
+2026-04-09T09:21:29.2562004Z     fi && \
+2026-04-09T09:21:29.2562228Z     cd /tmp && \
+2026-04-09T09:21:29.2562639Z     curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+2026-04-09T09:21:29.2563094Z     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+2026-04-09T09:21:29.2563394Z     cd ffmpeg-${FFMPEG_VERSION} && \
+2026-04-09T09:21:29.2563651Z     ./configure \
+2026-04-09T09:21:29.2563892Z         --prefix=/usr/local \
+2026-04-09T09:21:29.2564151Z         --disable-gpl \
+2026-04-09T09:21:29.2564405Z         --disable-nonfree \
+2026-04-09T09:21:29.2564683Z         --disable-programs \
+2026-04-09T09:21:29.2564935Z         --disable-doc \
+2026-04-09T09:21:29.2565182Z         --disable-static \
+2026-04-09T09:21:29.2565445Z         --disable-x86asm \
+2026-04-09T09:21:29.2565716Z         --disable-postproc \
+2026-04-09T09:21:29.2565980Z         --disable-network \
+2026-04-09T09:21:29.2566244Z         --disable-encoders \
+2026-04-09T09:21:29.2566503Z         --disable-muxers \
+2026-04-09T09:21:29.2566769Z         --disable-bsfs \
+2026-04-09T09:21:29.2567024Z         --disable-devices \
+2026-04-09T09:21:29.2567276Z         --disable-libdrm \
+2026-04-09T09:21:29.2567542Z         --enable-shared && \
+2026-04-09T09:21:29.2567796Z     make -j$(nproc) && \
+2026-04-09T09:21:29.2568042Z     make install && \
+2026-04-09T09:21:29.2568317Z     /tmp/use-sccache.sh show-stats "FFMPEG" && \
+2026-04-09T09:21:29.2568647Z     ldconfig && \
+2026-04-09T09:21:29.2568884Z     mkdir -p /usr/local/src/ffmpeg && \
+2026-04-09T09:21:29.2569211Z     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
+2026-04-09T09:21:29.2569408Z 
+2026-04-09T09:21:29.2569516Z # Build and install UCX
+2026-04-09T09:21:29.2569823Z RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+2026-04-09T09:21:29.2570223Z     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+2026-04-09T09:21:29.2570648Z     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
+2026-04-09T09:21:29.2571008Z     if [ "$USE_SCCACHE" = "true" ]; then \
+2026-04-09T09:21:29.2571304Z         eval $(/tmp/use-sccache.sh setup-env); \
+2026-04-09T09:21:29.2571570Z     fi && \
+2026-04-09T09:21:29.2571787Z     cd /usr/local/src && \
+2026-04-09T09:21:29.2572087Z     git clone https://github.com/openucx/ucx.git && \
+2026-04-09T09:21:29.2572368Z     cd ucx &&  \
+2026-04-09T09:21:29.2572607Z     git checkout $NIXL_UCX_REF &&	 \
+2026-04-09T09:21:29.2572874Z     if [ "$DEVICE" = "xpu" ]; then \
+2026-04-09T09:21:29.2573172Z     git apply --ignore-whitespace /tmp/ucx.patch; \
+2026-04-09T09:21:29.2573450Z     fi && \
+2026-04-09T09:21:29.2573674Z     ./autogen.sh &&      \
+2026-04-09T09:21:29.2573928Z     if [ "$DEVICE" = "xpu" ]; then \
+2026-04-09T09:21:29.2574209Z      ./contrib/configure-release     \
+2026-04-09T09:21:29.2574501Z         --prefix=/usr/local/ucx     \
+2026-04-09T09:21:29.2574772Z         --with-ze                   \
+2026-04-09T09:21:29.2575042Z         --enable-shared             \
+2026-04-09T09:21:29.2575313Z         --disable-static            \
+2026-04-09T09:21:29.2575588Z         --disable-doxygen-doc       \
+2026-04-09T09:21:29.2575873Z         --enable-optimizations      \
+2026-04-09T09:21:29.2576252Z         --enable-cma                \
+2026-04-09T09:21:29.2576551Z         --enable-devel-headers      \
+2026-04-09T09:21:29.2576848Z         --with-verbs                \
+2026-04-09T09:21:29.2577380Z         --with-dm                   \
+2026-04-09T09:21:29.2577889Z         --with-efa                  \
+2026-04-09T09:21:29.2578172Z         --without-cuda              \
+2026-04-09T09:21:29.2578508Z         --enable-mt;                 \
+2026-04-09T09:21:29.2578798Z     elif [ "$DEVICE" = "cuda" ]; then \
+2026-04-09T09:21:29.2579084Z      ./contrib/configure-release     \
+2026-04-09T09:21:29.2579490Z         --prefix=/usr/local/ucx     \
+2026-04-09T09:21:29.2579777Z         --enable-shared             \
+2026-04-09T09:21:29.2580051Z         --disable-static            \
+2026-04-09T09:21:29.2580329Z         --disable-doxygen-doc       \
+2026-04-09T09:21:29.2580609Z         --enable-optimizations      \
+2026-04-09T09:21:29.2580897Z         --enable-cma                \
+2026-04-09T09:21:29.2581174Z         --enable-devel-headers      \
+2026-04-09T09:21:29.2581454Z         --with-cuda=/usr/local/cuda \
+2026-04-09T09:21:29.2581720Z         --with-verbs                \
+2026-04-09T09:21:29.2581998Z         --with-dm                   \
+2026-04-09T09:21:29.2582280Z         --with-gdrcopy=/usr/local   \
+2026-04-09T09:21:29.2582550Z         --with-efa                  \
+2026-04-09T09:21:29.2582816Z         --enable-mt;                 \
+2026-04-09T09:21:29.2583087Z     elif [ "$DEVICE" = "cpu" ]; then  \
+2026-04-09T09:21:29.2583369Z      ./contrib/configure-release     \
+2026-04-09T09:21:29.2583660Z         --prefix=/usr/local/ucx     \
+2026-04-09T09:21:29.2583927Z         --enable-shared             \
+2026-04-09T09:21:29.2584209Z         --disable-static            \
+2026-04-09T09:21:29.2584479Z         --disable-doxygen-doc       \
+2026-04-09T09:21:29.2584762Z         --enable-optimizations      \
+2026-04-09T09:21:29.2585035Z         --enable-cma                \
+2026-04-09T09:21:29.2585299Z         --enable-devel-headers      \
+2026-04-09T09:21:29.2585576Z         --with-verbs                \
+2026-04-09T09:21:29.2585872Z         --without-cuda              \
+2026-04-09T09:21:29.2586143Z         --enable-mt;                 \
+2026-04-09T09:21:29.2586392Z      fi && \
+2026-04-09T09:21:29.2586620Z      make -j &&                      \
+2026-04-09T09:21:29.2586890Z      make -j install-strip &&        \
+2026-04-09T09:21:29.2587185Z      /tmp/use-sccache.sh show-stats "UCX" && \
+2026-04-09T09:21:29.2587529Z      echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
+2026-04-09T09:21:29.2587933Z      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
+2026-04-09T09:21:29.2588248Z      ldconfig
+2026-04-09T09:21:29.2588369Z 
+2026-04-09T09:21:29.2588552Z ##################################
+2026-04-09T09:21:29.2588822Z ##### runtime_wheel_builder ######
+2026-04-09T09:21:29.2589088Z ##################################
+2026-04-09T09:21:29.2589446Z # Builds ai-dynamo, ai-dynamo-runtime, and gpu_memory_service wheels, sans nixl.
+2026-04-09T09:21:29.2589719Z 
+2026-04-09T09:21:29.2589854Z FROM wheel_builder_base AS runtime_wheel_builder
+2026-04-09T09:21:29.2590043Z 
+2026-04-09T09:21:29.2590190Z # Copy source code (order matters for layer caching)
+2026-04-09T09:21:29.2590497Z COPY .cargo/ /opt/dynamo/.cargo/
+2026-04-09T09:21:29.2590949Z COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+2026-04-09T09:21:29.2591385Z COPY lib/ /opt/dynamo/lib/
+2026-04-09T09:21:29.2591652Z COPY components/ /opt/dynamo/components/
+2026-04-09T09:21:29.2591827Z 
+2026-04-09T09:21:29.2592018Z # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
+2026-04-09T09:21:29.2592343Z ARG USE_SCCACHE
+2026-04-09T09:21:29.2592566Z ARG ENABLE_MEDIA_FFMPEG
+2026-04-09T09:21:29.2592876Z RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+2026-04-09T09:21:29.2593275Z     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+2026-04-09T09:21:29.2593749Z     --mount=type=cache,target=/root/.cargo/registry \
+2026-04-09T09:21:29.2594100Z     --mount=type=cache,target=/root/.cargo/git \
+2026-04-09T09:21:29.2594411Z     --mount=type=cache,target=/root/.cache/uv \
+2026-04-09T09:21:29.2594713Z     export UV_CACHE_DIR=/root/.cache/uv && \
+2026-04-09T09:21:29.2595076Z     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
+2026-04-09T09:21:29.2595442Z     if [ "$USE_SCCACHE" = "true" ]; then \
+2026-04-09T09:21:29.2595771Z         eval $(/tmp/use-sccache.sh setup-env cmake); \
+2026-04-09T09:21:29.2596042Z     fi && \
+2026-04-09T09:21:29.2596459Z     mkdir -p ${CARGO_TARGET_DIR} && \
+2026-04-09T09:21:29.2596742Z     source ${VIRTUAL_ENV}/bin/activate && \
+2026-04-09T09:21:29.2597010Z     cd /opt/dynamo && \
+2026-04-09T09:21:29.2597412Z     uv build --wheel --out-dir /opt/dynamo/dist && \
+2026-04-09T09:21:29.2597908Z     cd /opt/dynamo/lib/bindings/python && \
+2026-04-09T09:21:29.2598222Z     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+2026-04-09T09:21:29.2598782Z         maturin build --release --features "media-ffmpeg,kv-indexer,kv-indexer-runtime" --out /opt/dynamo/dist; \
+2026-04-09T09:21:29.2599208Z     else \
+2026-04-09T09:21:29.2599577Z         maturin build --release --features "kv-indexer,kv-indexer-runtime" --out /opt/dynamo/dist; \
+2026-04-09T09:21:29.2599966Z     fi && \
+2026-04-09T09:21:29.2600225Z     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+2026-04-09T09:21:29.2600423Z 
+2026-04-09T09:21:29.2600925Z # Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
+2026-04-09T09:21:29.2601360Z 
+2026-04-09T09:21:29.2601488Z ##################################
+2026-04-09T09:21:29.2601767Z ##### wheel_builder ##############
+2026-04-09T09:21:29.2602044Z ##################################
+2026-04-09T09:21:29.2602414Z # Builds nixl (native + Python wheel) and kvbm wheel, then consolidates all wheels.
+2026-04-09T09:21:29.2602803Z # Runtime templates COPY from this stage.
+2026-04-09T09:21:29.2602998Z 
+2026-04-09T09:21:29.2603116Z FROM wheel_builder_base AS wheel_builder
+2026-04-09T09:21:29.2603291Z 
+2026-04-09T09:21:29.2603396Z # Build and install nixl
+2026-04-09T09:21:29.2603651Z ARG TARGETARCH
+2026-04-09T09:21:29.2603867Z ARG DEVICE
+2026-04-09T09:21:29.2604073Z ARG NIXL_REF
+2026-04-09T09:21:29.2604287Z ARG USE_SCCACHE
+2026-04-09T09:21:29.2604406Z 
+2026-04-09T09:21:29.2604588Z RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+2026-04-09T09:21:29.2604990Z     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+2026-04-09T09:21:29.2605419Z     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
+2026-04-09T09:21:29.2605798Z     if [ "$USE_SCCACHE" = "true" ]; then \
+2026-04-09T09:21:29.2606093Z         eval $(/tmp/use-sccache.sh setup-env); \
+2026-04-09T09:21:29.2606359Z     fi && \
+2026-04-09T09:21:29.2606591Z     source ${VIRTUAL_ENV}/bin/activate && \
+2026-04-09T09:21:29.2606932Z     git clone "https://github.com/ai-dynamo/nixl.git" && \
+2026-04-09T09:21:29.2607237Z     cd nixl && \
+2026-04-09T09:21:29.2607472Z     git checkout ${NIXL_REF} && \
+2026-04-09T09:21:29.2607734Z     if [ "$DEVICE" = "cuda" ]; then \
+2026-04-09T09:21:29.2608019Z         PKG_NAME="nixl-cu${CUDA_MAJOR}"; \
+2026-04-09T09:21:29.2608265Z     else \
+2026-04-09T09:21:29.2608549Z         PKG_NAME="nixl-${DEVICE}"; \
+2026-04-09T09:21:29.2608796Z     fi && \
+2026-04-09T09:21:29.2609084Z     ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
+2026-04-09T09:21:29.2609413Z     mkdir build && \
+2026-04-09T09:21:29.2609654Z     if [ "$DEVICE" = "cuda" ]; then \
+2026-04-09T09:21:29.2610022Z         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
+2026-04-09T09:21:29.2610412Z             -Dcudapath_lib="/usr/local/cuda/lib64" \
+2026-04-09T09:21:29.2610731Z             -Dcudapath_inc="/usr/local/cuda/include" \
+2026-04-09T09:21:29.2611027Z             -Ducx_path="/usr/local/ucx" \
+2026-04-09T09:21:29.2611326Z             -Dlibfabric_path="/usr/local/libfabric"; \
+2026-04-09T09:21:29.2611750Z     elif [ "$DEVICE" = "xpu" ]; then \
+2026-04-09T09:21:29.2612130Z         meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release \
+2026-04-09T09:21:29.2612506Z             -Ducx_path="/usr/local/ucx"; \
+2026-04-09T09:21:29.2612807Z     elif [ "$DEVICE" = "cpu" ]; then \
+2026-04-09T09:21:29.2613161Z         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
+2026-04-09T09:21:29.2613522Z             -Ducx_path="/usr/local/ucx"; \
+2026-04-09T09:21:29.2613778Z     fi && \
+2026-04-09T09:21:29.2614054Z     cd build && \
+2026-04-09T09:21:29.2614262Z     ninja && \
+2026-04-09T09:21:29.2614474Z     ninja install && \
+2026-04-09T09:21:29.2614726Z     /tmp/use-sccache.sh show-stats "NIXL"
+2026-04-09T09:21:29.2614900Z 
+2026-04-09T09:21:29.2615067Z ENV NIXL_LIB_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu \
+2026-04-09T09:21:29.2615454Z     NIXL_PLUGIN_DIR=/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins \
+2026-04-09T09:21:29.2615810Z     NIXL_PREFIX=/opt/intel/intel_nixl
+2026-04-09T09:21:29.2615969Z 
+2026-04-09T09:21:29.2616262Z ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${LD_LIBRARY_PATH}
+2026-04-09T09:21:29.2616590Z 
+2026-04-09T09:21:29.2616742Z RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
+2026-04-09T09:21:29.2617100Z     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
+2026-04-09T09:21:29.2617402Z     ldconfig
+2026-04-09T09:21:29.2617514Z 
+2026-04-09T09:21:29.2617823Z # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
+2026-04-09T09:21:29.2618210Z ARG PYTHON_VERSION
+2026-04-09T09:21:29.2618553Z RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+2026-04-09T09:21:29.2618935Z     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+2026-04-09T09:21:29.2619290Z     --mount=type=cache,target=/root/.cache/uv \
+2026-04-09T09:21:29.2619587Z     export UV_CACHE_DIR=/root/.cache/uv && \
+2026-04-09T09:21:29.2619966Z     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
+2026-04-09T09:21:29.2620323Z     if [ "$USE_SCCACHE" = "true" ]; then \
+2026-04-09T09:21:29.2620608Z         eval $(/tmp/use-sccache.sh setup-env); \
+2026-04-09T09:21:29.2620870Z     fi && \
+2026-04-09T09:21:29.2621093Z     cd /workspace/nixl && \
+2026-04-09T09:21:29.2621429Z     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+2026-04-09T09:21:29.2621677Z 
+2026-04-09T09:21:29.2621821Z # Copy source code (order matters for layer caching)
+2026-04-09T09:21:29.2622140Z COPY .cargo/ /opt/dynamo/.cargo/
+2026-04-09T09:21:29.2622571Z COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+2026-04-09T09:21:29.2623001Z COPY lib/ /opt/dynamo/lib/
+2026-04-09T09:21:29.2623274Z COPY components/ /opt/dynamo/components/
+2026-04-09T09:21:29.2623450Z 
+2026-04-09T09:21:29.2623606Z # Build kvbm wheel (with nixl linkage via auditwheel repair)
+2026-04-09T09:21:29.2623904Z ARG ENABLE_KVBM
+2026-04-09T09:21:29.2624193Z RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+2026-04-09T09:21:29.2624581Z     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+2026-04-09T09:21:29.2624945Z     --mount=type=cache,target=/root/.cargo/registry \
+2026-04-09T09:21:29.2625259Z     --mount=type=cache,target=/root/.cargo/git \
+2026-04-09T09:21:29.2625569Z     --mount=type=cache,target=/root/.cache/uv \
+2026-04-09T09:21:29.2625867Z     export UV_CACHE_DIR=/root/.cache/uv && \
+2026-04-09T09:21:29.2626226Z     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
+2026-04-09T09:21:29.2626660Z     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+2026-04-09T09:21:29.2627021Z     if [ "$USE_SCCACHE" = "true" ]; then \
+2026-04-09T09:21:29.2627319Z         eval $(/tmp/use-sccache.sh setup-env cmake); \
+2026-04-09T09:21:29.2627588Z     fi && \
+2026-04-09T09:21:29.2627819Z     mkdir -p ${CARGO_TARGET_DIR} && \
+2026-04-09T09:21:29.2628186Z     source ${VIRTUAL_ENV}/bin/activate && \
+2026-04-09T09:21:29.2628512Z     if [ "$ENABLE_KVBM" = "true" ]; then \
+2026-04-09T09:21:29.2628790Z         cd /opt/dynamo/lib/bindings/kvbm && \
+2026-04-09T09:21:29.2629102Z         maturin build --release --out target/wheels && \
+2026-04-09T09:21:29.2629407Z         if [ "$DEVICE" = "cuda" ]; then \
+2026-04-09T09:21:29.2629674Z             auditwheel repair \
+2026-04-09T09:21:29.2629939Z                 --exclude libnixl.so \
+2026-04-09T09:21:29.2630213Z                 --exclude libnixl_build.so \
+2026-04-09T09:21:29.2630568Z                 --exclude libnixl_common.so \
+2026-04-09T09:21:29.2630842Z                 --exclude 'lib*.so*' \
+2026-04-09T09:21:29.2631118Z                 --plat manylinux_2_28_${ARCH_ALT} \
+2026-04-09T09:21:29.2631414Z                 --wheel-dir /opt/dynamo/dist \
+2026-04-09T09:21:29.2631701Z                 target/wheels/*.whl; \
+2026-04-09T09:21:29.2632012Z         elif [ "$DEVICE" = "xpu" ] || [ "$DEVICE" = "cpu" ]; then \
+2026-04-09T09:21:29.2632359Z             cp target/wheels/*.whl /opt/dynamo/dist/; \
+2026-04-09T09:21:29.2632626Z         fi; \
+2026-04-09T09:21:29.2632826Z     fi && \
+2026-04-09T09:21:29.2633068Z     /tmp/use-sccache.sh show-stats "Dynamo KVBM"
+2026-04-09T09:21:29.2633255Z 
+2026-04-09T09:21:29.2633419Z # Consolidate all wheels from the runtime wheel builder stage
+2026-04-09T09:21:29.2633824Z COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+2026-04-09T09:21:29.2634051Z 
+2026-04-09T09:21:29.2634157Z # --- SGLang Stages
+2026-04-09T09:21:29.2634282Z 
+2026-04-09T09:21:29.2634408Z # --- No SGLANG stages included
+2026-04-09T09:21:29.2634569Z 
+2026-04-09T09:21:29.2634663Z # --- VLLM Stages
+2026-04-09T09:21:29.2634798Z 
+2026-04-09T09:21:29.2634936Z # === BEGIN templates/vllm_framework.Dockerfile ===
+2026-04-09T09:21:29.2635258Z ########################################################
+2026-04-09T09:21:29.2635581Z ########## Framework Development Image ################
+2026-04-09T09:21:29.2635898Z ########################################################
+2026-04-09T09:21:29.2636139Z #
+2026-04-09T09:21:29.2636394Z # PURPOSE: Framework development and vLLM compilation
+2026-04-09T09:21:29.2636660Z #
+2026-04-09T09:21:29.2636935Z # This stage builds and compiles framework dependencies including:
+2026-04-09T09:21:29.2637290Z # - vLLM inference engine with CUDA/XPU/CPU support
+2026-04-09T09:21:29.2637592Z # - DeepGEMM and FlashInfer optimizations
+2026-04-09T09:21:29.2637924Z # - All necessary build tools and compilation dependencies
+2026-04-09T09:21:29.2638263Z # - Framework-level Python packages and extensions
+2026-04-09T09:21:29.2638567Z #
+2026-04-09T09:21:29.2638792Z # Use this stage when you need to:
+2026-04-09T09:21:29.2639091Z # - Build vLLM from source with custom modifications
+2026-04-09T09:21:29.2639404Z # - Develop or debug framework-level components
+2026-04-09T09:21:29.2639737Z # - Create custom builds with specific optimization flags
+2026-04-09T09:21:29.2640016Z #
+2026-04-09T09:21:29.2640130Z 
+2026-04-09T09:21:29.2640318Z # Use dynamo base image (see /container/Dockerfile for more details)
+2026-04-09T09:21:29.2640670Z FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
+2026-04-09T09:21:29.2640846Z 
+2026-04-09T09:21:29.2640982Z COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+2026-04-09T09:21:29.2641159Z 
+2026-04-09T09:21:29.2641254Z ARG PYTHON_VERSION
+2026-04-09T09:21:29.2641460Z ARG DEVICE
+2026-04-09T09:21:29.2641579Z 
+2026-04-09T09:21:29.2641694Z RUN apt clean && apt-get update -y && \
+2026-04-09T09:21:29.2642040Z     apt-get install -y --no-install-recommends --fix-missing \
+2026-04-09T09:21:29.2642429Z     curl ca-certificates zip unzip git lsb-release numactl wget vim
+2026-04-09T09:21:29.2642648Z 
+2026-04-09T09:21:29.2642866Z # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+2026-04-09T09:21:29.2643289Z RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+2026-04-09T09:21:29.2643603Z     apt-get update -y \
+2026-04-09T09:21:29.2644053Z     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+2026-04-09T09:21:29.2644511Z         # Python runtime - CRITICAL for virtual environment to work
+2026-04-09T09:21:29.2644871Z         python${PYTHON_VERSION}-dev \
+2026-04-09T09:21:29.2645153Z         build-essential \
+2026-04-09T09:21:29.2645425Z         # vLLM build dependencies
+2026-04-09T09:21:29.2645677Z         cmake \
+2026-04-09T09:21:29.2645919Z         ibverbs-providers \
+2026-04-09T09:21:29.2646177Z         ibverbs-utils \
+2026-04-09T09:21:29.2646426Z         libibumad-dev \
+2026-04-09T09:21:29.2646735Z         libibverbs-dev \
+2026-04-09T09:21:29.2646987Z         libnuma-dev \
+2026-04-09T09:21:29.2647218Z         librdmacm-dev \
+2026-04-09T09:21:29.2647453Z         rdma-core \
+2026-04-09T09:21:29.2647674Z     && apt-get clean \
+2026-04-09T09:21:29.2647926Z     && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:29.2648092Z 
+2026-04-09T09:21:29.2648326Z # if libmlx5.so not shipped with 24.04 rdma-core packaging, CMAKE will fail when looking for
+2026-04-09T09:21:29.2648792Z # generic dev name .so so we symlink .s0.1 -> .so
+2026-04-09T09:21:29.2649249Z RUN ln -sf /usr/lib/aarch64-linux-gnu/libmlx5.so.1 /usr/lib/aarch64-linux-gnu/libmlx5.so || true
+2026-04-09T09:21:29.2649548Z 
+2026-04-09T09:21:29.2649668Z # Create virtual environment
+2026-04-09T09:21:29.2649925Z RUN mkdir -p /opt/dynamo/venv && \
+2026-04-09T09:21:29.2650202Z     export UV_CACHE_DIR=/root/.cache/uv && \
+2026-04-09T09:21:29.2650514Z     uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+2026-04-09T09:21:29.2650706Z 
+2026-04-09T09:21:29.2650815Z # Activate virtual environment
+2026-04-09T09:21:29.2651103Z ENV VIRTUAL_ENV=/opt/dynamo/venv \
+2026-04-09T09:21:29.2651378Z     PATH="/opt/dynamo/venv/bin:${PATH}"
+2026-04-09T09:21:29.2651541Z 
+2026-04-09T09:21:29.2651636Z ARG TARGETARCH
+2026-04-09T09:21:29.2651904Z # Install vllm - keep this early in Dockerfile to avoid
+2026-04-09T09:21:29.2652217Z # rebuilds from unrelated source code changes
+2026-04-09T09:21:29.2652471Z ARG VLLM_REF
+2026-04-09T09:21:29.2652682Z ARG VLLM_GIT_URL
+2026-04-09T09:21:29.2652887Z ARG LMCACHE_REF
+2026-04-09T09:21:29.2653092Z ARG VLLM_OMNI_REF
+2026-04-09T09:21:29.2653220Z 
+2026-04-09T09:21:29.2653312Z ARG MAX_JOBS
+2026-04-09T09:21:29.2653520Z ENV MAX_JOBS=$MAX_JOBS
+2026-04-09T09:21:29.2653651Z 
+2026-04-09T09:21:29.2653762Z ENV VLLM_TARGET_DEVICE=xpu
+2026-04-09T09:21:29.2654024Z ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
+2026-04-09T09:21:29.2654196Z 
+2026-04-09T09:21:29.2654307Z # Install VLLM and related dependencies
+2026-04-09T09:21:29.2654634Z RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
+2026-04-09T09:21:29.2654984Z     --mount=type=cache,target=/root/.cache/uv \
+2026-04-09T09:21:29.2655363Z     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+2026-04-09T09:21:29.2655767Z     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
+2026-04-09T09:21:29.2656092Z     chmod +x /tmp/install_vllm.sh && \
+2026-04-09T09:21:29.2656406Z     if [ "$DEVICE" = "cpu" ] && [ "$TARGETARCH" = "amd64" ]; then \
+2026-04-09T09:21:29.2656767Z         export VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512} \
+2026-04-09T09:21:29.2657095Z                VLLM_CPU_AVX512=${VLLM_CPU_AVX512} \
+2026-04-09T09:21:29.2657407Z                VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16} \
+2026-04-09T09:21:29.2657747Z                VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI} \
+2026-04-09T09:21:29.2658065Z                VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}; \
+2026-04-09T09:21:29.2658327Z     fi && \
+2026-04-09T09:21:29.2658575Z     /tmp/install_vllm.sh \
+2026-04-09T09:21:29.2658830Z         --device $DEVICE \
+2026-04-09T09:21:29.2659081Z         --vllm-ref $VLLM_REF \
+2026-04-09T09:21:29.2659337Z         --max-jobs $MAX_JOBS \
+2026-04-09T09:21:29.2659592Z         --arch $TARGETARCH \
+2026-04-09T09:21:29.2659856Z         --installation-dir /opt \
+2026-04-09T09:21:29.2660149Z         ${LMCACHE_REF:+--lmcache-ref "$LMCACHE_REF"} \
+2026-04-09T09:21:29.2660476Z         ${VLLM_OMNI_REF:+--vllm-omni-ref "$VLLM_OMNI_REF"} \
+2026-04-09T09:21:29.2660910Z         ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"} \
+2026-04-09T09:21:29.2661248Z         ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"} \
+2026-04-09T09:21:29.2661569Z         ${CUDA_VERSION:+--cuda-version "$CUDA_VERSION"}
+2026-04-09T09:21:29.2661759Z 
+2026-04-09T09:21:29.2661890Z # === BEGIN templates/vllm_runtime.Dockerfile ===
+2026-04-09T09:21:29.2662220Z ##################################################
+2026-04-09T09:21:29.2662522Z ########## Runtime Image ########################
+2026-04-09T09:21:29.2662823Z ##################################################
+2026-04-09T09:21:29.2663156Z #
+2026-04-09T09:21:29.2663396Z # PURPOSE: Production runtime environment
+2026-04-09T09:21:29.2663651Z #
+2026-04-09T09:21:29.2663953Z # This stage creates a lightweight production-ready image containing:
+2026-04-09T09:21:29.2664330Z # - Pre-compiled vLLM and framework dependencies
+2026-04-09T09:21:29.2664670Z # - Dynamo runtime libraries and Python packages
+2026-04-09T09:21:29.2665016Z # - Essential runtime dependencies and configurations
+2026-04-09T09:21:29.2665357Z # - Optimized for inference workloads and deployment
+2026-04-09T09:21:29.2665625Z #
+2026-04-09T09:21:29.2665844Z # Use this stage when you need:
+2026-04-09T09:21:29.2666126Z # - Production deployment of Dynamo with vLLM
+2026-04-09T09:21:29.2666434Z # - Minimal runtime footprint without build tools
+2026-04-09T09:21:29.2666747Z # - Ready-to-run inference server environment
+2026-04-09T09:21:29.2667055Z # - Base for custom application containers
+2026-04-09T09:21:29.2667307Z #
+2026-04-09T09:21:29.2667420Z 
+2026-04-09T09:21:29.2667573Z FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+2026-04-09T09:21:29.2667771Z 
+2026-04-09T09:21:29.2667856Z ARG DEVICE
+2026-04-09T09:21:29.2668069Z WORKDIR /workspace
+2026-04-09T09:21:29.2668306Z ENV DYNAMO_HOME=/opt/dynamo
+2026-04-09T09:21:29.2668612Z ENV VIRTUAL_ENV=/opt/dynamo/venv
+2026-04-09T09:21:29.2668901Z ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+2026-04-09T09:21:29.2669064Z 
+2026-04-09T09:21:29.2669578Z RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
+2026-04-09T09:21:29.2670526Z     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
+2026-04-09T09:21:29.2671155Z     add-apt-repository -y ppa:kobuk-team/intel-graphics
+2026-04-09T09:21:29.2671366Z 
+2026-04-09T09:21:29.2671467Z ### COPY NATS & ETCD ###
+2026-04-09T09:21:29.2671734Z # Copy nats and etcd from dev image
+2026-04-09T09:21:29.2672079Z COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+2026-04-09T09:21:29.2672468Z COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+2026-04-09T09:21:29.2672681Z 
+2026-04-09T09:21:29.2672895Z # Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
+2026-04-09T09:21:29.2673158Z 
+2026-04-09T09:21:29.2673278Z ENV PATH=/usr/local/bin/etcd/:$PATH
+2026-04-09T09:21:29.2673452Z 
+2026-04-09T09:21:29.2673557Z # Copy uv to system /bin
+2026-04-09T09:21:29.2673837Z COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+2026-04-09T09:21:29.2674025Z 
+2026-04-09T09:21:29.2674204Z # Create dynamo user with group 0 for OpenShift compatibility
+2026-04-09T09:21:29.2674555Z RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+2026-04-09T09:21:29.2674860Z     && useradd -m -s /bin/bash -g 0 dynamo \
+2026-04-09T09:21:29.2675154Z     && [ `id -u dynamo` -eq 1000 ] \
+2026-04-09T09:21:29.2675448Z     && mkdir -p /home/dynamo/.cache /opt/dynamo \
+2026-04-09T09:21:29.2675820Z     # Non-recursive chown - only the directories themselves, not contents
+2026-04-09T09:21:29.2676251Z     && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
+2026-04-09T09:21:29.2676703Z     # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
+2026-04-09T09:21:29.2677400Z     # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
+2026-04-09T09:21:29.2677949Z     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
+2026-04-09T09:21:29.2678469Z     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+2026-04-09T09:21:29.2678716Z 
+2026-04-09T09:21:29.2678813Z ARG PYTHON_VERSION
+2026-04-09T09:21:29.2679060Z ENV PYTHON_VERSION=${PYTHON_VERSION}
+2026-04-09T09:21:29.2679233Z 
+2026-04-09T09:21:29.2679424Z # Install Python, build-essential and python3-dev as apt dependencies
+2026-04-09T09:21:29.2679926Z # Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
+2026-04-09T09:21:29.2680352Z RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+2026-04-09T09:21:29.2680661Z     apt-get update && \
+2026-04-09T09:21:29.2680906Z     if [ "$DEVICE" = "cuda" ]; then \
+2026-04-09T09:21:29.2681187Z         CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} &&\
+2026-04-09T09:21:29.2681539Z         CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1); \
+2026-04-09T09:21:29.2681857Z     fi && \
+2026-04-09T09:21:29.2682172Z     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+2026-04-09T09:21:29.2682600Z         # Python runtime - CRITICAL for virtual environment to work
+2026-04-09T09:21:29.2682933Z         python${PYTHON_VERSION}-dev \
+2026-04-09T09:21:29.2683195Z         build-essential \
+2026-04-09T09:21:29.2683495Z         # jq and curl for polling various endpoints and health checks
+2026-04-09T09:21:29.2683794Z         jq \
+2026-04-09T09:21:29.2684003Z         git \
+2026-04-09T09:21:29.2684229Z         git-lfs \
+2026-04-09T09:21:29.2684478Z         # required for verification of GPG keys
+2026-04-09T09:21:29.2684745Z         gnupg2 \
+2026-04-09T09:21:29.2684959Z         curl \
+2026-04-09T09:21:29.2685223Z         # Libraries required by UCX to find RDMA devices
+2026-04-09T09:21:29.2685558Z         libibverbs1 rdma-core ibverbs-utils libibumad3 \
+2026-04-09T09:21:29.2685881Z         libnuma1 librdmacm1 ibverbs-providers \
+2026-04-09T09:21:29.2686175Z         # JIT Kernel Compilation, flashinfer
+2026-04-09T09:21:29.2686444Z         ninja-build \
+2026-04-09T09:21:29.2686673Z         g++ \
+2026-04-09T09:21:29.2686902Z         # prometheus dependencies
+2026-04-09T09:21:29.2687157Z         ca-certificates \
+2026-04-09T09:21:29.2687510Z         # opencv-python-headless (vLLM dependency) requires libxcb for some functions
+2026-04-09T09:21:29.2687869Z         libxcb1 && \
+2026-04-09T09:21:29.2688103Z     if [ "$DEVICE" = "cuda" ]; then \
+2026-04-09T09:21:29.2688504Z         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+2026-04-09T09:21:29.2688949Z         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
+2026-04-09T09:21:29.2689354Z         cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR}; \
+2026-04-09T09:21:29.2689689Z     fi && \
+2026-04-09T09:21:29.2689913Z     rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:29.2690068Z 
+2026-04-09T09:21:29.2690171Z RUN apt-get update && \
+2026-04-09T09:21:29.2690480Z     apt-get install -y --no-install-recommends --fix-missing \
+2026-04-09T09:21:29.2690789Z     #ffmpeg \
+2026-04-09T09:21:29.2691001Z     libsndfile1 \
+2026-04-09T09:21:29.2691205Z     libsm6 \
+2026-04-09T09:21:29.2691403Z     libxext6 \
+2026-04-09T09:21:29.2691602Z     libgl1 \
+2026-04-09T09:21:29.2691800Z     lsb-release \
+2026-04-09T09:21:29.2692005Z     numactl \
+2026-04-09T09:21:29.2692200Z     wget \
+2026-04-09T09:21:29.2692392Z     vim \
+2026-04-09T09:21:29.2692602Z     linux-libc-dev && \
+2026-04-09T09:21:29.2692868Z     # Install Intel GPU runtime packages
+2026-04-09T09:21:29.2693307Z     apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing \
+2026-04-09T09:21:29.2693797Z     intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+2026-04-09T09:21:29.2694148Z     apt-get clean && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:29.2694332Z 
+2026-04-09T09:21:29.2694740Z RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/intel-oneccl-2021.15.7.8_offline.sh && \
+2026-04-09T09:21:29.2695317Z     bash intel-oneccl-2021.15.7.8_offline.sh -a --silent --eula accept && \
+2026-04-09T09:21:29.2695767Z     echo "source /opt/intel/oneapi/setvars.sh --force" >> /etc/bash.bashrc && \
+2026-04-09T09:21:29.2696214Z     rm -f /opt/intel/oneapi/ccl/la*** && \
+2026-04-09T09:21:29.2696559Z     ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/la***
+2026-04-09T09:21:29.2696783Z 
+2026-04-09T09:21:29.2696869Z USER dynamo
+2026-04-09T09:21:29.2697078Z ENV HOME=/home/dynamo
+2026-04-09T09:21:29.2697642Z # This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
+2026-04-09T09:21:29.2698061Z SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+2026-04-09T09:21:29.2698244Z 
+2026-04-09T09:21:29.2698370Z ENV NIXL_PREFIX=/opt/intel/intel_nixl
+2026-04-09T09:21:29.2698717Z ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
+2026-04-09T09:21:29.2699018Z ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+2026-04-09T09:21:29.2699192Z 
+2026-04-09T09:21:29.2699340Z # Site-packages path derived from PYTHON_VERSION ARG
+2026-04-09T09:21:29.2699723Z ARG SITE_PACKAGES=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages
+2026-04-09T09:21:29.2699967Z 
+2026-04-09T09:21:29.2700093Z ### VIRTUAL ENVIRONMENT SETUP ###
+2026-04-09T09:21:29.2700503Z # Copy virtual environment from framework container, splitting large packages into separate layers
+2026-04-09T09:21:29.2701051Z # to enable parallel downloads. Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as
+2026-04-09T09:21:29.2701515Z # root because COPY --chmod only affects <path>/*, not <path>
+2026-04-09T09:21:29.2701803Z #
+2026-04-09T09:21:29.2702120Z # Layer sizes (uncompressed): nvidia=4.5GB, flashinfer_jit_cache=4.1GB, torch=2.1GB,
+2026-04-09T09:21:29.2702538Z #                             vllm=1.2GB, triton=592MB, flashinfer_cubin=437MB
+2026-04-09T09:21:29.2702743Z 
+2026-04-09T09:21:29.2702995Z COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/torch ${SITE_PACKAGES}/torch
+2026-04-09T09:21:29.2703501Z COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm ${SITE_PACKAGES}/vllm
+2026-04-09T09:21:29.2704030Z COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm_omni ${SITE_PACKAGES}/vllm_omni
+2026-04-09T09:21:29.2704568Z COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/triton ${SITE_PACKAGES}/triton
+2026-04-09T09:21:29.2704860Z 
+2026-04-09T09:21:29.2705066Z # Remaining packages and venv structure (bin/, include/, share/, etc.)
+2026-04-09T09:21:29.2705438Z COPY --chmod=775 --chown=dynamo:0 --from=framework \
+2026-04-09T09:21:29.2705753Z     --exclude=lib/python*/site-packages/nvidia \
+2026-04-09T09:21:29.2706093Z     --exclude=lib/python*/site-packages/flashinfer_jit_cache \
+2026-04-09T09:21:29.2706426Z     --exclude=lib/python*/site-packages/torch \
+2026-04-09T09:21:29.2706725Z     --exclude=lib/python*/site-packages/vllm \
+2026-04-09T09:21:29.2707037Z     --exclude=lib/python*/site-packages/vllm_omni \
+2026-04-09T09:21:29.2707346Z     --exclude=lib/python*/site-packages/triton \
+2026-04-09T09:21:29.2707674Z     --exclude=lib/python*/site-packages/flashinfer_cubin \
+2026-04-09T09:21:29.2707973Z     ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+2026-04-09T09:21:29.2708139Z 
+2026-04-09T09:21:29.2708318Z # Copy vllm with correct ownership (read-only, no group-write needed)
+2026-04-09T09:21:29.2708746Z COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
+2026-04-09T09:21:29.2708967Z 
+2026-04-09T09:21:29.2709165Z # Copy UCX and NIXL to system directories (read-only, no group-write needed)
+2026-04-09T09:21:29.2709585Z COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+2026-04-09T09:21:29.2709972Z COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+2026-04-09T09:21:29.2710187Z 
+2026-04-09T09:21:29.2710458Z COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+2026-04-09T09:21:29.2710784Z 
+2026-04-09T09:21:29.2711124Z COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+2026-04-09T09:21:29.2711805Z COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+2026-04-09T09:21:29.2712219Z 
+2026-04-09T09:21:29.2712329Z ENV PATH=/usr/local/ucx/bin:$PATH
+2026-04-09T09:21:29.2712487Z 
+2026-04-09T09:21:29.2712587Z ENV LD_LIBRARY_PATH=\
+2026-04-09T09:21:29.2712807Z $NIXL_LIB_DIR:\
+2026-04-09T09:21:29.2713017Z $NIXL_PLUGIN_DIR:\
+2026-04-09T09:21:29.2713225Z /usr/local/ucx/lib:\
+2026-04-09T09:21:29.2713506Z /usr/local/ucx/lib/ucx:\
+2026-04-09T09:21:29.2713734Z ${LD_LIBRARY_PATH:-}
+2026-04-09T09:21:29.2713867Z 
+2026-04-09T09:21:29.2714092Z # TODO: skip /workspace COPYs for dev/local-dev (bind-mounted from host, these get shadowed)
+2026-04-09T09:21:29.2714543Z COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+2026-04-09T09:21:29.2714783Z 
+2026-04-09T09:21:29.2715103Z # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+2026-04-09T09:21:29.2715617Z COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+2026-04-09T09:21:29.2715858Z 
+2026-04-09T09:21:29.2716168Z # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+2026-04-09T09:21:29.2716742Z COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+2026-04-09T09:21:29.2717070Z 
+2026-04-09T09:21:29.2717223Z # Install dynamo, NIXL, and dynamo-specific dependencies
+2026-04-09T09:21:29.2717517Z ARG ENABLE_KVBM
+2026-04-09T09:21:29.2717825Z RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+2026-04-09T09:21:29.2718212Z     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
+2026-04-09T09:21:29.2718515Z     uv pip install \
+2026-04-09T09:21:29.2718778Z       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+2026-04-09T09:21:29.2719086Z       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+2026-04-09T09:21:29.2719395Z       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+2026-04-09T09:21:29.2719688Z     if [ "${ENABLE_KVBM}" = "true" ]; then \
+2026-04-09T09:21:29.2720055Z         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+2026-04-09T09:21:29.2720421Z         if [ -z "$KVBM_WHEEL" ]; then \
+2026-04-09T09:21:29.2720784Z             echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+2026-04-09T09:21:29.2721136Z             exit 1; \
+2026-04-09T09:21:29.2721356Z         fi; \
+2026-04-09T09:21:29.2721591Z         uv pip install "$KVBM_WHEEL"; \
+2026-04-09T09:21:29.2721834Z     fi && \
+2026-04-09T09:21:29.2722075Z     cd /workspace/benchmarks && \
+2026-04-09T09:21:29.2722397Z     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+2026-04-09T09:21:29.2722706Z     uv pip install . && \
+2026-04-09T09:21:29.2722966Z     chmod -R g+w /workspace/benchmarks
+2026-04-09T09:21:29.2723135Z 
+2026-04-09T09:21:29.2723321Z # Install runtime dependencies (common + vllm-specific + benchmarks).
+2026-04-09T09:21:29.2723912Z # Test and dev dependencies are NOT installed here — they go in the *** and dev images.
+2026-04-09T09:21:29.2724500Z RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+2026-04-09T09:21:29.2725123Z     --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+2026-04-09T09:21:29.2725746Z     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
+2026-04-09T09:21:29.2726303Z     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
+2026-04-09T09:21:29.2726796Z     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+2026-04-09T09:21:29.2727177Z     uv pip install \
+2026-04-09T09:21:29.2727459Z         --requirement /tmp/requirements.common.txt \
+2026-04-09T09:21:29.2727869Z         --requirement /tmp/requirements.vllm.txt \
+2026-04-09T09:21:29.2728202Z         --requirement /tmp/requirements.benchmark.txt
+2026-04-09T09:21:29.2728386Z 
+2026-04-09T09:21:29.2728637Z # Copy ***s, deploy, lib, and the vllm/common/mocker component subtrees for CI.
+2026-04-09T09:21:29.2729171Z # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+2026-04-09T09:21:29.2729710Z COPY --chmod=775 --chown=dynamo:0 ***s /workspace/***s
+2026-04-09T09:21:29.2730069Z COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
+2026-04-09T09:21:29.2730493Z COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+2026-04-09T09:21:29.2730848Z COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
+2026-04-09T09:21:29.2731307Z COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+2026-04-09T09:21:29.2731842Z COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
+2026-04-09T09:21:29.2732384Z COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
+2026-04-09T09:21:29.2732828Z COPY --chmod=775 --chown=dynamo:0 lib/ /workspace/lib/
+2026-04-09T09:21:29.2733016Z 
+2026-04-09T09:21:29.2733196Z # Setup launch banner in common directory accessible to all users
+2026-04-09T09:21:29.2733679Z RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
+2026-04-09T09:21:29.2734177Z     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+2026-04-09T09:21:29.2734417Z 
+2026-04-09T09:21:29.2734532Z # Setup environment for all users
+2026-04-09T09:21:29.2734781Z USER root
+2026-04-09T09:21:29.2735108Z # Fix directory permissions: COPY --chmod only affects contents, not the directory itself
+2026-04-09T09:21:29.2735587Z RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* ${VIRTUAL_ENV} && \
+2026-04-09T09:21:29.2735965Z     chmod 755 /opt/dynamo/.launch_screen && \
+2026-04-09T09:21:29.2736309Z     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+2026-04-09T09:21:29.2736683Z     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+2026-04-09T09:21:29.2736890Z 
+2026-04-09T09:21:29.2736984Z USER dynamo
+2026-04-09T09:21:29.2737097Z 
+2026-04-09T09:21:29.2737200Z ARG DYNAMO_COMMIT_SHA
+2026-04-09T09:21:29.2737444Z ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+2026-04-09T09:21:29.2737603Z 
+2026-04-09T09:21:29.2737740Z RUN uv pip uninstall triton triton-xpu && \
+2026-04-09T09:21:29.2738187Z     uv pip install triton-xpu==3.6.0 --extra-index-url=https://download.pytorch.org/whl/***/xpu && \
+2026-04-09T09:21:29.2738638Z     uv pip uninstall oneccl && \
+2026-04-09T09:21:29.2738917Z     uv pip uninstall oneccl-devel
+2026-04-09T09:21:29.2739068Z 
+2026-04-09T09:21:29.2739172Z SHELL ["bash", "-c"]
+2026-04-09T09:21:29.2739451Z CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
+2026-04-09T09:21:29.2739644Z 
+2026-04-09T09:21:29.2739746Z # --- TRTLLM Stages
+2026-04-09T09:21:29.2739884Z 
+2026-04-09T09:21:29.2739990Z # --- No TRTLLM stages included
+2026-04-09T09:21:29.2740145Z 
+2026-04-09T09:21:29.2740244Z # --- Development Stages
+2026-04-09T09:21:29.2740398Z 
+2026-04-09T09:21:29.2740522Z # --- No development stages included
+2026-04-09T09:21:29.2740675Z 
+2026-04-09T09:21:29.2740776Z ##############
+2026-04-09T09:21:29.2741174Z INFO: Generated Dockerfile written to /home/sdp/actions-runner/_work/dynamo/dynamo/container/rendered.Dockerfile
+2026-04-09T09:21:29.2861024Z Prepare all required actions
+2026-04-09T09:21:29.2861377Z Getting action download info
+2026-04-09T09:21:29.4617795Z Download action repository 'actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f' (SHA:b7c566a772e6b6bfb58ed0dc250532a479d7789f)
+2026-04-09T09:21:30.0119866Z ##[group]Run ./.github/actions/docker-remote-build
+2026-04-09T09:21:30.0120163Z with:
+2026-04-09T09:21:30.0120844Z   image_tag: ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu
+2026-04-09T09:21:30.0121273Z   framework: vllm
+2026-04-09T09:21:30.0121478Z   target: runtime
+2026-04-09T09:21:30.0121686Z   platform: linux/amd64
+2026-04-09T09:21:30.0121900Z   device: xpu
+2026-04-09T09:21:30.0122129Z   aws_default_region: ***
+2026-04-09T09:21:30.0122413Z   sccache_s3_bucket: ***
+2026-04-09T09:21:30.0122692Z   aws_account_id: ***
+2026-04-09T09:21:30.0122938Z   aws_access_key_id: ***
+2026-04-09T09:21:30.0123227Z   aws_secret_access_key: ***
+2026-04-09T09:21:30.0123451Z   no_cache: false
+2026-04-09T09:21:30.0123660Z   push_image: false
+2026-04-09T09:21:30.0123949Z   no_load: true
+2026-04-09T09:21:30.0124150Z   use_sccache: false
+2026-04-09T09:21:30.0124472Z   extra_build_args: DYNAMO_COMMIT_SHA=eb0b4f8f8be9df86a608b49c419d90945f70606a
+
+
+2026-04-09T09:21:30.0124809Z env:
+2026-04-09T09:21:30.0124997Z   FRAMEWORK: vllm
+2026-04-09T09:21:30.0125219Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:30.0125453Z ##[endgroup]
+2026-04-09T09:21:30.0153220Z ##[group]Run set -x
+2026-04-09T09:21:30.0153524Z [36;1mset -x[0m
+2026-04-09T09:21:30.0153705Z [36;1m[0m
+2026-04-09T09:21:30.0154212Z [36;1mIMAGE_TAG="***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu"[0m
+2026-04-09T09:21:30.0154627Z [36;1m[0m
+2026-04-09T09:21:30.0154888Z [36;1m# Normalize platform: prepend linux/ only when not already present[0m
+2026-04-09T09:21:30.0155203Z [36;1mPLATFORM_FLAG="${PLATFORM}"[0m
+2026-04-09T09:21:30.0155459Z [36;1mif [[ "$PLATFORM_FLAG" != linux/* ]]; then[0m
+2026-04-09T09:21:30.0155757Z [36;1m  PLATFORM_FLAG="linux/${PLATFORM_FLAG}"[0m
+2026-04-09T09:21:30.0156019Z [36;1mfi[0m
+2026-04-09T09:21:30.0156294Z [36;1m# Sanitized platform for registry tags and filenames (no slashes or commas)[0m
+2026-04-09T09:21:30.0156677Z [36;1mPLATFORM_SAFE=$(echo "${PLATFORM}" | sed 's|linux/||g; s/,/-/g')[0m
+2026-04-09T09:21:30.0156959Z [36;1m[0m
+2026-04-09T09:21:30.0157165Z [36;1mCUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}[0m
+2026-04-09T09:21:30.0157436Z [36;1mif [[ "runtime" == "frontend" ]]; then[0m
+2026-04-09T09:21:30.0157686Z [36;1m  CACHE_TAG_SUFFIX=""[0m
+2026-04-09T09:21:30.0157918Z [36;1melif [[ "${DEVICE}" == "cuda" ]]; then[0m
+2026-04-09T09:21:30.0158199Z [36;1m  CACHE_TAG_SUFFIX="-cuda${CUDA_VERSION_MAJOR}"[0m
+2026-04-09T09:21:30.0158522Z [36;1melse[0m
+2026-04-09T09:21:30.0158725Z [36;1m  CACHE_TAG_SUFFIX="-${DEVICE}"[0m
+2026-04-09T09:21:30.0158947Z [36;1mfi[0m
+2026-04-09T09:21:30.0159111Z [36;1m[0m
+2026-04-09T09:21:30.0159326Z [36;1mBUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)[0m
+2026-04-09T09:21:30.0159635Z [36;1mecho "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV[0m
+2026-04-09T09:21:30.0159894Z [36;1m[0m
+2026-04-09T09:21:30.0160102Z [36;1mecho "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT[0m
+2026-04-09T09:21:30.0160337Z [36;1m[0m
+2026-04-09T09:21:30.0160517Z [36;1m# Create build logs directory[0m
+2026-04-09T09:21:30.0160752Z [36;1mmkdir -p build-logs[0m
+2026-04-09T09:21:30.0161038Z [36;1mBUILD_LOG_FILE="build-logs/build-vllm-${PLATFORM_SAFE}.log"[0m
+2026-04-09T09:21:30.0161368Z [36;1mecho "BUILD_LOG_FILE=${BUILD_LOG_FILE}" >> $GITHUB_ENV[0m
+2026-04-09T09:21:30.0161691Z [36;1mecho "📝 Build log will be saved to: ${BUILD_LOG_FILE}"[0m
+2026-04-09T09:21:30.0161949Z [36;1m[0m
+2026-04-09T09:21:30.0162170Z [36;1m# Collect optional overrides provided by the workflow[0m
+2026-04-09T09:21:30.0162496Z [36;1m# Set base cache args and set --cache-to if this is a main commit[0m
+2026-04-09T09:21:30.0162781Z [36;1mCACHE_ARGS=""[0m
+2026-04-09T09:21:30.0163001Z [36;1mif [[ "runtime" != "frontend" ]]; then[0m
+2026-04-09T09:21:30.0163307Z [36;1m  CACHE_TAG="vllm${CACHE_TAG_SUFFIX}-${PLATFORM_SAFE}-cache"[0m
+2026-04-09T09:21:30.0163716Z [36;1m  CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "[0m
+2026-04-09T09:21:30.0164246Z [36;1m  CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG} "[0m
+2026-04-09T09:21:30.0164737Z [36;1m  if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then[0m
+2026-04-09T09:21:30.0165014Z [36;1m    # Release branches also use release cache[0m
+2026-04-09T09:21:30.0165403Z [36;1m    CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max "[0m
+2026-04-09T09:21:30.0165812Z [36;1m  elif [[ "$GITHUB_REF_NAME" == "main" ]]; then[0m
+2026-04-09T09:21:30.0166191Z [36;1m    CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "[0m
+2026-04-09T09:21:30.0166547Z [36;1m  fi[0m
+2026-04-09T09:21:30.0166772Z [36;1melse[0m
+2026-04-09T09:21:30.0167010Z [36;1m  CACHE_TAG="runtime${CACHE_TAG_SUFFIX}-${PLATFORM_SAFE}-cache"[0m
+2026-04-09T09:21:30.0167407Z [36;1m  CACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG} "[0m
+2026-04-09T09:21:30.0167779Z [36;1m  if [[ "$GITHUB_REF_NAME" == "main" ]]; then[0m
+2026-04-09T09:21:30.0168156Z [36;1m    CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max "[0m
+2026-04-09T09:21:30.0168575Z [36;1m  fi[0m
+2026-04-09T09:21:30.0168756Z [36;1mfi[0m
+2026-04-09T09:21:30.0168932Z [36;1m[0m
+2026-04-09T09:21:30.0169127Z [36;1mecho "$CACHE_ARGS"[0m
+2026-04-09T09:21:30.0169386Z [36;1m# Collect optional overrides provided by the workflow[0m
+2026-04-09T09:21:30.0169663Z [36;1mif [ "false" == "true" ]; then[0m
+2026-04-09T09:21:30.0169901Z [36;1m  EXTRA_ARGS+=" --no-cache"[0m
+2026-04-09T09:21:30.0170116Z [36;1mfi[0m
+2026-04-09T09:21:30.0170306Z [36;1mif [ "false" == "true" ]; then[0m
+2026-04-09T09:21:30.0170569Z [36;1m  EXTRA_ARGS+=" --build-arg USE_SCCACHE=true"[0m
+2026-04-09T09:21:30.0170881Z [36;1m  EXTRA_ARGS+=" --build-arg SCCACHE_BUCKET=${SCCACHE_S3_BUCKET}"[0m
+2026-04-09T09:21:30.0171220Z [36;1m  EXTRA_ARGS+=" --build-arg SCCACHE_REGION=${AWS_DEFAULT_REGION}"[0m
+2026-04-09T09:21:30.0171499Z [36;1mfi[0m
+2026-04-09T09:21:30.0171691Z [36;1mif [ "false" == "true" ]; then[0m
+2026-04-09T09:21:30.0171932Z [36;1m  EXTRA_ARGS+=" --push"[0m
+2026-04-09T09:21:30.0172164Z [36;1melif [ "true" == "false" ]; then[0m
+2026-04-09T09:21:30.0172403Z [36;1m  EXTRA_ARGS+=" --load"[0m
+2026-04-09T09:21:30.0172612Z [36;1mfi[0m
+2026-04-09T09:21:30.0172791Z [36;1m[0m
+2026-04-09T09:21:30.0173014Z [36;1m# Add extra tags (each as a separate --tag argument)[0m
+2026-04-09T09:21:30.0173279Z [36;1mEXTRA_TAGS=""[0m
+2026-04-09T09:21:30.0173494Z [36;1mif [ -n "$EXTRA_TAGS" ]; then[0m
+2026-04-09T09:21:30.0173731Z [36;1m  while IFS= read -r EXTRA_TAG; do[0m
+2026-04-09T09:21:30.0173978Z [36;1m    if [ -n "$EXTRA_TAG" ]; then[0m
+2026-04-09T09:21:30.0174223Z [36;1m      EXTRA_ARGS+=" --tag ${EXTRA_TAG}"[0m
+2026-04-09T09:21:30.0174507Z [36;1m    fi[0m
+2026-04-09T09:21:30.0174697Z [36;1m  done <<< "$EXTRA_TAGS"[0m
+2026-04-09T09:21:30.0174905Z [36;1mfi[0m
+2026-04-09T09:21:30.0175080Z [36;1m[0m
+2026-04-09T09:21:30.0175311Z [36;1m# Add extra build args (each as a separate --build-arg)[0m
+2026-04-09T09:21:30.0175685Z [36;1mEXTRA_BUILD_ARGS="DYNAMO_COMMIT_SHA=eb0b4f8f8be9df86a608b49c419d90945f70606a[0m
+2026-04-09T09:21:30.0176000Z [36;1m[0m
+2026-04-09T09:21:30.0176180Z [36;1m"[0m
+2026-04-09T09:21:30.0176384Z [36;1mif [ -n "$EXTRA_BUILD_ARGS" ]; then[0m
+2026-04-09T09:21:30.0176633Z [36;1m  while IFS= read -r BUILD_ARG; do[0m
+2026-04-09T09:21:30.0176876Z [36;1m    if [ -n "$BUILD_ARG" ]; then[0m
+2026-04-09T09:21:30.0177132Z [36;1m      EXTRA_ARGS+=" --build-arg ${BUILD_ARG}"[0m
+2026-04-09T09:21:30.0177370Z [36;1m    fi[0m
+2026-04-09T09:21:30.0177569Z [36;1m  done <<< "$EXTRA_BUILD_ARGS"[0m
+2026-04-09T09:21:30.0177789Z [36;1mfi[0m
+2026-04-09T09:21:30.0177965Z [36;1m[0m
+2026-04-09T09:21:30.0178198Z [36;1m# Pass AWS credentials as build secrets for sccache S3 access.[0m
+2026-04-09T09:21:30.0178631Z [36;1m# Dockerfile steps reference these via --mount=type=secret,id=aws-key-id,env=...[0m
+2026-04-09T09:21:30.0178967Z [36;1mSECRET_ARGS=""[0m
+2026-04-09T09:21:30.0179282Z [36;1mif [ "false" == "true" ] && [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then[0m
+2026-04-09T09:21:30.0179623Z [36;1m  SECRET_ARGS+=" --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID"[0m
+2026-04-09T09:21:30.0179977Z [36;1m  SECRET_ARGS+=" --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY"[0m
+2026-04-09T09:21:30.0180264Z [36;1mfi[0m
+2026-04-09T09:21:30.0180430Z [36;1m[0m
+2026-04-09T09:21:30.0180612Z [36;1mdocker buildx build \[0m
+2026-04-09T09:21:30.0180837Z [36;1m  --progress=plain \[0m
+2026-04-09T09:21:30.0181055Z [36;1m  --tag "$IMAGE_TAG" \[0m
+2026-04-09T09:21:30.0181279Z [36;1m  --platform "${PLATFORM_FLAG}" \[0m
+2026-04-09T09:21:30.0181586Z [36;1m  -f ./container/rendered.Dockerfile \[0m
+2026-04-09T09:21:30.0181909Z [36;1m  $CACHE_ARGS $EXTRA_ARGS $SECRET_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"[0m
+2026-04-09T09:21:30.0182197Z [36;1m[0m
+2026-04-09T09:21:30.0182394Z [36;1mBUILD_EXIT_CODE=${PIPESTATUS[0]}[0m
+2026-04-09T09:21:30.0182617Z [36;1m[0m
+2026-04-09T09:21:30.0182845Z [36;1mBUILD_END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)[0m
+2026-04-09T09:21:30.0183147Z [36;1mecho "BUILD_END_TIME=${BUILD_END_TIME}" >> $GITHUB_ENV[0m
+2026-04-09T09:21:30.0183399Z [36;1m[0m
+2026-04-09T09:21:30.0183598Z [36;1m# Exit with the build's exit code[0m
+2026-04-09T09:21:30.0183844Z [36;1mexit ${BUILD_EXIT_CODE}[0m
+2026-04-09T09:21:30.0197969Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:30.0198247Z env:
+2026-04-09T09:21:30.0198483Z   FRAMEWORK: vllm
+2026-04-09T09:21:30.0198692Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:30.0198982Z   AWS_DEFAULT_REGION: ***
+2026-04-09T09:21:30.0199265Z   SCCACHE_S3_BUCKET: ***
+2026-04-09T09:21:30.0199498Z   AWS_ACCESS_KEY_ID: ***
+2026-04-09T09:21:30.0199775Z   AWS_SECRET_ACCESS_KEY: ***
+2026-04-09T09:21:30.0199992Z   PLATFORM: linux/amd64
+2026-04-09T09:21:30.0200257Z   ECR_HOSTNAME: ***.dkr.ecr.***.amazonaws.com
+2026-04-09T09:21:30.0200501Z   GITHUB_RUN_ID: 24182595453
+2026-04-09T09:21:30.0200702Z   GITHUB_JOB: build
+2026-04-09T09:21:30.0200904Z   GITHUB_REF_NAME: 6/merge
+2026-04-09T09:21:30.0201104Z   DEVICE: xpu
+2026-04-09T09:21:30.0201281Z   CUDA_VERSION: 
+2026-04-09T09:21:30.0201463Z ##[endgroup]
+2026-04-09T09:21:30.0257450Z + IMAGE_TAG=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu
+2026-04-09T09:21:30.0260159Z + PLATFORM_FLAG=linux/amd64
+2026-04-09T09:21:30.0261279Z + [[ linux/amd64 != linux/* ]]
+2026-04-09T09:21:30.0278264Z ++ echo linux/amd64
+2026-04-09T09:21:30.0281434Z ++ sed 's|linux/||g; s/,/-/g'
+2026-04-09T09:21:30.0317399Z + PLATFORM_SAFE=amd64
+2026-04-09T09:21:30.0319376Z + CUDA_VERSION_MAJOR=
+2026-04-09T09:21:30.0320451Z + [[ runtime == \f\r\o\n\t\e\n\d ]]
+2026-04-09T09:21:30.0321534Z + [[ xpu == \c\u\d\a ]]
+2026-04-09T09:21:30.0322538Z + CACHE_TAG_SUFFIX=-xpu
+2026-04-09T09:21:30.0330027Z ++ date -u +%Y-%m-%dT%H:%M:%SZ
+2026-04-09T09:21:30.0351103Z + BUILD_START_TIME=2026-04-09T09:21:30Z
+2026-04-09T09:21:30.0354334Z + echo BUILD_START_TIME=2026-04-09T09:21:30Z
+2026-04-09T09:21:30.0357332Z + echo image_tag=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu
+2026-04-09T09:21:30.0359715Z + mkdir -p build-logs
+2026-04-09T09:21:30.0388348Z + BUILD_LOG_FILE=build-logs/build-vllm-amd64.log
+2026-04-09T09:21:30.0390955Z 📝 Build log will be saved to: build-logs/build-vllm-amd64.log
+2026-04-09T09:21:30.0392693Z + echo BUILD_LOG_FILE=build-logs/build-vllm-amd64.log
+2026-04-09T09:21:30.0394542Z + echo '📝 Build log will be saved to: build-logs/build-vllm-amd64.log'
+2026-04-09T09:21:30.0395895Z + CACHE_ARGS=
+2026-04-09T09:21:30.0396966Z + [[ runtime != \f\r\o\n\t\e\n\d ]]
+2026-04-09T09:21:30.0398109Z + CACHE_TAG=vllm-xpu-amd64-cache
+2026-04-09T09:21:30.0400720Z + CACHE_ARGS='--cache-from type=registry,ref=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:main-vllm-xpu-amd64-cache '
+2026-04-09T09:21:30.0403753Z + CACHE_ARGS+='--cache-from type=registry,ref=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:release-vllm-xpu-amd64-cache '
+2026-04-09T09:21:30.0406391Z + [[ 6/merge =~ ^release ]]
+2026-04-09T09:21:30.0407412Z + [[ 6/merge == \m\a\i\n ]]
+2026-04-09T09:21:30.0410904Z + echo '--cache-from type=registry,ref=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:main-vllm-xpu-amd64-cache --cache-from type=registry,ref=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:release-vllm-xpu-amd64-cache '
+2026-04-09T09:21:30.0413808Z + '[' false == true ']'
+2026-04-09T09:21:30.0414747Z + '[' false == true ']'
+2026-04-09T09:21:30.0415654Z + '[' false == true ']'
+2026-04-09T09:21:30.0416549Z + '[' true == false ']'
+2026-04-09T09:21:30.0417664Z + EXTRA_TAGS=
+2026-04-09T09:21:30.0418578Z + '[' -n '' ']'
+2026-04-09T09:21:30.0419913Z + EXTRA_BUILD_ARGS='DYNAMO_COMMIT_SHA=eb0b4f8f8be9df86a608b49c419d90945f70606a
+2026-04-09T09:21:30.0421016Z 
+2026-04-09T09:21:30.0421346Z '
+2026-04-09T09:21:30.0422494Z + '[' -n 'DYNAMO_COMMIT_SHA=eb0b4f8f8be9df86a608b49c419d90945f70606a
+2026-04-09T09:21:30.0423427Z 
+2026-04-09T09:21:30.0423772Z ' ']'
+2026-04-09T09:21:30.0424535Z + IFS=
+2026-04-09T09:21:30.0425384Z + read -r BUILD_ARG
+2026-04-09T09:21:30.0426637Z + '[' -n DYNAMO_COMMIT_SHA=eb0b4f8f8be9df86a608b49c419d90945f70606a ']'
+2026-04-09T09:21:30.0428608Z + EXTRA_ARGS+=' --build-arg DYNAMO_COMMIT_SHA=eb0b4f8f8be9df86a608b49c419d90945f70606a'
+2026-04-09T09:21:30.0430096Z + IFS=
+2026-04-09T09:21:30.0430902Z + read -r BUILD_ARG
+2026-04-09T09:21:30.0431755Z + '[' -n '' ']'
+2026-04-09T09:21:30.0432555Z + IFS=
+2026-04-09T09:21:30.0433339Z + read -r BUILD_ARG
+2026-04-09T09:21:30.0434178Z + '[' -n '' ']'
+2026-04-09T09:21:30.0434965Z + IFS=
+2026-04-09T09:21:30.0435752Z + read -r BUILD_ARG
+2026-04-09T09:21:30.0436642Z + SECRET_ARGS=
+2026-04-09T09:21:30.0437495Z + '[' false == true ']'
+2026-04-09T09:21:30.0440871Z --cache-from type=registry,ref=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:main-vllm-xpu-amd64-cache --cache-from type=registry,ref=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:release-vllm-xpu-amd64-cache 
+2026-04-09T09:21:30.0449686Z + docker buildx build --progress=plain --tag ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu --platform linux/amd64 -f ./container/rendered.Dockerfile --cache-from type=registry,ref=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:main-vllm-xpu-amd64-cache --cache-from type=registry,ref=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:release-vllm-xpu-amd64-cache --build-arg DYNAMO_COMMIT_SHA=eb0b4f8f8be9df86a608b49c419d90945f70606a .
+2026-04-09T09:21:30.0456164Z + tee build-logs/build-vllm-amd64.log
+2026-04-09T09:21:30.4673293Z #0 building with "default" instance using docker driver
+2026-04-09T09:21:30.4674937Z 
+2026-04-09T09:21:30.4675715Z #1 [internal] load build definition from rendered.Dockerfile
+2026-04-09T09:21:30.4677165Z #1 transferring dockerfile: 36.10kB done
+2026-04-09T09:21:30.4678064Z #1 DONE 0.0s
+2026-04-09T09:21:30.4678701Z 
+2026-04-09T09:21:30.4679580Z #2 resolve image config for docker-image://docker.io/docker/dockerfile:1.10.0-labs
+2026-04-09T09:21:30.8731992Z #2 DONE 0.6s
+2026-04-09T09:21:31.0244081Z 
+2026-04-09T09:21:31.0249639Z #3 docker-image://docker.io/docker/dockerfile:1.10.0-labs@sha256:940282bab7a18daad689c238d407ad22393369ad53c6125c9c00f8be8a9da678
+2026-04-09T09:21:31.0251861Z #3 CACHED
+2026-04-09T09:21:31.1094844Z 
+2026-04-09T09:21:31.1101355Z #4 [internal] load metadata for ghcr.io/astral-sh/uv:la***
+2026-04-09T09:21:31.5166694Z #4 DONE 0.4s
+2026-04-09T09:21:31.5169405Z 
+2026-04-09T09:21:31.5170604Z #5 [internal] load metadata for docker.io/intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04
+2026-04-09T09:21:31.6827120Z #5 DONE 0.5s
+2026-04-09T09:21:31.6828803Z 
+2026-04-09T09:21:31.6831024Z #6 [internal] load .dockerignore
+2026-04-09T09:21:31.6832151Z #6 transferring context: 1.17kB done
+2026-04-09T09:21:31.6833359Z #6 DONE 0.0s
+2026-04-09T09:21:31.6833760Z 
+2026-04-09T09:21:31.6835221Z #7 importing cache manifest from ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:release-vllm-xpu-amd64-cache
+2026-04-09T09:21:31.8440516Z #7 ...
+2026-04-09T09:21:31.8443551Z 
+2026-04-09T09:21:31.8445099Z #8 [internal] load build context
+2026-04-09T09:21:31.8446189Z #8 DONE 0.0s
+2026-04-09T09:21:31.8446623Z 
+2026-04-09T09:21:31.8447076Z #9 [internal] setting cache mount permissions
+2026-04-09T09:21:31.8448097Z #9 DONE 0.0s
+2026-04-09T09:21:31.9880009Z 
+2026-04-09T09:21:31.9885580Z #10 importing cache manifest from ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:main-vllm-xpu-amd64-cache
+2026-04-09T09:21:31.9890863Z #10 ERROR: failed to configure registry cache importer: unexpected status from HEAD request to https://***.dkr.ecr.***.amazonaws.com/v2/ai-dynamo/dynamo/manifests/main-vllm-xpu-amd64-cache: 401 Unauthorized
+2026-04-09T09:21:31.9894138Z 
+2026-04-09T09:21:31.9895556Z #7 importing cache manifest from ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:release-vllm-xpu-amd64-cache
+2026-04-09T09:21:32.1152318Z #7 ERROR: failed to configure registry cache importer: unexpected status from HEAD request to https://***.dkr.ecr.***.amazonaws.com/v2/ai-dynamo/dynamo/manifests/release-vllm-xpu-amd64-cache: 401 Unauthorized
+2026-04-09T09:21:32.1155109Z 
+2026-04-09T09:21:32.1156285Z #11 FROM ghcr.io/astral-sh/uv:la***@sha256:555ac94f9a22e656fc5f2ce5dfee13b04e94d099e46bb8dd3a73ec7263f2e484
+2026-04-09T09:21:32.1157906Z #11 DONE 0.0s
+2026-04-09T09:21:32.1158331Z 
+2026-04-09T09:21:32.1160399Z #12 [wheel_builder_base  1/18] FROM docker.io/intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04@sha256:4bdd1bf92a21d18411002dc43910d8296273c8ca1c0464f7c9a7142049ddf96b
+2026-04-09T09:21:32.1162707Z #12 DONE 0.0s
+2026-04-09T09:21:32.1163094Z 
+2026-04-09T09:21:32.1163434Z #8 [internal] load build context
+2026-04-09T09:21:32.8597805Z #8 transferring context: 41.36MB 0.6s done
+2026-04-09T09:21:32.8599228Z #8 DONE 0.7s
+2026-04-09T09:21:32.8599619Z 
+2026-04-09T09:21:32.8606693Z #13 [runtime  8/37] RUN --mount=type=cache,target=/var/cache/apt,sharing=locked     apt-get update &&     if [ "xpu" = "cuda" ]; then         CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} &&        CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1);     fi &&     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends         python3.12-dev         build-essential         jq         git         git-lfs         gnupg2         curl         libibverbs1 rdma-core ibverbs-utils libibumad3         libnuma1 librdmacm1 ibverbs-providers         ninja-build         g++         ca-certificates         libxcb1 &&     if [ "xpu" = "cuda" ]; then         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends         cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR};     fi &&     rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:32.8613321Z #13 CACHED
+2026-04-09T09:21:32.8613637Z 
+2026-04-09T09:21:32.8616984Z #14 [dynamo_base 7/7] RUN ARCH_ALT=$([ "amd64" = "amd64" ] && echo "x86_64" || echo "aarch64") &&     RUSTARCH="${ARCH_ALT}-unknown-linux-gnu" &&     wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" &&     chmod +x rustup-init &&     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.93.1 --default-host ${RUSTARCH} &&     rm rustup-init &&     chmod -R a+w /usr/local/rustup /usr/local/cargo
+2026-04-09T09:21:32.8620724Z #14 CACHED
+2026-04-09T09:21:32.8621012Z 
+2026-04-09T09:21:32.8624279Z #15 [wheel_builder_base  6/18] RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null &&     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list &&     add-apt-repository -y ppa:kobuk-team/intel-graphics
+2026-04-09T09:21:32.8627978Z #15 CACHED
+2026-04-09T09:21:32.8628239Z 
+2026-04-09T09:21:32.8629722Z #16 [framework 3/7] RUN apt clean && apt-get update -y &&     apt-get install -y --no-install-recommends --fix-missing     curl ca-certificates zip unzip git lsb-release numactl wget vim
+2026-04-09T09:21:32.8631420Z #16 CACHED
+2026-04-09T09:21:32.8631694Z 
+2026-04-09T09:21:32.8633468Z #17 [runtime 21/37] COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+2026-04-09T09:21:32.8634996Z #17 CACHED
+2026-04-09T09:21:32.8635280Z 
+2026-04-09T09:21:32.8637821Z #18 [wheel_builder_base 10/18] RUN apt-get update -y     && DEBIAN_FRONTEND=noninteractive apt-get -y install --reinstall --no-install-recommends         libibverbs-dev         rdma-core         ibverbs-utils         libibumad-dev         libnuma-dev         librdmacm-dev         ibverbs-providers     && apt-get clean     && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:32.8640954Z #18 CACHED
+2026-04-09T09:21:32.8641211Z 
+2026-04-09T09:21:32.8644339Z #19 [runtime  9/37] RUN apt-get update &&     apt-get install -y --no-install-recommends --fix-missing     libsndfile1     libsm6     libxext6     libgl1     lsb-release     numactl     wget     vim     linux-libc-dev &&     apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing     intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 &&     apt-get clean && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:32.8647782Z #19 CACHED
+2026-04-09T09:21:32.8648136Z 
+2026-04-09T09:21:32.8655251Z #20 [runtime_wheel_builder 5/5] RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY     --mount=type=cache,target=/root/.cargo/registry     --mount=type=cache,target=/root/.cargo/git     --mount=type=cache,target=/root/.cache/uv     export UV_CACHE_DIR=/root/.cache/uv &&     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-amd64} &&     if [ "$USE_SCCACHE" = "true" ]; then         eval $(/tmp/use-sccache.sh setup-env cmake);     fi &&     mkdir -p /opt/dynamo/target &&     source /workspace/.venv/bin/activate &&     cd /opt/dynamo &&     uv build --wheel --out-dir /opt/dynamo/dist &&     cd /opt/dynamo/lib/bindings/python &&     if [ "false" = "true" ]; then         maturin build --release --features "media-ffmpeg,kv-indexer,kv-indexer-runtime" --out /opt/dynamo/dist;     else         maturin build --release --features "kv-indexer,kv-indexer-runtime" --out /opt/dynamo/dist;     fi &&     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+2026-04-09T09:21:32.8663129Z #20 CACHED
+2026-04-09T09:21:32.8663383Z 
+2026-04-09T09:21:32.8663995Z #21 [runtime_wheel_builder 1/5] COPY .cargo/ /opt/dynamo/.cargo/
+2026-04-09T09:21:32.8664779Z #21 CACHED
+2026-04-09T09:21:32.8665033Z 
+2026-04-09T09:21:32.8665715Z #22 [dynamo_base 4/7] COPY --from=ghcr.io/astral-sh/uv:la*** /uv /uvx /bin/
+2026-04-09T09:21:32.8666593Z #22 CACHED
+2026-04-09T09:21:32.8666861Z 
+2026-04-09T09:21:32.8667174Z #23 [wheel_builder 6/9] COPY lib/ /opt/dynamo/lib/
+2026-04-09T09:21:32.8667856Z #23 CACHED
+2026-04-09T09:21:32.8668123Z 
+2026-04-09T09:21:32.8668751Z #24 [runtime 22/37] COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
+2026-04-09T09:21:32.8669768Z #24 CACHED
+2026-04-09T09:21:32.8670016Z 
+2026-04-09T09:21:32.8670805Z #25 [runtime 32/37] COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
+2026-04-09T09:21:32.8671956Z #25 CACHED
+2026-04-09T09:21:32.8672217Z 
+2026-04-09T09:21:32.8675107Z #26 [dynamo_base 3/7] RUN ARCH_ALT=$([ "amd64" = "amd64" ] && echo "x86_64" || echo "aarch64") &&     wget --tries=3 --waitretry=5         "https://github.com/mozilla/sccache/releases/download/v0.14.0/sccache-v0.14.0-${ARCH_ALT}-unknown-linux-musl.tar.gz" &&     tar -xzf "sccache-v0.14.0-${ARCH_ALT}-unknown-linux-musl.tar.gz" &&     mv "sccache-v0.14.0-${ARCH_ALT}-unknown-linux-musl/sccache" /usr/local/bin/ &&     rm -rf sccache*
+2026-04-09T09:21:32.8678330Z #26 CACHED
+2026-04-09T09:21:32.8678632Z 
+2026-04-09T09:21:32.8684064Z #27 [wheel_builder_base 11/18] RUN set -eux;     ARCH_ALT=$([ "amd64" = "amd64" ] && echo "x86_64" || echo "aarch64");     PROTOC_VERSION=25.3;     case "${ARCH_ALT}" in       x86_64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;;       aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;;       *) echo "Unsupported architecture: ${ARCH_ALT}" >&2; exit 1 ;;     esac;     wget --tries=3 --waitretry=5 -O /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}";     rm -f /usr/local/bin/protoc /usr/bin/protoc;     unzip -o /tmp/protoc.zip -d /usr/local bin/protoc include/*;     chmod +x /usr/local/bin/protoc;     ln -s /usr/local/bin/protoc /usr/bin/protoc;     protoc --version
+2026-04-09T09:21:32.8689575Z #27 CACHED
+2026-04-09T09:21:32.8689837Z 
+2026-04-09T09:21:32.8690751Z #28 [runtime 20/37] COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+2026-04-09T09:21:32.8691867Z #28 CACHED
+2026-04-09T09:21:32.8692112Z 
+2026-04-09T09:21:32.8692670Z #29 [runtime  4/37] COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+2026-04-09T09:21:32.8693588Z #29 CACHED
+2026-04-09T09:21:32.8693848Z 
+2026-04-09T09:21:32.8699067Z #30 [runtime 25/37] RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775     export UV_CACHE_DIR=/home/dynamo/.cache/uv &&     uv pip install       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl       /opt/dynamo/wheelhouse/ai_dynamo*any.whl       /opt/dynamo/wheelhouse/nixl/nixl*.whl &&     if [ "true" = "true" ]; then         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1);         if [ -z "$KVBM_WHEEL" ]; then             echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2;             exit 1;         fi;         uv pip install "$KVBM_WHEEL";     fi &&     cd /workspace/benchmarks &&     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 &&     uv pip install . &&     chmod -R g+w /workspace/benchmarks
+2026-04-09T09:21:32.8704464Z #30 CACHED
+2026-04-09T09:21:32.8704727Z 
+2026-04-09T09:21:32.8705093Z #31 [runtime_wheel_builder 3/5] COPY lib/ /opt/dynamo/lib/
+2026-04-09T09:21:32.8705827Z #31 CACHED
+2026-04-09T09:21:32.8706088Z 
+2026-04-09T09:21:32.8707811Z #32 [wheel_builder_base  7/18] RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/ucx-v1.12.0.patch -O /tmp/ucx.patch
+2026-04-09T09:21:32.8709990Z #32 CACHED
+2026-04-09T09:21:32.8710236Z 
+2026-04-09T09:21:32.8710820Z #33 [wheel_builder_base 12/18] COPY --from=ghcr.io/astral-sh/uv:la*** /uv /uvx /bin/
+2026-04-09T09:21:32.8711747Z #33 CACHED
+2026-04-09T09:21:32.8712008Z 
+2026-04-09T09:21:32.8714132Z #34 [dynamo_base 5/7] RUN --mount=type=cache,target=/var/cache/apt,sharing=locked     wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-amd64.deb &&     dpkg -i nats-server-v2.10.28-amd64.deb && rm nats-server-v2.10.28-amd64.deb
+2026-04-09T09:21:32.8716659Z #34 CACHED
+2026-04-09T09:21:32.8716897Z 
+2026-04-09T09:21:32.8717574Z #35 [runtime 18/37] COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl /opt/intel/intel_nixl
+2026-04-09T09:21:32.8718686Z #35 CACHED
+2026-04-09T09:21:32.8718943Z 
+2026-04-09T09:21:32.8719405Z #36 [runtime 29/37] COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+2026-04-09T09:21:32.8720257Z #36 CACHED
+2026-04-09T09:21:32.8720516Z 
+2026-04-09T09:21:32.8721131Z #37 [wheel_builder_base 14/18] COPY --from=dynamo_base /usr/local/bin/sccache /opt/sccache/sccache
+2026-04-09T09:21:32.8722156Z #37 CACHED
+2026-04-09T09:21:32.8722400Z 
+2026-04-09T09:21:32.8723220Z #38 [runtime 33/37] COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
+2026-04-09T09:21:32.8724420Z #38 CACHED
+2026-04-09T09:21:32.8724676Z 
+2026-04-09T09:21:32.8738925Z #39 [wheel_builder_base 18/18] RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-amd64}" &&     if [ "$USE_SCCACHE" = "true" ]; then         eval $(/tmp/use-sccache.sh setup-env);     fi &&     cd /usr/local/src &&     git clone https://github.com/openucx/ucx.git &&     cd ucx &&      git checkout v1.20.x &&	     if [ "xpu" = "xpu" ]; then     git apply --ignore-whitespace /tmp/ucx.patch;     fi &&     ./autogen.sh &&          if [ "xpu" = "xpu" ]; then      ./contrib/configure-release             --prefix=/usr/local/ucx             --with-ze                           --enable-shared                     --disable-static                    --disable-doxygen-doc               --enable-optimizations              --enable-cma                        --enable-devel-headers              --with-verbs                        --with-dm                           --with-efa                          --without-cuda                      --enable-mt;                     elif [ "xpu" = "cuda" ]; then      ./contrib/configure-release             --prefix=/usr/local/ucx             --enable-shared                     --disable-static                    --disable-doxygen-doc               --enable-optimizations              --enable-cma                        --enable-devel-headers              --with-cuda=/usr/local/cuda         --with-verbs                        --with-dm                           --with-gdrcopy=/usr/local           --with-efa                          --enable-mt;                     elif [ "xpu" = "cpu" ]; then       ./contrib/configure-release             --prefix=/usr/local/ucx             --enable-shared                     --disable-static                    --disable-doxygen-doc               --enable-optimizations              --enable-cma                        --enable-devel-headers              --with-verbs                        --without-cuda                      --enable-mt;                      fi &&      make -j &&                           make -j install-strip &&             /tmp/use-sccache.sh show-stats "UCX" &&      echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf &&      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf &&      ldconfig
+2026-04-09T09:21:32.8753334Z #39 CACHED
+2026-04-09T09:21:32.8753608Z 
+2026-04-09T09:21:32.8756915Z #40 [wheel_builder 3/9] RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY     --mount=type=cache,target=/root/.cache/uv     export UV_CACHE_DIR=/root/.cache/uv &&     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-amd64}" &&     if [ "$USE_SCCACHE" = "true" ]; then         eval $(/tmp/use-sccache.sh setup-env);     fi &&     cd /workspace/nixl &&     uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python 3.12
+2026-04-09T09:21:32.8760606Z #40 CACHED
+2026-04-09T09:21:32.8760856Z 
+2026-04-09T09:21:32.8761325Z #41 [runtime 17/37] COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+2026-04-09T09:21:32.8762172Z #41 CACHED
+2026-04-09T09:21:32.8762423Z 
+2026-04-09T09:21:32.8763891Z #42 [wheel_builder 2/9] RUN echo "/opt/intel/intel_nixl/lib/x86_64-linux-gnu" > /etc/ld.so.conf.d/nixl.conf &&     echo "/opt/intel/intel_nixl/lib/x86_64-linux-gnu/plugins" >> /etc/ld.so.conf.d/nixl.conf &&     ldconfig
+2026-04-09T09:21:32.8765688Z #42 CACHED
+2026-04-09T09:21:32.8765947Z 
+2026-04-09T09:21:32.8767055Z #43 [wheel_builder_base 16/18] RUN if [ "$USE_SCCACHE" = "true" ]; then         ln -s /opt/sccache/sccache /usr/local/bin/sccache &&         /tmp/use-sccache.sh install;     fi
+2026-04-09T09:21:32.8768587Z #43 CACHED
+2026-04-09T09:21:32.8768836Z 
+2026-04-09T09:21:32.8770276Z #44 [runtime 35/37] RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+2026-04-09T09:21:32.8772069Z #44 CACHED
+2026-04-09T09:21:32.8772326Z 
+2026-04-09T09:21:32.8772742Z #45 [wheel_builder 7/9] COPY components/ /opt/dynamo/components/
+2026-04-09T09:21:32.8773533Z #45 CACHED
+2026-04-09T09:21:32.8773794Z 
+2026-04-09T09:21:32.8775244Z #46 [runtime 13/37] COPY --chmod=775 --chown=dynamo:0 --from=framework /opt/dynamo/venv/lib/python3.12/site-packages/vllm_omni /opt/dynamo/venv/lib/python3.12/site-packages/vllm_omni
+2026-04-09T09:21:32.8776890Z #46 CACHED
+2026-04-09T09:21:32.8777135Z 
+2026-04-09T09:21:32.8779738Z #47 [wheel_builder_base  9/18] RUN apt-get update -y     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends         autoconf         automake         cmake         git-lfs         libtool         meson         net-tools         ninja-build         pybind11-dev         clang         libclang-dev         protobuf-compiler     && apt-get clean     && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:32.8782638Z #47 CACHED
+2026-04-09T09:21:32.8783035Z 
+2026-04-09T09:21:32.8783442Z #48 [runtime  6/37] COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+2026-04-09T09:21:32.8784252Z #48 CACHED
+2026-04-09T09:21:32.8784498Z 
+2026-04-09T09:21:32.8784873Z #49 [wheel_builder 4/9] COPY .cargo/ /opt/dynamo/.cargo/
+2026-04-09T09:21:32.8785712Z #49 CACHED
+2026-04-09T09:21:32.8785985Z 
+2026-04-09T09:21:32.8787107Z #50 [dynamo_base 6/7] RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/v3.5.21/etcd-v3.5.21-linux-amd64.tar.gz -O /tmp/etcd.tar.gz &&     mkdir -p /usr/local/bin/etcd &&     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 &&     rm /tmp/etcd.tar.gz
+2026-04-09T09:21:32.8787923Z #50 CACHED
+2026-04-09T09:21:32.8788025Z 
+2026-04-09T09:21:32.8788889Z #51 [runtime  7/37] RUN userdel -r ubuntu > /dev/null 2>&1 || true     && useradd -m -s /bin/bash -g 0 dynamo     && [ `id -u dynamo` -eq 1000 ]     && mkdir -p /home/dynamo/.cache /opt/dynamo     && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+2026-04-09T09:21:32.8789753Z #51 CACHED
+2026-04-09T09:21:32.8789850Z 
+2026-04-09T09:21:32.8789987Z #52 [dynamo_base 2/7] WORKDIR /opt/dynamo
+2026-04-09T09:21:32.8790267Z #52 CACHED
+2026-04-09T09:21:32.8790407Z 
+2026-04-09T09:21:32.8791205Z #53 [wheel_builder_base  3/18] RUN apt clean && apt-get update -y &&     apt-get install -y --no-install-recommends --fix-missing     curl ca-certificates zip unzip git lsb-release numactl wget vim     libsndfile1     libsm6     libxext6     libgl1     libaio-dev     linux-libc-dev
+2026-04-09T09:21:32.8792182Z #53 CACHED
+2026-04-09T09:21:32.8792291Z 
+2026-04-09T09:21:32.8792558Z #54 [runtime 27/37] COPY --chmod=775 --chown=dynamo:0 ***s /workspace/***s
+2026-04-09T09:21:32.8792909Z #54 CACHED
+2026-04-09T09:21:32.8793033Z 
+2026-04-09T09:21:32.8793233Z #55 [wheel_builder_base  4/18] COPY --from=dynamo_base /usr/local/rustup /usr/local/rustup
+2026-04-09T09:21:32.8793602Z #55 CACHED
+2026-04-09T09:21:32.8793734Z 
+2026-04-09T09:21:32.8794038Z #56 [runtime 24/37] COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+2026-04-09T09:21:32.8794451Z #56 CACHED
+2026-04-09T09:21:32.8794541Z 
+2026-04-09T09:21:32.8796701Z #57 [framework 7/7] RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps     --mount=type=cache,target=/root/.cache/uv     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 &&     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh &&     chmod +x /tmp/install_vllm.sh &&     if [ "xpu" = "cpu" ] && [ "amd64" = "amd64" ]; then         export VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}                VLLM_CPU_AVX512=${VLLM_CPU_AVX512}                VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16}                VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}                VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16};     fi &&     /tmp/install_vllm.sh         --device xpu         --vllm-ref v0.17.1         --max-jobs 10         --arch amd64         --installation-dir /opt         --lmcache-ref "0.4.2"         --vllm-omni-ref "release/v0.19.0rc1"         ${DEEPGEMM_REF:+--deepgemm-ref "$DEEPGEMM_REF"}         ${FLASHINF_REF:+--flashinf-ref "$FLASHINF_REF"}         ${CUDA_VERSION:+--cuda-version "$CUDA_VERSION"}
+2026-04-09T09:21:32.8799078Z #57 CACHED
+2026-04-09T09:21:32.8799160Z 
+2026-04-09T09:21:32.8799513Z #58 [framework 6/7] RUN mkdir -p /opt/dynamo/venv &&     export UV_CACHE_DIR=/root/.cache/uv &&     uv venv /opt/dynamo/venv --python 3.12
+2026-04-09T09:21:32.8799916Z #58 CACHED
+2026-04-09T09:21:32.8800009Z 
+2026-04-09T09:21:32.8800178Z #59 [runtime 28/37] COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
+2026-04-09T09:21:32.8800542Z #59 CACHED
+2026-04-09T09:21:32.8800658Z 
+2026-04-09T09:21:32.8800877Z #60 [wheel_builder_base 15/18] COPY container/use-sccache.sh /tmp/use-sccache.sh
+2026-04-09T09:21:32.8801251Z #60 CACHED
+2026-04-09T09:21:32.8801354Z 
+2026-04-09T09:21:32.8801581Z #61 [wheel_builder_base  5/18] COPY --from=dynamo_base /usr/local/cargo /usr/local/cargo
+2026-04-09T09:21:32.8802071Z #61 CACHED
+2026-04-09T09:21:32.8802185Z 
+2026-04-09T09:21:32.8802685Z #62 [runtime 11/37] COPY --chmod=775 --chown=dynamo:0 --from=framework /opt/dynamo/venv/lib/python3.12/site-packages/torch /opt/dynamo/venv/lib/python3.12/site-packages/torch
+2026-04-09T09:21:32.8803328Z #62 CACHED
+2026-04-09T09:21:32.8803433Z 
+2026-04-09T09:21:32.8806274Z #63 [wheel_builder_base 17/18] RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-amd64} &&     if [ "$USE_SCCACHE" = "true" ]; then         eval $(/tmp/use-sccache.sh setup-env);     fi &&     if [ "xpu" = "xpu" ] || [ "xpu" = "cpu" ]; then     apt-get update -y && apt-get install -y build-essential pkg-config xz-utils;     apt-get clean && rm -rf /var/lib/apt/lists/*;     elif [ "xpu" = "cuda" ]; then     dnf install -y pkg-config xz;     fi &&     cd /tmp &&     curl --retry 5 --retry-delay 3 -LO https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz &&     tar xf ffmpeg-7.1.tar.xz &&     cd ffmpeg-7.1 &&     ./configure         --prefix=/usr/local         --disable-gpl         --disable-nonfree         --disable-programs         --disable-doc         --disable-static         --disable-x86asm         --disable-postproc         --disable-network         --disable-encoders         --disable-muxers         --disable-bsfs         --disable-devices         --disable-libdrm         --enable-shared &&     make -j$(nproc) &&     make install &&     /tmp/use-sccache.sh show-stats "FFMPEG" &&     ldconfig &&     mkdir -p /usr/local/src/ffmpeg &&     mv /tmp/ffmpeg-7.1* /usr/local/src/ffmpeg/
+2026-04-09T09:21:32.8809329Z #63 CACHED
+2026-04-09T09:21:32.8809444Z 
+2026-04-09T09:21:32.8810724Z #64 [runtime  3/37] RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null &&     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list &&     add-apt-repository -y ppa:kobuk-team/intel-graphics
+2026-04-09T09:21:32.8812148Z #64 CACHED
+2026-04-09T09:21:32.8812294Z 
+2026-04-09T09:21:32.8812659Z #65 [wheel_builder 5/9] COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+2026-04-09T09:21:32.8813143Z #65 CACHED
+2026-04-09T09:21:32.8813236Z 
+2026-04-09T09:21:32.8813419Z #66 [runtime_wheel_builder 4/5] COPY components/ /opt/dynamo/components/
+2026-04-09T09:21:32.8813738Z #66 CACHED
+2026-04-09T09:21:32.8813837Z 
+2026-04-09T09:21:32.8814811Z #67 [framework 4/7] RUN --mount=type=cache,target=/var/cache/apt,sharing=locked     apt-get update -y     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends         python3.12-dev         build-essential         cmake         ibverbs-providers         ibverbs-utils         libibumad-dev         libibverbs-dev         libnuma-dev         librdmacm-dev         rdma-core     && apt-get clean     && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:32.8815913Z #67 CACHED
+2026-04-09T09:21:32.8816032Z 
+2026-04-09T09:21:32.8816373Z #68 [runtime_wheel_builder 2/5] COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+2026-04-09T09:21:32.8816877Z #68 CACHED
+2026-04-09T09:21:32.8817038Z 
+2026-04-09T09:21:32.8817222Z #69 [runtime  5/37] COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+2026-04-09T09:21:32.8817528Z #69 CACHED
+2026-04-09T09:21:32.8817626Z 
+2026-04-09T09:21:32.8820625Z #70 [wheel_builder 1/9] RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-amd64}" &&     if [ "$USE_SCCACHE" = "true" ]; then         eval $(/tmp/use-sccache.sh setup-env);     fi &&     source /workspace/.venv/bin/activate &&     git clone "https://github.com/ai-dynamo/nixl.git" &&     cd nixl &&     git checkout 0.10.1 &&     if [ "xpu" = "cuda" ]; then         PKG_NAME="nixl-cu${CUDA_MAJOR}";     else         PKG_NAME="nixl-xpu";     fi &&     ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml &&     mkdir build &&     if [ "xpu" = "cuda" ]; then         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release             -Dcudapath_lib="/usr/local/cuda/lib64"             -Dcudapath_inc="/usr/local/cuda/include"             -Ducx_path="/usr/local/ucx"             -Dlibfabric_path="/usr/local/libfabric";     elif [ "xpu" = "xpu" ]; then         meson setup build/ --prefix=/opt/intel/intel_nixl --buildtype=release             -Ducx_path="/usr/local/ucx";     elif [ "xpu" = "cpu" ]; then         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release             -Ducx_path="/usr/local/ucx";     fi &&     cd build &&     ninja &&     ninja install &&     /tmp/use-sccache.sh show-stats "NIXL"
+2026-04-09T09:21:32.8823819Z #70 CACHED
+2026-04-09T09:21:32.8823920Z 
+2026-04-09T09:21:32.8824317Z #71 [runtime 12/37] COPY --chmod=775 --chown=dynamo:0 --from=framework /opt/dynamo/venv/lib/python3.12/site-packages/vllm /opt/dynamo/venv/lib/python3.12/site-packages/vllm
+2026-04-09T09:21:32.8824822Z #71 CACHED
+2026-04-09T09:21:32.8824910Z 
+2026-04-09T09:21:32.8825133Z #72 [runtime 30/37] COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
+2026-04-09T09:21:32.8825428Z #72 CACHED
+2026-04-09T09:21:32.8825524Z 
+2026-04-09T09:21:32.8825656Z #73 [framework 2/7] COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+2026-04-09T09:21:32.8825920Z #73 CACHED
+2026-04-09T09:21:32.8826014Z 
+2026-04-09T09:21:32.8826268Z #74 [framework 5/7] RUN ln -sf /usr/lib/aarch64-linux-gnu/libmlx5.so.1 /usr/lib/aarch64-linux-gnu/libmlx5.so || true
+2026-04-09T09:21:32.8826642Z #74 CACHED
+2026-04-09T09:21:32.8826721Z 
+2026-04-09T09:21:32.8826831Z #75 [wheel_builder_base  2/18] WORKDIR /workspace
+2026-04-09T09:21:32.8827062Z #75 CACHED
+2026-04-09T09:21:32.8827157Z 
+2026-04-09T09:21:32.8827478Z #76 [runtime 19/37] COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. /opt/intel/intel_nixl/lib/x86_64-linux-gnu/
+2026-04-09T09:21:32.8827926Z #76 CACHED
+2026-04-09T09:21:32.8828022Z 
+2026-04-09T09:21:32.8829699Z #77 [runtime 26/37] RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt     --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt     --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 &&     uv pip install         --requirement /tmp/requirements.common.txt         --requirement /tmp/requirements.vllm.txt         --requirement /tmp/requirements.benchmark.txt
+2026-04-09T09:21:32.8831559Z #77 CACHED
+2026-04-09T09:21:32.8831658Z 
+2026-04-09T09:21:32.8831933Z #78 [runtime 31/37] COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+2026-04-09T09:21:32.8832345Z #78 CACHED
+2026-04-09T09:21:32.8832439Z 
+2026-04-09T09:21:32.8833452Z #79 [runtime 10/37] RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/intel-oneccl-2021.15.7.8_offline.sh &&     bash intel-oneccl-2021.15.7.8_offline.sh -a --silent --eula accept &&     echo "source /opt/intel/oneapi/setvars.sh --force" >> /etc/bash.bashrc &&     rm -f /opt/intel/oneapi/ccl/la*** &&     ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/la***
+2026-04-09T09:21:32.8834440Z #79 CACHED
+2026-04-09T09:21:32.8834538Z 
+2026-04-09T09:21:32.8835590Z #80 [runtime 15/37] COPY --chmod=775 --chown=dynamo:0 --from=framework     --exclude=lib/python*/site-packages/nvidia     --exclude=lib/python*/site-packages/flashinfer_jit_cache     --exclude=lib/python*/site-packages/torch     --exclude=lib/python*/site-packages/vllm     --exclude=lib/python*/site-packages/vllm_omni     --exclude=lib/python*/site-packages/triton     --exclude=lib/python*/site-packages/flashinfer_cubin     /opt/dynamo/venv /opt/dynamo/venv
+2026-04-09T09:21:32.8836789Z #80 CACHED
+2026-04-09T09:21:32.8836883Z 
+2026-04-09T09:21:32.8837264Z #81 [runtime 14/37] COPY --chmod=775 --chown=dynamo:0 --from=framework /opt/dynamo/venv/lib/python3.12/site-packages/triton /opt/dynamo/venv/lib/python3.12/site-packages/triton
+2026-04-09T09:21:32.8837779Z #81 CACHED
+2026-04-09T09:21:32.8837876Z 
+2026-04-09T09:21:32.8838078Z #82 [wheel_builder 9/9] COPY --from=runtime_wheel_builder /opt/dynamo/dist/ /opt/dynamo/dist/
+2026-04-09T09:21:32.8838400Z #82 CACHED
+2026-04-09T09:21:32.8838513Z 
+2026-04-09T09:21:32.8838697Z #83 [runtime 23/37] COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+2026-04-09T09:21:32.8839004Z #83 CACHED
+2026-04-09T09:21:32.8839099Z 
+2026-04-09T09:21:32.8839274Z #84 [runtime 16/37] COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
+2026-04-09T09:21:32.8839599Z #84 CACHED
+2026-04-09T09:21:32.8839705Z 
+2026-04-09T09:21:32.8840408Z #85 [wheel_builder_base 13/18] RUN --mount=type=cache,target=/root/.cache/uv     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 &&     uv venv /workspace/.venv --python 3.12 &&     uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
+2026-04-09T09:21:32.8841236Z #85 CACHED
+2026-04-09T09:21:32.8841330Z 
+2026-04-09T09:21:32.8841507Z #86 [runtime 34/37] COPY --chmod=775 --chown=dynamo:0 lib/ /workspace/lib/
+2026-04-09T09:21:32.8841826Z #86 CACHED
+2026-04-09T09:21:32.8841918Z 
+2026-04-09T09:21:32.8842574Z #87 [wheel_builder_base  8/18] RUN apt update -y && apt upgrade -y &&     apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd      libze-intel-gpu-raytracing intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 &&     apt-get clean && rm -rf /var/lib/apt/lists/*
+2026-04-09T09:21:32.8843354Z #87 CACHED
+2026-04-09T09:21:32.8843434Z 
+2026-04-09T09:21:32.8846106Z #88 [wheel_builder 8/9] RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY     --mount=type=cache,target=/root/.cargo/registry     --mount=type=cache,target=/root/.cargo/git     --mount=type=cache,target=/root/.cache/uv     export UV_CACHE_DIR=/root/.cache/uv &&     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-amd64} &&     ARCH_ALT=$([ "amd64" = "amd64" ] && echo "x86_64" || echo "aarch64") &&     if [ "$USE_SCCACHE" = "true" ]; then         eval $(/tmp/use-sccache.sh setup-env cmake);     fi &&     mkdir -p /opt/dynamo/target &&     source /workspace/.venv/bin/activate &&     if [ "true" = "true" ]; then         cd /opt/dynamo/lib/bindings/kvbm &&         maturin build --release --out target/wheels &&         if [ "xpu" = "cuda" ]; then             auditwheel repair                 --exclude libnixl.so                 --exclude libnixl_build.so                 --exclude libnixl_common.so                 --exclude 'lib*.so*'                 --plat manylinux_2_28_${ARCH_ALT}                 --wheel-dir /opt/dynamo/dist                 target/wheels/*.whl;         elif [ "xpu" = "xpu" ] || [ "xpu" = "cpu" ]; then             cp target/wheels/*.whl /opt/dynamo/dist/;         fi;     fi &&     /tmp/use-sccache.sh show-stats "Dynamo KVBM"
+2026-04-09T09:21:32.8849003Z #88 CACHED
+2026-04-09T09:21:32.8849153Z 
+2026-04-09T09:21:32.8849845Z #89 [runtime 36/37] RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* /opt/dynamo/venv &&     chmod 755 /opt/dynamo/.launch_screen &&     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc &&     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+2026-04-09T09:21:32.8850739Z #89 CACHED
+2026-04-09T09:21:32.8850853Z 
+2026-04-09T09:21:32.8851448Z #90 [runtime 37/37] RUN uv pip uninstall triton triton-xpu &&     uv pip install triton-xpu==3.6.0 --extra-index-url=https://download.pytorch.org/whl/***/xpu &&     uv pip uninstall oneccl &&     uv pip uninstall oneccl-devel
+2026-04-09T09:21:33.1982093Z #90 0.496 Using Python 3.12.3 environment at: /opt/dynamo/venv
+2026-04-09T09:21:33.4494593Z #90 0.574 Uninstalled 2 packages in 138ms
+2026-04-09T09:21:33.4530494Z #90 0.574  - triton==3.6.0
+2026-04-09T09:21:33.4545553Z #90 0.574  - triton-xpu==3.6.0
+2026-04-09T09:21:33.4546179Z #90 0.595 Using Python 3.12.3 environment at: /opt/dynamo/venv
+2026-04-09T09:21:34.1365010Z #90 1.434 Resolved 2 packages in 821ms
+2026-04-09T09:21:34.5586285Z #90 1.856 Downloading triton-xpu (412.5MiB)
+2026-04-09T09:21:48.2807437Z #90 15.58  Downloaded triton-xpu
+2026-04-09T09:21:48.4310744Z #90 15.58 Prepared 1 package in 14.14s
+2026-04-09T09:21:48.4587533Z #90 15.76 Installed 1 package in 177ms
+2026-04-09T09:21:48.4594678Z #90 15.76  + triton-xpu==3.6.0
+2026-04-09T09:21:48.6953425Z #90 15.80 Using Python 3.12.3 environment at: /opt/dynamo/venv
+2026-04-09T09:21:48.6955099Z #90 15.82 Uninstalled 1 package in 19ms
+2026-04-09T09:21:48.6956177Z #90 15.82  - oneccl==2021.17.1
+2026-04-09T09:21:48.6957351Z #90 15.83 Using Python 3.12.3 environment at: /opt/dynamo/venv
+2026-04-09T09:21:48.6958745Z #90 15.84 Uninstalled 1 package in 16ms
+2026-04-09T09:21:48.6959690Z #90 15.84  - oneccl-devel==2021.17.1
+2026-04-09T09:21:50.6544657Z #90 DONE 18.0s
+2026-04-09T09:21:50.8076940Z 
+2026-04-09T09:21:50.8082908Z #91 exporting to image
+2026-04-09T09:21:50.8084833Z #91 exporting layers
+2026-04-09T09:21:53.1751640Z #91 exporting layers 2.5s done
+2026-04-09T09:21:53.2048281Z #91 writing image sha256:2f30634f750fecdc38064fb0290d04fb69a8adf774a7ae36638ccf2e68b63f3c done
+2026-04-09T09:21:53.2053494Z #91 naming to ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu done
+2026-04-09T09:21:53.2055450Z #91 DONE 2.5s
+2026-04-09T09:21:53.2056125Z ------
+2026-04-09T09:21:53.2057697Z  > importing cache manifest from ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:main-vllm-xpu-amd64-cache:
+2026-04-09T09:21:53.2059489Z ------
+2026-04-09T09:21:53.2065873Z ------
+2026-04-09T09:21:53.2070604Z  > importing cache manifest from ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:release-vllm-xpu-amd64-cache:
+2026-04-09T09:21:53.2072280Z ------
+2026-04-09T09:21:53.2306622Z + BUILD_EXIT_CODE=0
+2026-04-09T09:21:53.2321327Z ++ date -u +%Y-%m-%dT%H:%M:%SZ
+2026-04-09T09:21:53.2351878Z + BUILD_END_TIME=2026-04-09T09:21:53Z
+2026-04-09T09:21:53.2354480Z + echo BUILD_END_TIME=2026-04-09T09:21:53Z
+2026-04-09T09:21:53.2356031Z + exit 0
+2026-04-09T09:21:53.2453616Z ##[group]Run # Create metrics directory
+2026-04-09T09:21:53.2454916Z [36;1m[0m
+2026-04-09T09:21:53.2455660Z [36;1m# Create metrics directory[0m
+2026-04-09T09:21:53.2456630Z [36;1mmkdir -p build-metrics[0m
+2026-04-09T09:21:53.2457471Z [36;1m[0m
+2026-04-09T09:21:53.2458165Z [36;1m# Get accurate build timing[0m
+2026-04-09T09:21:53.2459280Z [36;1mBUILD_START_TIME="2026-04-09T09:21:30Z"[0m
+2026-04-09T09:21:53.2460325Z [36;1mBUILD_END_TIME="2026-04-09T09:21:53Z"[0m
+2026-04-09T09:21:53.2461341Z [36;1m[0m
+2026-04-09T09:21:53.2462055Z [36;1m# Calculate duration[0m
+2026-04-09T09:21:53.2463015Z [36;1mSTART_EPOCH=$(date -d "$BUILD_START_TIME" +%s)[0m
+2026-04-09T09:21:53.2463396Z [36;1mEND_EPOCH=$(date -d "$BUILD_END_TIME" +%s)[0m
+2026-04-09T09:21:53.2463776Z [36;1mBUILD_DURATION_SEC=$((END_EPOCH - START_EPOCH))[0m
+2026-04-09T09:21:53.2464101Z [36;1m[0m
+2026-04-09T09:21:53.2464640Z [36;1mecho "🕐 Build timing:"[0m
+2026-04-09T09:21:53.2464954Z [36;1mecho "  Start: ${BUILD_START_TIME}"[0m
+2026-04-09T09:21:53.2465270Z [36;1mecho "  End: ${BUILD_END_TIME}"[0m
+2026-04-09T09:21:53.2465621Z [36;1mecho "  Duration: ${BUILD_DURATION_SEC} seconds"[0m
+2026-04-09T09:21:53.2465949Z [36;1m[0m
+2026-04-09T09:21:53.2466171Z [36;1m# Get image size[0m
+2026-04-09T09:21:53.2466924Z [36;1mIMAGE_TAG="***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu"[0m
+2026-04-09T09:21:53.2467525Z [36;1mIMAGE_SIZE_TYPE="unknown"[0m
+2026-04-09T09:21:53.2467983Z [36;1mif [ -n "$IMAGE_TAG" ]; then[0m
+2026-04-09T09:21:53.2468284Z [36;1m  if [ "true" == "false" ]; then[0m
+2026-04-09T09:21:53.2468821Z [36;1m    # Image was loaded into local Docker daemon but not pushed; docker inspect[0m
+2026-04-09T09:21:53.2469383Z [36;1m    # reports uncompressed (virtual) size, which differs from the compressed[0m
+2026-04-09T09:21:53.2469842Z [36;1m    # registry size reported below[0m
+2026-04-09T09:21:53.2470362Z [36;1m    IMAGE_SIZE_BYTES=$(docker image inspect "$IMAGE_TAG" --format='{{.Size}}' 2>/dev/null || echo "0")[0m
+2026-04-09T09:21:53.2470887Z [36;1m    IMAGE_SIZE_TYPE="uncompressed"[0m
+2026-04-09T09:21:53.2471209Z [36;1m  elif [ "false" == "true" ]; then[0m
+2026-04-09T09:21:53.2471722Z [36;1m    # Image was pushed to ECR without loading locally; query ECR for compressed size[0m
+2026-04-09T09:21:53.2472284Z [36;1m    REPO_NAME=$(echo "$IMAGE_TAG" | sed 's|.*amazonaws.com/||' | cut -d: -f1)[0m
+2026-04-09T09:21:53.2472760Z [36;1m    IMAGE_TAG_NAME=$(echo "$IMAGE_TAG" | cut -d: -f2-)[0m
+2026-04-09T09:21:53.2473170Z [36;1m    IMAGE_SIZE_BYTES=$(aws ecr describe-images \[0m
+2026-04-09T09:21:53.2473543Z [36;1m      --repository-name "$REPO_NAME" \[0m
+2026-04-09T09:21:53.2473914Z [36;1m      --image-ids "imageTag=${IMAGE_TAG_NAME}" \[0m
+2026-04-09T09:21:53.2474326Z [36;1m      --query 'imageDetails[0].imageSizeInBytes' \[0m
+2026-04-09T09:21:53.2474712Z [36;1m      --output text 2>/dev/null || echo "0")[0m
+2026-04-09T09:21:53.2475066Z [36;1m    # Treat empty or "None" response as 0[0m
+2026-04-09T09:21:53.2475478Z [36;1m    if [[ "$IMAGE_SIZE_BYTES" == "None" || -z "$IMAGE_SIZE_BYTES" ]]; then[0m
+2026-04-09T09:21:53.2475878Z [36;1m      IMAGE_SIZE_BYTES=0[0m
+2026-04-09T09:21:53.2476150Z [36;1m    fi[0m
+2026-04-09T09:21:53.2476401Z [36;1m    IMAGE_SIZE_TYPE="compressed"[0m
+2026-04-09T09:21:53.2476697Z [36;1m  else[0m
+2026-04-09T09:21:53.2476932Z [36;1m    IMAGE_SIZE_BYTES=0[0m
+2026-04-09T09:21:53.2477192Z [36;1m  fi[0m
+2026-04-09T09:21:53.2477534Z [36;1m  echo "📦 Image size: ${IMAGE_SIZE_BYTES} bytes (${IMAGE_SIZE_TYPE})"[0m
+2026-04-09T09:21:53.2477923Z [36;1melse[0m
+2026-04-09T09:21:53.2478151Z [36;1m  IMAGE_SIZE_BYTES=0[0m
+2026-04-09T09:21:53.2478508Z [36;1m  echo "⚠️  No image tag available"[0m
+2026-04-09T09:21:53.2478819Z [36;1mfi[0m
+2026-04-09T09:21:53.2479034Z [36;1m[0m
+2026-04-09T09:21:53.2479367Z [36;1mPLATFORM_ARCH=$(echo "linux/amd64" | sed 's|linux/||g; s/,/-/g')[0m
+2026-04-09T09:21:53.2479801Z [36;1mecho "  Architecture: ${PLATFORM_ARCH}"[0m
+2026-04-09T09:21:53.2480193Z [36;1mecho "PLATFORM_ARCH=${PLATFORM_ARCH}" >> $GITHUB_ENV[0m
+2026-04-09T09:21:53.2480581Z [36;1mJOB_KEY="vllm-${PLATFORM_ARCH}"[0m
+2026-04-09T09:21:53.2480898Z [36;1mecho "  Job Key: ${JOB_KEY}"[0m
+2026-04-09T09:21:53.2481193Z [36;1m[0m
+2026-04-09T09:21:53.2481440Z [36;1m# Create job-specific metrics file[0m
+2026-04-09T09:21:53.2481760Z [36;1mmkdir -p build-metrics[0m
+2026-04-09T09:21:53.2482228Z [36;1mMETRICS_FILE="build-metrics/metrics-vllm-${PLATFORM_ARCH}-24182595453-70579093813.json"[0m
+2026-04-09T09:21:53.2482703Z [36;1m[0m
+2026-04-09T09:21:53.2482935Z [36;1m# Create the job metrics file[0m
+2026-04-09T09:21:53.2483233Z [36;1mcat > "$METRICS_FILE" << EOF[0m
+2026-04-09T09:21:53.2483521Z [36;1m{[0m
+2026-04-09T09:21:53.2483754Z [36;1m  "framework": "vllm",[0m
+2026-04-09T09:21:53.2484036Z [36;1m  "target": "runtime",[0m
+2026-04-09T09:21:53.2484437Z [36;1m  "platform": "linux/amd64",[0m
+2026-04-09T09:21:53.2484767Z [36;1m  "platform_arch": "${PLATFORM_ARCH}",[0m
+2026-04-09T09:21:53.2485122Z [36;1m  "image_size_bytes": ${IMAGE_SIZE_BYTES},[0m
+2026-04-09T09:21:53.2485472Z [36;1m  "image_size_type": "${IMAGE_SIZE_TYPE}",[0m
+2026-04-09T09:21:53.2485830Z [36;1m  "build_start_time": "${BUILD_START_TIME}",[0m
+2026-04-09T09:21:53.2486196Z [36;1m  "build_end_time": "${BUILD_END_TIME}",[0m
+2026-04-09T09:21:53.2486557Z [36;1m  "build_duration_sec": ${BUILD_DURATION_SEC}[0m
+2026-04-09T09:21:53.2486973Z [36;1m}[0m
+2026-04-09T09:21:53.2487191Z [36;1mEOF[0m
+2026-04-09T09:21:53.2487396Z [36;1m[0m
+2026-04-09T09:21:53.2487628Z [36;1mcat "$METRICS_FILE"[0m
+2026-04-09T09:21:53.2516651Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:53.2517019Z env:
+2026-04-09T09:21:53.2517259Z   FRAMEWORK: vllm
+2026-04-09T09:21:53.2517517Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:53.2517804Z   BUILD_START_TIME: 2026-04-09T09:21:30Z
+2026-04-09T09:21:53.2518161Z   BUILD_LOG_FILE: build-logs/build-vllm-amd64.log
+2026-04-09T09:21:53.2518532Z   BUILD_END_TIME: 2026-04-09T09:21:53Z
+2026-04-09T09:21:53.2518892Z   AWS_DEFAULT_REGION: ***
+2026-04-09T09:21:53.2519157Z ##[endgroup]
+2026-04-09T09:21:53.2692507Z 🕐 Build timing:
+2026-04-09T09:21:53.2694170Z   Start: 2026-04-09T09:21:30Z
+2026-04-09T09:21:53.2695068Z   End: 2026-04-09T09:21:53Z
+2026-04-09T09:21:53.2695882Z   Duration: 23 seconds
+2026-04-09T09:21:53.2696898Z 📦 Image size: 0 bytes (unknown)
+2026-04-09T09:21:53.2755970Z   Architecture: amd64
+2026-04-09T09:21:53.2758026Z   Job Key: vllm-amd64
+2026-04-09T09:21:53.2822455Z {
+2026-04-09T09:21:53.2826120Z   "framework": "vllm",
+2026-04-09T09:21:53.2827089Z   "target": "runtime",
+2026-04-09T09:21:53.2828020Z   "platform": "linux/amd64",
+2026-04-09T09:21:53.2829177Z   "platform_arch": "amd64",
+2026-04-09T09:21:53.2829997Z   "image_size_bytes": 0,
+2026-04-09T09:21:53.2830825Z   "image_size_type": "unknown",
+2026-04-09T09:21:53.2831846Z   "build_start_time": "2026-04-09T09:21:30Z",
+2026-04-09T09:21:53.2832848Z   "build_end_time": "2026-04-09T09:21:53Z",
+2026-04-09T09:21:53.2833757Z   "build_duration_sec": 23
+2026-04-09T09:21:53.2834497Z }
+2026-04-09T09:21:53.2889301Z ##[group]Run echo "=========================================="
+2026-04-09T09:21:53.2890299Z [36;1mecho "=========================================="[0m
+2026-04-09T09:21:53.2891081Z [36;1mecho "📊 GENERATING COMPREHENSIVE BUILD METRICS"[0m
+2026-04-09T09:21:53.2891814Z [36;1mecho "=========================================="[0m
+2026-04-09T09:21:53.2892436Z [36;1m[0m
+2026-04-09T09:21:53.2892891Z [36;1m# Create metrics directory[0m
+2026-04-09T09:21:53.2893493Z [36;1mmkdir -p build-metrics[0m
+2026-04-09T09:21:53.2894028Z [36;1m[0m
+2026-04-09T09:21:53.2894462Z [36;1mPLATFORM_ARCH="amd64"[0m
+2026-04-09T09:21:53.2895006Z [36;1mWORKFLOW_ID="24182595453"[0m
+2026-04-09T09:21:53.2895546Z [36;1mJOB_ID="70579093813"[0m
+2026-04-09T09:21:53.2896252Z [36;1mFRAMEWORK_LOWER=$(echo "vllm" | tr '[:upper:]' '[:lower:]')[0m
+2026-04-09T09:21:53.2897009Z [36;1m[0m
+2026-04-09T09:21:53.2897449Z [36;1m# Make parser executable[0m
+2026-04-09T09:21:53.2898129Z [36;1mchmod +x .github/scripts/parse_buildkit_output.py[0m
+2026-04-09T09:21:53.2898827Z [36;1m[0m
+2026-04-09T09:21:53.2899397Z [36;1m# Check for build logs and build stage arguments dynamically[0m
+2026-04-09T09:21:53.2900235Z [36;1m# Use the BUILD_LOG_FILE set during the build step[0m
+2026-04-09T09:21:53.2900986Z [36;1mBUILD_LOG="build-logs/build-vllm-amd64.log"[0m
+2026-04-09T09:21:53.2901599Z [36;1m[0m
+2026-04-09T09:21:53.2902149Z [36;1m# Path to container metadata created in previous step[0m
+2026-04-09T09:21:53.2903263Z [36;1mCONTAINER_METADATA="build-metrics/metrics-vllm-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"[0m
+2026-04-09T09:21:53.2904209Z [36;1m[0m
+2026-04-09T09:21:53.2904766Z [36;1m# Output single comprehensive JSON with all build stages[0m
+2026-04-09T09:21:53.2906038Z [36;1mCOMPREHENSIVE_JSON="build-metrics/build-vllm-${PLATFORM_ARCH}-${WORKFLOW_ID}-${JOB_ID}.json"[0m
+2026-04-09T09:21:53.2906967Z [36;1m[0m
+2026-04-09T09:21:53.2907636Z [36;1mecho "🚀 Parsing BuildKit outputs and merging with container metrics..."[0m
+2026-04-09T09:21:53.2908403Z [36;1m[0m
+2026-04-09T09:21:53.2909058Z [36;1m# Build stage arguments dynamically based on which logs exist[0m
+2026-04-09T09:21:53.2909778Z [36;1mSTAGE_ARGS=()[0m
+2026-04-09T09:21:53.2910251Z [36;1m[0m
+2026-04-09T09:21:53.2910813Z [36;1mif [ -f "$BUILD_LOG" ]; then[0m
+2026-04-09T09:21:53.2911512Z [36;1m  echo "  ✓ Found base image log: ${BUILD_LOG}"[0m
+2026-04-09T09:21:53.2912458Z [36;1m  STAGE_ARGS+=("runtime:${BUILD_LOG}")[0m
+2026-04-09T09:21:53.2913082Z [36;1melse[0m
+2026-04-09T09:21:53.2913598Z [36;1m  echo "  ℹ️  No image log found"[0m
+2026-04-09T09:21:53.2914194Z [36;1mfi[0m
+2026-04-09T09:21:53.2914635Z [36;1m[0m
+2026-04-09T09:21:53.2915318Z [36;1m# Check for any additional stage logs (e.g., build-logs/stage3-*.log)[0m
+2026-04-09T09:21:53.2916249Z [36;1mfor extra_log in build-logs/stage*.log; do[0m
+2026-04-09T09:21:53.2916942Z [36;1m  if [ -f "$extra_log" ]; then[0m
+2026-04-09T09:21:53.2917618Z [36;1m    stage_name=$(basename "$extra_log" .log)[0m
+2026-04-09T09:21:53.2918526Z [36;1m    echo "  ✓ Found additional stage log: ${extra_log} (${stage_name})"[0m
+2026-04-09T09:21:53.2919427Z [36;1m    STAGE_ARGS+=("${stage_name}:${extra_log}")[0m
+2026-04-09T09:21:53.2920097Z [36;1m  fi[0m
+2026-04-09T09:21:53.2920541Z [36;1mdone[0m
+2026-04-09T09:21:53.2920974Z [36;1m[0m
+2026-04-09T09:21:53.2921617Z [36;1mecho "Container Metadata: ${CONTAINER_METADATA}"[0m
+2026-04-09T09:21:53.2922329Z [36;1mecho "Output: ${COMPREHENSIVE_JSON}"[0m
+2026-04-09T09:21:53.2922907Z [36;1mecho ""[0m
+2026-04-09T09:21:53.2923319Z [36;1m[0m
+2026-04-09T09:21:53.2923777Z [36;1m# Run parser with all discovered stages[0m
+2026-04-09T09:21:53.2924922Z [36;1m# Usage: parse_buildkit_output.py <output_json> <stage1_name:log_file> [stage2_name:log_file] ... [--metadata=<file>][0m
+2026-04-09T09:21:53.2925976Z [36;1mset +e[0m
+2026-04-09T09:21:53.2926579Z [36;1mpython3 .github/scripts/parse_buildkit_output.py \[0m
+2026-04-09T09:21:53.2927301Z [36;1m  "$COMPREHENSIVE_JSON" \[0m
+2026-04-09T09:21:53.2927859Z [36;1m  "${STAGE_ARGS[@]}" \[0m
+2026-04-09T09:21:53.2928496Z [36;1m  "--metadata=${CONTAINER_METADATA}"[0m
+2026-04-09T09:21:53.2929107Z [36;1mPARSER_EXIT_CODE=$?[0m
+2026-04-09T09:21:53.2929617Z [36;1mset -e[0m
+2026-04-09T09:21:53.2930016Z [36;1m[0m
+2026-04-09T09:21:53.2930399Z [36;1mecho ""[0m
+2026-04-09T09:21:53.2930949Z [36;1mecho "📊 Parser exit code: ${PARSER_EXIT_CODE}"[0m
+2026-04-09T09:21:53.2931548Z [36;1m[0m
+2026-04-09T09:21:53.2932257Z [36;1mif [ ${PARSER_EXIT_CODE} -eq 0 ] && [ -f "$COMPREHENSIVE_JSON" ]; then[0m
+2026-04-09T09:21:53.2933218Z [36;1m  echo "✅ Comprehensive build metrics generated successfully"[0m
+2026-04-09T09:21:53.2934068Z [36;1m  echo "📄 Output file: ${COMPREHENSIVE_JSON}"[0m
+2026-04-09T09:21:53.2934687Z [36;1melse[0m
+2026-04-09T09:21:53.2935283Z [36;1m  echo "⚠️  Metrics generation had issues but continuing..."[0m
+2026-04-09T09:21:53.2935971Z [36;1mfi[0m
+2026-04-09T09:21:53.2966976Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:53.2967232Z env:
+2026-04-09T09:21:53.2967398Z   FRAMEWORK: vllm
+2026-04-09T09:21:53.2967581Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:53.2967786Z   BUILD_START_TIME: 2026-04-09T09:21:30Z
+2026-04-09T09:21:53.2968023Z   BUILD_LOG_FILE: build-logs/build-vllm-amd64.log
+2026-04-09T09:21:53.2968255Z   BUILD_END_TIME: 2026-04-09T09:21:53Z
+2026-04-09T09:21:53.2968524Z   PLATFORM_ARCH: amd64
+2026-04-09T09:21:53.2968709Z ##[endgroup]
+2026-04-09T09:21:53.3025471Z ==========================================
+2026-04-09T09:21:53.3027508Z 📊 GENERATING COMPREHENSIVE BUILD METRICS
+2026-04-09T09:21:53.3028870Z ==========================================
+2026-04-09T09:21:53.3150735Z 🚀 Parsing BuildKit outputs and merging with container metrics...
+2026-04-09T09:21:53.3153979Z   ✓ Found base image log: build-logs/build-vllm-amd64.log
+2026-04-09T09:21:53.3155650Z Container Metadata: build-metrics/metrics-vllm-amd64-24182595453-70579093813.json
+2026-04-09T09:21:53.3157355Z Output: build-metrics/build-vllm-amd64-24182595453-70579093813.json
+2026-04-09T09:21:53.3158250Z 
+2026-04-09T09:21:53.3544288Z ✅ Parsed runtime stage: 85 steps
+2026-04-09T09:21:53.3547233Z ℹ️  No sccache stats found in build logs
+2026-04-09T09:21:53.3549535Z ✅ Build data written to: build-metrics/build-vllm-amd64-24182595453-70579093813.json
+2026-04-09T09:21:53.3551469Z 
+2026-04-09T09:21:53.3551914Z 📊 Build Summary:
+2026-04-09T09:21:53.3552870Z    Steps: 85 total, 77 cached, 8 built
+2026-04-09T09:21:53.3553783Z    Cache Hit Rate: 90.6%
+2026-04-09T09:21:53.3554279Z 
+2026-04-09T09:21:53.3554662Z 🔨 sccache Summary:
+2026-04-09T09:21:53.3555371Z    Available: False
+2026-04-09T09:21:53.3599368Z 
+2026-04-09T09:21:53.3602917Z 📊 Parser exit code: 0
+2026-04-09T09:21:53.3604618Z ✅ Comprehensive build metrics generated successfully
+2026-04-09T09:21:53.3606368Z 📄 Output file: build-metrics/build-vllm-amd64-24182595453-70579093813.json
+2026-04-09T09:21:53.3700307Z ##[group]Run actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+2026-04-09T09:21:53.3700886Z with:
+2026-04-09T09:21:53.3701323Z   name: build-metrics-vllm-runtime-amd64-24182595453-70579093813
+2026-04-09T09:21:53.3701966Z   path: build-metrics/build-vllm-amd64-24182595453-70579093813.json
+2026-04-09T09:21:53.3702470Z   retention-days: 7
+2026-04-09T09:21:53.3702811Z   compression-level: 0
+2026-04-09T09:21:53.3703219Z   if-no-files-found: warn
+2026-04-09T09:21:53.3703564Z   overwrite: false
+2026-04-09T09:21:53.3703897Z   include-hidden-files: false
+2026-04-09T09:21:53.3704246Z env:
+2026-04-09T09:21:53.3704525Z   FRAMEWORK: vllm
+2026-04-09T09:21:53.3704844Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:53.3705225Z   BUILD_START_TIME: 2026-04-09T09:21:30Z
+2026-04-09T09:21:53.3705677Z   BUILD_LOG_FILE: build-logs/build-vllm-amd64.log
+2026-04-09T09:21:53.3706203Z   BUILD_END_TIME: 2026-04-09T09:21:53Z
+2026-04-09T09:21:53.3706588Z   PLATFORM_ARCH: amd64
+2026-04-09T09:21:53.3706916Z ##[endgroup]
+2026-04-09T09:21:53.5343224Z With the provided path, there will be 1 file uploaded
+2026-04-09T09:21:53.5345094Z Artifact name is valid!
+2026-04-09T09:21:53.5346004Z Root directory input is valid!
+2026-04-09T09:21:53.8612928Z Beginning upload of artifact content to blob storage
+2026-04-09T09:21:54.4894595Z Uploaded bytes 42958
+2026-04-09T09:21:54.6152708Z Finished uploading artifact content to blob storage!
+2026-04-09T09:21:54.6155011Z SHA256 digest of uploaded artifact zip is 27c0578a40324a798d90c4e4d803d46270c6b49fa3de0b0fed49961c6ce55183
+2026-04-09T09:21:54.6157562Z Finalizing artifact upload
+2026-04-09T09:21:55.0057744Z Artifact build-metrics-vllm-runtime-amd64-24182595453-70579093813.zip successfully finalized. Artifact ID 6346199930
+2026-04-09T09:21:55.0061287Z Artifact build-metrics-vllm-runtime-amd64-24182595453-70579093813 has been successfully uploaded! Final size is 42958 bytes. Artifact ID is 6346199930
+2026-04-09T09:21:55.0069325Z Artifact download URL: https://github.com/VincyZhang/dynamo/actions/runs/24182595453/artifacts/6346199930
+2026-04-09T09:21:55.0356877Z ##[group]Run IMAGE_VARIANT="xpu"
+2026-04-09T09:21:55.0357446Z [36;1mIMAGE_VARIANT="xpu"[0m
+2026-04-09T09:21:55.0357994Z [36;1mCACHE_TAG="***-vllm-${IMAGE_VARIANT}-cache"[0m
+2026-04-09T09:21:55.0358905Z [36;1mCACHE_ARGS="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG}"[0m
+2026-04-09T09:21:55.0359941Z [36;1mCACHE_ARGS+=" --cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG}"[0m
+2026-04-09T09:21:55.0360788Z [36;1mif [[ "$GITHUB_REF_NAME" == "main" ]]; then[0m
+2026-04-09T09:21:55.0361580Z [36;1m  CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${CACHE_TAG},mode=max"[0m
+2026-04-09T09:21:55.0362394Z [36;1melif [[ "$GITHUB_REF_NAME" =~ ^release ]]; then[0m
+2026-04-09T09:21:55.0363382Z [36;1m  CACHE_ARGS+=" --cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${CACHE_TAG},mode=max"[0m
+2026-04-09T09:21:55.0364129Z [36;1mfi[0m
+2026-04-09T09:21:55.0364449Z [36;1m[0m
+2026-04-09T09:21:55.0364781Z [36;1mPUSH_ARGS=""[0m
+2026-04-09T09:21:55.0365195Z [36;1mif [ "false" == "true" ]; then[0m
+2026-04-09T09:21:55.0365642Z [36;1m  PUSH_ARGS="--push"[0m
+2026-04-09T09:21:55.0366075Z [36;1melif [ "true" == "false" ]; then[0m
+2026-04-09T09:21:55.0366518Z [36;1m  PUSH_ARGS="--load"[0m
+2026-04-09T09:21:55.0366903Z [36;1mfi[0m
+2026-04-09T09:21:55.0367385Z [36;1m[0m
+2026-04-09T09:21:55.0367703Z [36;1mNO_CACHE_ARG=""[0m
+2026-04-09T09:21:55.0368106Z [36;1mif [ "false" == "true" ]; then[0m
+2026-04-09T09:21:55.0368604Z [36;1m  NO_CACHE_ARG="--no-cache"[0m
+2026-04-09T09:21:55.0369006Z [36;1mfi[0m
+2026-04-09T09:21:55.0369299Z [36;1m[0m
+2026-04-09T09:21:55.0369629Z [36;1mdocker buildx build \[0m
+2026-04-09T09:21:55.0370038Z [36;1m  --progress=plain \[0m
+2026-04-09T09:21:55.0370442Z [36;1m  ${PUSH_ARGS} \[0m
+2026-04-09T09:21:55.0370828Z [36;1m  ${NO_CACHE_ARG} \[0m
+2026-04-09T09:21:55.0371251Z [36;1m  --platform linux/amd64 \[0m
+2026-04-09T09:21:55.0371724Z [36;1m  -f container/Dockerfile.*** \[0m
+2026-04-09T09:21:55.0372761Z [36;1m  --build-arg BASE_IMAGE=***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu \[0m
+2026-04-09T09:21:55.0373673Z [36;1m  ${CACHE_ARGS} \[0m
+2026-04-09T09:21:55.0374545Z [36;1m  -t ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-***-xpu .[0m
+2026-04-09T09:21:55.0391720Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T09:21:55.0392042Z env:
+2026-04-09T09:21:55.0392252Z   FRAMEWORK: vllm
+2026-04-09T09:21:55.0392459Z   BUILDX_BUILDER_NAME: default
+2026-04-09T09:21:55.0392700Z   BUILD_START_TIME: 2026-04-09T09:21:30Z
+2026-04-09T09:21:55.0392968Z   BUILD_LOG_FILE: build-logs/build-vllm-amd64.log
+2026-04-09T09:21:55.0393243Z   BUILD_END_TIME: 2026-04-09T09:21:53Z
+2026-04-09T09:21:55.0393475Z   PLATFORM_ARCH: amd64
+2026-04-09T09:21:55.0393774Z   ECR_HOSTNAME: ***.dkr.ecr.***.amazonaws.com
+2026-04-09T09:21:55.0394024Z ##[endgroup]
+2026-04-09T09:21:55.5259593Z #0 building with "default" instance using docker driver
+2026-04-09T09:21:55.5260628Z 
+2026-04-09T09:21:55.5261371Z #1 [internal] load build definition from Dockerfile.***
+2026-04-09T09:21:55.5262534Z #1 transferring dockerfile: 1.33kB done
+2026-04-09T09:21:55.5263456Z #1 DONE 0.0s
+2026-04-09T09:21:55.5263883Z 
+2026-04-09T09:21:55.5264781Z #2 resolve image config for docker-image://docker.io/docker/dockerfile:1.10.0-labs
+2026-04-09T09:21:55.5388970Z #2 DONE 0.2s
+2026-04-09T09:21:55.6893030Z 
+2026-04-09T09:21:55.6896853Z #3 docker-image://docker.io/docker/dockerfile:1.10.0-labs@sha256:940282bab7a18daad689c238d407ad22393369ad53c6125c9c00f8be8a9da678
+2026-04-09T09:21:55.6899150Z #3 CACHED
+2026-04-09T09:21:55.9779787Z 
+2026-04-09T09:21:55.9784968Z #4 [internal] load metadata for ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu
+2026-04-09T09:21:55.9787032Z #4 DONE 0.0s
+2026-04-09T09:21:55.9787846Z 
+2026-04-09T09:21:55.9788300Z #5 [internal] load .dockerignore
+2026-04-09T09:21:55.9789477Z #5 transferring context: 1.17kB done
+2026-04-09T09:21:55.9790365Z #5 DONE 0.0s
+2026-04-09T09:21:55.9790781Z 
+2026-04-09T09:21:55.9791126Z #6 [internal] load build context
+2026-04-09T09:21:55.9791928Z #6 DONE 0.0s
+2026-04-09T09:21:55.9792532Z 
+2026-04-09T09:21:55.9794036Z #7 [stage-0 1/4] FROM ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu
+2026-04-09T09:21:55.9796954Z #7 DONE 0.0s
+2026-04-09T09:21:55.9798830Z 
+2026-04-09T09:21:55.9800470Z #8 importing cache manifest from ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:release-***-vllm-xpu-cache
+2026-04-09T09:21:56.2100095Z #8 ERROR: failed to configure registry cache importer: unexpected status from HEAD request to https://***.dkr.ecr.***.amazonaws.com/v2/ai-dynamo/dynamo/manifests/release-***-vllm-xpu-cache: 401 Unauthorized
+2026-04-09T09:21:56.2102752Z 
+2026-04-09T09:21:56.2104146Z #9 importing cache manifest from ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:main-***-vllm-xpu-cache
+2026-04-09T09:21:56.3592381Z #9 ERROR: failed to configure registry cache importer: unexpected status from HEAD request to https://***.dkr.ecr.***.amazonaws.com/v2/ai-dynamo/dynamo/manifests/main-***-vllm-xpu-cache: 401 Unauthorized
+2026-04-09T09:21:56.3594943Z 
+2026-04-09T09:21:56.3596618Z #7 [stage-0 1/4] FROM ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-xpu
+2026-04-09T09:21:56.3599688Z #7 DONE 0.0s
+2026-04-09T09:21:56.3600134Z 
+2026-04-09T09:21:56.3600505Z #6 [internal] load build context
+2026-04-09T09:21:56.3601453Z #6 transferring context: 9.66kB 0.1s done
+2026-04-09T09:21:56.5158162Z #6 DONE 0.1s
+2026-04-09T09:21:56.5159366Z 
+2026-04-09T09:21:56.5173635Z #10 [stage-0 2/4] RUN --mount=type=bind,source=./container/deps/requirements.***.txt,target=/tmp/requirements.***.txt     --mount=type=cache,target=/root/.cache/uv     --mount=type=cache,target=/root/.cache/pip,sharing=locked     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 &&     export PIP_CACHE_DIR=/root/.cache/pip &&     if [ -n "/opt/dynamo/venv" ]; then         uv pip install             --requirement /tmp/requirements.***.txt;     else         pip install --break-system-packages             --requirement /tmp/requirements.***.txt;     fi
+2026-04-09T09:21:56.8462752Z #10 0.481 Using Python 3.12.3 environment at: /opt/dynamo/venv
+2026-04-09T09:21:57.4478202Z #10 1.082 Resolved 119 packages in 580ms
+2026-04-09T09:21:57.5739217Z #10 1.209 Uninstalled 8 packages in 121ms
+2026-04-09T09:21:57.8029344Z #10 1.288 warning: Failed to hardlink files; falling back to full copy. This may lead to degraded performance.
+2026-04-09T09:21:57.8032117Z #10 1.288          If the cache and target directories are on different filesystems, hardlinking may not be supported.
+2026-04-09T09:21:57.8034543Z #10 1.288          If this is intentional, set `export UV_LINK_MODE=copy` or use `--link-mode=copy` to suppress this warning.
+2026-04-09T09:21:58.0707344Z #10 1.706 Installed 53 packages in 496ms
+2026-04-09T09:21:58.2260446Z #10 1.706  + allure-py***==2.15.3
+2026-04-09T09:21:58.2262484Z #10 1.706  + allure-python-commons==2.15.3
+2026-04-09T09:21:58.2263561Z #10 1.706  + boto3==1.42.4
+2026-04-09T09:21:58.2264418Z #10 1.706  + boto3-stubs==1.42.9
+2026-04-09T09:21:58.2265386Z #10 1.706  + botocore==1.42.86
+2026-04-09T09:21:58.2266318Z #10 1.706  + botocore-stubs==1.42.41
+2026-04-09T09:21:58.2267226Z #10 1.706  + chardet==5.2.0
+2026-04-09T09:21:58.2268059Z #10 1.706  + coverage==7.13.5
+2026-04-09T09:21:58.2269030Z #10 1.706  + dataproperty==1.1.0
+2026-04-09T09:21:58.2269913Z #10 1.706  - datasets==4.8.4
+2026-04-09T09:21:58.2270714Z #10 1.707  + datasets==4.4.1
+2026-04-09T09:21:58.2271498Z #10 1.707  - dill==0.4.1
+2026-04-09T09:21:58.2272266Z #10 1.707  + dill==0.4.0
+2026-04-09T09:21:58.2273008Z #10 1.707  + execnet==2.1.2
+2026-04-09T09:21:58.2273810Z #10 1.707  - filelock==3.25.2
+2026-04-09T09:21:58.2274614Z #10 1.707  + filelock==3.25.1
+2026-04-09T09:21:58.2275385Z #10 1.707  - fsspec==2026.2.0
+2026-04-09T09:21:58.2276182Z #10 1.707  + fsspec==2025.10.0
+2026-04-09T09:21:58.2276973Z #10 1.707  + httpx-ws==0.9.0
+2026-04-09T09:21:58.2277770Z #10 1.707  + kr8s==0.20.13
+2026-04-09T09:21:58.2278785Z #10 1.707  + kubernetes-asyncio==32.0.0
+2026-04-09T09:21:58.2279791Z #10 1.707  + matplotlib-stubs==0.3.11
+2026-04-09T09:21:58.2280809Z #10 1.707  + mbstrdecoder==1.1.4
+2026-04-09T09:21:58.2281672Z #10 1.707  - multiprocess==0.70.19
+2026-04-09T09:21:58.2282552Z #10 1.707  + multiprocess==0.70.18
+2026-04-09T09:21:58.2283388Z #10 1.707  + mypy==1.18.2
+2026-04-09T09:21:58.2284212Z #10 1.708  + mypy-boto3-s3==1.42.85
+2026-04-09T09:21:58.2285124Z #10 1.708  + mypy-extensions==1.1.0
+2026-04-09T09:21:58.2285991Z #10 1.708  + nats-py==2.12.0
+2026-04-09T09:21:58.2287519Z #10 1.708  + pathspec==1.0.4
+2026-04-09T09:21:58.2288375Z #10 1.708  + pathvalidate==3.3.1
+2026-04-09T09:21:58.2289276Z #10 1.708  + py==1.11.0
+2026-04-09T09:21:58.2290066Z #10 1.708  + pytablewriter==1.2.1
+2026-04-09T09:21:58.2290974Z #10 1.708  - py***==9.0.3
+2026-04-09T09:21:58.2291756Z #10 1.708  + py***==8.4.2
+2026-04-09T09:21:58.2292543Z #10 1.708  + py***-asyncio==1.3.0
+2026-04-09T09:21:58.2293438Z #10 1.708  + py***-benchmark==5.2.3
+2026-04-09T09:21:58.2294360Z #10 1.708  + py***-codeblocks==0.17.0
+2026-04-09T09:21:58.2295252Z #10 1.708  + py***-cov==7.0.0
+2026-04-09T09:21:58.2296338Z #10 1.708  + py***-forked==1.6.0
+2026-04-09T09:21:58.2297226Z #10 1.708  + py***-httpserver==1.1.3
+2026-04-09T09:21:58.2298165Z #10 1.708  + py***-md-report==0.7.0
+2026-04-09T09:21:58.2299140Z #10 1.709  + py***-order==1.3.0
+2026-04-09T09:21:58.2299985Z #10 1.709  + py***-xdist==3.8.0
+2026-04-09T09:21:58.2300816Z #10 1.709  + python-box==7.4.1
+2026-04-09T09:21:58.2301647Z #10 1.709  + python-jsonpath==2.0.2
+2026-04-09T09:21:58.2302536Z #10 1.709  - requests==2.33.1
+2026-04-09T09:21:58.2303326Z #10 1.709  + requests==2.32.5
+2026-04-09T09:21:58.2304126Z #10 1.709  + s3transfer==0.16.0
+2026-04-09T09:21:58.2304925Z #10 1.709  + tabledata==1.3.4
+2026-04-09T09:21:58.2305710Z #10 1.709  - tabulate==0.10.0
+2026-04-09T09:21:58.2306486Z #10 1.709  + tabulate==0.9.0
+2026-04-09T09:21:58.2307279Z #10 1.709  + tcolorpy==0.1.7
+2026-04-09T09:21:58.2308055Z #10 1.709  + typepy==1.3.4
+2026-04-09T09:21:58.2309066Z #10 1.709  + types-aiofiles==25.1.0.20260409
+2026-04-09T09:21:58.2310040Z #10 1.709  + types-awscrt==0.31.3
+2026-04-09T09:21:58.2310964Z #10 1.709  + types-pyyaml==6.0.12.20250915
+2026-04-09T09:21:58.2311949Z #10 1.709  + types-requests==2.32.4.20250913
+2026-04-09T09:21:58.2312920Z #10 1.710  + types-s3transfer==0.16.0
+2026-04-09T09:21:58.2313856Z #10 1.710  + types-tabulate==0.10.0.20260408
+2026-04-09T09:21:58.2314755Z #10 1.710  + wsproto==1.3.2
+2026-04-09T09:21:58.4243874Z #10 DONE 2.1s
+2026-04-09T09:21:58.5319835Z 
+2026-04-09T09:21:58.5326184Z #11 [stage-0 3/4] COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
+2026-04-09T09:21:58.5328000Z #11 DONE 0.0s
+2026-04-09T09:21:58.5329466Z 
+2026-04-09T09:21:58.5330271Z #12 [stage-0 4/4] COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
+2026-04-09T09:21:58.5331620Z #12 DONE 0.1s
+2026-04-09T09:21:58.6841941Z 
+2026-04-09T09:21:58.6847953Z #13 exporting to image
+2026-04-09T09:21:58.6850008Z #13 exporting layers
+2026-04-09T09:21:59.7277748Z #13 exporting layers 1.2s done
+2026-04-09T09:21:59.7506425Z #13 writing image sha256:429372e3cb1000a74d6a00794a2a35ae24ded82620c3178e5586ba193ab75bf5 done
+2026-04-09T09:21:59.7510823Z #13 naming to ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:eb0b4f8f8be9df86a608b49c419d90945f70606a-vllm-runtime-***-xpu done
+2026-04-09T09:21:59.7512839Z #13 DONE 1.2s
+2026-04-09T09:21:59.7513537Z ------
+2026-04-09T09:21:59.7515178Z  > importing cache manifest from ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:main-***-vllm-xpu-cache:
+2026-04-09T09:21:59.7516705Z ------
+2026-04-09T09:21:59.7517296Z ------
+2026-04-09T09:21:59.7518980Z  > importing cache manifest from ***.dkr.ecr.***.amazonaws.com/ai-dynamo/dynamo:release-***-vllm-xpu-cache:
+2026-04-09T09:21:59.7520611Z ------
+2026-04-09T09:21:59.7520979Z 
+2026-04-09T09:21:59.7522324Z  [33m1 warning found (use docker --debug to expand):
+2026-04-09T09:21:59.7524519Z [0m - InvalidDefaultArgInFrom: Default value for ARG ${BASE_IMAGE} results in empty or invalid base image name (line 8)
+2026-04-09T09:21:59.8035431Z Post job cleanup.
+2026-04-09T09:21:59.8088673Z Post job cleanup.
+2026-04-09T09:21:59.9080626Z [command]/usr/bin/git version
+2026-04-09T09:21:59.9145286Z git version 2.43.0
+2026-04-09T09:21:59.9181163Z Copying '/home/sdp/.gitconfig' to '/home/sdp/actions-runner/_work/_temp/90a073e2-7440-47c8-b7a5-7d726fe626e9/.gitconfig'
+2026-04-09T09:21:59.9204608Z Temporarily overriding HOME='/home/sdp/actions-runner/_work/_temp/90a073e2-7440-47c8-b7a5-7d726fe626e9' before making global git config changes
+2026-04-09T09:21:59.9206777Z Adding repository directory to the temporary git global config as a safe directory
+2026-04-09T09:21:59.9208754Z [command]/usr/bin/git config --global --add safe.directory /home/sdp/actions-runner/_work/dynamo/dynamo
+2026-04-09T09:21:59.9284660Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-04-09T09:21:59.9324858Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-04-09T09:21:59.9926788Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-04-09T09:21:59.9960154Z http.https://github.com/.extraheader
+2026-04-09T09:21:59.9980414Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-04-09T09:22:00.0021489Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-04-09T09:22:00.0780711Z Evaluate and set job outputs
+2026-04-09T09:22:00.0787941Z Set output 'target_tag_plain'
+2026-04-09T09:22:00.0790158Z Set output 'image_variant_label'
+2026-04-09T09:22:00.0790859Z Set output 'image_tag_suffix'
+2026-04-09T09:22:00.0791234Z Set output 'compliance_arches'
+2026-04-09T09:22:00.0791736Z Set output '***_runners'
+2026-04-09T09:22:00.0792337Z Cleaning up orphan processes
+2026-04-09T09:22:01.1628699Z ##[warning]Node.js 20 actions are deprecated. The following actions are running on Node.js 20 and may not work as expected: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955. Actions will be forced to run with Node.js 24 by default starting June 2nd, 2026. Node.js 20 will be removed from the runner on September 16th, 2026. Please check if updated versions of these actions are available that support Node.js 24. To opt into Node.js 24 now, set the FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true environment variable on the runner or in your workflow file. Once Node.js 24 becomes the default, you can temporarily opt out by setting ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

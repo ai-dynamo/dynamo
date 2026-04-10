@@ -1,0 +1,4 @@
+2026-04-09T09:27:30.4040000Z Evaluating notify-slack.if
+2026-04-09T09:27:30.4040000Z Evaluating: (success() && (false))
+2026-04-09T09:27:30.4040000Z Expanded: (false && false)
+2026-04-09T09:27:30.4040000Z Result: false

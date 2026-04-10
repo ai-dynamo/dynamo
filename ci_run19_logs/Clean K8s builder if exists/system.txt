@@ -1,0 +1,13 @@
+2026-04-09T09:27:30.6730000Z Evaluating clean-k8s-builder.if
+2026-04-09T09:27:30.6730000Z Evaluating: always()
+2026-04-09T09:27:30.6730000Z Result: true
+2026-04-09T09:27:30.7350000Z Requested labels: prod-default-small-v2
+2026-04-09T09:27:30.7350000Z Job defined at: VincyZhang/dynamo/.github/workflows/post-merge-ci.yml@refs/pull/6/merge
+2026-04-09T09:27:30.7350000Z Waiting for a runner to pick up this job...
+2026-04-09T09:27:31.4040000Z Job is about to start running on the runner: gnr816789-2
+2026-04-09T09:28:31.5490000Z Requested labels: prod-default-small-v2
+2026-04-09T09:28:31.5490000Z Job defined at: VincyZhang/dynamo/.github/workflows/post-merge-ci.yml@refs/pull/6/merge
+2026-04-09T09:28:31.5490000Z Waiting for a runner to pick up this job...
+2026-04-09T09:29:32.7130000Z Requested labels: prod-default-small-v2
+2026-04-09T09:29:32.7130000Z Job defined at: VincyZhang/dynamo/.github/workflows/post-merge-ci.yml@refs/pull/6/merge
+2026-04-09T09:29:32.7130000Z Waiting for a runner to pick up this job...

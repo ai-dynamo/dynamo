@@ -67,11 +67,6 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Verify Docker Buildx availability
-      shell: bash
-      run: |
-        docker buildx version
-
     - name: Define remote buildkit builders
       if: inputs.buildkit_worker_addresses != ''
       shell: bash
@@ -136,10 +131,9 @@ runs:
       if: inputs.skip_bootstrap != 'true'
       shell: bash
       run: |
-        BUILDER_NAME="${BUILDX_BUILDER_NAME:-${{ inputs.builder_name }}}"
         echo "Bootstrapping buildkit..."
         for i in 1 2 3; do
-          if docker buildx inspect "$BUILDER_NAME" --bootstrap; then
+          if docker buildx inspect ${{ inputs.builder_name }} --bootstrap; then
             echo "Bootstrap succeeded on attempt $i"
             break
           fi

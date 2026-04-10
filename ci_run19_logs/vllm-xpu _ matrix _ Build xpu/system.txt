@@ -1,0 +1,18 @@
+2026-04-09T07:40:32.7890000Z Requested labels: xpu
+2026-04-09T07:40:32.7890000Z Job defined at: VincyZhang/dynamo/.github/workflows/build-test-distribute-flavor.yml@refs/pull/6/merge
+2026-04-09T07:40:32.7890000Z Reusable workflow chain:
+2026-04-09T07:40:32.7890000Z VincyZhang/dynamo/.github/workflows/post-merge-ci.yml@refs/pull/6/merge (a8da9361c5f9a7a107143fd3fc583414c3e755dd)
+2026-04-09T07:40:32.7890000Z -> VincyZhang/dynamo/.github/workflows/build-test-distribute-flavor-matrix.yml@refs/pull/6/merge (a8da9361c5f9a7a107143fd3fc583414c3e755dd)
+2026-04-09T07:40:32.7890000Z --> VincyZhang/dynamo/.github/workflows/build-test-distribute-flavor.yml@refs/pull/6/merge (a8da9361c5f9a7a107143fd3fc583414c3e755dd)
+2026-04-09T07:40:32.7890000Z Waiting for a runner to pick up this job...
+2026-04-09T07:40:32.7830000Z Evaluating vllm-xpu-pipeline.if
+2026-04-09T07:40:32.7830000Z Evaluating: success()
+2026-04-09T07:40:32.7830000Z Result: true
+2026-04-09T07:40:32.7830000Z Evaluating vllm-xpu-pipeline.pipeline.if
+2026-04-09T07:40:32.7830000Z Evaluating: success()
+2026-04-09T07:40:32.7830000Z Result: true
+2026-04-09T07:40:32.7830000Z Evaluating vllm-xpu-pipeline.pipeline.job.build.if
+2026-04-09T07:40:32.7830000Z Evaluating: (success() && (inputs.build_image))
+2026-04-09T07:40:32.7830000Z Expanded: (true && true)
+2026-04-09T07:40:32.7830000Z Result: true
+2026-04-09T07:40:33.7690000Z Job is about to start running on the runner: gnr816789

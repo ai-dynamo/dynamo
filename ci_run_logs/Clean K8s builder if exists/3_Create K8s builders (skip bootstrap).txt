@@ -1,0 +1,64 @@
+﻿2026-04-09T10:00:47.4737590Z Prepare all required actions
+2026-04-09T10:00:47.4993498Z ##[group]Run ./.github/actions/bootstrap-buildkit
+2026-04-09T10:00:47.4994465Z with:
+2026-04-09T10:00:47.4995062Z   builder_name: b-24182595453-1
+2026-04-09T10:00:47.4995863Z   skip_bootstrap: true
+2026-04-09T10:00:47.4996608Z   use_runner_docker_builder: false
+2026-04-09T10:00:47.4997390Z   ephemeral_storage: 400Gi
+2026-04-09T10:00:47.4998168Z   namespace: buildkit
+2026-04-09T10:00:47.4998940Z   replicas: 1
+2026-04-09T10:00:47.4999582Z   requests_cpu: 12
+2026-04-09T10:00:47.5000224Z   requests_memory: 26Gi
+2026-04-09T10:00:47.5000933Z   limits_memory: 29Gi
+2026-04-09T10:00:47.5002051Z   tolerations: key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule
+2026-04-09T10:00:47.5003337Z   fresh_builder: false
+2026-04-09T10:00:47.5004048Z ##[endgroup]
+2026-04-09T10:00:47.5119944Z ##[group]Run docker buildx version
+2026-04-09T10:00:47.5121152Z [36;1mdocker buildx version[0m
+2026-04-09T10:00:47.5155047Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T10:00:47.5156395Z ##[endgroup]
+2026-04-09T10:00:47.7002285Z github.com/docker/buildx v0.31.1 a2675950d46b2cb171b23c2015ca44fb88607531
+2026-04-09T10:00:47.7333832Z ##[group]Run if [[ "false" != "true" ]] && docker buildx inspect b-24182595453-1 > /dev/null 2>&1; then
+2026-04-09T10:00:47.7336051Z [36;1mif [[ "false" != "true" ]] && docker buildx inspect b-24182595453-1 > /dev/null 2>&1; then[0m
+2026-04-09T10:00:47.7337918Z [36;1m    echo "✅ Builder 'b-24182595453-1' already exists. Skipping creation."[0m
+2026-04-09T10:00:47.7339709Z [36;1melse[0m
+2026-04-09T10:00:47.7341270Z [36;1m  if [[ "false" == "true" ]] && docker buildx inspect b-24182595453-1 > /dev/null 2>&1; then[0m
+2026-04-09T10:00:47.7343088Z [36;1m    echo "🔄 Forcing fresh K8s builder: removing existing 'b-24182595453-1'."[0m
+2026-04-09T10:00:47.7344537Z [36;1m    docker buildx rm b-24182595453-1 || true[0m
+2026-04-09T10:00:47.7345561Z [36;1m  fi[0m
+2026-04-09T10:00:47.7346456Z [36;1m  echo "🔨 Creating K8s builder 'b-24182595453-1'."[0m
+2026-04-09T10:00:47.7348254Z [36;1m  docker buildx create --use --name b-24182595453-1 --driver kubernetes --platform=linux/amd64 \[0m
+2026-04-09T10:00:47.7350084Z [36;1m  '--driver-opt=requests.ephemeral-storage=400Gi' \[0m
+2026-04-09T10:00:47.7351332Z [36;1m  '--driver-opt=namespace=buildkit' \[0m
+2026-04-09T10:00:47.7352444Z [36;1m  '--driver-opt=loadbalance=sticky' \[0m
+2026-04-09T10:00:47.7353458Z [36;1m  '--driver-opt=replicas=1' \[0m
+2026-04-09T10:00:47.7354737Z [36;1m  '--driver-opt=requests.cpu=12' \[0m
+2026-04-09T10:00:47.7355798Z [36;1m  '--driver-opt=requests.memory=26Gi' \[0m
+2026-04-09T10:00:47.7356956Z [36;1m  '--driver-opt=limits.memory=29Gi' \[0m
+2026-04-09T10:00:47.7358598Z [36;1m  '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=dynamo-builder-fallback"' \[0m
+2026-04-09T10:00:47.7361320Z [36;1m  '--driver-opt="tolerations=key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"'[0m
+2026-04-09T10:00:47.7363073Z [36;1m[0m
+2026-04-09T10:00:47.7364419Z [36;1m  docker buildx create --append --name b-24182595453-1 --driver kubernetes --platform=linux/arm64 \[0m
+2026-04-09T10:00:47.7366297Z [36;1m  '--driver-opt=requests.ephemeral-storage=400Gi' \[0m
+2026-04-09T10:00:47.7367530Z [36;1m  '--driver-opt=namespace=buildkit' \[0m
+2026-04-09T10:00:47.7369395Z [36;1m  '--driver-opt=loadbalance=sticky' \[0m
+2026-04-09T10:00:47.7370486Z [36;1m  '--driver-opt=replicas=1' \[0m
+2026-04-09T10:00:47.7371475Z [36;1m  '--driver-opt=requests.cpu=12' \[0m
+2026-04-09T10:00:47.7372947Z [36;1m  '--driver-opt=requests.memory=26Gi' \[0m
+2026-04-09T10:00:47.7374068Z [36;1m  '--driver-opt=limits.memory=29Gi' \[0m
+2026-04-09T10:00:47.7375643Z [36;1m  '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=dynamo-builder-fallback"' \[0m
+2026-04-09T10:00:47.7377943Z [36;1m  '--driver-opt="tolerations=key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"'[0m
+2026-04-09T10:00:47.7379856Z [36;1mfi[0m
+2026-04-09T10:00:47.7381040Z [36;1msleep 3 # Give the builders some time to be ready[0m
+2026-04-09T10:00:47.7382095Z [36;1m[0m
+2026-04-09T10:00:47.7382990Z [36;1mif [[ "true" != "true" && "false" != "true" ]]; then[0m
+2026-04-09T10:00:47.7384465Z [36;1m  echo "::warning::Build is using fallback pod. Please alert the ops team."[0m
+2026-04-09T10:00:47.7386001Z [36;1m  echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY[0m
+2026-04-09T10:00:47.7387848Z [36;1m  echo "This build is running on a **fallback pod**. Please alert the ops team." >> $GITHUB_STEP_SUMMARY[0m
+2026-04-09T10:00:47.7389787Z [36;1m  echo "" >> $GITHUB_STEP_SUMMARY[0m
+2026-04-09T10:00:47.7390818Z [36;1mfi[0m
+2026-04-09T10:00:47.7417257Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T10:00:47.7418390Z ##[endgroup]
+2026-04-09T10:00:47.9642162Z 🔨 Creating K8s builder 'b-24182595453-1'.
+2026-04-09T10:00:48.1577093Z b-24182595453-1
+2026-04-09T10:00:48.3585937Z b-24182595453-1

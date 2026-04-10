@@ -1,0 +1,49 @@
+﻿2026-04-09T09:22:07.6384879Z Current runner version: '2.333.1'
+2026-04-09T09:22:07.6393528Z Runner name: 'gnr816789'
+2026-04-09T09:22:07.6394481Z Runner group name: 'Default'
+2026-04-09T09:22:07.6395485Z Machine name: 'gnr816789'
+2026-04-09T09:22:07.6398203Z ##[group]GITHUB_TOKEN Permissions
+2026-04-09T09:22:07.6401515Z Contents: read
+2026-04-09T09:22:07.6402114Z Metadata: read
+2026-04-09T09:22:07.6402649Z ##[endgroup]
+2026-04-09T09:22:07.6405659Z Secret source: Actions
+2026-04-09T09:22:07.6406814Z Prepare workflow directory
+2026-04-09T09:22:07.7149787Z Prepare all required actions
+2026-04-09T09:22:07.7188746Z Getting action download info
+2026-04-09T09:22:08.1925513Z Download action repository 'actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955' (SHA:08eba0b27e820071cde6df949e0beb9ba4906955)
+2026-04-09T09:22:08.7010495Z Uses: VincyZhang/dynamo/.github/workflows/build-***-distribute-flavor.yml@refs/pull/6/merge (eb0b4f8f8be9df86a608b49c419d90945f70606a)
+2026-04-09T09:22:08.7014651Z ##[group] Inputs
+2026-04-09T09:22:08.7015072Z   framework: vllm
+2026-04-09T09:22:08.7015829Z   device: xpu
+2026-04-09T09:22:08.7016233Z   builder_flavor: 
+2026-04-09T09:22:08.7017294Z   target: runtime
+2026-04-09T09:22:08.7017698Z   platform: linux/amd64
+2026-04-09T09:22:08.7018129Z   cuda_version: 
+2026-04-09T09:22:08.7018897Z   cpu_only: false
+2026-04-09T09:22:08.7019729Z   build_timeout_minutes: 120
+2026-04-09T09:22:08.7020342Z   run_cpu_only_***s: false
+2026-04-09T09:22:08.7020786Z   cpu_only_***_markers: 
+2026-04-09T09:22:08.7021217Z   cpu_only_***_timeout_minutes: 10
+2026-04-09T09:22:08.7021710Z   run_single_gpu_***s: false
+2026-04-09T09:22:08.7022111Z   single_gpu_***_markers: 
+2026-04-09T09:22:08.7022572Z   single_gpu_***_timeout_minutes: 30
+2026-04-09T09:22:08.7023060Z   run_single_xpu_***s: true
+2026-04-09T09:22:08.7023645Z   single_xpu_***_markers: (pre_merge or post_merge) and vllm and (xpu_1 or xpu_2)
+2026-04-09T09:22:08.7024281Z   single_xpu_***_timeout_minutes: 120
+2026-04-09T09:22:08.7024764Z   run_multi_gpu_***s: false
+2026-04-09T09:22:08.7025239Z   multi_gpu_***_markers: 
+2026-04-09T09:22:08.7025690Z   multi_gpu_***_timeout_minutes: 30
+2026-04-09T09:22:08.7026097Z   copy_to_acr: false
+2026-04-09T09:22:08.7026502Z   copy_timeout_minutes: 20
+2026-04-09T09:22:08.7026940Z   builder_name: b-24182595453-1
+2026-04-09T09:22:08.7027373Z   extra_tags: 
+2026-04-09T09:22:08.7027730Z   build_image: true
+2026-04-09T09:22:08.7028705Z   no_cache: false
+2026-04-09T09:22:08.7029087Z   push_image: false
+2026-04-09T09:22:08.7029456Z   no_load: true
+2026-04-09T09:22:08.7029816Z   show_summary: false
+2026-04-09T09:22:08.7030201Z   make_efa: false
+2026-04-09T09:22:08.7030581Z   fresh_builder: false
+2026-04-09T09:22:08.7031124Z   use_sccache: false
+2026-04-09T09:22:08.7031501Z ##[endgroup]
+2026-04-09T09:22:08.7031924Z Complete job name: vllm-xpu / matrix / Test xpu (amd64)

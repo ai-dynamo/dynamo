@@ -4,9 +4,8 @@
 name: Nightly CI Pipeline
 
 on:
-  pull_request:
-    branches:
-      - main
+  schedule:
+    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
   workflow_dispatch:  # Allow manual triggering for testing
 
 permissions:

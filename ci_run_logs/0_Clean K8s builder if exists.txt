@@ -1,0 +1,171 @@
+﻿2026-04-09T10:00:44.9721266Z Current runner version: '2.333.1'
+2026-04-09T10:00:44.9726403Z Runner name: 'gnr816789-2'
+2026-04-09T10:00:44.9726950Z Runner group name: 'Default'
+2026-04-09T10:00:44.9727677Z Machine name: 'gnr816789'
+2026-04-09T10:00:44.9729577Z ##[group]GITHUB_TOKEN Permissions
+2026-04-09T10:00:44.9731778Z Contents: read
+2026-04-09T10:00:44.9732178Z Metadata: read
+2026-04-09T10:00:44.9732586Z ##[endgroup]
+2026-04-09T10:00:44.9734441Z Secret source: Actions
+2026-04-09T10:00:44.9734915Z Prepare workflow directory
+2026-04-09T10:00:45.0129611Z Prepare all required actions
+2026-04-09T10:00:45.0164187Z Getting action download info
+2026-04-09T10:00:45.4393748Z Download action repository 'actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955' (SHA:08eba0b27e820071cde6df949e0beb9ba4906955)
+2026-04-09T10:00:45.9970244Z Complete job name: Clean K8s builder if exists
+2026-04-09T10:00:46.3894889Z ##[group]Run actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+2026-04-09T10:00:46.3895982Z with:
+2026-04-09T10:00:46.3896478Z   repository: VincyZhang/dynamo
+2026-04-09T10:00:46.3897379Z   token: ***
+2026-04-09T10:00:46.3897842Z   ssh-strict: true
+2026-04-09T10:00:46.3898240Z   ssh-user: git
+2026-04-09T10:00:46.3898807Z   persist-credentials: true
+2026-04-09T10:00:46.3899278Z   clean: true
+2026-04-09T10:00:46.3899710Z   sparse-checkout-cone-mode: true
+2026-04-09T10:00:46.3900163Z   fetch-depth: 1
+2026-04-09T10:00:46.3900596Z   fetch-tags: false
+2026-04-09T10:00:46.3900985Z   show-progress: true
+2026-04-09T10:00:46.3901418Z   lfs: false
+2026-04-09T10:00:46.3901849Z   submodules: false
+2026-04-09T10:00:46.3902261Z   set-safe-directory: true
+2026-04-09T10:00:46.3902881Z ##[endgroup]
+2026-04-09T10:00:46.5121165Z Syncing repository: VincyZhang/dynamo
+2026-04-09T10:00:46.5123163Z ##[group]Getting Git version info
+2026-04-09T10:00:46.5124091Z Working directory is '/home/sdp/actions-runner2/_work/dynamo/dynamo'
+2026-04-09T10:00:46.5125162Z [command]/usr/bin/git version
+2026-04-09T10:00:46.5125783Z git version 2.43.0
+2026-04-09T10:00:46.5127270Z ##[endgroup]
+2026-04-09T10:00:46.5131984Z Copying '/home/sdp/.gitconfig' to '/home/sdp/actions-runner2/_work/_temp/cb292a79-61fe-4e15-83a4-e0c9c61a322b/.gitconfig'
+2026-04-09T10:00:46.5133366Z Temporarily overriding HOME='/home/sdp/actions-runner2/_work/_temp/cb292a79-61fe-4e15-83a4-e0c9c61a322b' before making global git config changes
+2026-04-09T10:00:46.5134596Z Adding repository directory to the temporary git global config as a safe directory
+2026-04-09T10:00:46.5135706Z [command]/usr/bin/git config --global --add safe.directory /home/sdp/actions-runner2/_work/dynamo/dynamo
+2026-04-09T10:00:46.5196327Z [command]/usr/bin/git config --local --get remote.origin.url
+2026-04-09T10:00:46.5252037Z https://github.com/VincyZhang/dynamo
+2026-04-09T10:00:46.5279041Z ##[group]Removing previously created refs, to avoid conflicts
+2026-04-09T10:00:46.5282327Z [command]/usr/bin/git rev-parse --symbolic-full-name --verify --quiet HEAD
+2026-04-09T10:00:46.5310646Z HEAD
+2026-04-09T10:00:46.5362695Z ##[endgroup]
+2026-04-09T10:00:46.5363820Z [command]/usr/bin/git submodule status
+2026-04-09T10:00:46.6051285Z ##[group]Cleaning the repository
+2026-04-09T10:00:46.6052747Z [command]/usr/bin/git clean -ffdx
+2026-04-09T10:00:46.6250213Z [command]/usr/bin/git reset --hard HEAD
+2026-04-09T10:00:46.6444285Z HEAD is now at 638942d Merge a011a5749367fccc14c31a69e2e372520b6d6034 into 2aed48e18c1a725a11f350ed04b5b172ce93ac4d
+2026-04-09T10:00:46.6451462Z ##[endgroup]
+2026-04-09T10:00:46.6453722Z ##[group]Disabling automatic garbage collection
+2026-04-09T10:00:46.6455941Z [command]/usr/bin/git config --local gc.auto 0
+2026-04-09T10:00:46.6508047Z ##[endgroup]
+2026-04-09T10:00:46.6512016Z ##[group]Setting up auth
+2026-04-09T10:00:46.6515165Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-04-09T10:00:46.6560139Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-04-09T10:00:46.7233274Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-04-09T10:00:46.7314126Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-04-09T10:00:46.7979129Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-04-09T10:00:46.8089745Z ##[endgroup]
+2026-04-09T10:00:46.8093395Z ##[group]Fetching the repository
+2026-04-09T10:00:46.8100599Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +eb0b4f8f8be9df86a608b49c419d90945f70606a:refs/remotes/pull/6/merge
+2026-04-09T10:00:47.2121103Z From https://github.com/VincyZhang/dynamo
+2026-04-09T10:00:47.2125693Z  + 638942d...eb0b4f8 eb0b4f8f8be9df86a608b49c419d90945f70606a -> pull/6/merge  (forced update)
+2026-04-09T10:00:47.2155461Z ##[endgroup]
+2026-04-09T10:00:47.2156542Z ##[group]Determining the checkout info
+2026-04-09T10:00:47.2157916Z ##[endgroup]
+2026-04-09T10:00:47.2176372Z [command]/usr/bin/git sparse-checkout disable
+2026-04-09T10:00:47.2256711Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-04-09T10:00:47.2338715Z ##[group]Checking out the ref
+2026-04-09T10:00:47.2340608Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/6/merge
+2026-04-09T10:00:47.2571775Z Warning: you are leaving 1 commit behind, not connected to
+2026-04-09T10:00:47.2573456Z any of your branches:
+2026-04-09T10:00:47.2574100Z 
+2026-04-09T10:00:47.2575073Z   638942d Merge a011a5749367fccc14c31a69e2e372520b6d6034 into 2aed48e18c1a725a11f350ed04b5b172ce93ac4d
+2026-04-09T10:00:47.2576275Z 
+2026-04-09T10:00:47.2577131Z If you want to keep it by creating a new branch, this may be a good time
+2026-04-09T10:00:47.2578293Z to do so with:
+2026-04-09T10:00:47.2578863Z 
+2026-04-09T10:00:47.2579286Z  git branch <new-branch-name> 638942d
+2026-04-09T10:00:47.2579992Z 
+2026-04-09T10:00:47.2736812Z HEAD is now at eb0b4f8 Merge c36d9942cae7420120b42a2aa3c77964405680f8 into 2aed48e18c1a725a11f350ed04b5b172ce93ac4d
+2026-04-09T10:00:47.3950763Z ##[endgroup]
+2026-04-09T10:00:47.4045618Z [command]/usr/bin/git log -1 --format=%H
+2026-04-09T10:00:47.4112666Z eb0b4f8f8be9df86a608b49c419d90945f70606a
+2026-04-09T10:00:47.4737631Z Prepare all required actions
+2026-04-09T10:00:47.4993538Z ##[group]Run ./.github/actions/bootstrap-buildkit
+2026-04-09T10:00:47.4994469Z with:
+2026-04-09T10:00:47.4995120Z   builder_name: b-24182595453-1
+2026-04-09T10:00:47.4995867Z   skip_bootstrap: true
+2026-04-09T10:00:47.4996610Z   use_runner_docker_builder: false
+2026-04-09T10:00:47.4997392Z   ephemeral_storage: 400Gi
+2026-04-09T10:00:47.4998173Z   namespace: buildkit
+2026-04-09T10:00:47.4998944Z   replicas: 1
+2026-04-09T10:00:47.4999585Z   requests_cpu: 12
+2026-04-09T10:00:47.5000227Z   requests_memory: 26Gi
+2026-04-09T10:00:47.5000936Z   limits_memory: 29Gi
+2026-04-09T10:00:47.5002055Z   tolerations: key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule
+2026-04-09T10:00:47.5003339Z   fresh_builder: false
+2026-04-09T10:00:47.5004052Z ##[endgroup]
+2026-04-09T10:00:47.5120006Z ##[group]Run docker buildx version
+2026-04-09T10:00:47.5121157Z [36;1mdocker buildx version[0m
+2026-04-09T10:00:47.5155427Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T10:00:47.5156399Z ##[endgroup]
+2026-04-09T10:00:47.7002444Z github.com/docker/buildx v0.31.1 a2675950d46b2cb171b23c2015ca44fb88607531
+2026-04-09T10:00:47.7333875Z ##[group]Run if [[ "false" != "true" ]] && docker buildx inspect b-24182595453-1 > /dev/null 2>&1; then
+2026-04-09T10:00:47.7336058Z [36;1mif [[ "false" != "true" ]] && docker buildx inspect b-24182595453-1 > /dev/null 2>&1; then[0m
+2026-04-09T10:00:47.7337923Z [36;1m    echo "✅ Builder 'b-24182595453-1' already exists. Skipping creation."[0m
+2026-04-09T10:00:47.7339712Z [36;1melse[0m
+2026-04-09T10:00:47.7341273Z [36;1m  if [[ "false" == "true" ]] && docker buildx inspect b-24182595453-1 > /dev/null 2>&1; then[0m
+2026-04-09T10:00:47.7343091Z [36;1m    echo "🔄 Forcing fresh K8s builder: removing existing 'b-24182595453-1'."[0m
+2026-04-09T10:00:47.7344540Z [36;1m    docker buildx rm b-24182595453-1 || true[0m
+2026-04-09T10:00:47.7345564Z [36;1m  fi[0m
+2026-04-09T10:00:47.7346500Z [36;1m  echo "🔨 Creating K8s builder 'b-24182595453-1'."[0m
+2026-04-09T10:00:47.7348257Z [36;1m  docker buildx create --use --name b-24182595453-1 --driver kubernetes --platform=linux/amd64 \[0m
+2026-04-09T10:00:47.7350087Z [36;1m  '--driver-opt=requests.ephemeral-storage=400Gi' \[0m
+2026-04-09T10:00:47.7351335Z [36;1m  '--driver-opt=namespace=buildkit' \[0m
+2026-04-09T10:00:47.7352447Z [36;1m  '--driver-opt=loadbalance=sticky' \[0m
+2026-04-09T10:00:47.7353461Z [36;1m  '--driver-opt=replicas=1' \[0m
+2026-04-09T10:00:47.7354741Z [36;1m  '--driver-opt=requests.cpu=12' \[0m
+2026-04-09T10:00:47.7355801Z [36;1m  '--driver-opt=requests.memory=26Gi' \[0m
+2026-04-09T10:00:47.7356958Z [36;1m  '--driver-opt=limits.memory=29Gi' \[0m
+2026-04-09T10:00:47.7359071Z [36;1m  '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=dynamo-builder-fallback"' \[0m
+2026-04-09T10:00:47.7361359Z [36;1m  '--driver-opt="tolerations=key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"'[0m
+2026-04-09T10:00:47.7363076Z [36;1m[0m
+2026-04-09T10:00:47.7364422Z [36;1m  docker buildx create --append --name b-24182595453-1 --driver kubernetes --platform=linux/arm64 \[0m
+2026-04-09T10:00:47.7366300Z [36;1m  '--driver-opt=requests.ephemeral-storage=400Gi' \[0m
+2026-04-09T10:00:47.7367578Z [36;1m  '--driver-opt=namespace=buildkit' \[0m
+2026-04-09T10:00:47.7369398Z [36;1m  '--driver-opt=loadbalance=sticky' \[0m
+2026-04-09T10:00:47.7370488Z [36;1m  '--driver-opt=replicas=1' \[0m
+2026-04-09T10:00:47.7371478Z [36;1m  '--driver-opt=requests.cpu=12' \[0m
+2026-04-09T10:00:47.7372949Z [36;1m  '--driver-opt=requests.memory=26Gi' \[0m
+2026-04-09T10:00:47.7374070Z [36;1m  '--driver-opt=limits.memory=29Gi' \[0m
+2026-04-09T10:00:47.7375647Z [36;1m  '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=dynamo-builder-fallback"' \[0m
+2026-04-09T10:00:47.7377946Z [36;1m  '--driver-opt="tolerations=key=buildkit-fallback-worker,value=true,operator=Equal,effect=NoSchedule"'[0m
+2026-04-09T10:00:47.7380138Z [36;1mfi[0m
+2026-04-09T10:00:47.7381043Z [36;1msleep 3 # Give the builders some time to be ready[0m
+2026-04-09T10:00:47.7382099Z [36;1m[0m
+2026-04-09T10:00:47.7382993Z [36;1mif [[ "true" != "true" && "false" != "true" ]]; then[0m
+2026-04-09T10:00:47.7384469Z [36;1m  echo "::warning::Build is using fallback pod. Please alert the ops team."[0m
+2026-04-09T10:00:47.7386005Z [36;1m  echo "## ⚠️ Fallback Build Warning" >> $GITHUB_STEP_SUMMARY[0m
+2026-04-09T10:00:47.7387852Z [36;1m  echo "This build is running on a **fallback pod**. Please alert the ops team." >> $GITHUB_STEP_SUMMARY[0m
+2026-04-09T10:00:47.7389791Z [36;1m  echo "" >> $GITHUB_STEP_SUMMARY[0m
+2026-04-09T10:00:47.7390821Z [36;1mfi[0m
+2026-04-09T10:00:47.7417266Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T10:00:47.7418394Z ##[endgroup]
+2026-04-09T10:00:47.9642294Z 🔨 Creating K8s builder 'b-24182595453-1'.
+2026-04-09T10:00:48.1577517Z b-24182595453-1
+2026-04-09T10:00:48.3586050Z b-24182595453-1
+2026-04-09T10:00:51.3848122Z ##[group]Run docker buildx rm b-24182595453-1 || true
+2026-04-09T10:00:51.3848971Z [36;1mdocker buildx rm b-24182595453-1 || true[0m
+2026-04-09T10:00:51.3879573Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-04-09T10:00:51.3879934Z ##[endgroup]
+2026-04-09T10:00:51.5699021Z b-24182595453-1 removed
+2026-04-09T10:00:51.5967817Z Post job cleanup.
+2026-04-09T10:00:51.6950447Z [command]/usr/bin/git version
+2026-04-09T10:00:51.7015817Z git version 2.43.0
+2026-04-09T10:00:51.7047018Z Copying '/home/sdp/.gitconfig' to '/home/sdp/actions-runner2/_work/_temp/25faa15e-83c8-4b03-94ec-2f20fe099bcc/.gitconfig'
+2026-04-09T10:00:51.7069654Z Temporarily overriding HOME='/home/sdp/actions-runner2/_work/_temp/25faa15e-83c8-4b03-94ec-2f20fe099bcc' before making global git config changes
+2026-04-09T10:00:51.7073012Z Adding repository directory to the temporary git global config as a safe directory
+2026-04-09T10:00:51.7086107Z [command]/usr/bin/git config --global --add safe.directory /home/sdp/actions-runner2/_work/dynamo/dynamo
+2026-04-09T10:00:51.7155604Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-04-09T10:00:51.7218923Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-04-09T10:00:51.7740263Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-04-09T10:00:51.7795174Z http.https://github.com/.extraheader
+2026-04-09T10:00:51.7809570Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+2026-04-09T10:00:51.7859259Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-04-09T10:00:51.8617741Z Cleaning up orphan processes
+2026-04-09T10:00:52.4062059Z ##[warning]Node.js 20 actions are deprecated. The following actions are running on Node.js 20 and may not work as expected: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955. Actions will be forced to run with Node.js 24 by default starting June 2nd, 2026. Node.js 20 will be removed from the runner on September 16th, 2026. Please check if updated versions of these actions are available that support Node.js 24. To opt into Node.js 24 now, set the FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true environment variable on the runner or in your workflow file. Once Node.js 24 becomes the default, you can temporarily opt out by setting ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

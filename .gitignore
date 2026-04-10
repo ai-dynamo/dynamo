@@ -1,9 +1,6 @@
 .idea
 .vs/
 .vscode/
-ci_run*_logs/
-ci_run*_logs.zip
-.github/copilot-instructions.md
 .helix
 issues/
 plans/

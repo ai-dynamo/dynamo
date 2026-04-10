@@ -1,0 +1,4 @@
+2026-04-09T07:40:32.7720000Z Evaluating deploy-cleanup.if
+2026-04-09T07:40:32.7720000Z Evaluating: (success() && (false))
+2026-04-09T07:40:32.7720000Z Expanded: (false && false)
+2026-04-09T07:40:32.7720000Z Result: false
