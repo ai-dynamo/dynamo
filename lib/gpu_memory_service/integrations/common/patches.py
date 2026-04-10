@@ -38,7 +38,7 @@ def patch_empty_cache() -> None:
             for mapping in manager.mappings.values()
             if mapping.handle != 0
         )
-        if active_mapping_count > 0:
+        if active_mapping_count:
             logger.warning(
                 "[GMS] Skipping torch.cuda.empty_cache() - %d active GMS mappings",
                 active_mapping_count,
