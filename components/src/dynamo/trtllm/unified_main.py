@@ -10,7 +10,7 @@ See dynamo/common/backend/README.md for architecture, response contract,
 and feature gap details.
 """
 
-from dynamo.common.backend.main import run
+from dynamo.common.backend.run import run
 from dynamo.trtllm.llm_engine import TrtllmLLMEngine
 
 

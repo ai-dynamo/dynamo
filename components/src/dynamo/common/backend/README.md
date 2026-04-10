@@ -61,7 +61,7 @@ python -m dynamo.trtllm.unified_main --model Qwen/Qwen3-0.6B ...
 ```
 
 Each `unified_main.py` calls `run(MyLLMEngine)` from the common
-`main.py` module.
+`run.py` module.
 
 ## Implementing a New Engine
 
@@ -115,7 +115,7 @@ Then create an entry point:
 
 ```python
 # my_backend/unified_main.py
-from dynamo.common.backend.main import run
+from dynamo.common.backend.run import run
 from my_backend.llm_engine import MyEngine
 
 def main():
@@ -225,7 +225,7 @@ common/backend/
                          #   DynamoBackend, BackendConfig
     engine.py            # LLMEngine ABC + EngineConfig dataclass
     worker.py            # DynamoBackend + BackendConfig
-    main.py              # Common entry point: run(engine_cls)
+    run.py               # Common entry point: run(engine_cls)
     sample_engine.py     # SampleLLMEngine (reference impl)
     sample_main.py       # Entry point for sample engine
 

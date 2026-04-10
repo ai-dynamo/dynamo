@@ -108,7 +108,7 @@ Standardize on:
 |------|-------------|
 | `engine.py` | `LLMEngine` ABC -- the only interface engines must implement |
 | `worker.py` | `DynamoBackend` -- runtime lifecycle: create runtime, register model, serve endpoint, cleanup |
-| `main.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
+| `run.py` | Common entry point -- `run(engine_cls)` used by all `unified_main.py` files |
 | `sample_engine.py` | Reference engine -- use as template and for testing |
 | `../engine_utils/request.py` | `normalize_request_format()` -- call this at the top of `generate()` if your engine receives both OpenAI and internal protocol formats |
 | `../engine_utils/response.py` | `build_completion_usage()`, `normalize_finish_reason()` -- use these to build response dicts |

@@ -7,7 +7,7 @@ Usage:
     python -m dynamo.common.backend.sample_main --model-name test-model
 """
 
-from dynamo.common.backend.main import run
+from dynamo.common.backend.run import run
 from dynamo.common.backend.sample_engine import SampleLLMEngine
 
 
