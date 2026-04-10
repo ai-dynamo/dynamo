@@ -133,7 +133,7 @@ The migration system exposes Prometheus metrics to monitor migration activity. T
     - `model`: The model name being served
 
 **Example metrics output:**
-```
+```text
 dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 3
 dynamo_frontend_model_migration_total{migration_type="new_request",model="Qwen/Qwen3-0.6B"} 1
 dynamo_frontend_model_migration_max_seq_len_exceeded_total{model="Qwen/Qwen3-0.6B"} 2

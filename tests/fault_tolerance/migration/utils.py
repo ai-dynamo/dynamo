@@ -3,6 +3,7 @@
 
 import json
 import logging
+import re
 import threading
 import time
 
@@ -470,8 +471,6 @@ def _parse_migration_metric(
     Returns:
         The metric count, or 0 if not found
     """
-    import re
-
     # Match pattern like:
     # dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 1
     # Labels can be in any order
@@ -500,8 +499,6 @@ def _parse_migration_max_seq_len_exceeded_metric(
     Returns:
         The metric count, or 0 if not found
     """
-    import re
-
     pattern = rf'dynamo_frontend_model_migration_max_seq_len_exceeded_total\{{[^}}]*model="{re.escape(model_name)}"[^}}]*\}}\s+(\d+)'
     match = re.search(pattern, metrics_text)
     return int(match.group(1)) if match else 0

@@ -313,7 +313,7 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help=(
                 "Maximum sequence length (prompt + generated tokens) for migration state tracking. "
-                "Once the accumulated token count reaches this limit, the request becomes "
+                "Once the accumulated token count exceeds this limit, the request becomes "
                 "non-migratable. Prevents unbounded memory growth from caching long sequences. "
                 "Default: no limit."
             ),
