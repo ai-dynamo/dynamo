@@ -10,7 +10,7 @@ from dynamo.llm import MockEngineArgs, ModelRuntimeConfig, ReasoningConfig, Sgla
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_SEQS = 256
-_DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
+_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 
 
 def _parse_reasoning_config(reasoning_json: str | None) -> ReasoningConfig | None:

@@ -252,8 +252,8 @@ pub struct MockEngineArgs {
     #[validate(range(min = 1))]
     pub max_num_seqs: Option<usize>,
 
-    // default for open api server, for llm class it's 16384
-    #[builder(default = Some(8192))]
+    // default for recent vLLM versions
+    #[builder(default = Some(2048))]
     #[validate(range(min = 1))]
     pub max_num_batched_tokens: Option<usize>,
 

@@ -76,7 +76,7 @@ python -m dynamo.mocker \
 | `--num-gpu-blocks-override` | 16384 | Number of KV cache blocks |
 | `--block-size` | 64 (`vllm`) / engine-specific | Tokens per KV cache block. For `sglang`, if omitted, the effective page/block size defaults to 1 or to `--sglang-page-size` when provided |
 | `--max-num-seqs` | 256 | Maximum concurrent sequences |
-| `--max-num-batched-tokens` | 8192 | Maximum tokens per batch |
+| `--max-num-batched-tokens` | 2048 | Maximum tokens per batch |
 | `--enable-prefix-caching` | True | Enable prefix caching |
 | `--no-enable-prefix-caching` | - | Disable prefix caching |
 | `--enable-chunked-prefill` | True | Enable chunked prefill |
