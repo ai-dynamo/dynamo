@@ -173,7 +173,7 @@ pub struct DistributedTraceContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub x_request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub x_dynamo_request_id: Option<String>,
+    pub request_id: Option<String>,
 }
 
 /// Pending context data collected in on_new_span, to be finalized in on_enter
@@ -184,7 +184,7 @@ struct PendingDistributedTraceContext {
     parent_id: Option<String>,
     tracestate: Option<String>,
     x_request_id: Option<String>,
-    x_dynamo_request_id: Option<String>,
+    request_id: Option<String>,
 }
 
 /// Macro to emit a tracing event at a dynamic level with a custom target.
@@ -232,7 +232,7 @@ pub struct TraceParent {
     pub parent_id: Option<String>,
     pub tracestate: Option<String>,
     pub x_request_id: Option<String>,
-    pub x_dynamo_request_id: Option<String>,
+    pub request_id: Option<String>,
 }
 
 pub trait GenericHeaders {
@@ -257,7 +257,7 @@ impl TraceParent {
         let mut parent_id = None;
         let mut tracestate = None;
         let mut x_request_id = None;
-        let mut x_dynamo_request_id = None;
+        let mut request_id = None;
 
         if let Some(header_value) = headers.get("traceparent") {
             (trace_id, parent_id) = parse_traceparent(header_value);
@@ -271,25 +271,30 @@ impl TraceParent {
             tracestate = Some(header_value.to_string());
         }
 
-        if let Some(header_value) = headers.get("x-dynamo-request-id") {
-            x_dynamo_request_id = Some(header_value.to_string());
+        // Read request-id from internal headers, with fallback to deprecated x-dynamo-request-id
+        if let Some(header_value) = headers.get("request-id") {
+            request_id = Some(header_value.to_string());
+        } else if let Some(header_value) = headers.get("x-dynamo-request-id") {
+            request_id = Some(header_value.to_string());
         }
 
-        // Validate UUID format
-        let x_dynamo_request_id =
-            x_dynamo_request_id.filter(|id| uuid::Uuid::parse_str(id).is_ok());
+        let request_id = request_id.filter(|id| uuid::Uuid::parse_str(id).is_ok());
         TraceParent {
             trace_id,
             parent_id,
             tracestate,
             x_request_id,
-            x_dynamo_request_id,
+            request_id,
         }
     }
 }
 
-// Takes Axum request and returning a span
-pub fn make_request_span<B>(req: &Request<B>) -> Span {
+/// Create a span for inference request endpoints (completions, chat, embeddings, etc.).
+///
+/// Uses `target: "request_span"` which is always allowed through the DYN_LOG filter
+/// (via `request_span=trace` directive in `filters()`). This ensures request context
+/// (request_id, model, trace_id) is always available on log events.
+pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
     let method = req.method();
     let uri = req.uri();
     let version = format!("{:?}", req.version());
@@ -297,7 +302,15 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
 
     let otel_context = extract_otel_context_from_http_headers(req.headers());
 
+    // Ensure every inference request has a request_id on the span.
+    // This is the single source of truth — workers and get_or_create_request_id
+    // read it back via DistributedTraceIdLayer.
+    let request_id = trace_parent
+        .request_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
     let span = tracing::info_span!(
+            target: "request_span",
         "http-request",
         method = %method,
         uri = %uri,
@@ -305,7 +318,58 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
         trace_id = trace_parent.trace_id,
         parent_id = trace_parent.parent_id,
         x_request_id = trace_parent.x_request_id,
-        x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+        request_id = %request_id,
+        model = tracing::field::Empty,
+        input_tokens = tracing::field::Empty,
+        output_tokens = tracing::field::Empty,
+        ttft_ms = tracing::field::Empty,
+        avg_itl_ms = tracing::field::Empty,
+        prefill_worker_id = tracing::field::Empty,
+        decode_worker_id = tracing::field::Empty,
+    );
+
+    if let Some(context) = otel_context {
+        let _ = span.set_parent(context);
+    }
+
+    span
+}
+
+/// Create a span for system endpoints (health, metrics, models, engine, loras, etc.).
+///
+/// Same structure as `make_inference_request_span` but uses `target: "system_span"`
+/// which follows normal DYN_LOG filtering (debug level by default). The inference
+/// span target `request_span` is always-on via a `request_span=trace` directive;
+/// system spans are not, keeping high-frequency polling endpoints quiet.
+pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
+    let method = req.method();
+    let uri = req.uri();
+    let version = format!("{:?}", req.version());
+    let trace_parent = TraceParent::from_headers(req.headers());
+    let otel_context = extract_otel_context_from_http_headers(req.headers());
+
+    // Ensure every system request has a request_id on the span.
+    let request_id = trace_parent
+        .request_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let span = tracing::debug_span!(
+        target: "system_span",
+        "http-request",
+        method = %method,
+        uri = %uri,
+        version = %version,
+        trace_id = trace_parent.trace_id,
+        parent_id = trace_parent.parent_id,
+        x_request_id = trace_parent.x_request_id,
+        request_id = %request_id,
+        model = tracing::field::Empty,
+        input_tokens = tracing::field::Empty,
+        output_tokens = tracing::field::Empty,
+        ttft_ms = tracing::field::Empty,
+        avg_itl_ms = tracing::field::Empty,
+        prefill_worker_id = tracing::field::Empty,
+        decode_worker_id = tracing::field::Empty,
     );
 
     if let Some(context) = otel_context {
@@ -364,11 +428,12 @@ pub fn make_handle_payload_span(
 
     if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
         let span = tracing::info_span!(
+            target: "request_span",
             "handle_payload",
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
             x_request_id = trace_parent.x_request_id,
-            x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+            request_id = trace_parent.request_id,
             tracestate = trace_parent.tracestate,
             component = component,
             endpoint = endpoint,
@@ -382,9 +447,10 @@ pub fn make_handle_payload_span(
         span
     } else {
         tracing::info_span!(
+            target: "request_span",
             "handle_payload",
             x_request_id = trace_parent.x_request_id,
-            x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+            request_id = trace_parent.request_id,
             tracestate = trace_parent.tracestate,
             component = component,
             endpoint = endpoint,
@@ -404,16 +470,21 @@ pub fn make_handle_payload_span_from_tcp_headers(
 ) -> Span {
     let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_tcp_headers(headers);
     let x_request_id = headers.get("x-request-id").cloned();
-    let x_dynamo_request_id = headers.get("x-dynamo-request-id").cloned();
+    let request_id = headers
+        .get("request-id")
+        .or_else(|| headers.get("x-dynamo-request-id"))
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .cloned();
     let tracestate = headers.get("tracestate").cloned();
 
     if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
         let span = tracing::info_span!(
+            target: "request_span",
             "handle_payload",
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
             x_request_id = x_request_id,
-            x_dynamo_request_id = x_dynamo_request_id,
+            request_id = request_id,
             tracestate = tracestate,
             component = component,
             endpoint = endpoint,
@@ -427,9 +498,10 @@ pub fn make_handle_payload_span_from_tcp_headers(
         span
     } else {
         tracing::info_span!(
+            target: "request_span",
             "handle_payload",
             x_request_id = x_request_id,
-            x_dynamo_request_id = x_dynamo_request_id,
+            request_id = request_id,
             tracestate = tracestate,
             component = component,
             endpoint = endpoint,
@@ -565,8 +637,8 @@ pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<Str
         if let Some(x_request_id) = trace_context.x_request_id {
             headers.insert("x-request-id".to_string(), x_request_id);
         }
-        if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
-            headers.insert("x-dynamo-request-id".to_string(), x_dynamo_request_id);
+        if let Some(request_id) = trace_context.request_id {
+            headers.insert("request-id".to_string(), request_id);
         }
     }
 }
@@ -598,8 +670,6 @@ pub fn make_client_request_span(
                 trace_id = ctx.trace_id.as_str(),
                 parent_id = ctx.span_id.as_str(),
                 x_request_id = ctx.x_request_id.as_deref(),
-                x_dynamo_request_id = ctx.x_dynamo_request_id.as_deref(),
-                // tracestate = ctx.tracestate.as_deref(),
             )
         } else {
             tracing::info_span!(
@@ -609,8 +679,6 @@ pub fn make_client_request_span(
                 trace_id = ctx.trace_id.as_str(),
                 parent_id = ctx.span_id.as_str(),
                 x_request_id = ctx.x_request_id.as_deref(),
-                x_dynamo_request_id = ctx.x_dynamo_request_id.as_deref(),
-                // tracestate = ctx.tracestate.as_deref(),
             )
         };
 
@@ -677,7 +745,7 @@ where
             let mut parent_id: Option<String> = None;
             let mut span_id: Option<String> = None;
             let mut x_request_id: Option<String> = None;
-            let mut x_dynamo_request_id: Option<String> = None;
+            let mut request_id: Option<String> = None;
             let mut tracestate: Option<String> = None;
             let mut visitor = FieldVisitor::default();
             attrs.record(&mut visitor);
@@ -719,9 +787,11 @@ where
                 x_request_id = Some(x_request_id_input.to_string());
             }
 
-            // Extract x_dynamo_request_id
-            if let Some(x_request_id_input) = visitor.fields.get("x_dynamo_request_id") {
-                x_dynamo_request_id = Some(x_request_id_input.to_string());
+            // Extract request_id (with backward compat for x_dynamo_request_id)
+            if let Some(request_id_input) = visitor.fields.get("request_id") {
+                request_id = Some(request_id_input.to_string());
+            } else if let Some(x_request_id_input) = visitor.fields.get("x_dynamo_request_id") {
+                request_id = Some(x_request_id_input.to_string());
             }
 
             // Inherit trace context from parent span if available
@@ -734,6 +804,12 @@ where
                     trace_id = Some(parent_tracing_context.trace_id.clone());
                     parent_id = Some(parent_tracing_context.span_id.clone());
                     tracestate = parent_tracing_context.tracestate.clone();
+                    if x_request_id.is_none() {
+                        x_request_id = parent_tracing_context.x_request_id.clone();
+                    }
+                    if request_id.is_none() {
+                        request_id = parent_tracing_context.request_id.clone();
+                    }
                 }
             }
 
@@ -753,7 +829,7 @@ where
                 parent_id,
                 tracestate,
                 x_request_id,
-                x_dynamo_request_id,
+                request_id,
             });
         }
     }
@@ -786,7 +862,7 @@ where
             let parent_id = pending.parent_id;
             let tracestate = pending.tracestate;
             let x_request_id = pending.x_request_id;
-            let x_dynamo_request_id = pending.x_dynamo_request_id;
+            let request_id = pending.request_id;
 
             // Try to extract from OtelData if not already set
             // Need to drop extensions_mut to get immutable borrow for OtelData
@@ -838,7 +914,7 @@ where
                 start: Some(Instant::now()),
                 end: None,
                 x_request_id,
-                x_dynamo_request_id,
+                request_id,
             });
 
             drop(extensions);
@@ -879,7 +955,7 @@ pub fn init() {
 }
 
 #[cfg(feature = "tokio-console")]
-fn setup_logging() {
+fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
         .with_default_env()
         .server_addr(([0, 0, 0, 0], console_subscriber::Server::DEFAULT_PORT))
@@ -897,6 +973,7 @@ fn setup_logging() {
         .with(l)
         .with(tokio_console_layer.with_filter(tokio_console_target))
         .init();
+    Ok(())
 }
 
 #[cfg(not(feature = "tokio-console"))]
@@ -1042,6 +1119,12 @@ fn filters(config: LoggingConfig) -> EnvFilter {
     if span_events_enabled() {
         filter_layer = filter_layer.add_directive("span_event=trace".parse().unwrap());
     }
+
+    // Always allow infrastructure request spans regardless of DYN_LOG level.
+    // This ensures request context (request_id, model, trace_id) is always
+    // available on log events, even when DYN_LOG=error or DYN_LOG=warn.
+    // Can be overridden via DYN_LOG=request_span=<level> if needed.
+    filter_layer = filter_layer.add_directive("request_span=trace".parse().unwrap());
 
     filter_layer
 }
@@ -1269,14 +1352,16 @@ where
                     visitor.fields.remove("x_request_id");
                 }
 
-                if let Some(x_dynamo_request_id) = tracing_context.x_dynamo_request_id.clone() {
+                if let Some(request_id) = tracing_context.request_id.clone() {
                     visitor.fields.insert(
-                        "x_dynamo_request_id".to_string(),
-                        serde_json::Value::String(x_dynamo_request_id),
+                        "request_id".to_string(),
+                        serde_json::Value::String(request_id),
                     );
                 } else {
-                    visitor.fields.remove("x_dynamo_request_id");
+                    visitor.fields.remove("request_id");
                 }
+                // Remove old field name if present
+                visitor.fields.remove("x_dynamo_request_id");
             } else {
                 tracing::error!(
                     "Distributed Trace Context not found, falling back to internal ids"

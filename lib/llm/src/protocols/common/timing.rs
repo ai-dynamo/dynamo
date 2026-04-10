@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
@@ -22,16 +22,12 @@ use crate::http::service::metrics::{
 };
 use crate::protocols::openai::nvext::WorkerIdInfo;
 
-/// Sentinel value indicating no worker ID has been set.
-/// We use 0 as the sentinel since valid worker IDs are non-zero lease IDs from etcd.
-const NO_WORKER_ID: u64 = 0;
-const NO_DP_RANK: u32 = u32::MAX;
-
 /// Worker type constants for Prometheus metric labels.
 /// These are stored in RequestTracker at routing time to avoid costly MDC lookups
 /// when updating per-worker metrics (TTFT, ITL).
 pub const WORKER_TYPE_PREFILL: &str = "prefill";
 pub const WORKER_TYPE_DECODE: &str = "decode";
+const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Phase of the request in disaggregated serving.
 ///
@@ -81,8 +77,8 @@ impl std::fmt::Display for RequestPhase {
 /// phase's final finish naturally overwrites the prefill phase's earlier finish.
 /// `phase` also uses a Mutex since it transitions across phases.
 ///
-/// **`AtomicU64`/`AtomicU32`:** Used for frequently updated counters (`osl_tokens`)
-/// and worker IDs/ranks where `OnceLock`'s heap overhead is unnecessary.
+/// **`AtomicU64`:** Used for frequently updated counters (`osl_tokens`) and
+/// accumulated detokenize timing, where lock-free updates are beneficial.
 #[derive(Debug)]
 pub struct RequestTracker {
     /// When the request was received (monotonic clock for duration calculations)
@@ -118,19 +114,17 @@ pub struct RequestTracker {
     /// Output sequence length in tokens - updated atomically as tokens stream back
     osl_tokens: AtomicU64,
 
-    /// Prefill worker ID (for disaggregated serving).
-    /// Uses atomic with compare-exchange for set-once semantics.
-    /// Value of 0 (NO_WORKER_ID) means not yet set.
-    prefill_worker_id: AtomicU64,
+    /// Prefill worker ID (for disaggregated serving) - set once when known.
+    prefill_worker_id: OnceLock<u64>,
 
-    /// Prefill DP rank. Value of u32::MAX (NO_DP_RANK) means not yet set.
-    prefill_dp_rank: AtomicU32,
+    /// Prefill DP rank - set once when known.
+    prefill_dp_rank: OnceLock<u32>,
 
-    /// Decode worker ID. Value of 0 (NO_WORKER_ID) means not yet set.
-    decode_worker_id: AtomicU64,
+    /// Decode worker ID - set once when known.
+    decode_worker_id: OnceLock<u64>,
 
-    /// Decode DP rank. Value of u32::MAX (NO_DP_RANK) means not yet set.
-    decode_dp_rank: AtomicU32,
+    /// Decode DP rank - set once when known.
+    decode_dp_rank: OnceLock<u32>,
 
     /// Worker type for the prefill worker ("prefill" or "decode").
     /// Stored at routing time to avoid MDC lookup when updating Prometheus metrics.
@@ -149,7 +143,7 @@ pub struct RequestTracker {
     /// Semaphore for coordinating phase transitions.
     /// Acquiring a permit blocks subsequent set_phase calls until the permit is dropped.
     /// This prevents race conditions in the bootstrap optimization path where prefill
-    /// runs in background and needs to complete record_worker_full before phase changes.
+    /// runs in background and needs to complete worker recording before phase changes.
     phase_semaphore: Arc<Semaphore>,
 
     /// How long it took to tokenize the input
@@ -185,10 +179,10 @@ impl RequestTracker {
             isl_tokens: OnceLock::new(),
             cached_tokens: OnceLock::new(),
             osl_tokens: AtomicU64::new(0),
-            prefill_worker_id: AtomicU64::new(NO_WORKER_ID),
-            prefill_dp_rank: AtomicU32::new(NO_DP_RANK),
-            decode_worker_id: AtomicU64::new(NO_WORKER_ID),
-            decode_dp_rank: AtomicU32::new(NO_DP_RANK),
+            prefill_worker_id: OnceLock::new(),
+            prefill_dp_rank: OnceLock::new(),
+            decode_worker_id: OnceLock::new(),
+            decode_dp_rank: OnceLock::new(),
             prefill_worker_type: OnceLock::new(),
             decode_worker_type: OnceLock::new(),
             phase: Mutex::new(RequestPhase::Aggregated),
@@ -220,10 +214,12 @@ impl RequestTracker {
         overlap_set && isl_set
     }
 
-    /// Record input sequence length in tokens and cached token count.
-    pub fn record_isl(&self, isl_tokens: usize, cached_tokens: usize) {
+    /// Record input sequence length in tokens and cached token count when known.
+    pub fn record_isl(&self, isl_tokens: usize, cached_tokens: Option<usize>) {
         let _ = self.isl_tokens.set(isl_tokens);
-        let _ = self.cached_tokens.set(cached_tokens);
+        if let Some(cached_tokens) = cached_tokens {
+            let _ = self.cached_tokens.set(cached_tokens);
+        }
     }
 
     pub fn isl_tokens(&self) -> Option<usize> {
@@ -321,31 +317,96 @@ impl RequestTracker {
         *self.phase.lock()
     }
 
-    /// Record worker ID, DP rank, and worker type based on the current phase.
+    fn record_once_u64(slot: &OnceLock<u64>, value: u64, field_name: &'static str) {
+        if let Some(existing) = slot.get() {
+            if *existing != value {
+                tracing::error!(
+                    field = field_name,
+                    existing = *existing,
+                    new = value,
+                    "Conflicting request tracker write"
+                );
+            }
+            return;
+        }
+        let _ = slot.set(value);
+    }
+
+    fn record_once_u32(slot: &OnceLock<u32>, value: u32, field_name: &'static str) {
+        if let Some(existing) = slot.get() {
+            if *existing != value {
+                tracing::error!(
+                    field = field_name,
+                    existing = *existing,
+                    new = value,
+                    "Conflicting request tracker write"
+                );
+            }
+            return;
+        }
+        let _ = slot.set(value);
+    }
+
+    fn record_once_worker_type(
+        slot: &OnceLock<&'static str>,
+        value: &'static str,
+        field_name: &'static str,
+    ) {
+        if let Some(existing) = slot.get() {
+            if *existing != value {
+                tracing::error!(
+                    field = field_name,
+                    existing = *existing,
+                    new = value,
+                    "Conflicting request tracker write"
+                );
+            }
+            return;
+        }
+        let _ = slot.set(value);
+    }
+
+    fn record_prefill_worker(
+        &self,
+        instance_id: u64,
+        dp_rank: Option<u32>,
+        worker_type: &'static str,
+    ) {
+        Self::record_once_u64(&self.prefill_worker_id, instance_id, "prefill_worker_id");
+        if let Some(rank) = dp_rank {
+            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank");
+        }
+        Self::record_once_worker_type(
+            &self.prefill_worker_type,
+            worker_type,
+            "prefill_worker_type",
+        );
+    }
+
+    fn record_decode_worker(
+        &self,
+        instance_id: u64,
+        dp_rank: Option<u32>,
+        worker_type: &'static str,
+    ) {
+        Self::record_once_u64(&self.decode_worker_id, instance_id, "decode_worker_id");
+        if let Some(rank) = dp_rank {
+            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank");
+        }
+        Self::record_once_worker_type(&self.decode_worker_type, worker_type, "decode_worker_type");
+    }
+
+    /// Record worker ID, optional DP rank, and worker type based on the current phase.
     ///
-    /// Each slot is written exactly once by `KvPushRouter::generate()`:
-    /// - Prefill phase: stores as prefill worker
-    /// - Decode phase: stores as decode worker
-    /// - Aggregated phase: stores as both prefill and decode worker
-    pub fn record_worker_full(&self, instance_id: u64, dp_rank: u32, worker_type: &'static str) {
+    /// Worker ID and type are recorded as soon as they are known. DP rank is recorded only
+    /// when it is concrete, allowing the unresolved rank to remain unset until later.
+    pub fn record_worker(&self, instance_id: u64, dp_rank: Option<u32>, worker_type: &'static str) {
         match self.phase() {
-            RequestPhase::Prefill => {
-                self.prefill_worker_id.store(instance_id, Ordering::Relaxed);
-                self.prefill_dp_rank.store(dp_rank, Ordering::Relaxed);
-                let _ = self.prefill_worker_type.set(worker_type);
-            }
-            RequestPhase::Decode => {
-                self.decode_worker_id.store(instance_id, Ordering::Relaxed);
-                self.decode_dp_rank.store(dp_rank, Ordering::Relaxed);
-                let _ = self.decode_worker_type.set(worker_type);
-            }
+            RequestPhase::Prefill => self.record_prefill_worker(instance_id, dp_rank, worker_type),
+            RequestPhase::Decode => self.record_decode_worker(instance_id, dp_rank, worker_type),
             RequestPhase::Aggregated => {
-                self.prefill_worker_id.store(instance_id, Ordering::Relaxed);
-                self.prefill_dp_rank.store(dp_rank, Ordering::Relaxed);
-                let _ = self.prefill_worker_type.set(worker_type);
-                self.decode_worker_id.store(instance_id, Ordering::Relaxed);
-                self.decode_dp_rank.store(dp_rank, Ordering::Relaxed);
-                let _ = self.decode_worker_type.set(worker_type);
+                self.record_prefill_worker(instance_id, dp_rank, worker_type);
+                self.record_decode_worker(instance_id, dp_rank, worker_type);
             }
         }
     }
@@ -415,26 +476,22 @@ impl RequestTracker {
 
     /// Get the decode worker ID if recorded.
     pub fn decode_worker_id(&self) -> Option<u64> {
-        let id = self.decode_worker_id.load(Ordering::SeqCst);
-        if id == NO_WORKER_ID { None } else { Some(id) }
+        self.decode_worker_id.get().copied()
     }
 
     /// Get the decode DP rank if recorded.
     pub fn decode_dp_rank(&self) -> Option<u32> {
-        let rank = self.decode_dp_rank.load(Ordering::SeqCst);
-        if rank == NO_DP_RANK { None } else { Some(rank) }
+        self.decode_dp_rank.get().copied()
     }
 
     /// Get the prefill worker ID if recorded.
     pub fn prefill_worker_id(&self) -> Option<u64> {
-        let id = self.prefill_worker_id.load(Ordering::SeqCst);
-        if id == NO_WORKER_ID { None } else { Some(id) }
+        self.prefill_worker_id.get().copied()
     }
 
     /// Get the prefill DP rank if recorded.
     pub fn prefill_dp_rank(&self) -> Option<u32> {
-        let rank = self.prefill_dp_rank.load(Ordering::SeqCst);
-        if rank == NO_DP_RANK { None } else { Some(rank) }
+        self.prefill_dp_rank.get().copied()
     }
 
     /// Get the prefill worker type if recorded.
@@ -456,7 +513,7 @@ impl RequestTracker {
         let worker_id_str = worker_id.to_string();
         let dp_rank_str = self
             .prefill_dp_rank()
-            .map_or("0".to_string(), |r| r.to_string());
+            .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
         let worker_type = self.prefill_worker_type().unwrap_or(WORKER_TYPE_PREFILL);
         let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
 
@@ -481,7 +538,7 @@ impl RequestTracker {
         let worker_id_str = worker_id.to_string();
         let dp_rank_str = self
             .decode_dp_rank()
-            .map_or("0".to_string(), |r| r.to_string());
+            .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
         let worker_type = self.decode_worker_type().unwrap_or(WORKER_TYPE_DECODE);
         let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
 
@@ -555,7 +612,7 @@ mod tests {
     fn test_record_isl_osl() {
         let tracker = RequestTracker::new();
 
-        tracker.record_isl(512, 256);
+        tracker.record_isl(512, Some(256));
         assert_eq!(tracker.isl_tokens(), Some(512));
         assert_eq!(tracker.cached_tokens(), Some(256));
 
@@ -659,7 +716,7 @@ mod tests {
     fn test_observe_first_token_gauges_no_panic_without_worker() {
         let tracker = RequestTracker::new();
         tracker.record_first_token();
-        tracker.record_isl(100, 50);
+        tracker.record_isl(100, Some(50));
         // No worker recorded — should return early without panic
         tracker.observe_first_token_gauges();
     }
@@ -677,10 +734,10 @@ mod tests {
     #[test]
     fn test_observe_first_token_gauges_with_worker() {
         let tracker = RequestTracker::new();
-        tracker.record_worker_full(42, 0, WORKER_TYPE_PREFILL);
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
         thread::sleep(Duration::from_millis(5));
         tracker.record_first_token();
-        tracker.record_isl(256, 128);
+        tracker.record_isl(256, Some(128));
 
         tracker.observe_first_token_gauges();
 
@@ -702,7 +759,7 @@ mod tests {
     #[test]
     fn test_observe_finish_gauges_with_worker() {
         let tracker = RequestTracker::new();
-        tracker.record_worker_full(99, 1, WORKER_TYPE_DECODE);
+        tracker.record_worker(99, Some(1), WORKER_TYPE_DECODE);
         tracker.record_first_token();
         thread::sleep(Duration::from_millis(10));
         tracker.record_osl(5);

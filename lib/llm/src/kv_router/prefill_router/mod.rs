@@ -6,10 +6,11 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
+use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_runtime::{
     pipeline::{
-        AsyncEngineContextProvider, ManyOut, Operator, RouterMode, ServerStreamingEngine, SingleIn,
-        async_trait,
+        AsyncEngineContextProvider, Context, ManyOut, Operator, RouterMode, ServerStreamingEngine,
+        SingleIn, async_trait,
     },
     protocols::{EndpointId, annotated::Annotated},
 };
@@ -27,7 +28,6 @@ mod execution;
 mod inner;
 mod types;
 
-use execution::link_child_context;
 use inner::InnerPrefillRouter;
 pub use types::PrefillError;
 use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override};
@@ -47,6 +47,7 @@ pub struct PrefillRouter {
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
     /// Namespace used to look up the correct WorkerSet's worker monitor
@@ -139,14 +140,22 @@ impl
 
                 let routing = prefill_req.routing_mut();
                 routing.prefill_worker_id = Some(worker_id);
-                routing.dp_rank = Some(dp_rank);
+                routing.dp_rank = dp_rank;
                 prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
-                let prefill_context =
-                    link_child_context(&engine_ctx, prefill_req, request_id.as_str());
+                // NVBugs 5969206: Do NOT link prefill as child of engine context.
+                // Kill propagation tears down the RPC transport, interrupting NIXL
+                // KV cache transfers and leaking blocks permanently. The prefill
+                // runs to completion independently; blocks are freed via the normal
+                // completion path (state 21→22).
+                // NOTE: This means prefill runs to completion even if the client
+                // disconnects, wasting prefill compute. This is an accepted
+                // trade-off (wasted compute vs permanent KV block leak). Future
+                // work: add NIXL-level cancellation that properly frees blocks.
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
                 // Pass the phase barrier to the spawned task. It is released after routing
-                // completes so `record_worker_full` finishes before phase changes to Decode.
+                // completes so worker recording finishes before phase changes to Decode.
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_barrier);
 
                 Ok(PrefillOutcome::Bootstrap(bootstrap_info))
@@ -161,8 +170,8 @@ impl
                 // so there is no race with set_phase(Decode) below.
                 drop(prefill_phase_barrier);
 
-                let prefill_context =
-                    link_child_context(&engine_ctx, prefill_req, request_id.as_str());
+                // NVBugs 5969206: Do NOT link prefill as child (same rationale as bootstrap path).
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
 
                 // In Direct mode, pass preselected_worker so execute_prefill uses
                 // router.direct() instead of router.generate() (which bails in Direct mode).
@@ -178,13 +187,17 @@ impl
             }
         };
 
-        // Abort if cancelled during prefill
+        // NVBugs 5969206: Do NOT abort decode routing when context is killed.
+        // In disaggregated serving, the prefill may have completed and KV transfer
+        // is in flight. Blocking decode here orphans the transfer (no receiver)
+        // and leaks KV blocks permanently. The decode handler's
+        // kv_transfer_complete_event guard will clean up after KV is received.
+        // Log-only; decode routing must proceed for KV transfer cleanup.
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {
-            tracing::debug!("Abort entering decode after context is stopped or killed");
-            return Err(anyhow::anyhow!(
-                "Context id {} is stopped or killed",
+            tracing::debug!(
+                "Context {} killed/stopped after prefill, allowing decode routing for KV transfer",
                 engine_ctx.id()
-            ));
+            );
         }
 
         // Handle prefill result
