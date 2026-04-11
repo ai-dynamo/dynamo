@@ -94,6 +94,9 @@ pub(crate) struct ErrorMessage {
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
+        // 499 is not IANA-registered (nginx convention for client-closed-request),
+        // so canonical_reason() returns None. Use the de facto standard name.
+        None if code.as_u16() == 499 => "Client Closed Request".to_string(),
         None => "UnknownError".to_string(),
     }
 }
@@ -229,8 +232,8 @@ impl ErrorMessage {
                 code,
                 Json(ErrorMessage {
                     message: err.to_string(),
-                    error_type: "Client Closed Request".to_string(),
-                    code: 499,
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
                 }),
             );
         }
