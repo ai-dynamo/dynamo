@@ -269,68 +269,19 @@ class RLMixin:
         )
 
 
-class BaseWorkerHandler(RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
-    """Abstract base class for SGLang LLM worker handlers.
+class LoraMixin:
+    """Mixin providing LoRA adapter load/unload/list management.
 
-    Extends BaseGenerativeHandler with LLM-specific functionality:
-    - SGLang Engine integration
-    - Tokenization and input parameter management
-    - Disaggregated serving support
+    Requires the host class to have ``self.engine``, ``self.config``,
+    and ``self.generate_endpoint``.
     """
 
-    def __init__(
-        self,
-        engine: sgl.Engine,
-        config: Config,
-        publisher: Optional[DynamoSglangPublisher] = None,
-        generate_endpoint=None,
-        shutdown_event: Optional[asyncio.Event] = None,
-    ) -> None:
-        """Initialize base worker handler.
+    engine: sgl.Engine  # provided by BaseWorkerHandler
+    config: Config
+    generate_endpoint: Any
 
-        Args:
-            engine: The SGLang engine instance.
-            config: SGLang and Dynamo configuration.
-            publisher: Optional metrics publisher for the worker.
-            generate_endpoint: The endpoint handle for discovery registration.
-            shutdown_event: Optional event to signal shutdown.
-        """
-        # Call parent constructor
-        super().__init__(config, publisher)
-
-        # LLM-specific initialization
-        self.engine = engine
-        self.config = config
-        self.generate_endpoint = generate_endpoint
-        self.publisher = publisher
-        self.shutdown_event = shutdown_event
-        if publisher is not None:
-            self.metrics_publisher = publisher.metrics_publisher
-            self.kv_publisher = publisher.kv_publisher
-        self.serving_mode = config.serving_mode
-        self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
-        self.enable_trace = config.server_args.enable_trace
-
-        if engine is not None:
-            self.input_param_manager = InputParamManager(
-                self.engine.tokenizer_manager.tokenizer
-                if self.use_sglang_tokenizer
-                else None
-            )
-            self._engine_supports_priority = (
-                "priority" in inspect.signature(engine.async_generate).parameters
-            )
-        else:
-            # Encode-only workers (e.g. MultimodalEncodeWorkerHandler) don't
-            # have an sgl.Engine.
-            self.input_param_manager = InputParamManager(None)
-            self._engine_supports_priority = False
-        self._quiesce_controller = (
-            SGLangEngineQuiesceController(engine) if engine is not None else None
-        )
-        self._quiesce_lock = asyncio.Lock()
-
-        # LoRA tracking
+    def _init_lora_tracking(self) -> None:
+        """Initialize LoRA tracking state. Call from host __init__."""
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
 
@@ -881,6 +832,290 @@ class BaseWorkerHandler(RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         except Exception as e:
             logger.error(f"Failed to list LoRA adapters: {e}")
             yield {"status": "error", "message": str(e)}
+
+
+class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
+    """Abstract base class for SGLang LLM worker handlers.
+
+    Extends BaseGenerativeHandler with LLM-specific functionality:
+    - SGLang Engine integration
+    - Tokenization and input parameter management
+    - Disaggregated serving support
+    """
+
+    def __init__(
+        self,
+        engine: sgl.Engine,
+        config: Config,
+        publisher: Optional[DynamoSglangPublisher] = None,
+        generate_endpoint=None,
+        shutdown_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        """Initialize base worker handler.
+
+        Args:
+            engine: The SGLang engine instance.
+            config: SGLang and Dynamo configuration.
+            publisher: Optional metrics publisher for the worker.
+            generate_endpoint: The endpoint handle for discovery registration.
+            shutdown_event: Optional event to signal shutdown.
+        """
+        # Call parent constructor
+        super().__init__(config, publisher)
+
+        # LLM-specific initialization
+        self.engine = engine
+        self.config = config
+        self.generate_endpoint = generate_endpoint
+        self.publisher = publisher
+        self.shutdown_event = shutdown_event
+        if publisher is not None:
+            self.metrics_publisher = publisher.metrics_publisher
+            self.kv_publisher = publisher.kv_publisher
+        self.serving_mode = config.serving_mode
+        self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
+        self.enable_trace = config.server_args.enable_trace
+
+        if engine is not None:
+            self.input_param_manager = InputParamManager(
+                self.engine.tokenizer_manager.tokenizer
+                if self.use_sglang_tokenizer
+                else None
+            )
+            self._engine_supports_priority = (
+                "priority" in inspect.signature(engine.async_generate).parameters
+            )
+        else:
+            # Encode-only workers (e.g. MultimodalEncodeWorkerHandler) don't
+            # have an sgl.Engine.
+            self.input_param_manager = InputParamManager(None)
+            self._engine_supports_priority = False
+        self._quiesce_controller = (
+            SGLangEngineQuiesceController(engine) if engine is not None else None
+        )
+        self._quiesce_lock = asyncio.Lock()
+
+        # LoRA tracking (via LoraMixin)
+        self._init_lora_tracking()
+
+    def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
+        if priority is not None and self._engine_supports_priority:
+            normalized = int(priority)
+            if getattr(
+                self.config.server_args, "schedule_low_priority_values_first", False
+            ):
+                normalized = -normalized
+            return {"priority": normalized}
+        return {}
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        """Release GPU memory occupation and unregister from discovery.
+
+        Args:
+            body: Optional dict with "tags" to target specific memory regions.
+
+        Order of operations:
+        1. Unregister from discovery - stop accepting new requests
+        2. Pause generation - drain in-flight requests
+        3. Release memory - safe now that no requests are active
+        """
+        if self._quiesce_controller is None:
+            return {
+                "status": "error",
+                "message": "memory control not supported on this worker",
+            }
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if self._quiesce_controller.is_quiesced:
+                return {
+                    "status": "ok",
+                    "message": "Memory already released",
+                }
+
+            try:
+                # Stop new requests and drain in-flight work before releasing memory.
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.unregister_endpoint_instance()
+
+                await self._quiesce_controller.quiesce(tags)
+
+                return {
+                    "status": "ok",
+                    "message": (
+                        f"Memory released for tags: {tags}"
+                        if tags is not None
+                        else "Memory released"
+                    ),
+                }
+            except Exception as e:
+                logging.error(f"Failed to release memory occupation: {e}")
+                return {"status": "error", "message": str(e)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        """Resume GPU memory occupation and re-register to discovery.
+
+        Args:
+            body: Optional dict with "tags" to target specific memory regions.
+
+        Order of operations:
+        1. Resume memory - restore GPU allocations
+        2. Continue generation - ready to serve requests
+        3. Re-register to discovery - allow frontend to route here
+        """
+        if self._quiesce_controller is None:
+            return {
+                "status": "error",
+                "message": "memory control not supported on this worker",
+            }
+
+        body = body or {}
+        tags = body.get("tags")
+        async with self._quiesce_lock:
+            if not self._quiesce_controller.is_quiesced:
+                return {
+                    "status": "ok",
+                    "message": "Memory already resumed",
+                }
+
+            try:
+                await self._quiesce_controller.resume(tags)
+
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+                self._quiesce_controller.mark_resumed()
+
+                return {
+                    "status": "ok",
+                    "message": (
+                        f"Memory resumed for tags: {tags}"
+                        if tags is not None
+                        else "Memory resumed"
+                    ),
+                }
+            except Exception as e:
+                logging.error(f"Failed to resume memory occupation: {e}")
+                return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        """Start profiling on the engine.
+
+        Args:
+            body: Dict with profiling parameters passed to start_profile.
+        """
+        await self.engine.tokenizer_manager.start_profile(**body)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop profiling on the engine.
+
+        Args:
+            body: Unused, but required for handler signature.
+        """
+        await self.engine.tokenizer_manager.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+    async def update_weights_from_disk(self, body: dict) -> dict:
+        """Update model weights from disk without restarting the server."""
+        from sglang.srt.managers.io_struct import UpdateWeightFromDiskReqInput
+
+        req = UpdateWeightFromDiskReqInput(**body)
+        (
+            success,
+            message,
+            num_paused_requests,
+        ) = await self.engine.tokenizer_manager.update_weights_from_disk(req, None)
+        return {
+            "success": success,
+            "message": message,
+            "num_paused_requests": num_paused_requests,
+        }
+
+    async def update_weights_from_tensor(self, body: dict) -> dict:
+        """Update model weights from tensors without restarting the server."""
+        from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
+
+        req = UpdateWeightsFromTensorReqInput(**body)
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_tensor(req, None)
+        return {"success": success, "message": message}
+
+    async def update_weights_from_distributed(self, body: dict) -> dict:
+        """Update model weights using distributed online synchronization."""
+        from sglang.srt.managers.io_struct import UpdateWeightsFromDistributedReqInput
+
+        req = UpdateWeightsFromDistributedReqInput(**body)
+        (
+            success,
+            message,
+        ) = await self.engine.tokenizer_manager.update_weights_from_distributed(
+            req, None
+        )
+        return {"success": success, "message": message}
+
+    async def update_weights_from_ipc(self, body: dict) -> dict:
+        """Update model weights from IPC for checkpoint-engine integration."""
+        from sglang.srt.managers.io_struct import UpdateWeightsFromIPCReqInput
+
+        req = UpdateWeightsFromIPCReqInput(**body)
+        success, message = await self.engine.tokenizer_manager.update_weights_from_ipc(
+            req, None
+        )
+        if success and not self.engine.tokenizer_manager.initial_weights_loaded:
+            self.engine.tokenizer_manager.initial_weights_loaded = True
+        return {"success": success, "message": message}
+
+    async def update_weight_version(self, body: dict) -> dict:
+        """Update the active weight version without changing model weights."""
+        from sglang.srt.managers.io_struct import UpdateWeightVersionReqInput
+
+        req = UpdateWeightVersionReqInput(**body)
+        if req.abort_all_requests:
+            self.engine.tokenizer_manager.abort_request(abort_all=True)
+
+        self.engine.tokenizer_manager.server_args.weight_version = req.new_version
+        return {
+            "success": True,
+            "message": f"Weight version updated to {req.new_version}",
+            "new_version": req.new_version,
+        }
+
+    def register_engine_routes(self, runtime: DistributedRuntime) -> None:
+        """Register all engine routes for this handler.
+
+        Args:
+            runtime: The DistributedRuntime instance to register routes on.
+        """
+        runtime.register_engine_route("start_profile", self.start_profile)
+        runtime.register_engine_route("stop_profile", self.stop_profile)
+        runtime.register_engine_route(
+            "release_memory_occupation", self.release_memory_occupation
+        )
+        runtime.register_engine_route(
+            "resume_memory_occupation", self.resume_memory_occupation
+        )
+        runtime.register_engine_route(
+            "update_weights_from_disk", self.update_weights_from_disk
+        )
+        runtime.register_engine_route(
+            "update_weights_from_tensor", self.update_weights_from_tensor
+        )
+        runtime.register_engine_route(
+            "update_weights_from_distributed", self.update_weights_from_distributed
+        )
+        runtime.register_engine_route(
+            "update_weights_from_ipc", self.update_weights_from_ipc
+        )
+        runtime.register_engine_route(
+            "update_weight_version", self.update_weight_version
+        )
+        if getattr(self.config, "dynamo_args", None) and getattr(
+            self.config.dynamo_args, "enable_rl", False
+        ):
+            self.register_rl_engine_routes(runtime)
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
