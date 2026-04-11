@@ -403,7 +403,18 @@ impl DeviceMemPoolOps for ZeMemPoolWrapper {
 
         // Record an event on the stream: it will signal after all prior commands
         // (including any kernel reading this memory) have completed.
-        let event = stream.record_event()?;
+        let event = match stream.record_event() {
+            Ok(event) => event,
+            Err(e) => {
+                // Keep ownership tracking intact on event-record failure so callers
+                // can retry free_async without losing the buffer from the pool map.
+                self.buffers
+                    .lock()
+                    .map_err(|lock_err| anyhow::anyhow!("buffer map poisoned: {}", lock_err))?
+                    .insert(ptr, (buffer, size));
+                return Err(e);
+            }
+        };
 
         // Defer the actual return-to-pool until the event signals.
         self.pending_frees
