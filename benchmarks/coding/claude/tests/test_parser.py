@@ -1,4 +1,7 @@
-from benchmarks.coding.claude_parser import build_turns_for_session
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from benchmarks.coding.claude.parser import build_turns_for_session
 from benchmarks.coding.models import TraceRecord
 
 
