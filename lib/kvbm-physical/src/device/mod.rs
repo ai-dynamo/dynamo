@@ -172,6 +172,10 @@ impl DeviceStream {
         self.ops.memcpy_htod(dst_device, src_host)
     }
 
+    pub fn memcpy_dtoh(&self, src_device: u64, dst_host: &mut [u8]) -> Result<()> {
+        self.ops.memcpy_dtoh(src_device, dst_host)
+    }
+
     pub fn vectorized_copy(
         &self,
         src_ptrs_device: u64,
@@ -197,6 +201,33 @@ impl DeviceStream {
 
 unsafe impl Send for DeviceStream {}
 unsafe impl Sync for DeviceStream {}
+
+
+/// Synchronous device-to-host memcpy using the device abstraction.
+///
+/// Creates a temporary stream, enqueues the copy, and synchronizes.
+/// Used by test helpers (checksum, fill) that need backend-agnostic device access.
+pub fn sync_memcpy_dtoh(device_id: u32, src_device: u64, dst_host: &mut [u8]) -> Result<()> {
+    let backend = DeviceBackend::detect_backend()?;
+    let ctx = DeviceContext::new(backend, device_id)?;
+    let stream = ctx.create_stream(EngineHint::Copy)?;
+    stream.memcpy_dtoh(src_device, dst_host)?;
+    stream.synchronize()?;
+    Ok(())
+}
+
+/// Synchronous host-to-device memcpy using the device abstraction.
+///
+/// Creates a temporary stream, enqueues the copy, and synchronizes.
+/// Used by test helpers (checksum, fill) that need backend-agnostic device access.
+pub fn sync_memcpy_htod(device_id: u32, dst_device: u64, src_host: &[u8]) -> Result<()> {
+    let backend = DeviceBackend::detect_backend()?;
+    let ctx = DeviceContext::new(backend, device_id)?;
+    let stream = ctx.create_stream(EngineHint::Copy)?;
+    stream.memcpy_htod(dst_device, src_host)?;
+    stream.synchronize()?;
+    Ok(())
+}
 
 impl std::fmt::Debug for DeviceStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

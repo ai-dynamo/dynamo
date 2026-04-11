@@ -498,6 +498,17 @@ impl DeviceStreamOps for ZeStreamWrapper {
         Ok(())
     }
 
+    fn memcpy_dtoh(&self, src_device: u64, dst_host: &mut [u8]) -> Result<()> {
+        self.cmd_list
+            .append_memcpy(
+                dst_host.as_mut_ptr() as *mut std::ffi::c_void,
+                src_device as *const std::ffi::c_void,
+                dst_host.len(),
+            )
+            .map_err(|e| anyhow::anyhow!("XPU memcpy_dtoh (append_memcpy) failed: {:?}", e))?;
+        Ok(())
+    }
+
     fn vectorized_copy(
         &self,
         src_ptrs_device: u64,

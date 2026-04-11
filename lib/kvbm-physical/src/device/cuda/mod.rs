@@ -311,6 +311,18 @@ impl DeviceStreamOps for CudaStreamWrapper {
         Ok(())
     }
 
+    fn memcpy_dtoh(&self, src_device: u64, dst_host: &mut [u8]) -> Result<()> {
+        unsafe {
+            cuda_result::memcpy_dtoh_async(
+                dst_host,
+                src_device,
+                self.stream.cu_stream(),
+            )
+            .map_err(|e| anyhow::anyhow!("CUDA memcpy_dtoh_async failed: {:?}", e))?;
+        }
+        Ok(())
+    }
+
     fn vectorized_copy(
         &self,
         src_ptrs_device: u64,
