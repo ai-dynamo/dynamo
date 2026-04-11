@@ -45,8 +45,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-            - name: FLASHINFER_DISABLE_VERSION_CHECK
-              value: "1"
           image: <your-registry>/sglang-dynamo-glm5:latest
           name: ""
           resources: {}
