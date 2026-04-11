@@ -15,6 +15,7 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -144,6 +145,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     block_size: usize,
     router_id: u64,
     publisher: Arc<P>,
+    remote_state_updates: watch::Sender<()>,
     replica_sync: bool,
     worker_type: &'static str,
 }
@@ -161,6 +163,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker_type: &'static str,
     ) -> Self {
         assert!(block_size > 1, "block_size must be greater than 1");
+        let (remote_state_updates, _) = watch::channel(());
 
         Self {
             workers: RwLock::new(WorkerTable::new(block_size, &dp_range)),
@@ -169,6 +172,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             block_size,
             router_id,
             publisher: Arc::new(publisher),
+            remote_state_updates,
             replica_sync,
             worker_type,
         }
@@ -191,6 +195,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 );
             }
         });
+    }
+
+    /// Subscribe to remote lifecycle updates that were applied through replica sync.
+    ///
+    /// The queue uses this to react immediately when a peer router frees prompt
+    /// capacity locally.
+    pub fn subscribe_remote_state_changes(&self) -> watch::Receiver<()> {
+        self.remote_state_updates.subscribe()
     }
 
     /// Spawn a background task that subscribes to replica-sync events from peer routers
@@ -235,6 +247,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     // TODO: ActiveSequenceEvent does not carry prompt-load decay timestamps yet.
                     // Peer routers still approximate decay anchoring with local receive time.
                     let decay_now = Instant::now();
+                    let mut remote_capacity_changed = false;
                     match &event.data {
                         ActiveSequenceEventData::AddRequest {
                             token_sequence,
@@ -278,6 +291,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                 let table = self.workers.read();
                                 if let Some(&idx) = table.index.get(&worker) {
                                     table.slots[idx].1.write().free(&event.request_id, decay_now);
+                                    remote_capacity_changed = true;
                                 }
                             }
                             self.request_to_lora.remove(&event.request_id);
@@ -292,9 +306,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                         .1
                                         .write()
                                         .mark_prefill_completed(&event.request_id, decay_now);
+                                    remote_capacity_changed = true;
                                 }
                             }
                         }
+                    }
+
+                    if remote_capacity_changed {
+                        let _ = self.remote_state_updates.send(());
                     }
                 }
                 _ = cancel_token.cancelled() => {
