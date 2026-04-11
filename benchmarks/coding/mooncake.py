@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
+from tqdm import tqdm
+
 from benchmarks.coding.common import canonical_json
 from benchmarks.coding.hashing import RollingHasher, TokenizerWrapper
 from benchmarks.coding.models import TurnDraft
@@ -12,6 +14,7 @@ def build_mooncake_rows(
     turns: Sequence[TurnDraft],
     tokenizer: TokenizerWrapper,
     block_size: int,
+    show_progress: bool = False,
 ) -> list[dict[str, Any]]:
     hasher = RollingHasher(block_size=block_size)
     first_turn_starts = [
@@ -22,8 +25,18 @@ def build_mooncake_rows(
     global_trace_start_ms = min(first_turn_starts)
 
     rows: list[dict[str, Any]] = []
-    for turn in turns:
-        tokens = tokenizer.encode(turn.input_text)
+    token_iter = tokenizer.iter_encode_many(turn.input_text for turn in turns)
+    for turn, tokens in zip(
+        turns,
+        tqdm(
+            token_iter,
+            desc="Tokenizing turns",
+            unit="turn",
+            total=len(turns),
+            disable=not show_progress,
+        ),
+        strict=True,
+    ):
         blocks = [
             tokens[index : index + block_size]
             for index in range(0, len(tokens), block_size)

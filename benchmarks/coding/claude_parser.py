@@ -5,12 +5,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
+from tqdm import tqdm
+
 from benchmarks.coding.common import (
     anonymized_session_id,
     canonical_json,
     content_blocks,
     flatten_block_content_text,
-    maybe_dict,
     parse_utc_timestamp_ms,
 )
 from benchmarks.coding.hashing import TokenizerWrapper
@@ -36,11 +37,19 @@ class ToolIdNormalizer:
         return self._raw_to_normalized[raw_id]
 
 
-def load_trace_records(trace_files: Sequence[Path]) -> dict[str, list[TraceRecord]]:
+def load_trace_records(
+    trace_files: Sequence[Path],
+    show_progress: bool = False,
+) -> dict[str, list[TraceRecord]]:
     sessions: dict[str, list[TraceRecord]] = defaultdict(list)
     source_order = 0
 
-    for trace_file in trace_files:
+    for trace_file in tqdm(
+        trace_files,
+        desc="Loading trace files",
+        unit="file",
+        disable=not show_progress,
+    ):
         with trace_file.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 stripped = line.strip()
@@ -87,13 +96,56 @@ def load_trace_records(trace_files: Sequence[Path]) -> dict[str, list[TraceRecor
 
 def assistant_group_key(record: TraceRecord) -> str:
     request_id = record.raw.get("requestId")
-    message_id = maybe_dict(record.raw.get("message")).get("id")
+    message = record.raw.get("message")
+    message_id = message.get("id") if isinstance(message, dict) else None
     return (
         request_id
         or message_id
         or record.raw.get("uuid")
         or f"row-{record.source_order}"
     )
+
+
+def is_compact_boundary(record: TraceRecord) -> bool:
+    return (
+        record.row_type == "system" and record.raw.get("subtype") == "compact_boundary"
+    )
+
+
+def is_compact_summary(record: TraceRecord) -> bool:
+    return record.row_type == "user" and bool(record.raw.get("isCompactSummary"))
+
+
+def is_local_command_wrapper_text(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith(
+        (
+            "<command-name>",
+            "<command-message>",
+            "<command-args>",
+            "<local-command-caveat>",
+            "<local-command-stdout>",
+            "<local-command-stderr>",
+        )
+    )
+
+
+def should_skip_user_record(record: TraceRecord) -> bool:
+    if record.row_type != "user":
+        return False
+    if bool(record.raw.get("isMeta")):
+        return True
+
+    raw_message = record.raw.get("message")
+    message = raw_message if isinstance(raw_message, dict) else {}
+    blocks = content_blocks(message.get("content"))
+    if not blocks:
+        return False
+    if any(block.get("type") != "text" for block in blocks):
+        return False
+
+    texts = [str(block.get("text", "")) for block in blocks]
+    return bool(texts) and all(is_local_command_wrapper_text(text) for text in texts)
 
 
 def sanitize_structure(value: Any, normalizer: ToolIdNormalizer) -> Any:
@@ -171,8 +223,10 @@ def summarize_assistant_group(
     output_lengths: list[int] = []
 
     for record in group:
-        message = maybe_dict(record.raw.get("message"))
-        usage = maybe_dict(message.get("usage"))
+        raw_message = record.raw.get("message")
+        message = raw_message if isinstance(raw_message, dict) else {}
+        raw_usage = message.get("usage")
+        usage = raw_usage if isinstance(raw_usage, dict) else {}
         output_tokens = usage.get("output_tokens")
         if isinstance(output_tokens, int):
             output_lengths.append(output_tokens)
@@ -237,7 +291,10 @@ def summarize_assistant_group(
 
 
 def progress_timestamp_ms(record: TraceRecord) -> int:
-    nested_message = maybe_dict(maybe_dict(record.raw.get("data")).get("message"))
+    raw_data = record.raw.get("data")
+    data = raw_data if isinstance(raw_data, dict) else {}
+    raw_message = data.get("message")
+    nested_message = raw_message if isinstance(raw_message, dict) else {}
     nested_timestamp = nested_message.get("timestamp")
     if isinstance(nested_timestamp, str):
         try:
@@ -310,14 +367,17 @@ def aggregate_progress_metrics(
 
     for record in relevant_records:
         timestamp_ms = progress_timestamp_ms(record)
-        data = maybe_dict(record.raw.get("data"))
+        raw_data = record.raw.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
         agent_id = data.get("agentId")
         if isinstance(agent_id, str):
             agent_ids.add(agent_id)
 
-        nested_message = maybe_dict(data.get("message"))
+        raw_message = data.get("message")
+        nested_message = raw_message if isinstance(raw_message, dict) else {}
         nested_type = nested_message.get("type")
-        nested_payload = maybe_dict(nested_message.get("message"))
+        raw_payload = nested_message.get("message")
+        nested_payload = raw_payload if isinstance(raw_payload, dict) else {}
         if nested_type == "assistant":
             for block in content_blocks(nested_payload.get("content")):
                 block_type = block.get("type")
@@ -402,24 +462,41 @@ def build_turns_for_session(
     turns: list[TurnDraft] = []
     previous_assistant_end_ms: int | None = None
     turn_index = 0
+    pending_compact_reset = False
 
     top_level_records = [
         record
         for record in records
-        if record.row_type in {"user", "assistant"}
+        if record.row_type in {"user", "assistant", "system"}
         and not bool(record.raw.get("isSidechain"))
     ]
 
     cursor = 0
     while cursor < len(top_level_records):
         record = top_level_records[cursor]
-        if record.row_type == "user":
-            conversation_entries.extend(
-                render_user_entries(maybe_dict(record.raw.get("message")), normalizer)
-            )
+        if record.row_type == "system":
+            pending_compact_reset = is_compact_boundary(record)
             cursor += 1
             continue
 
+        if record.row_type == "user":
+            if should_skip_user_record(record):
+                pending_compact_reset = False
+                cursor += 1
+                continue
+
+            raw_message = record.raw.get("message")
+            message = raw_message if isinstance(raw_message, dict) else {}
+            rendered_entries = render_user_entries(message, normalizer)
+            if pending_compact_reset and is_compact_summary(record):
+                conversation_entries = rendered_entries
+            else:
+                conversation_entries.extend(rendered_entries)
+            pending_compact_reset = False
+            cursor += 1
+            continue
+
+        pending_compact_reset = False
         group = [record]
         group_key = assistant_group_key(record)
         cursor += 1

@@ -55,22 +55,12 @@ def dedupe_paths(paths: Sequence[Path]) -> list[Path]:
     return deduped
 
 
-def maybe_list(value: Any) -> list[Any]:
-    if isinstance(value, list):
-        return value
-    return []
-
-
-def maybe_dict(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    return {}
-
-
 def content_blocks(content: Any) -> list[dict[str, Any]]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
-    return [block for block in maybe_list(content) if isinstance(block, dict)]
+    if not isinstance(content, list):
+        return []
+    return [block for block in content if isinstance(block, dict)]
 
 
 def flatten_block_content_text(value: Any) -> str:

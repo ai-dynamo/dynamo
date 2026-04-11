@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from benchmarks.coding.export_claude_trace import main
+from benchmarks.coding.claude.export_trace import main
 
 if __name__ == "__main__":
     try:
