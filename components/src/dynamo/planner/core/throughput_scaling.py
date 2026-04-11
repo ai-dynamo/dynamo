@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 class ThroughputScalingMixin:
     """Traffic-driven throughput-based scaling decisions."""
 
+    # Scratch fields owned by PlannerStateMachine, declared here for mypy
     _diag_predicted_num_req: Optional[float]
     _diag_predicted_isl: Optional[float]
     _diag_predicted_osl: Optional[float]

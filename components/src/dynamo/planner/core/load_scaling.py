@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 class LoadScalingMixin:
     """FPM-driven load-based scaling decisions."""
 
+    # Scratch fields owned by PlannerStateMachine, declared here for mypy
     _diag_estimated_ttft_ms: Optional[float]
     _diag_estimated_itl_ms: Optional[float]
     _diag_load_reason: Optional[str]
