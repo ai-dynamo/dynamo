@@ -5,28 +5,26 @@
 
 use super::DeviceBackend;
 use anyhow::{Result, bail};
-use std::str::FromStr;
 
 impl DeviceBackend {
     /// Auto-detect the best available device backend.
     ///
-    /// Priority order: CUDA → Level-Zero (XPU)
-    pub fn auto_detect() -> Result<Self> {
-        // 1. Check environment variable override
-        if let Ok(backend_str) = std::env::var("KVBM_DEVICE_BACKEND") {
-            return Self::from_str(&backend_str);
-        }
-
-        // 2. Probe hardware in priority order
-        if Self::Cuda.is_available() {
-            tracing::info!("Auto-detected CUDA backend");
-            return Ok(Self::Cuda);
+    /// Priority order: CUDA then Level-Zero (XPU).
+    pub fn detect_backend() -> Result<Self> {
+        #[cfg(feature = "cuda")]
+        {
+            if Self::Cuda.is_available() {
+                tracing::info!("Auto-detected CUDA backend");
+                return Ok(Self::Cuda);
+            }
         }
 
         #[cfg(feature = "xpu")]
-        if Self::Ze.is_available() {
-            tracing::info!("Auto-detected Level-Zero (XPU) backend");
-            return Ok(Self::Ze);
+        {
+            if Self::Ze.is_available() {
+                tracing::info!("Auto-detected Level-Zero (XPU) backend");
+                return Ok(Self::Ze);
+            }
         }
 
         bail!("No supported device backend available on this system")
@@ -36,6 +34,7 @@ impl DeviceBackend {
     pub fn list_available() -> Vec<Self> {
         let mut backends = Vec::new();
 
+        #[cfg(feature = "cuda")]
         if Self::Cuda.is_available() {
             backends.push(Self::Cuda);
         }
@@ -54,10 +53,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_auto_detect() {
-        match DeviceBackend::auto_detect() {
+    fn test_detect_backend() {
+        match DeviceBackend::detect_backend() {
             Ok(backend) => {
-                println!("Auto-detected: {:?}", backend);
+                println!("Detected: {:?}", backend);
                 assert!(backend.is_available());
             }
             Err(e) => {

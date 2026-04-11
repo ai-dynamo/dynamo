@@ -102,6 +102,13 @@ pub trait DeviceStreamOps: Send + Sync + Debug {
     /// record an event and synchronize before dropping the source buffer).
     fn memcpy_htod(&self, dst_device: u64, src_host: &[u8]) -> Result<()>;
 
+    /// Async device-to-host memcpy on this stream.
+    ///
+    /// Enqueues a copy of `dst_host.len()` bytes from `src_device` into `dst_host`.
+    /// The copy is stream-ordered. Caller must synchronize the stream
+    /// before reading `dst_host`.
+    fn memcpy_dtoh(&self, src_device: u64, dst_host: &mut [u8]) -> Result<()>;
+
     /// Vectorized copy: N independent copies executed in parallel via a GPU kernel.
     ///
     /// Both `src_ptrs_device` and `dst_ptrs_device` are device pointers to arrays

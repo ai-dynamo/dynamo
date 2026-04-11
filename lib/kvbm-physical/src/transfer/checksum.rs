@@ -23,7 +23,7 @@ use std::{
     os::fd::FromRawFd,
 };
 
-use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind};
+use crate::device::sync_memcpy_dtoh;
 
 pub type BlockChecksum = String;
 
@@ -127,19 +127,9 @@ fn compute_single_block_checksum(
                     };
                     hasher.update(slice);
                 }
-                StorageKind::Device(_) => {
+                StorageKind::Device(device_id) => {
                     let mut system_region: Vec<u8> = vec![0; region.size()];
-                    let err = unsafe {
-                        cudaMemcpy(
-                            system_region.as_mut_ptr() as *mut std::ffi::c_void,
-                            region.addr() as *const std::ffi::c_void,
-                            region.size(),
-                            cudaMemcpyKind::cudaMemcpyDeviceToHost,
-                        )
-                    };
-                    if err != cudarc::runtime::sys::cudaError::cudaSuccess {
-                        return Err(anyhow!("cudaMemcpy D2H failed in checksum: {:?}", err));
-                    }
+                    sync_memcpy_dtoh(device_id as u32, region.addr() as u64, &mut system_region)?;
                     hasher.update(system_region.as_slice());
                 }
                 StorageKind::Disk(fd) => {
