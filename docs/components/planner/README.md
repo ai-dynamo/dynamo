@@ -177,6 +177,8 @@ The dashboard shows:
 
 ### Prometheus Metrics
 
+When `PLANNER_PROMETHEUS_PORT` is set, the planner serves its own metrics endpoint. Exported series use the `dynamo_planner_*` naming convention (underscores and standard unit suffixes), replacing older `planner:*`-style names.
+
 **Throughput-based scaling** pulls traffic metrics from the cluster-wide Prometheus server:
 - Request count and duration
 - TTFT and ITL distributions
@@ -186,3 +188,27 @@ The dashboard shows:
 - Per-iteration wall time, scheduled prefill/decode tokens, and queued request status
 - Delivered via `FpmEventSubscriber` with automatic engine discovery and lifecycle tracking
 - No router `/metrics` scraping required
+
+Core gauges on the planner port include replica counts (`dynamo_planner_num_prefill_replicas`, `dynamo_planner_num_decode_replicas`), observed traffic (`dynamo_planner_observed_*`), replica decisions (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), and cumulative `dynamo_planner_gpu_hours`.
+
+Throughput prediction gauges `dynamo_planner_predicted_requests_per_second`, `dynamo_planner_predicted_input_sequence_tokens`, and `dynamo_planner_predicted_output_sequence_tokens` are wired from throughput-scaling traffic prediction and exposed alongside observed sequence-length metrics.
+
+#### Diagnostics metrics
+
+Additional series support dashboards and offline analysis:
+
+- **Regression-based latency estimates:** `dynamo_planner_estimated_ttft_ms` and `dynamo_planner_estimated_itl_ms` reflect the maximum estimated TTFT and ITL from the online regression across engines.
+- **Engine capacity:** `dynamo_planner_engine_prefill_requests_per_second` and `dynamo_planner_engine_decode_requests_per_second` report single-engine prefill and decode capacity under the configured SLA.
+- **Scaling decision reasons:** `dynamo_planner_load_scaling_decision` and `dynamo_planner_throughput_scaling_decision` are Enum gauges whose state labels encode why each mode chose to scale, hold, or skip (for example `scale_up`, `no_fpm_data`, `set_lower_bound`).
+- **Per-engine FPM queue depths:** `dynamo_planner_engine_queued_prefill_tokens`, `dynamo_planner_engine_queued_decode_kv_tokens`, and `dynamo_planner_engine_inflight_decode_kv_tokens` are labeled with `worker_id` and `dp_rank` for each engine.
+
+### HTML diagnostics reports
+
+The planner can emit periodic, self-contained HTML diagnostics files with interactive Plotly charts.
+
+Configure this in `PlannerConfig` (or the equivalent YAML / constructor wiring your deployment uses):
+
+- `report_interval_hours`: interval in **simulated** time between reports; set to `None` to disable.
+- `report_output_dir`: directory where HTML files are written (default `./planner_reports`).
+
+Reports aggregate per-tick snapshots and use `TickInput.now_s` for timestamps, so they behave the same in live runs (wall clock) and in **replay** with a simulated clock. Typical charts cover worker counts, observed versus estimated latencies versus SLA targets, request rate, engine capacity, scaling decision timelines, and input/output sequence lengths.

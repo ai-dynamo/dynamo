@@ -44,7 +44,7 @@ class PrefillPlanner(NativePlannerBase):
             return
         desired = effects.scale_to.num_prefill
         if self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_p.set(desired)
+            self.prometheus_metrics.predicted_num_prefill_replicas.set(desired)
         await self._apply_scaling_targets(
             [
                 TargetReplica(
@@ -82,7 +82,7 @@ class DecodePlanner(NativePlannerBase):
             return
         desired = effects.scale_to.num_decode
         if self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_d.set(desired)
+            self.prometheus_metrics.predicted_num_decode_replicas.set(desired)
         await self._apply_scaling_targets(
             [
                 TargetReplica(
@@ -120,7 +120,7 @@ class AggPlanner(NativePlannerBase):
             return
         desired = effects.scale_to.num_decode
         if self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_d.set(desired)
+            self.prometheus_metrics.predicted_num_decode_replicas.set(desired)
         await self._apply_scaling_targets(
             [
                 TargetReplica(
@@ -168,9 +168,13 @@ class DisaggPlanner(NativePlannerBase):
         decision = effects.scale_to
 
         if decision.num_prefill is not None and self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_p.set(decision.num_prefill)
+            self.prometheus_metrics.predicted_num_prefill_replicas.set(
+                decision.num_prefill
+            )
         if decision.num_decode is not None and self.prometheus_port != 0:
-            self.prometheus_metrics.predicted_num_d.set(decision.num_decode)
+            self.prometheus_metrics.predicted_num_decode_replicas.set(
+                decision.num_decode
+            )
 
         targets = []
         if decision.num_prefill is not None:
