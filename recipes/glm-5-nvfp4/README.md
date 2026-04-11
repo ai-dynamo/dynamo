@@ -17,14 +17,13 @@ disaggregated prefill/decode and EAGLE speculative decoding via Dynamo on GB200 
 
 ## Prerequisites
 
-- GB200 nodes with RDMA networking
-- Dynamo operator installed
-- dynamo-platform HelmRelease deployed
+- 5 4xGB200 nodes in an NVL36 or NVL72 domain
+- A Kubernetes cluster with the [Dynamo Operator](https://docs.nvidia.com/dynamo/) installed
 - Shared NFS PVC for model weights
 
 ## Step 1: Build the Container
 
-This recipe currently requires using unreleased versions of sglang and dynamo.
+This recipe currently requires using unreleased versions of SGLang and Dynamo.
 Use the command below to build and push a container with the necessary dependencies.
 
 ```bash
