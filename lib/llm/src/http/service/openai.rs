@@ -2566,7 +2566,7 @@ mod tests {
             classify_error_for_metrics(StatusCode::from_u16(499).unwrap(), "cancelled request");
         assert_eq!(
             error_type,
-            super::metrics::ErrorType::Cancelled,
+            ErrorType::Cancelled,
             "HTTP 499 should map to ErrorType::Cancelled in metrics"
         );
     }
