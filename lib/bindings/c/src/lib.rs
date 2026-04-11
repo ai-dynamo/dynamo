@@ -1207,12 +1207,13 @@ fn inject_tokens_into_body(request_json: &str, tokens: &[u32]) -> Result<String,
         .collect();
 
     let nvext = obj.entry("nvext").or_insert_with(|| serde_json::json!({}));
-    if let Some(nvext_obj) = nvext.as_object_mut() {
-        nvext_obj.insert(
-            "token_data".to_string(),
-            serde_json::Value::Array(token_ids),
-        );
+    if !nvext.is_object() {
+        *nvext = serde_json::json!({});
     }
+    nvext.as_object_mut().unwrap().insert(
+        "token_data".to_string(),
+        serde_json::Value::Array(token_ids),
+    );
 
     serde_json::to_string(&body).map_err(|e| format!("JSON serialize error: {e}"))
 }
