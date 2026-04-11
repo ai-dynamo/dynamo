@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,7 +11,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -108,69 +110,87 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 
 func waitForCheckpoint(ctx context.Context, clientset kubernetes.Interface, namespace string, jobName string) (string, error) {
 	var status string
-	if err := wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
-		job, err := clientset.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return false, nil
+	err := watchNamedObject(
+		ctx,
+		jobName,
+		&batchv1.Job{},
+		func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
+			return clientset.BatchV1().Jobs(namespace).List(ctx, options)
+		},
+		func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+			return clientset.BatchV1().Jobs(namespace).Watch(ctx, options)
+		},
+		func(event watch.Event) (bool, error) {
+			if event.Type == watch.Error {
+				return false, apierrors.FromObject(event.Object)
 			}
-			return false, fmt.Errorf("get checkpoint job %s/%s: %w", namespace, jobName, err)
-		}
 
-		status = strings.TrimSpace(job.Annotations[snapshotprotocol.CheckpointStatusAnnotation])
-		if status == snapshotprotocol.CheckpointStatusCompleted {
-			return true, nil
-		}
-		if status == snapshotprotocol.CheckpointStatusFailed {
-			return false, fmt.Errorf("checkpoint job %s/%s failed", namespace, jobName)
-		}
-		if job.Status.Failed > 0 {
-			return false, fmt.Errorf("checkpoint job %s/%s failed", namespace, jobName)
-		}
-		for _, condition := range job.Status.Conditions {
-			if condition.Status != corev1.ConditionTrue {
-				continue
+			job, ok := event.Object.(*batchv1.Job)
+			if !ok {
+				return false, fmt.Errorf("unexpected checkpoint watch object %T", event.Object)
 			}
-			if condition.Type == batchv1.JobFailed {
-				return false, fmt.Errorf("checkpoint job %s/%s failed: %s", namespace, jobName, strings.TrimSpace(condition.Message))
+
+			status = strings.TrimSpace(job.Annotations[snapshotprotocol.CheckpointStatusAnnotation])
+			if status == snapshotprotocol.CheckpointStatusCompleted {
+				return true, nil
 			}
-		}
-		return false, nil
-	}); err != nil {
-		if !wait.Interrupted(err) {
+			if status == snapshotprotocol.CheckpointStatusFailed {
+				return false, fmt.Errorf("checkpoint job %s/%s failed", namespace, jobName)
+			}
+			if job.Status.Failed > 0 {
+				return false, fmt.Errorf("checkpoint job %s/%s failed", namespace, jobName)
+			}
+			for _, condition := range job.Status.Conditions {
+				if condition.Status != corev1.ConditionTrue {
+					continue
+				}
+				if condition.Type == batchv1.JobFailed {
+					return false, fmt.Errorf("checkpoint job %s/%s failed: %s", namespace, jobName, strings.TrimSpace(condition.Message))
+				}
+			}
+			return false, nil
+		},
+	)
+	if err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) {
 			return "", err
 		}
-
-		summaryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		pods, err := clientset.CoreV1().Pods(namespace).List(summaryCtx, metav1.ListOptions{
-			LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
-		})
-		summary := "no checkpoint pod created yet"
-		if err != nil {
-			summary = "unable to list checkpoint pod: " + err.Error()
-		} else if len(pods.Items) != 0 {
-			pod := pods.Items[0]
-			parts := []string{
-				fmt.Sprintf("job_status=%q", status),
-				fmt.Sprintf("pod=%s phase=%s", pod.Name, pod.Status.Phase),
-			}
-			for _, condition := range pod.Status.Conditions {
-				if condition.Status == corev1.ConditionTrue || condition.Status == corev1.ConditionFalse {
-					parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
-				}
-			}
-			for _, status := range pod.Status.ContainerStatuses {
-				if status.State.Waiting != nil {
-					parts = append(parts, fmt.Sprintf("container=%s waiting=%s", status.Name, status.State.Waiting.Reason))
-				}
-				if status.State.Terminated != nil {
-					parts = append(parts, fmt.Sprintf("container=%s terminated=%s", status.Name, status.State.Terminated.Reason))
-				}
-			}
-			summary = strings.Join(parts, " ")
-		}
-		return "", fmt.Errorf("checkpoint job %s/%s timed out: %s", namespace, jobName, summary)
+		return "", fmt.Errorf("checkpoint job %s/%s timed out: %s", namespace, jobName, checkpointTimeoutSummary(clientset, namespace, jobName, status))
 	}
 	return status, nil
+}
+
+func checkpointTimeoutSummary(clientset kubernetes.Interface, namespace string, jobName string, status string) string {
+	summaryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pods, err := clientset.CoreV1().Pods(namespace).List(summaryCtx, metav1.ListOptions{
+		LabelSelector: "batch.kubernetes.io/job-name=" + jobName,
+	})
+	if err != nil {
+		return "unable to list checkpoint pod: " + err.Error()
+	}
+	if len(pods.Items) == 0 {
+		return "no checkpoint pod created yet"
+	}
+
+	pod := pods.Items[0]
+	parts := []string{
+		fmt.Sprintf("job_status=%q", status),
+		fmt.Sprintf("pod=%s phase=%s", pod.Name, pod.Status.Phase),
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Status == corev1.ConditionTrue || condition.Status == corev1.ConditionFalse {
+			parts = append(parts, fmt.Sprintf("%s=%s", condition.Type, condition.Status))
+		}
+	}
+	for _, containerStatus := range pod.Status.ContainerStatuses {
+		if containerStatus.State.Waiting != nil {
+			parts = append(parts, fmt.Sprintf("container=%s waiting=%s", containerStatus.Name, containerStatus.State.Waiting.Reason))
+		}
+		if containerStatus.State.Terminated != nil {
+			parts = append(parts, fmt.Sprintf("container=%s terminated=%s", containerStatus.Name, containerStatus.State.Terminated.Reason))
+		}
+	}
+	return strings.Join(parts, " ")
 }

@@ -22,8 +22,12 @@ volumes:
 services:
   # DCGM stands for Data Center GPU Manager: https://developer.nvidia.com/dcgm
   # dcgm-exporter is a tool from NVIDIA that exposes DCGM metrics in Prometheus format.
+  # Requires NVIDIA GPU and runtime. Enable with:
+  #   docker compose --profile nvidia -f deploy/docker-observability.yml up -d
   dcgm-exporter:
     image: nvidia/dcgm-exporter:4.2.3-4.1.3-ubi9
+    profiles:
+      - nvidia
     ports:
       # Expose dcgm-exporter on port 9401 both inside and outside the container
       # to avoid conflicts with other dcgm-exporter instances in distributed environments.
@@ -81,7 +85,6 @@ services:
     extra_hosts:
     - "host.docker.internal:host-gateway"
     depends_on:
-      - dcgm-exporter
       - nats-prometheus-exporter
 
   # Loki - Log aggregation backend
@@ -166,4 +169,3 @@ services:
       - prometheus
       - tempo
       - loki
-

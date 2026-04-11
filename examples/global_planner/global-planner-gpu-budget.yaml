@@ -39,7 +39,7 @@ roleRef:
   name: dynamo-platform-dynamo-operator-planner
 subjects:
   - kind: ServiceAccount
-    name: default
+    name: planner-serviceaccount
     namespace: ${K8S_NAMESPACE}
 ---
 apiVersion: v1
@@ -62,7 +62,7 @@ metadata:
 spec:
   services:
     GlobalPlanner:
-      componentType: default
+      componentType: planner
       replicas: 1
       extraPodSpec:
         mainContainer:

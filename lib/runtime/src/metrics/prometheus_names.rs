@@ -232,8 +232,16 @@ pub mod frontend_service {
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
 
+    /// Total number of times migration was disabled because the sequence length
+    /// exceeded the configured max_seq_len limit
+    pub const MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL: &str =
+        "model_migration_max_seq_len_exceeded_total";
+
     /// Total number of request cancellations
     pub const MODEL_CANCELLATION_TOTAL: &str = "model_cancellation_total";
+
+    /// Total number of requests rejected due to resource exhaustion
+    pub const MODEL_REJECTION_TOTAL: &str = "model_rejection_total";
 
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
@@ -319,6 +327,9 @@ pub mod frontend_service {
 
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
+
+        /// Backend accepted the request but stopped responding (response inactivity timeout)
+        pub const RESPONSE_TIMEOUT: &str = "response_timeout";
 
         /// Internal server error (500 and other unexpected errors)
         pub const INTERNAL: &str = "internal";
@@ -502,6 +513,14 @@ pub mod routing_overhead {
 pub mod router {
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
+
+    /// Total number of remote indexer overlap queries that failed
+    pub const REMOTE_INDEXER_QUERY_FAILURES_TOTAL: &str =
+        "router_remote_indexer_query_failures_total";
+
+    /// Total number of remote indexer routing-decision writes that failed
+    pub const REMOTE_INDEXER_WRITE_FAILURES_TOTAL: &str =
+        "router_remote_indexer_write_failures_total";
 
     /// Time to first token observed at the router (seconds)
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";

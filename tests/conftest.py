@@ -25,6 +25,7 @@ from tests.utils.test_output import resolve_test_output_path
 
 _logger = logging.getLogger(__name__)
 
+
 # Typed stash keys for GPU-parallel config (avoids setting unknown attrs on Config)
 _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
 _gpu_indices_key: pytest.StashKey[list[int] | None] = pytest.StashKey()
@@ -77,6 +78,36 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+def pytest_runtest_setup(item):
+    """Add Allure labels and parameters from CI environment."""
+    try:
+        import allure
+    except ImportError:
+        return
+
+    env_params = {
+        "framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
+        "platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
+        "test_type": os.environ.get("DYNAMO_TEST_TYPE"),
+    }
+    for name, value in env_params.items():
+        if value:
+            allure.dynamic.parameter(name, value)
+
+    # Labels used by allurerc.mjs plugin filters for the unified dashboard.
+    # Use "dynamo_" prefix to avoid collision with allure-pytest's built-in
+    # "framework" label (which is always set to "pytest").
+    env_labels = {
+        "dynamo_workflow": os.environ.get("DYNAMO_TEST_WORKFLOW"),
+        "dynamo_framework": os.environ.get("DYNAMO_TEST_FRAMEWORK"),
+        "dynamo_platform": os.environ.get("DYNAMO_TEST_PLATFORM"),
+        "dynamo_testType": os.environ.get("DYNAMO_TEST_TYPE"),
+    }
+    for name, value in env_labels.items():
+        if value:
+            allure.dynamic.label(name, value)
+
+
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
@@ -99,6 +130,8 @@ def pytest_configure(config: pytest.Config) -> None:
     """Detect GPUs for --max-vram-gib planning and parallel execution."""
     vram_limit = config.getoption("max_vram_gib", default=None)
     if vram_limit is None:
+        return
+    if config.option.collectonly:
         return
     # Delayed: vram_utils requires pynvml, otherwise conftest fails to load
     # on CPU-only CI runners (e.g. ARM deploy tests) that lack nvidia-ml-py.
@@ -241,9 +274,10 @@ def download_models(model_list=None, ignore_weights=False):
     if model_list is None:
         model_list = TEST_MODELS
 
-    # Check for HF_TOKEN in environment
-    hf_token = os.environ.get("HF_TOKEN", "").strip() or None
-    if hf_token:
+    # Check for HF_TOKEN in environment. snapshot_download() picks it up
+    # automatically via huggingface_hub's token resolution (HF_TOKEN env var →
+    # ~/.cache/huggingface/token), so we don't pass it explicitly.
+    if os.environ.get("HF_TOKEN", "").strip():
         logging.info("HF_TOKEN found in environment")
     else:
         logging.warning(
@@ -279,14 +313,12 @@ def download_models(model_list=None, ignore_weights=False):
                 # Download everything except weight files
                 snapshot_download(
                     repo_id=model_id,
-                    token=hf_token,
                     ignore_patterns=weight_patterns,
                 )
             else:
                 # Download the full model snapshot (includes all files)
                 snapshot_download(
                     repo_id=model_id,
-                    token=hf_token,
                 )
             logging.info(f"Successfully pre-downloaded: {model_id}")
 
@@ -482,8 +514,9 @@ def pytest_collection_modifyitems(config, items):
     #   - Tests whose profiled VRAM exceeds the limit are removed
     #   - Tests WITHOUT a VRAM marker are also removed (unknown VRAM = unsafe)
     # Using deselect (not skip) so they never reach the xdist scheduler.
+    # Skip all VRAM logic during --collect-only (just listing tests).
     vram_limit = config.getoption("--max-vram-gib", default=None)
-    if vram_limit is not None:
+    if vram_limit is not None and not config.option.collectonly:
         keep = []
         deselected = []
         for item in items:
@@ -497,7 +530,7 @@ def pytest_collection_modifyitems(config, items):
             items[:] = keep
 
     # Write test metadata for the GPU orchestrator to read.
-    if vram_limit is not None:
+    if vram_limit is not None and not config.option.collectonly:
         # Delayed: see vram_utils pynvml note in pytest_configure
         from tests.utils.vram_utils import print_gpu_plan, write_test_meta
 
