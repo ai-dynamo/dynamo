@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import pytest
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     CommitRequest,
     CommitResponse,
@@ -24,13 +25,8 @@ from gpu_memory_service.common.protocol.messages import (
     GetRuntimeStateRequest,
     HandshakeRequest,
 )
-from gpu_memory_service.common.types import (
-    GrantedLockType,
-    RequestedLockType,
-    ServerState,
-    StateEvent,
-)
 from gpu_memory_service.server.allocations import GMSAllocationManager
+from gpu_memory_service.server.fsm import ServerState, StateEvent
 from gpu_memory_service.server.gms import GMS
 from gpu_memory_service.server.rpc import GMSRPCServer, _is_connection_alive
 from gpu_memory_service.server.session import (
@@ -46,7 +42,8 @@ from cuda.bindings import driver as cuda  # noqa: E402
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_0,
+    pytest.mark.none,
+    pytest.mark.gpu_1,
 ]
 
 

@@ -502,7 +502,9 @@ mod tests_startup_helpers {
     use super::*;
     use crate::utils::zmq::{bind_pub_socket, send_multipart};
     use bytes::Bytes;
-    use dynamo_kv_router::indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface};
+    use dynamo_kv_router::indexer::{
+        GetWorkersRequest, KvIndexer, KvIndexerInterface, WorkerKvQueryResponse,
+    };
     use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use std::sync::{Arc, Mutex};
 
@@ -1152,8 +1154,12 @@ mod tests_startup_helpers {
         );
 
         // assert: Worker's local indexer buffered event
-        let buffered = local_indexer_1.get_all_events_in_buffer();
-        assert_eq!(buffered.len(), 1, "Local indexer should buffer 1 event");
+        match local_indexer_1.get_events_in_id_range(Some(1), None).await {
+            WorkerKvQueryResponse::Events { events, .. } => {
+                assert_eq!(events.len(), 1, "Local indexer should buffer 1 event");
+            }
+            other => panic!("Expected buffered events, got {other:?}"),
+        }
 
         // === STEP 2 & 3: Simulate Outage - Stop forwarding to router ===
         let event_2 = KvCacheEvent {
@@ -1192,12 +1198,16 @@ mod tests_startup_helpers {
         }
 
         // assert: Worker's local indexer has both events
-        let buffered = local_indexer_1.get_all_events_in_buffer();
-        assert_eq!(
-            buffered.len(),
-            2,
-            "Local indexer should have both events during outage"
-        );
+        match local_indexer_1.get_events_in_id_range(Some(1), None).await {
+            WorkerKvQueryResponse::Events { events, .. } => {
+                assert_eq!(
+                    events.len(),
+                    2,
+                    "Local indexer should have both events during outage"
+                );
+            }
+            other => panic!("Expected buffered events, got {other:?}"),
+        }
 
         // assert: Router DOESN'T have event_2
         let block_hashes_2 = vec![LocalBlockHash(200), LocalBlockHash(202)];
@@ -1223,7 +1233,7 @@ mod tests_startup_helpers {
             .get_events_in_id_range(Some(last_known_id + 1), None)
             .await;
         let missed_events = match response {
-            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events { events: e, .. } => e,
             dynamo_kv_router::indexer::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             dynamo_kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
                 panic!("Unexpected error response: {message}")

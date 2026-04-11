@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Deploy Test Framework
+name: Shared Deploy Test
 
 on:
   workflow_call:
@@ -42,7 +42,7 @@ jobs:
       max-parallel: 2
       matrix:
         profile: ${{ fromJSON(inputs.profiles) }}
-    name: deploy-test-${{ inputs.framework }} (${{ matrix.profile }})
+    name: ${{ matrix.profile }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
