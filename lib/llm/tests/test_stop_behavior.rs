@@ -37,7 +37,7 @@ impl tokenizer_traits::Decoder for TestTokenizer {
                 _ => Some("?"),
             })
             .collect();
-        Ok(tokenizer_traits::DecodeResult::classify(text))
+        Ok(text.into())
     }
 }
 

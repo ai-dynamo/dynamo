@@ -69,7 +69,7 @@ pub mod traits {
     /// trailing incomplete multi-byte sequences (represented as U+FFFD).
     /// This lets callers like `DecodeStream::step()` decide whether to emit or
     /// buffer without resorting to hardcoded replacement-character string checks.
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, strum::EnumIs)]
     pub enum DecodeResult {
         /// No trailing incomplete multi-byte sequences (text does not end with U+FFFD).
         /// Note: the string may still contain *interior* U+FFFD characters from
@@ -81,18 +81,6 @@ pub mod traits {
     }
 
     impl DecodeResult {
-        /// Unwrap the inner string regardless of variant.
-        pub fn into_string(self) -> String {
-            match self {
-                DecodeResult::Complete(s) | DecodeResult::Partial(s) => s,
-            }
-        }
-
-        /// Returns `true` if the decode produced incomplete trailing bytes.
-        pub fn is_partial(&self) -> bool {
-            matches!(self, DecodeResult::Partial(_))
-        }
-
         /// Returns a reference to the inner string.
         pub fn as_str(&self) -> &str {
             match self {
@@ -100,12 +88,26 @@ pub mod traits {
             }
         }
 
-        /// Classify a decoded string: `Partial` if it ends with U+FFFD, else `Complete`.
-        pub fn classify(text: String) -> Self {
+        /// Construct from a decoded string: `Partial` if it ends with U+FFFD, else `Complete`.
+        pub fn from_decoded(text: String) -> Self {
             if text.ends_with('\u{FFFD}') {
                 DecodeResult::Partial(text)
             } else {
                 DecodeResult::Complete(text)
+            }
+        }
+    }
+
+    impl From<String> for DecodeResult {
+        fn from(text: String) -> Self {
+            DecodeResult::from_decoded(text)
+        }
+    }
+
+    impl From<DecodeResult> for String {
+        fn from(result: DecodeResult) -> Self {
+            match result {
+                DecodeResult::Complete(s) | DecodeResult::Partial(s) => s,
             }
         }
     }
@@ -272,13 +274,13 @@ impl DecodeStream {
     pub fn step(&mut self, id: u32) -> Result<Option<String>> {
         self.all_token_ids.push(id);
 
-        let prefix_text = self
+        let prefix_text: String = self
             .tokenizer
             .decode(
                 &self.all_token_ids[self.prefix_offset..self.read_offset],
                 self.skip_special_tokens,
             )?
-            .into_string();
+            .into();
 
         let new_result = self.tokenizer.decode(
             &self.all_token_ids[self.prefix_offset..],
@@ -379,10 +381,10 @@ impl Sequence {
         self.token_ids.push(token_id);
         // log::trace!("pushed token_id: {}", token_id);
 
-        let prefix_text = self
+        let prefix_text: String = self
             .tokenizer
             .decode(&self.token_ids[self.prefix_offset..self.read_offset], false)?
-            .into_string();
+            .into();
 
         let new_result = self
             .tokenizer
@@ -428,7 +430,7 @@ impl Sequence {
         // let tokenizer = self.tokenizer.read().map_err(|err| {
         //     Error::msg(format!("Failed to acquire read lock on tokenizer: {}", err))
         // })?;
-        Ok(self.tokenizer.decode(&self.token_ids, false)?.into_string())
+        Ok(self.tokenizer.decode(&self.token_ids, false)?.into())
     }
 }
 

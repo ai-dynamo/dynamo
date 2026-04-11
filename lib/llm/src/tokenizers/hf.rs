@@ -59,7 +59,7 @@ impl Decoder for HuggingFaceTokenizer {
             .decode(token_ids, skip_special_tokens)
             .map_err(|err| Error::msg(format!("Error de-tokenizing input: {err}")))?;
 
-        Ok(DecodeResult::classify(text))
+        Ok(text.into())
     }
 }
 

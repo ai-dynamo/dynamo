@@ -81,10 +81,10 @@ mod tests {
         let text = "Hello, world!";
         let encoding = tokenizer.encode(text).unwrap();
         assert!(!encoding.token_ids().is_empty());
-        let decoded = tokenizer
+        let decoded: String = tokenizer
             .decode(encoding.token_ids(), true)
             .unwrap()
-            .into_string();
+            .into();
         assert!(!decoded.is_empty());
         // The decoded text should contain the same non-space characters
         let enc_chars: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -152,8 +152,8 @@ mod tests {
         // decode(continuation) which lacks the surrounding context.
         let mut all_ids = prompt_ids.clone();
         all_ids.extend_from_slice(&cont_ids);
-        let full_text = wrapper.decode(&all_ids, true).unwrap().into_string();
-        let prompt_text = wrapper.decode(&prompt_ids, true).unwrap().into_string();
+        let full_text: String = wrapper.decode(&all_ids, true).unwrap().into();
+        let prompt_text: String = wrapper.decode(&prompt_ids, true).unwrap().into();
         let expected = &full_text[prompt_text.len()..];
         assert_eq!(
             accumulated, expected,

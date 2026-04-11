@@ -106,7 +106,7 @@ impl Decoder for TikTokenTokenizer {
         // a complete character arrives. CoreBPE::decode() would error on invalid UTF-8 instead.
         let bytes: Vec<u8> = self.bpe._decode_native_and_split(ids).flatten().collect();
         let text = String::from_utf8_lossy(&bytes).into_owned();
-        Ok(DecodeResult::classify(text))
+        Ok(text.into())
     }
 }
 
@@ -352,7 +352,7 @@ mod tests {
         assert!(!ids.is_empty());
 
         // Test decode roundtrip
-        let decoded = tokenizer.decode(ids, false).unwrap().into_string();
+        let decoded: String = tokenizer.decode(ids, false).unwrap().into();
         assert_eq!(decoded, "hello world");
     }
 
@@ -394,11 +394,11 @@ mod tests {
         ids.push(22); // [EOS]
 
         // Decode with skip_special_tokens=true should strip special tokens
-        let decoded_skip = tokenizer.decode(&ids, true).unwrap().into_string();
+        let decoded_skip: String = tokenizer.decode(&ids, true).unwrap().into();
         assert_eq!(decoded_skip, "hello");
 
         // Decode with skip_special_tokens=false should include them
-        let decoded_all = tokenizer.decode(&ids, false).unwrap().into_string();
+        let decoded_all: String = tokenizer.decode(&ids, false).unwrap().into();
         assert!(decoded_all.contains("hello"));
     }
 
@@ -417,7 +417,7 @@ mod tests {
         let ids = encoding.token_ids();
         assert!(!ids.is_empty());
 
-        let decoded = tokenizer.decode(ids, false).unwrap().into_string();
+        let decoded: String = tokenizer.decode(ids, false).unwrap().into();
         assert_eq!(decoded, "hello world");
     }
 
@@ -551,7 +551,7 @@ mod tests {
 
         let result = tokenizer.decode(&[100, 101, 102], false);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().into_string(), "你");
+        assert_eq!(String::from(result.unwrap()), "你");
     }
 
     /// All 4 emoji bytes together form valid UTF-8, so this passes both before and after
@@ -563,7 +563,7 @@ mod tests {
 
         let result = tokenizer.decode(&[200, 201, 202, 203], false);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().into_string(), "😀");
+        assert_eq!(String::from(result.unwrap()), "😀");
     }
 
     /// Without the fix, fails with "incomplete utf-8 byte sequence" from CoreBPE::decode().
@@ -590,7 +590,7 @@ mod tests {
             decode_result.is_partial(),
             "trailing incomplete byte should produce DecodeResult::Partial"
         );
-        let text = decode_result.into_string();
+        let text: String = decode_result.into();
         assert!(
             text.starts_with("hello"),
             "should start with 'hello', got: {:?}",
@@ -658,10 +658,10 @@ mod tests {
         assert_eq!(encodings.len(), 2);
 
         for (encoding, input) in encodings.iter().zip(inputs.iter()) {
-            let decoded = tokenizer
+            let decoded: String = tokenizer
                 .decode(encoding.token_ids(), false)
                 .unwrap()
-                .into_string();
+                .into();
             assert_eq!(decoded, *input);
         }
     }
