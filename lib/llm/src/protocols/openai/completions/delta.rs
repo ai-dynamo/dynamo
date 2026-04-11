@@ -312,6 +312,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             self.tracker.as_ref(),
             delta.disaggregated_params.as_ref(),
             finish_reason.is_some(),
+            delta.engine_data,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             response.nvext = Some(nvext_json);
