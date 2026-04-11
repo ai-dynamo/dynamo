@@ -10,10 +10,6 @@ The canonical Claude exporter lives under:
 - [`benchmarks/coding/claude/discovery.py`](/Users/peabrane/Documents/codes/dynamo/benchmarks/coding/claude/discovery.py)
 - [`benchmarks/coding/claude/parser.py`](/Users/peabrane/Documents/codes/dynamo/benchmarks/coding/claude/parser.py)
 
-A thin root wrapper is also available at:
-
-- [`claude_trace_to_mooncake.py`](/Users/peabrane/Documents/codes/dynamo/claude_trace_to_mooncake.py)
-
 ## What It Produces
 
 For each exported run, the Claude exporter writes two files:
@@ -31,15 +27,14 @@ Use the project venv:
 
 ```bash
 .venv/bin/python benchmarks/coding/claude/export_trace.py \
-  --input-path /Users/peabrane/.claude/projects/-Users-peabrane-Documents-codes-dynamo/a5b1f869-977d-4b5b-81dc-3bd29a7107c4.jsonl \
   --output-file /tmp/claude_trace.jsonl
 ```
 
-Equivalent root wrapper:
+Optional `--input-path` for a specific file or directory:
 
 ```bash
-.venv/bin/python claude_trace_to_mooncake.py \
-  --input-path /Users/peabrane/.claude/projects/-Users-peabrane-Documents-codes-dynamo/a5b1f869-977d-4b5b-81dc-3bd29a7107c4.jsonl \
+.venv/bin/python benchmarks/coding/claude/export_trace.py \
+  --input-path /Users/peabrane/.claude/projects/-Users-peabrane-Documents-codes-dynamo \
   --output-file /tmp/claude_trace.jsonl
 ```
 
@@ -103,18 +98,3 @@ Prompt representation:
 
 - each Mooncake row represents the full prompt prefix for that assistant turn
 - after compaction, future rows are built from the compact summary forward, not from the pre-compact raw history
-
-## Tests
-
-Current focused tests:
-
-- [`benchmarks/coding/claude/tests/test_parser.py`](/Users/peabrane/Documents/codes/dynamo/benchmarks/coding/claude/tests/test_parser.py)
-- [`benchmarks/coding/claude/tests/test_discovery.py`](/Users/peabrane/Documents/codes/dynamo/benchmarks/coding/claude/tests/test_discovery.py)
-
-Run them with:
-
-```bash
-.venv/bin/python -m pytest \
-  benchmarks/coding/claude/tests/test_parser.py \
-  benchmarks/coding/claude/tests/test_discovery.py
-```
