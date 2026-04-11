@@ -300,6 +300,7 @@ impl
                     index: data.index,
                     completion_usage: data.completion_usage,
                     disaggregated_params: data.disaggregated_params,
+                    engine_data: data.engine_data,
                 })
             })
         });

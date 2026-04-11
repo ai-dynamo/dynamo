@@ -106,6 +106,11 @@ pub struct BackendOutput {
     /// Disaggregated execution parameters (for prefill/decode separation)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
+
+    /// Opaque engine data passed through from the backend worker to the response.
+    /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_data: Option<serde_json::Value>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -167,6 +172,11 @@ pub struct LLMEngineOutput {
     // Token usage information
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_usage: Option<CompletionUsage>,
+
+    /// Opaque engine data passed through from the backend worker to the response.
+    /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_data: Option<serde_json::Value>,
 }
 
 impl LLMEngineOutput {
@@ -186,6 +196,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            engine_data: None,
         }
     }
 
@@ -205,6 +216,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            engine_data: None,
         }
     }
 
@@ -224,6 +236,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            engine_data: None,
         }
     }
 
@@ -243,6 +256,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            engine_data: None,
         }
     }
 }

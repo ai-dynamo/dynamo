@@ -50,6 +50,7 @@ fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) ->
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        engine_data: None,
     }
 }
 
