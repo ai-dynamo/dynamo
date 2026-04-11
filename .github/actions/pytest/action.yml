@@ -8,8 +8,8 @@ inputs:
   image_tag:
     description: 'Image Tag to run tests on'
     required: true
-  test_suite_name:
-    description: 'Test suite name for test metrics'
+  framework:
+    description: 'Framework name for test metrics'
     required: false
     default: 'unknown'
   test_type:
@@ -125,7 +125,8 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 -m \"${{ inputs.pytest_marks }}\""
+          # --durations=0: show ALL test/setup/teardown durations (0 = no limit)
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=0 -m \"${{ inputs.pytest_marks }}\""
 
           # Set device-specific docker flags
           GPU_FLAGS=""
@@ -133,7 +134,8 @@ runs:
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID})
+            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
+            DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri")
           elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
@@ -151,11 +153,15 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-
+        DOCKER_ENV_FLAGS+=(--env "VLLM_LOGGING_LEVEL=DEBUG")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+
+        echo "🐳 Docker run command (runner v1):"
+        echo "docker run ${GPU_FLAGS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --cpus=${NUM_CPUS} --network host ${DOCKER_ENV_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         # Pre-cleanup: remove any leftover containers with the same name
         echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
@@ -222,7 +228,8 @@ runs:
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID})
+            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
+            DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri")
           elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
@@ -248,7 +255,8 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          # --durations=0: show ALL test/setup/teardown durations (0 = no limit)
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --log-cli-level=DEBUG --log-level=DEBUG --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=0 -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -261,11 +269,15 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-
+        DOCKER_ENV_FLAGS+=(--env "VLLM_LOGGING_LEVEL=DEBUG")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+
+        echo "🐳 Docker run command (dind sidecar):"
+        echo "docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --network host ${DOCKER_ENV_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         # Pre-cleanup: remove any leftover containers with the same name
         echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
@@ -317,7 +329,7 @@ runs:
           echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
 
           # Rename XML file to unique name
-          JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+          JUNIT_NAME="pytest_test_report_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
           mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
           echo "📝 Renamed XML file to: $JUNIT_NAME"
         else
@@ -330,16 +342,12 @@ runs:
         exit ${TEST_EXIT_CODE}
 
     - name: Cleanup MinIO Service
-      if: always() && inputs.start_minio == 'true'
+      if: always()
       shell: bash
       run: |
         echo "🧹 Cleaning up MinIO container..."
         docker rm -f dynamo-minio-test 2>/dev/null || true
 
-    - name: Cleanup Pytest Containers
-      if: always() && inputs.device == 'xpu'
-      shell: bash
-      run: |
         echo "🧹 Cleaning up pytest containers..."
         # Clean up pytest containers that may be left over (especially from runner v1)
         CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
@@ -354,12 +362,24 @@ runs:
           echo "No pytest containers found"
         fi
 
+        # Cleanup any test containers by pattern (from previous failed cleanup)
+        ALL_TEST_CONTAINERS=$(docker ps -aq --filter "name=test_" 2>/dev/null || true)
+        if [[ -n "${ALL_TEST_CONTAINERS}" ]]; then
+          echo "⚠️  Found other test containers. Attempting cleanup..."
+          docker stop ${ALL_TEST_CONTAINERS} 2>/dev/null || true
+          docker rm -f ${ALL_TEST_CONTAINERS} 2>/dev/null || true
+        fi
+
+        # Final listing of remaining containers
+        echo "📋 Remaining containers with 'test' in name:"
+        docker ps -a --filter "name=test_" 2>/dev/null | tail -n +2 | wc -l | xargs echo "Total:"
+
     - name: Upload Test Results
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()  # Always upload test results, even if tests failed
       with:
-        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
 
     - name: Upload Allure Results
