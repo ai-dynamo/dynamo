@@ -652,7 +652,21 @@ class LoraMixin:
                 hasattr(self.engine, "tokenizer_manager")
                 and self.engine.tokenizer_manager
             ):
-                await self.engine.tokenizer_manager.load_lora_adapter(lora_path)
+                from sglang.srt.managers.io_struct import LoadLoRAAdapterReqInput
+
+                load_req = LoadLoRAAdapterReqInput(
+                    lora_name=lora_name,
+                    lora_path=lora_path,
+                )
+                load_result = await self.engine.tokenizer_manager.load_lora_adapter(
+                    load_req
+                )
+                if not load_result.success:
+                    yield {
+                        "status": "error",
+                        "message": f"SGLang failed to load LoRA adapter '{lora_name}': {load_result.error_message}",
+                    }
+                    return
             else:
                 yield {
                     "status": "error",
@@ -694,8 +708,13 @@ class LoraMixin:
                     )
                     # Rollback: remove the LoRA from the engine
                     try:
+                        from sglang.srt.managers.io_struct import (
+                            UnloadLoRAAdapterReqInput,
+                        )
+
+                        rollback_req = UnloadLoRAAdapterReqInput(lora_name=lora_name)
                         await self.engine.tokenizer_manager.unload_lora_adapter(
-                            lora_path
+                            rollback_req
                         )
                         self.lora_id_for_name.pop(lora_name, None)
                         self.lora_name_to_path.pop(lora_name, None)
@@ -760,7 +779,18 @@ class LoraMixin:
                 hasattr(self.engine, "tokenizer_manager")
                 and self.engine.tokenizer_manager
             ):
-                await self.engine.tokenizer_manager.unload_lora_adapter(lora_path)
+                from sglang.srt.managers.io_struct import UnloadLoRAAdapterReqInput
+
+                unload_req = UnloadLoRAAdapterReqInput(lora_name=lora_name)
+                unload_result = await self.engine.tokenizer_manager.unload_lora_adapter(
+                    unload_req
+                )
+                if not unload_result.success:
+                    yield {
+                        "status": "error",
+                        "message": f"SGLang failed to unload LoRA adapter '{lora_name}': {unload_result.error_message}",
+                    }
+                    return
             else:
                 yield {
                     "status": "error",
@@ -788,7 +818,17 @@ class LoraMixin:
                     )
                     # Rollback: re-add the LoRA to engine
                     try:
-                        await self.engine.tokenizer_manager.load_lora_adapter(lora_path)
+                        from sglang.srt.managers.io_struct import (
+                            LoadLoRAAdapterReqInput,
+                        )
+
+                        rollback_req = LoadLoRAAdapterReqInput(
+                            lora_name=lora_name,
+                            lora_path=lora_path,
+                        )
+                        await self.engine.tokenizer_manager.load_lora_adapter(
+                            rollback_req
+                        )
                         self.lora_id_for_name[lora_name] = lora_id
                         if lora_path:
                             self.lora_name_to_path[lora_name] = lora_path

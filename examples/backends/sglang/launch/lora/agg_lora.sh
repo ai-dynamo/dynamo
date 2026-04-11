@@ -30,6 +30,8 @@ LORA_NAME="${LORA_NAME:-codelion/Qwen3-0.6B-accuracy-recovery-lora}"
 SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+# Default to profiled KV token cap when not overridden by the test scheduler
+: "${GPU_MEM_ARGS:=--max-total-tokens 2848}"
 
 print_launch_banner --no-curl "Launching Aggregated Serving + LoRA (1 GPU)" "$MODEL" "$HTTP_PORT"
 echo ""
@@ -56,7 +58,7 @@ python3 -m dynamo.sglang \
   --trust-remote-code \
   --skip-tokenizer-init \
   --enable-lora \
-  --max-lora-rank 32 \
+  --max-lora-rank 64 \
   --lora-target-modules all \
   $GPU_MEM_ARGS &
 
