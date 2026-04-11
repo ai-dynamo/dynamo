@@ -25,12 +25,20 @@ Raw prompt text is used only in memory to derive hashes. It is not written to di
 
 Use the project venv:
 
+Default behavior:
+
+- if `--input-path` is omitted, the exporter walks upward from `benchmarks/coding/claude/` to filesystem root
+- for each ancestor, it checks the matching encoded Claude project path under `~/.claude/projects/`
+- after that, it also scans the normal Claude home-level root `~/.claude/projects`
+
+Autodiscover traces and export:
+
 ```bash
 .venv/bin/python benchmarks/coding/claude/export_trace.py \
   --output-file /tmp/claude_trace.jsonl
 ```
 
-Optional `--input-path` for a specific file or directory:
+Optional `--input-path` overrides autodiscovery and restricts the export to a specific file or directory:
 
 ```bash
 .venv/bin/python benchmarks/coding/claude/export_trace.py \
