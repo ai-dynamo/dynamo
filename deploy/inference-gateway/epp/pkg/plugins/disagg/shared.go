@@ -33,7 +33,7 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
-	pluginpkg "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
@@ -44,7 +44,7 @@ const (
 	DecodeProfileName  = "decode"
 
 	// PrefillEnabledStateKey tracks whether this request should use disaggregated routing.
-	PrefillEnabledStateKey = pluginpkg.StateKey("disagg-prefill-enabled")
+	PrefillEnabledStateKey = plugins.StateKey("disagg-prefill-enabled")
 )
 
 // PrefillEnabledState stores whether prefill is enabled for the current scheduling cycle.
@@ -52,8 +52,8 @@ type PrefillEnabledState struct {
 	Enabled bool
 }
 
-// Clone implements pluginpkg.StateData.
-func (s *PrefillEnabledState) Clone() pluginpkg.StateData {
+// Clone implements plugins.StateData.
+func (s *PrefillEnabledState) Clone() plugins.StateData {
 	return &PrefillEnabledState{Enabled: s.Enabled}
 }
 

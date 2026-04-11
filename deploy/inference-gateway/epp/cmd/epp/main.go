@@ -38,7 +38,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/gateway-api-inference-extension/cmd/epp/runner"
-	pluginpkg "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 
 	// Dynamo plugins
 	"github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/disagg"
@@ -47,10 +47,10 @@ import (
 
 func main() {
 	// Register Dynamo custom plugins:
-	pluginpkg.Register("label-filter", labelfilter.LabelFilterFactory)
-	pluginpkg.Register(disagg.DisaggProfileHandlerType, disagg.DisaggProfileHandlerFactory)
-	pluginpkg.Register(disagg.DynPrefillScorerType, disagg.DynPrefillScorerFactory)
-	pluginpkg.Register(disagg.DynDecodeScorerType, disagg.DynDecodeScorerFactory)
+	plugins.Register("label-filter", labelfilter.LabelFilterFactory)
+	plugins.Register(disagg.DisaggProfileHandlerType, disagg.DisaggProfileHandlerFactory)
+	plugins.Register(disagg.DynPrefillScorerType, disagg.DynPrefillScorerFactory)
+	plugins.Register(disagg.DynDecodeScorerType, disagg.DynDecodeScorerFactory)
 
 	// Run using standard GAIE runner (it registers built-in plugins automatically)
 	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {

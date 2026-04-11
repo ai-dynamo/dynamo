@@ -24,7 +24,7 @@ import (
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
-	pluginpkg "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
@@ -39,7 +39,7 @@ var _ schedtypes.ProfileHandler = &DisaggProfileHandler{}
 type DisaggProfileHandlerConfig struct{}
 
 // DisaggProfileHandlerFactory defines the factory function for DisaggProfileHandler.
-func DisaggProfileHandlerFactory(name string, rawParameters json.RawMessage, _ pluginpkg.Handle) (pluginpkg.Plugin, error) {
+func DisaggProfileHandlerFactory(name string, rawParameters json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
 	cfg := DisaggProfileHandlerConfig{}
 	if rawParameters != nil {
 		if err := json.Unmarshal(rawParameters, &cfg); err != nil {
@@ -53,19 +53,19 @@ func DisaggProfileHandlerFactory(name string, rawParameters json.RawMessage, _ p
 // NewDisaggProfileHandler initializes a new DisaggProfileHandler.
 func NewDisaggProfileHandler(enforceDisagg bool) *DisaggProfileHandler {
 	return &DisaggProfileHandler{
-		typedName:     pluginpkg.TypedName{Type: DisaggProfileHandlerType, Name: DisaggProfileHandlerType},
+		typedName:     plugins.TypedName{Type: DisaggProfileHandlerType, Name: DisaggProfileHandlerType},
 		enforceDisagg: enforceDisagg,
 	}
 }
 
 // DisaggProfileHandler is a ProfileHandler that orchestrates prefill/decode disaggregated serving.
 type DisaggProfileHandler struct {
-	typedName     pluginpkg.TypedName
+	typedName     plugins.TypedName
 	enforceDisagg bool
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
-func (h *DisaggProfileHandler) TypedName() pluginpkg.TypedName {
+func (h *DisaggProfileHandler) TypedName() plugins.TypedName {
 	return h.typedName
 }
 

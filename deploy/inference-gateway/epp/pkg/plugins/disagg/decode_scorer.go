@@ -26,7 +26,7 @@ import (
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	fwkdl "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer"
-	pluginpkg "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	rc "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requestcontrol"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 
@@ -48,7 +48,7 @@ const (
 
 // compile-time type assertions
 var _ schedtypes.Scorer = &DynDecodeScorer{}
-var _ pluginpkg.Plugin = &DynDecodeScorer{}
+var _ plugins.Plugin = &DynDecodeScorer{}
 var _ rc.PreRequest = &DynDecodeScorer{}
 var _ rc.ResponseBody = &DynDecodeScorer{}
 
@@ -61,8 +61,8 @@ type DecodeRoutingState struct {
 	ModifiedBody    string
 }
 
-// Clone implements pluginpkg.StateData.
-func (s *DecodeRoutingState) Clone() pluginpkg.StateData {
+// Clone implements plugins.StateData.
+func (s *DecodeRoutingState) Clone() plugins.StateData {
 	if s == nil {
 		return nil
 	}
@@ -83,7 +83,7 @@ func (s *DecodeRoutingState) Clone() pluginpkg.StateData {
 type DynDecodeScorerConfig struct{}
 
 // DynDecodeScorerFactory defines the factory function for DynDecodeScorer.
-func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle pluginpkg.Handle) (pluginpkg.Plugin, error) {
+func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle plugins.Handle) (plugins.Plugin, error) {
 	cfg := DynDecodeScorerConfig{}
 	if rawParameters != nil {
 		if err := json.Unmarshal(rawParameters, &cfg); err != nil {
@@ -102,22 +102,22 @@ func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle p
 // NewDynDecodeScorer initializes a new DynDecodeScorer.
 func NewDynDecodeScorer(ctx context.Context, enforceDisagg bool) *DynDecodeScorer {
 	return &DynDecodeScorer{
-		typedName:     pluginpkg.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
-		pluginState:   pluginpkg.NewPluginState(ctx),
+		typedName:     plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
+		pluginState:   plugins.NewPluginState(ctx),
 		enforceDisagg: enforceDisagg,
 	}
 }
 
 // DynDecodeScorer is a scorer plugin for the decode scheduling profile.
 type DynDecodeScorer struct {
-	typedName      pluginpkg.TypedName
-	pluginState    *pluginpkg.PluginState
+	typedName      plugins.TypedName
+	pluginState    *plugins.PluginState
 	enforceDisagg  bool
 	firstTokenSeen sync.Map
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
-func (s *DynDecodeScorer) TypedName() pluginpkg.TypedName {
+func (s *DynDecodeScorer) TypedName() plugins.TypedName {
 	return s.typedName
 }
 
@@ -193,7 +193,7 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 			TokenData:    result.TokenData,
 			ModifiedBody: result.ModifiedBody,
 		}
-		s.pluginState.Write(req.RequestId, pluginpkg.StateKey(decodeStateKey), routingState)
+		s.pluginState.Write(req.RequestId, plugins.StateKey(decodeStateKey), routingState)
 	}
 
 	// Inject pre-computed tokens into the request body so the frontend
@@ -212,8 +212,8 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.LL
 		return
 	}
 
-	state, err := pluginpkg.ReadPluginStateKey[*DecodeRoutingState](
-		s.pluginState, request.RequestId, pluginpkg.StateKey(decodeStateKey),
+	state, err := plugins.ReadPluginStateKey[*DecodeRoutingState](
+		s.pluginState, request.RequestId, plugins.StateKey(decodeStateKey),
 	)
 	s.pluginState.Delete(request.RequestId)
 

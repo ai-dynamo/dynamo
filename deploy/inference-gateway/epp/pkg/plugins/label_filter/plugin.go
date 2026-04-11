@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	pluginpkg "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 )
 
@@ -39,7 +39,7 @@ type LabelFilterConfig struct {
 	AllowsNoLabel bool     `json:"allowsNoLabel"`
 }
 
-func LabelFilterFactory(name string, rawParameters json.RawMessage, _ pluginpkg.Handle) (pluginpkg.Plugin, error) {
+func LabelFilterFactory(name string, rawParameters json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
 	cfg := LabelFilterConfig{}
 	if rawParameters == nil {
 		return nil, fmt.Errorf("%s plugin requires parameters with 'label' and 'validValues' fields", LabelFilterType)
@@ -62,7 +62,7 @@ func NewLabelFilter(label string, validValues []string, allowsNoLabel bool) *Lab
 		valuesSet[v] = struct{}{}
 	}
 	return &LabelFilter{
-		typedName:     pluginpkg.TypedName{Type: LabelFilterType, Name: LabelFilterType},
+		typedName:     plugins.TypedName{Type: LabelFilterType, Name: LabelFilterType},
 		label:         label,
 		validValues:   valuesSet,
 		allowsNoLabel: allowsNoLabel,
@@ -70,13 +70,13 @@ func NewLabelFilter(label string, validValues []string, allowsNoLabel bool) *Lab
 }
 
 type LabelFilter struct {
-	typedName     pluginpkg.TypedName
+	typedName     plugins.TypedName
 	label         string
 	validValues   map[string]struct{}
 	allowsNoLabel bool
 }
 
-func (f *LabelFilter) TypedName() pluginpkg.TypedName {
+func (f *LabelFilter) TypedName() plugins.TypedName {
 	return f.typedName
 }
 

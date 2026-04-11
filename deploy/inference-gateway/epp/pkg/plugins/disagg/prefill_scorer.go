@@ -24,7 +24,7 @@ import (
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
-	pluginpkg "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
@@ -42,7 +42,7 @@ var _ schedtypes.Scorer = &DynPrefillScorer{}
 type DynPrefillScorerConfig struct{}
 
 // DynPrefillScorerFactory defines the factory function for DynPrefillScorer.
-func DynPrefillScorerFactory(name string, rawParameters json.RawMessage, _ pluginpkg.Handle) (pluginpkg.Plugin, error) {
+func DynPrefillScorerFactory(name string, rawParameters json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
 	cfg := DynPrefillScorerConfig{}
 	if rawParameters != nil {
 		if err := json.Unmarshal(rawParameters, &cfg); err != nil {
@@ -60,17 +60,17 @@ func DynPrefillScorerFactory(name string, rawParameters json.RawMessage, _ plugi
 // NewDynPrefillScorer initializes a new DynPrefillScorer.
 func NewDynPrefillScorer() *DynPrefillScorer {
 	return &DynPrefillScorer{
-		typedName: pluginpkg.TypedName{Type: DynPrefillScorerType, Name: DynPrefillScorerType},
+		typedName: plugins.TypedName{Type: DynPrefillScorerType, Name: DynPrefillScorerType},
 	}
 }
 
 // DynPrefillScorer is a scorer plugin for the prefill scheduling profile.
 type DynPrefillScorer struct {
-	typedName pluginpkg.TypedName
+	typedName plugins.TypedName
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
-func (s *DynPrefillScorer) TypedName() pluginpkg.TypedName {
+func (s *DynPrefillScorer) TypedName() plugins.TypedName {
 	return s.typedName
 }
 
