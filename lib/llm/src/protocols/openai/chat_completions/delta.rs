@@ -517,6 +517,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::openai::DeltaGeneratorExt;
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
