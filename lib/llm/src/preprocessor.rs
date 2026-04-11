@@ -560,35 +560,24 @@ impl OpenAIPreprocessor {
                             // Completions will use raw_prompt, no template
                             let prompt = formatted_prompt.unwrap_or(raw_prompt);
 
-                            // Check if backend_instance_id is present and token_data is provided
-                            let has_backend_instance_id = request
-                                .nvext()
-                                .and_then(|ext| ext.backend_instance_id)
-                                .is_some();
-
+                            // If nvext.token_data is present, use the pre-computed tokens
+                            // directly and skip tokenization.  This avoids redundant
+                            // tokenization when an external component (e.g. the GAIE EPP
+                            // KV-router) has already tokenized the prompt.
                             let token_data =
                                 request.nvext().and_then(|ext| ext.token_data.as_ref());
 
-                            let (tokens_vec, skip_token_annotation) = if has_backend_instance_id {
+                            let (tokens_vec, skip_token_annotation) =
                                 if let Some(tokens) = token_data {
                                     tracing::trace!(
-                                        "Using provided tokens from EPP: {} ids",
+                                        "Using provided tokens from nvext.token_data: {} ids",
                                         tokens.len()
                                     );
-                                    // need ownership for the builder, so clone.
                                     (tokens.clone(), true)
                                 } else {
-                                    tracing::warn!(
-                                        "backend_instance_id provided but no token_data; tokenizing prompt"
-                                    );
                                     let encoding = self.encode_with_timing(&prompt, tracker)?;
                                     (encoding.token_ids().to_vec(), false)
-                                }
-                            } else {
-                                // No backend_instance_id provided, continue the normal flow.
-                                let encoding = self.encode_with_timing(&prompt, tracker)?;
-                                (encoding.token_ids().to_vec(), false)
-                            };
+                                };
 
                             if request.has_annotation(ANNOTATION_TOKEN_IDS)
                                 && !skip_token_annotation

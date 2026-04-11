@@ -24,12 +24,11 @@ import (
 	"sync"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/backend"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
-	rc "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/requestcontrol"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/framework"
-	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
-	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	fwkdl "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/datalayer"
+	pluginpkg "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	rc "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requestcontrol"
+	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 )
@@ -44,16 +43,14 @@ const (
 	PrefillDpRankHeader   = "x-prefill-dp-rank"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
 
-	// decodeStateKey is the key used to store routing state in PluginState
 	decodeStateKey = "dynamo-decode-routing-state"
 )
 
 // compile-time type assertions
-var _ framework.Scorer = &DynDecodeScorer{}
-var _ plugins.Plugin = &DynDecodeScorer{}
+var _ schedtypes.Scorer = &DynDecodeScorer{}
+var _ pluginpkg.Plugin = &DynDecodeScorer{}
 var _ rc.PreRequest = &DynDecodeScorer{}
-var _ rc.ResponseStreaming = &DynDecodeScorer{}
-var _ rc.ResponseComplete = &DynDecodeScorer{}
+var _ rc.ResponseBody = &DynDecodeScorer{}
 
 // DecodeRoutingState holds routing information passed from Score() to PreRequest().
 type DecodeRoutingState struct {
@@ -61,10 +58,11 @@ type DecodeRoutingState struct {
 	DpRank          uint32
 	PrefillWorkerID string
 	TokenData       []int64
+	ModifiedBody    string
 }
 
-// Clone implements plugins.StateData.
-func (s *DecodeRoutingState) Clone() plugins.StateData {
+// Clone implements pluginpkg.StateData.
+func (s *DecodeRoutingState) Clone() pluginpkg.StateData {
 	if s == nil {
 		return nil
 	}
@@ -72,6 +70,7 @@ func (s *DecodeRoutingState) Clone() plugins.StateData {
 		WorkerID:        s.WorkerID,
 		DpRank:          s.DpRank,
 		PrefillWorkerID: s.PrefillWorkerID,
+		ModifiedBody:    s.ModifiedBody,
 	}
 	if s.TokenData != nil {
 		clone.TokenData = make([]int64, len(s.TokenData))
@@ -84,7 +83,7 @@ func (s *DecodeRoutingState) Clone() plugins.StateData {
 type DynDecodeScorerConfig struct{}
 
 // DynDecodeScorerFactory defines the factory function for DynDecodeScorer.
-func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle plugins.Handle) (plugins.Plugin, error) {
+func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle pluginpkg.Handle) (pluginpkg.Plugin, error) {
 	cfg := DynDecodeScorerConfig{}
 	if rawParameters != nil {
 		if err := json.Unmarshal(rawParameters, &cfg); err != nil {
@@ -92,7 +91,6 @@ func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle p
 		}
 	}
 
-	// Initialize the shared FFI (idempotent)
 	if err := dynscorer.InitFFI(); err != nil {
 		return nil, fmt.Errorf("Dynamo FFI init for decode scorer failed: %w", err)
 	}
@@ -104,31 +102,22 @@ func DynDecodeScorerFactory(name string, rawParameters json.RawMessage, handle p
 // NewDynDecodeScorer initializes a new DynDecodeScorer.
 func NewDynDecodeScorer(ctx context.Context, enforceDisagg bool) *DynDecodeScorer {
 	return &DynDecodeScorer{
-		typedName:     plugins.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
-		pluginState:   plugins.NewPluginState(ctx),
+		typedName:     pluginpkg.TypedName{Type: DynDecodeScorerType, Name: DynDecodeScorerType},
+		pluginState:   pluginpkg.NewPluginState(ctx),
 		enforceDisagg: enforceDisagg,
 	}
 }
 
 // DynDecodeScorer is a scorer plugin for the decode scheduling profile.
-//
-// When Score() is called, it:
-//  1. Reads PrefillEnabledState from CycleState (written by DisaggProfileHandler).
-//  2. Calls the Dynamo FFI decode router with is_disaggregated flag.
-//  3. Sets routing headers on the request.
-//  4. Stores routing state for PreRequest to register with router bookkeeping.
-//
-// It also implements PreRequest, ResponseStreaming, and ResponseComplete lifecycle hooks
-// for router bookkeeping (add_request, mark_prefill_complete, free_request).
 type DynDecodeScorer struct {
-	typedName      plugins.TypedName
-	pluginState    *plugins.PluginState
+	typedName      pluginpkg.TypedName
+	pluginState    *pluginpkg.PluginState
 	enforceDisagg  bool
 	firstTokenSeen sync.Map
 }
 
 // TypedName returns the type and name tuple of this plugin instance.
-func (s *DynDecodeScorer) TypedName() plugins.TypedName {
+func (s *DynDecodeScorer) TypedName() pluginpkg.TypedName {
 	return s.typedName
 }
 
@@ -138,8 +127,13 @@ func (s *DynDecodeScorer) WithName(name string) *DynDecodeScorer {
 	return s
 }
 
-// Score scores pods for decode suitability.
-func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.LLMRequest, pods []schedtypes.Pod) map[schedtypes.Pod]float64 {
+// Category returns the scorer category.
+func (s *DynDecodeScorer) Category() schedtypes.ScorerCategory {
+	return schedtypes.Affinity
+}
+
+// Score scores endpoints for decode suitability.
+func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.LLMRequest, endpoints []schedtypes.Endpoint) map[schedtypes.Endpoint]float64 {
 	logger := log.FromContext(ctx)
 
 	isDisaggregated := readPrefillEnabled(cycleState)
@@ -147,18 +141,18 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	requestJSON, err := buildRequestJSON(req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer: failed to build request")
-		return uniformScores(pods, 1.0)
+		return uniformScores(endpoints, 1.0)
 	}
 
-	podsJSON := serializePods(pods)
-	logger.V(logutil.DEFAULT).Info("DynDecodeScorer: pods received for scoring",
-		"podCount", len(pods),
-		"podsJSON", string(podsJSON))
+	endpointsJSON := serializeEndpoints(endpoints)
+	logger.V(logutil.DEFAULT).Info("DynDecodeScorer: endpoints received for scoring",
+		"endpointCount", len(endpoints),
+		"endpointsJSON", string(endpointsJSON))
 
-	result, err := dynscorer.CallRouteDecodeRequest(requestJSON, podsJSON, isDisaggregated)
+	result, err := dynscorer.CallRouteDecodeRequest(requestJSON, endpointsJSON, isDisaggregated)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer: FFI decode routing failed")
-		return uniformScores(pods, 1.0)
+		return uniformScores(endpoints, 1.0)
 	}
 
 	workerIDStr := fmt.Sprintf("%d", result.WorkerID)
@@ -169,7 +163,6 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 		"isDisaggregated", isDisaggregated,
 		"tokenCount", len(result.TokenData))
 
-	// Set routing headers
 	if req.Headers == nil {
 		req.Headers = map[string]string{}
 	}
@@ -195,20 +188,22 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	// Store routing state for PreRequest bookkeeping
 	if req.RequestId != "" {
 		routingState := &DecodeRoutingState{
-			WorkerID:  workerIDStr,
-			DpRank:    result.DpRank,
-			TokenData: result.TokenData,
+			WorkerID:     workerIDStr,
+			DpRank:       result.DpRank,
+			TokenData:    result.TokenData,
+			ModifiedBody: result.ModifiedBody,
 		}
-		s.pluginState.Write(req.RequestId, plugins.StateKey(decodeStateKey), routingState)
+		s.pluginState.Write(req.RequestId, pluginpkg.StateKey(decodeStateKey), routingState)
 	}
 
-	// Score: all decode pods get 1.0 since the router's internal selection is authoritative
-	// and the worker ID is communicated via headers.
-	return uniformScores(pods, 1.0)
+	// Inject pre-computed tokens into the request body so the frontend
+	// sidecar can skip redundant tokenization.
+	setTokenizedPrompt(req, result.TokenData, logger)
+
+	return uniformScores(endpoints, 1.0)
 }
 
-// PreRequest is called after scheduling is finalized and before the request is sent to the worker.
-// This registers the request with the Dynamo router's bookkeeping.
+// PreRequest registers the request with the Dynamo router's bookkeeping.
 func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.LLMRequest, _ *schedtypes.SchedulingResult) {
 	logger := log.FromContext(ctx)
 
@@ -217,8 +212,8 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.LL
 		return
 	}
 
-	state, err := plugins.ReadPluginStateKey[*DecodeRoutingState](
-		s.pluginState, request.RequestId, plugins.StateKey(decodeStateKey),
+	state, err := pluginpkg.ReadPluginStateKey[*DecodeRoutingState](
+		s.pluginState, request.RequestId, pluginpkg.StateKey(decodeStateKey),
 	)
 	s.pluginState.Delete(request.RequestId)
 
@@ -248,42 +243,37 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.LL
 		"tokenCount", len(state.TokenData))
 }
 
-// ResponseStreaming is called for each chunk of a streaming response.
-// On the first token, it marks prefill as complete in the Dynamo router's bookkeeping.
-func (s *DynDecodeScorer) ResponseStreaming(ctx context.Context, request *schedtypes.LLMRequest, _ *rc.Response, _ *backend.Pod) {
+// ResponseBody handles streaming chunks and end-of-stream cleanup.
+// On the first token it marks prefill as complete; on EndOfStream it frees the request.
+func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.LLMRequest, response *rc.Response, _ *fwkdl.EndpointMetadata) {
 	if request == nil || request.RequestId == "" {
 		return
 	}
 
+	logger := log.FromContext(ctx)
+
+	// Mark prefill complete on first token
 	if _, alreadySeen := s.firstTokenSeen.LoadOrStore(request.RequestId, true); !alreadySeen {
-		logger := log.FromContext(ctx)
 		if err := dynscorer.CallMarkPrefillComplete(request.RequestId); err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseStreaming: failed to mark prefill complete",
+			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to mark prefill complete",
 				"requestID", request.RequestId)
 			return
 		}
-		logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseStreaming: marked prefill complete",
+		logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: marked prefill complete",
 			"requestID", request.RequestId)
 	}
-}
 
-// ResponseComplete is called after the complete response is sent to the client.
-// It cleans up the router bookkeeping state for the completed request.
-func (s *DynDecodeScorer) ResponseComplete(ctx context.Context, request *schedtypes.LLMRequest, _ *rc.Response, _ *backend.Pod) {
-	logger := log.FromContext(ctx)
+	// Free request on end of stream
+	if response != nil && response.EndOfStream {
+		s.firstTokenSeen.Delete(request.RequestId)
 
-	if request == nil || request.RequestId == "" {
-		return
-	}
+		if err := dynscorer.CallFreeRequest(request.RequestId); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to free request",
+				"requestID", request.RequestId)
+			return
+		}
 
-	s.firstTokenSeen.Delete(request.RequestId)
-
-	if err := dynscorer.CallFreeRequest(request.RequestId); err != nil {
-		logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseComplete: failed to free request",
+		logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: freed request",
 			"requestID", request.RequestId)
-		return
 	}
-
-	logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseComplete: freed request",
-		"requestID", request.RequestId)
 }

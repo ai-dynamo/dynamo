@@ -29,9 +29,12 @@ package disagg
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
-	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
+	"github.com/go-logr/logr"
+	pluginpkg "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 )
@@ -41,30 +44,20 @@ const (
 	DecodeProfileName  = "decode"
 
 	// PrefillEnabledStateKey tracks whether this request should use disaggregated routing.
-	// Initially set to true by DisaggProfileHandler.Pick() if a "prefill" scheduling
-	// profile exists in the EPP config. Overwritten to false per-request in two cases:
-	//   - DisaggProfileHandler.Pick(): prefill profile result is nil (no prefill pods
-	//     passed the label-filter).
-	//   - DynPrefillScorer.Score(): prefill FFI routing failed (prefill router not yet
-	//     activated, e.g., worker registered in K8s but not yet in Dynamo discovery).
-	// The decode scorer reads this to decide whether to use overlap_score_weight=0
-	// (disaggregated) or normal KV cache overlap scoring (aggregated).
-	PrefillEnabledStateKey = plugins.StateKey("disagg-prefill-enabled")
+	PrefillEnabledStateKey = pluginpkg.StateKey("disagg-prefill-enabled")
 )
 
 // PrefillEnabledState stores whether prefill is enabled for the current scheduling cycle.
-// Written by DisaggProfileHandler, read by PrefillScorer and DecodeScorer.
 type PrefillEnabledState struct {
 	Enabled bool
 }
 
-// Clone implements plugins.StateData.
-func (s *PrefillEnabledState) Clone() plugins.StateData {
+// Clone implements pluginpkg.StateData.
+func (s *PrefillEnabledState) Clone() pluginpkg.StateData {
 	return &PrefillEnabledState{Enabled: s.Enabled}
 }
 
 // readPrefillEnabled reads the PrefillEnabledState from CycleState.
-// Returns false if the state is not found or not set.
 func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 	state, err := schedtypes.ReadCycleStateKey[*PrefillEnabledState](cycleState, PrefillEnabledStateKey)
 	if err == nil && state != nil {
@@ -86,24 +79,71 @@ func buildRequestJSON(req *schedtypes.LLMRequest) (string, error) {
 	return string(data), nil
 }
 
-// serializePods converts pods to a JSON string for the FFI filter.
-// Returns an empty string if serialization fails or pods is empty.
-func serializePods(pods []schedtypes.Pod) string {
-	if len(pods) == 0 {
+// serializeEndpoints converts endpoints to a JSON string for the FFI filter.
+func serializeEndpoints(endpoints []schedtypes.Endpoint) string {
+	if len(endpoints) == 0 {
 		return ""
 	}
-	pj, err := dynscorer.SerializePodsToJSON(pods)
+	pj, err := dynscorer.SerializeEndpointsToJSON(endpoints)
 	if err != nil {
 		return ""
 	}
 	return pj
 }
 
-// uniformScores returns a score map with the same score for every pod.
-func uniformScores(pods []schedtypes.Pod, score float64) map[schedtypes.Pod]float64 {
-	out := make(map[schedtypes.Pod]float64, len(pods))
-	for _, p := range pods {
-		out[p] = score
+// uniformScores returns a score map with the same score for every endpoint.
+func uniformScores(endpoints []schedtypes.Endpoint, score float64) map[schedtypes.Endpoint]float64 {
+	out := make(map[schedtypes.Endpoint]float64, len(endpoints))
+	for _, ep := range endpoints {
+		out[ep] = score
 	}
 	return out
+}
+
+// setTokenizedPrompt stores pre-computed token IDs on the LLMRequest so the
+// Dynamo frontend sidecar can skip redundant tokenization.  It sets both the
+// native TokenizedPrompt field and injects nvext.token_data into the Payload
+// (if the Payload is a PayloadMap) so the modified body is forwarded to the
+// worker.
+func setTokenizedPrompt(req *schedtypes.LLMRequest, tokens []int64, logger logr.Logger) {
+	if req == nil || len(tokens) == 0 {
+		return
+	}
+
+	tokenIDs := make([]uint32, len(tokens))
+	for i, t := range tokens {
+		tokenIDs[i] = uint32(t)
+	}
+
+	req.TokenizedPrompt = &schedtypes.TokenizedPrompt{
+		TokenIDs: tokenIDs,
+	}
+
+	// Also inject into the Payload so the body forwarded to the worker includes
+	// nvext.token_data.  This is only possible when the Payload is a PayloadMap.
+	if req.Body != nil {
+		if pm, ok := req.Body.Payload.(schedtypes.PayloadMap); ok {
+			nvext, _ := pm["nvext"].(map[string]any)
+			if nvext == nil {
+				nvext = map[string]any{}
+			}
+			nvext["token_data"] = tokenIDs
+			pm["nvext"] = nvext
+		}
+	}
+
+	logger.V(5).Info("Set TokenizedPrompt and nvext.token_data on request",
+		"tokenCount", len(tokenIDs))
+}
+
+func getEnvBoolOrDefault(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch strings.ToLower(v) {
+		case "true", "1", "yes", "on":
+			return true
+		case "false", "0", "no", "off":
+			return false
+		}
+	}
+	return def
 }
