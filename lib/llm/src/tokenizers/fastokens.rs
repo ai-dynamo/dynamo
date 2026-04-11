@@ -81,10 +81,7 @@ mod tests {
         let text = "Hello, world!";
         let encoding = tokenizer.encode(text).unwrap();
         assert!(!encoding.token_ids().is_empty());
-        let decoded: String = tokenizer
-            .decode(encoding.token_ids(), true)
-            .unwrap()
-            .into();
+        let decoded: String = tokenizer.decode(encoding.token_ids(), true).unwrap().into();
         assert!(!decoded.is_empty());
         // The decoded text should contain the same non-space characters
         let enc_chars: String = text.chars().filter(|c| !c.is_whitespace()).collect();

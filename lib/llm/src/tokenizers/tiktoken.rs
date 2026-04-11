@@ -100,13 +100,22 @@ impl Decoder for TikTokenTokenizer {
             token_ids.to_vec()
         };
 
-        // Use lossy UTF-8 conversion so that partial multi-byte sequences become U+FFFD.
-        // This is critical for incremental detokenization: DecodeStream::step() relies on
-        // DecodeResult::Partial to detect incomplete sequences and buffer tokens until
-        // a complete character arrives. CoreBPE::decode() would error on invalid UTF-8 instead.
+        // Try strict UTF-8 first: valid bytes get `Complete` with zero extra allocation
+        // (takes ownership of the Vec). This correctly handles vocabulary tokens whose
+        // raw bytes are EF BF BD (legitimate U+FFFD) -- they are valid UTF-8 and must
+        // not be confused with incomplete multi-byte sequences.
+        //
+        // On failure, fall back to lossy conversion so partial multi-byte sequences
+        // become U+FFFD, then classify via the trailing-FFFD heuristic. This path is
+        // only hit during incremental detokenization of byte-fallback tokens.
         let bytes: Vec<u8> = self.bpe._decode_native_and_split(ids).flatten().collect();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        Ok(text.into())
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(DecodeResult::Complete(text)),
+            Err(e) => {
+                let text = String::from_utf8_lossy(e.as_bytes()).into_owned();
+                Ok(DecodeResult::from_decoded(text))
+            }
+        }
     }
 }
 
@@ -491,6 +500,15 @@ mod tests {
             content.push_str(&format!("{encoded} {rank}\n"));
         }
 
+        // Legitimate U+FFFD token: valid UTF-8 bytes EF BF BD (replacement character
+        // as an actual vocabulary entry, not an artifact of lossy conversion)
+        let fffd_token: Vec<(Vec<u8>, u32)> = vec![(vec![0xEF, 0xBF, 0xBD], 300)];
+
+        for (token, rank) in &fffd_token {
+            let encoded = engine.encode(token);
+            content.push_str(&format!("{encoded} {rank}\n"));
+        }
+
         let file_path = dir.join("tiktoken.model");
         let mut file = std::fs::File::create(&file_path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
@@ -564,6 +582,26 @@ mod tests {
         let result = tokenizer.decode(&[200, 201, 202, 203], false);
         assert!(result.is_ok());
         assert_eq!(String::from(result.unwrap()), "😀");
+    }
+
+    /// Regression test: a vocabulary token whose raw bytes are EF BF BD (the valid
+    /// UTF-8 encoding of U+FFFD) must decode as `Complete`, not `Partial`. Before the
+    /// from_utf8 fast-path fix, from_utf8_lossy + the trailing-FFFD heuristic would
+    /// misclassify this as Partial, causing the incremental decoder to suppress it.
+    #[test]
+    fn test_decode_legitimate_replacement_char_token_is_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let tokenizer = create_byte_token_tokenizer(dir.path());
+
+        let result = tokenizer.decode(&[300], false);
+        assert!(result.is_ok());
+        let decode_result = result.unwrap();
+        assert!(
+            decode_result.is_complete(),
+            "legitimate U+FFFD vocab token must be Complete, got: {:?}",
+            decode_result
+        );
+        assert_eq!(decode_result.as_str(), "\u{FFFD}");
     }
 
     /// Without the fix, fails with "incomplete utf-8 byte sequence" from CoreBPE::decode().
