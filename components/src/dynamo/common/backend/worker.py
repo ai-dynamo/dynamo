@@ -35,7 +35,7 @@ class WorkerConfig:
     model_input: ModelInput = field(default_factory=lambda: ModelInput.Tokens)
     endpoint_types: str = "chat,completions"
     discovery_backend: str = "etcd"
-    request_plane: str = "nats"
+    request_plane: str = "tcp"
     event_plane: str = "nats"
     use_kv_events: bool = False
     custom_jinja_template: Optional[str] = None
