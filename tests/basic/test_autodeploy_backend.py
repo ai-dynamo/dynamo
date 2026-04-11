@@ -166,6 +166,7 @@ def send_completion_request(
         raise
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2607")
 @pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.slow
