@@ -7,6 +7,26 @@
 //! - Different storage types (System, Pinned, Device)
 //! - Different layout types (Fully Contiguous, Layer-wise)
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
+//!
+//! # Usage for Multiple Backends
+//!
+//! Requires `testing-kvbm` feature plus a device backend (`cuda` or `xpu`):
+//!
+//! ```sh
+//! # All tests in this file
+//! cargo test -p kvbm-physical --features testing-kvbm,cuda -- transfer::tests::local_transfers
+//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu -- transfer::tests::local_transfers
+//!
+//! # A single test (e.g. test_roundtrip)
+//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu -- transfer::tests::local_transfers::test_roundtrip
+//!
+//! # With stdout visible
+//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu -- transfer::tests::local_transfers --nocapture
+//!
+//! # Release mode (recommended for GPU-bound tests)
+//! cargo test -p kvbm-physical --features testing-kvbm,cuda --release -- transfer::tests::local_transfers
+//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu --release -- transfer::tests::local_transfers
+//! ```
 
 use super::*;
 use crate::transfer::executor::TransferOptionsInternal;
@@ -80,10 +100,9 @@ fn build_agent_for_kinds(kinds: &[StorageKind]) -> Result<NixlAgent> {
                 }
             }
             StorageKind::Device(_) => {
-                if !added_backends.contains(&"UCX") {
-                    agent.add_backend("UCX")?; // Required for VRAM
-                    added_backends.push("UCX");
-                }
+                // No NIXL backend needed for local device transfers.
+                // Local H2D/D2H/D2D go through Ze/CUDA APIs directly.
+                // UCX would only be needed for remote RDMA transfers.
             }
             StorageKind::Disk(_) => {
                 if !added_backends.contains(&"POSIX") {
@@ -1023,7 +1042,7 @@ async fn test_cuda_fc_lw_roundtrip_uses_vectorized(
     #[case] host_kind: LayoutKind,
     #[case] device_kind: LayoutKind,
 ) -> Result<()> {
-    let agent = build_agent_for_kinds(&[StorageKind::Pinned, StorageKind::Device(0)])?;
+    let agent = create_test_agent("test_cuda_fc_lw_roundtrip");
 
     let host = create_layout(
         agent.clone(),
