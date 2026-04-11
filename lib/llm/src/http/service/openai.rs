@@ -111,8 +111,8 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
         }
         StatusCode::NOT_FOUND => ErrorType::NotFound, // 404
         StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented, // 501
-        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
-        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503
+        StatusCode::TOO_MANY_REQUESTS => ErrorType::Throttled, // 429
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable, // 503
         StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
         _ if code.is_client_error() => ErrorType::Validation, // other 4xx
         _ => ErrorType::Internal,                     // everything else
@@ -3229,11 +3229,11 @@ mod tests {
         );
         assert_eq!(
             classify_error_for_metrics(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
-            ErrorType::Overload
+            ErrorType::Throttled
         );
         assert_eq!(
             classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Overloaded"),
-            ErrorType::Overload
+            ErrorType::Unavailable
         );
         assert_eq!(
             classify_error_for_metrics(StatusCode::INTERNAL_SERVER_ERROR, "Panic"),

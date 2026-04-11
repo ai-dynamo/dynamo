@@ -363,8 +363,10 @@ pub enum ErrorType {
     Validation,
     /// Model or resource not found (404)
     NotFound,
-    /// Service overloaded, too many requests (503)
-    Overload,
+    /// Too many requests / rate-limited (429)
+    Throttled,
+    /// Service unavailable (503)
+    Unavailable,
     /// Request cancelled by client or timeout
     Cancelled,
     /// Backend accepted the request but stopped responding (response inactivity timeout)
@@ -1124,7 +1126,8 @@ impl Drop for InflightGuard {
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
                     ErrorType::NotFound => "model or resource not found",
-                    ErrorType::Overload => "service overloaded or rate limited",
+                    ErrorType::Throttled => "rate limited (too many requests)",
+                    ErrorType::Unavailable => "service unavailable",
                     ErrorType::NotImplemented => "requested feature not implemented",
                     ErrorType::None => "unknown error",
                 };
@@ -1217,7 +1220,8 @@ impl ErrorType {
             ErrorType::None => frontend_service::error_type::NONE,
             ErrorType::Validation => frontend_service::error_type::VALIDATION,
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
-            ErrorType::Overload => frontend_service::error_type::OVERLOAD,
+            ErrorType::Throttled => frontend_service::error_type::THROTTLED,
+            ErrorType::Unavailable => frontend_service::error_type::UNAVAILABLE,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
             ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
@@ -2245,7 +2249,8 @@ mod tests {
         assert_eq!(ErrorType::None.as_str(), "");
         assert_eq!(ErrorType::Validation.as_str(), "validation");
         assert_eq!(ErrorType::NotFound.as_str(), "not_found");
-        assert_eq!(ErrorType::Overload.as_str(), "overload");
+        assert_eq!(ErrorType::Throttled.as_str(), "throttled");
+        assert_eq!(ErrorType::Unavailable.as_str(), "unavailable");
         assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
         assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
@@ -2355,7 +2360,8 @@ mod tests {
         let error_types = vec![
             ErrorType::Validation,
             ErrorType::NotFound,
-            ErrorType::Overload,
+            ErrorType::Throttled,
+            ErrorType::Unavailable,
             ErrorType::Cancelled,
             ErrorType::ResponseTimeout,
             ErrorType::Internal,

@@ -322,8 +322,11 @@ pub mod frontend_service {
         /// Model or resource not found (404)
         pub const NOT_FOUND: &str = "not_found";
 
-        /// Service overloaded, too many requests (503)
-        pub const OVERLOAD: &str = "overload";
+        /// Too many requests / rate-limited (429)
+        pub const THROTTLED: &str = "throttled";
+
+        /// Service unavailable (503)
+        pub const UNAVAILABLE: &str = "unavailable";
 
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
