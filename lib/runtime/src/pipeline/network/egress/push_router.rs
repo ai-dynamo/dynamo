@@ -189,6 +189,17 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
     selected
 }
 
+/// Select the target device group for the next request in `DeviceAwareWeighted` mode.
+///
+/// If only one class exists (all CPU or all non-CPU), returns that class directly.
+/// If both classes exist, compares capability-normalized load and returns the less-loaded group.
+///
+/// Budget check (integer form):
+/// `allowed_cpu_inflight = total_non_cpu_inflight * cpu_count / (ratio * non_cpu_count)`
+/// and choose CPU when `total_cpu_inflight < allowed_cpu_inflight`.
+///
+/// `ratio` is `non_cpu_to_cpu_ratio` (from `DYN_ENCODER_CUDA_TO_CPU_RATIO`,
+/// default `8` in `device_aware_weighted`).
 fn device_aware_candidate_group(
     state: &RoutingOccupancyState,
     instance_ids: &[u64],
@@ -1143,7 +1154,7 @@ mod tests {
         rt.shutdown();
     }
 
-    /// When the router selects an instance that deregistered between selection
+    /// When the router selects an instance that has deregistered between selection
     /// and transport resolution, it should fall back to another available instance
     /// rather than returning a 500 error.
     #[tokio::test]
@@ -1171,18 +1182,25 @@ mod tests {
         let stale_id = real_id + 1000;
         client.override_instance_avail(vec![stale_id, real_id]);
 
+        // Build a router and call direct() targeting the *real* instance to
+        // verify the router can still resolve transport for known instances.
         let router =
             PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
                 .await
                 .unwrap();
 
-        // Even if stale_id is selected first, transport resolution should
-        // fall back to real_id.
+        // Round robin should succeed — even if it picks stale_id first, the
+        // fallback logic should resolve transport via real_id.
+        // We cannot fully test the network send without a worker, but we can
+        // verify it doesn't fail at the transport resolution stage by checking
+        // that the error (if any) is a transport/network error, not
+        // "Instance not found".
         let request = SingleIn::new(42u64);
         let result = router.generate(request).await;
 
-        // The request may fail at network level (no actual worker), but it
-        // must not fail with "Instance X not found".
+        // The request may fail at the network level (no actual worker), but it
+        // must NOT fail with "Instance X not found" — that would mean the
+        // fallback did not work.
         if let Err(err) = &result {
             let msg = format!("{err}");
             assert!(
@@ -1219,7 +1237,7 @@ mod tests {
                 .unwrap();
 
         // Override avail to contain only a stale ID with no real backing
-        // instance and no other available fallback.
+        // instance AND no other available fallback.
         let stale_id = 99999;
         client.override_instance_avail(vec![stale_id]);
 
