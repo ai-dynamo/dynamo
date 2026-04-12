@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Optional, Union
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import TargetReplica
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
@@ -169,6 +169,14 @@ class NativePlannerBase:
         # Runtime client caches
         self._prefill_client = None
         self._decode_client = None
+
+        # Pending scaling targets: when using GlobalPlannerConnector, the
+        # connector can't check DGD status to detect in-flight rollouts.
+        # We track the last desired count ourselves and treat the system as
+        # unstable until discovery matches, mirroring what
+        # KubernetesConnector.get_actual_worker_counts does via is_stable.
+        self._pending_desired_prefill: Optional[int] = None
+        self._pending_desired_decode: Optional[int] = None
 
         # Shared metrics state
         self._last_metrics = Metrics()
@@ -593,15 +601,32 @@ class NativePlannerBase:
 
     async def _collect_worker_counts(self) -> WorkerCounts:
         num_p, num_d, is_stable = await self._get_worker_counts_raw()
+
+        # When the connector can't check DGD status (e.g. GlobalPlannerConnector
+        # which always returns is_stable=True), use our own pending-desired
+        # tracking to detect in-flight scaling.  Clear the pending target once
+        # discovery catches up.  When a pending target exists and doesn't match
+        # discovery, report the *pending* count as expected so that
+        # _scaling_in_progress sees expected != actual and blocks new decisions.
+        expected_p = num_p if is_stable else None
+        expected_d = num_d if is_stable else None
+
+        if self._pending_desired_prefill is not None:
+            if num_p == self._pending_desired_prefill:
+                self._pending_desired_prefill = None
+            else:
+                expected_p = self._pending_desired_prefill
+        if self._pending_desired_decode is not None:
+            if num_d == self._pending_desired_decode:
+                self._pending_desired_decode = None
+            else:
+                expected_d = self._pending_desired_decode
+
         return WorkerCounts(
             ready_num_prefill=num_p if self.require_prefill else None,
             ready_num_decode=num_d if self.require_decode else None,
-            expected_num_prefill=(num_p if is_stable else None)
-            if self.require_prefill
-            else None,
-            expected_num_decode=(num_d if is_stable else None)
-            if self.require_decode
-            else None,
+            expected_num_prefill=expected_p if self.require_prefill else None,
+            expected_num_decode=expected_d if self.require_decode else None,
         )
 
     # ------------------------------------------------------------------
@@ -643,6 +668,15 @@ class NativePlannerBase:
         if self.config.no_operation or not targets:
             return
         await self.connector.set_component_replicas(targets, blocking=blocking)
+
+        # Track pending desired counts so _collect_worker_counts can detect
+        # in-flight scaling when the connector lacks DGD status awareness
+        # (e.g. GlobalPlannerConnector).
+        for t in targets:
+            if t.sub_component_type == SubComponentType.PREFILL:
+                self._pending_desired_prefill = t.desired_replicas
+            elif t.sub_component_type == SubComponentType.DECODE:
+                self._pending_desired_decode = t.desired_replicas
 
     # ------------------------------------------------------------------
     # Diagnostics reporting (shared across all adapters)
