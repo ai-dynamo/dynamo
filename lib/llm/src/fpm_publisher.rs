@@ -232,7 +232,7 @@ impl FpmDirectPublisher {
     /// - `component`: Dynamo component (provides runtime + discovery scope).
     /// - `worker_id`: Unique worker identifier (typically `connection_id().to_string()`).
     /// - `dp_size`: Number of data-parallel ranks.
-    pub fn new(
+    pub async fn new(
         component: Component,
         worker_id: String,
         dp_size: u32,
@@ -240,8 +240,7 @@ impl FpmDirectPublisher {
         let rt = component.drt().runtime().secondary();
         let cancel = CancellationToken::new();
 
-        let publisher =
-            rt.block_on(async { EventPublisher::for_component(&component, FPM_TOPIC).await })?;
+        let publisher = EventPublisher::for_component(&component, FPM_TOPIC).await?;
 
         // Shared channel: per-dp_rank serialization tasks send bytes here,
         // a single publisher task writes them to the event plane.
