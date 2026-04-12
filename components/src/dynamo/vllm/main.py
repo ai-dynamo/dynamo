@@ -657,6 +657,11 @@ async def register_vllm_model(
         config.exclude_tools_when_tool_choice_none
     )
 
+    # Propagate stream_interval so the frontend can respect --stream-interval
+    stream_interval = getattr(config.engine_args, "stream_interval", None)
+    if stream_interval is not None:
+        runtime_config.set_engine_specific("stream_interval", stream_interval)
+
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)
     runtime_config.data_parallel_start_rank = dp_range[0]
