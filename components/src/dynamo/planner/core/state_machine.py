@@ -242,6 +242,14 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             self._num_d_workers = counts.ready_num_decode
         self._expected_num_p = counts.expected_num_prefill
         self._expected_num_d = counts.expected_num_decode
+        logger.debug(
+            "Planner inventory updated: ready_prefill=%s ready_decode=%s "
+            "expected_prefill=%s expected_decode=%s",
+            self._num_p_workers,
+            self._num_d_workers,
+            self._expected_num_p,
+            self._expected_num_d,
+        )
 
     def _scaling_in_progress(self, component: str) -> bool:
         if component == "prefill":

@@ -137,6 +137,22 @@ class GlobalPlannerConnector(PlannerConnector):
             f"prefill={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.PREFILL]}, "
             f"decode={[r.desired_replicas for r in target_replicas if r.sub_component_type == SubComponentType.DECODE]}"
         )
+        logger.debug(
+            "GlobalPlanner scale request details: pod_namespace=%s "
+            "caller_namespace=%s blocking=%s predicted_load=%s targets=%s",
+            k8s_namespace,
+            self.dynamo_namespace,
+            blocking,
+            self.last_predicted_load,
+            [
+                {
+                    "component": r.component_name,
+                    "sub_component_type": r.sub_component_type.value,
+                    "desired_replicas": r.desired_replicas,
+                }
+                for r in target_replicas
+            ],
+        )
 
         # Send request to GlobalPlanner
         response = await self.remote_client.send_scale_request(request)
@@ -202,9 +218,16 @@ class GlobalPlannerConnector(PlannerConnector):
         The GlobalPlanner manages deployment state, so we don't need to
         wait locally in delegating mode.
         """
+        graph_deployment_name = os.environ.get("DYN_PARENT_DGD_K8S_NAME")
+        k8s_namespace = os.environ.get("POD_NAMESPACE")
         logger.info(
             "GlobalPlannerConnector: Skipping deployment ready check "
-            "(GlobalPlanner manages deployment state)"
+            "(GlobalPlanner manages deployment state). "
+            "include_planner=%s pod_namespace=%s dgd=%s global_planner_namespace=%s",
+            include_planner,
+            k8s_namespace,
+            graph_deployment_name,
+            self.global_planner_namespace,
         )
 
     def get_model_name(self, **kwargs) -> str:

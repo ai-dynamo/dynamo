@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Optional, Union
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.config.defaults import TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
@@ -170,14 +170,6 @@ class NativePlannerBase:
         self._prefill_client = None
         self._decode_client = None
 
-        # Pending scaling targets: when using GlobalPlannerConnector, the
-        # connector can't check DGD status to detect in-flight rollouts.
-        # We track the last desired count ourselves and treat the system as
-        # unstable until discovery matches, mirroring what
-        # KubernetesConnector.get_actual_worker_counts does via is_stable.
-        self._pending_desired_prefill: Optional[int] = None
-        self._pending_desired_decode: Optional[int] = None
-
         # Shared metrics state
         self._last_metrics = Metrics()
         self._cumulative_gpu_hours: float = 0.0
@@ -262,9 +254,31 @@ class NativePlannerBase:
                 require_prefill=self.require_prefill,
                 require_decode=self.require_decode,
             )
+            logger.debug(
+                "Planner init waiting for deployment readiness: connector=%s "
+                "namespace=%s mode=%s require_prefill=%s require_decode=%s",
+                type(self.connector).__name__,
+                self.namespace,
+                self.config.mode,
+                self.require_prefill,
+                self.require_decode,
+            )
             await self.connector.wait_for_deployment_ready(include_planner=False)
+            logger.debug(
+                "Planner init readiness wait returned: connector=%s namespace=%s",
+                type(self.connector).__name__,
+                self.namespace,
+            )
 
         await self._init_worker_info()
+        logger.debug(
+            "Resolved worker info: prefill(component=%s endpoint=%s) "
+            "decode(component=%s endpoint=%s)",
+            self.prefill_worker_info.component_name,
+            self.prefill_worker_info.endpoint,
+            self.decode_worker_info.component_name,
+            self.decode_worker_info.endpoint,
+        )
 
         if self.runtime is not None:
             if self.require_prefill:
@@ -438,6 +452,15 @@ class NativePlannerBase:
                     self.decode_worker_info.k8s_name if self.require_decode else None
                 ),
             )
+            logger.debug(
+                "Worker counts via KubernetesConnector: prefill_component=%s "
+                "decode_component=%s prefill=%s decode=%s stable=%s",
+                self.prefill_worker_info.k8s_name if self.require_prefill else None,
+                self.decode_worker_info.k8s_name if self.require_decode else None,
+                prefill_count if self.require_prefill else 0,
+                decode_count if self.require_decode else 0,
+                is_stable,
+            )
             return (
                 prefill_count if self.require_prefill else 0,
                 decode_count if self.require_decode else 0,
@@ -448,6 +471,8 @@ class NativePlannerBase:
             raise RuntimeError("Runtime is not initialized")
 
         num_p, num_d = 0, 0
+        prefill_ids: list[str] = []
+        decode_ids: list[str] = []
         if self.require_prefill:
             try:
                 if self._prefill_client is None:
@@ -457,9 +482,10 @@ class NativePlannerBase:
                         self.prefill_worker_info.component_name,
                         self.prefill_worker_info.endpoint,
                     )
-                num_p = len(self._prefill_client.instance_ids())  # type: ignore
-            except Exception:
-                logger.warning("No prefill workers found")
+                prefill_ids = list(self._prefill_client.instance_ids())  # type: ignore
+                num_p = len(prefill_ids)
+            except Exception as e:
+                logger.warning(f"No prefill workers found: {e}")
 
         if self.require_decode:
             try:
@@ -470,10 +496,19 @@ class NativePlannerBase:
                         self.decode_worker_info.component_name,
                         self.decode_worker_info.endpoint,
                     )
-                num_d = len(self._decode_client.instance_ids())  # type: ignore
+                decode_ids = list(self._decode_client.instance_ids())  # type: ignore
+                num_d = len(decode_ids)
             except Exception as e:
                 raise RuntimeError(f"Failed to get decode worker endpoints: {e}")
 
+        logger.debug(
+            "Worker counts via runtime discovery: connector=%s "
+            "prefill_ids=%s decode_ids=%s stable=%s",
+            type(self.connector).__name__ if hasattr(self, "connector") else None,
+            prefill_ids if self.require_prefill else None,
+            decode_ids if self.require_decode else None,
+            True,
+        )
         return num_p, num_d, True
 
     async def _collect_traffic(self) -> Optional[TrafficObservation]:
@@ -601,33 +636,26 @@ class NativePlannerBase:
 
     async def _collect_worker_counts(self) -> WorkerCounts:
         num_p, num_d, is_stable = await self._get_worker_counts_raw()
-
-        # When the connector can't check DGD status (e.g. GlobalPlannerConnector
-        # which always returns is_stable=True), use our own pending-desired
-        # tracking to detect in-flight scaling.  Clear the pending target once
-        # discovery catches up.  When a pending target exists and doesn't match
-        # discovery, report the *pending* count as expected so that
-        # _scaling_in_progress sees expected != actual and blocks new decisions.
-        expected_p = num_p if is_stable else None
-        expected_d = num_d if is_stable else None
-
-        if self._pending_desired_prefill is not None:
-            if num_p == self._pending_desired_prefill:
-                self._pending_desired_prefill = None
-            else:
-                expected_p = self._pending_desired_prefill
-        if self._pending_desired_decode is not None:
-            if num_d == self._pending_desired_decode:
-                self._pending_desired_decode = None
-            else:
-                expected_d = self._pending_desired_decode
-
-        return WorkerCounts(
+        counts = WorkerCounts(
             ready_num_prefill=num_p if self.require_prefill else None,
             ready_num_decode=num_d if self.require_decode else None,
-            expected_num_prefill=expected_p if self.require_prefill else None,
-            expected_num_decode=expected_d if self.require_decode else None,
+            expected_num_prefill=(num_p if is_stable else None)
+            if self.require_prefill
+            else None,
+            expected_num_decode=(num_d if is_stable else None)
+            if self.require_decode
+            else None,
         )
+        logger.debug(
+            "Collected worker counts: connector=%s raw=(prefill=%s, decode=%s, "
+            "stable=%s) translated=%s",
+            type(self.connector).__name__ if hasattr(self, "connector") else None,
+            num_p,
+            num_d,
+            is_stable,
+            counts,
+        )
+        return counts
 
     # ------------------------------------------------------------------
     # Gather tick input
@@ -667,16 +695,20 @@ class NativePlannerBase:
         """Shared helper: send scaling targets to connector."""
         if self.config.no_operation or not targets:
             return
+        logger.debug(
+            "Applying scaling targets via %s: blocking=%s targets=%s",
+            type(self.connector).__name__ if hasattr(self, "connector") else None,
+            blocking,
+            [
+                {
+                    "component": t.component_name,
+                    "sub_component_type": t.sub_component_type.value,
+                    "desired_replicas": t.desired_replicas,
+                }
+                for t in targets
+            ],
+        )
         await self.connector.set_component_replicas(targets, blocking=blocking)
-
-        # Track pending desired counts so _collect_worker_counts can detect
-        # in-flight scaling when the connector lacks DGD status awareness
-        # (e.g. GlobalPlannerConnector).
-        for t in targets:
-            if t.sub_component_type == SubComponentType.PREFILL:
-                self._pending_desired_prefill = t.desired_replicas
-            elif t.sub_component_type == SubComponentType.DECODE:
-                self._pending_desired_decode = t.desired_replicas
 
     # ------------------------------------------------------------------
     # Diagnostics reporting (shared across all adapters)
@@ -724,7 +756,54 @@ class NativePlannerBase:
             self._populate_worker_info_from_discovery()
 
             tick_input = await self._gather_tick_input(next_tick)
+            logger.debug(
+                "Planner tick input: now=%.3f scheduled_at=%.3f load=%s throughput=%s "
+                "worker_counts=%s traffic=%s fpm_prefill=%s fpm_decode=%s",
+                tick_input.now_s,
+                next_tick.at_s,
+                next_tick.run_load_scaling,
+                next_tick.run_throughput_scaling,
+                tick_input.worker_counts,
+                (
+                    {
+                        "duration_s": tick_input.traffic.duration_s,
+                        "num_req": tick_input.traffic.num_req,
+                        "isl": tick_input.traffic.isl,
+                        "osl": tick_input.traffic.osl,
+                    }
+                    if tick_input.traffic is not None
+                    else None
+                ),
+                (
+                    len(tick_input.fpm_observations.prefill)
+                    if tick_input.fpm_observations is not None
+                    and tick_input.fpm_observations.prefill is not None
+                    else 0
+                ),
+                (
+                    len(tick_input.fpm_observations.decode)
+                    if tick_input.fpm_observations is not None
+                    and tick_input.fpm_observations.decode is not None
+                    else 0
+                ),
+            )
             effects = self.state_machine.on_tick(next_tick, tick_input)
+            logger.debug(
+                "Planner tick result: scale_to=%s load_reason=%s "
+                "throughput_reason=%s next_tick=%s",
+                effects.scale_to,
+                (
+                    effects.diagnostics.load_decision_reason
+                    if effects.diagnostics is not None
+                    else None
+                ),
+                (
+                    effects.diagnostics.throughput_decision_reason
+                    if effects.diagnostics is not None
+                    else None
+                ),
+                effects.next_tick,
+            )
             await self._apply_effects(effects)
             self._report_diagnostics(effects.diagnostics)
 
