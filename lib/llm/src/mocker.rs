@@ -370,7 +370,9 @@ impl MockEngine {
             component.clone(),
             worker_id,
             self.engine_args.dp_size,
-        ) {
+        )
+        .await
+        {
             Ok((publisher, sinks)) => {
                 let _ = self._fpm_publisher.set(publisher);
                 sinks
