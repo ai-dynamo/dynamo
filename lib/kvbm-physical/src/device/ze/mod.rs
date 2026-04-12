@@ -10,7 +10,6 @@ use anyhow::Result;
 use level_zero::{self as ze, ZE_EVENT_SCOPE_FLAG_HOST};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 
 /// Embedded SPIR-V binary for the vectorized_copy kernel.
@@ -37,42 +36,58 @@ fn ensure_ze_initialized() -> Result<()> {
 }
 
 /// Device context cache entry.
-/// Event pool wrapper with atomic index counter for safe slot allocation.
+/// Event pool wrapper with a free-list for safe, reusable slot allocation.
 ///
 /// Level-Zero event pools are fixed-size, index-based. Each `create_event(index)`
-/// occupies a slot; `zeEventDestroy` frees the slot. This wrapper assigns monotonically
-/// increasing indices (mod pool_size) so concurrent callers never alias the same slot.
-///
-/// With 8192 slots and ~4 events per transfer, up to ~2048 concurrent in-flight
-/// transfers are supported before indices could theoretically wrap into a live slot.
-/// Events are short-lived (destroyed after synchronize or drain), so this is safe.
+/// occupies a slot; `zeEventDestroy` frees the slot.  This wrapper tracks available
+/// indices in a `Mutex<Vec<u32>>` so that:
+///   - A slot is never handed out while still in use (no aliasing).
+///   - Destroyed events return their index to the free-list via `ZeEventWrapper::Drop`.
+///   - Pool exhaustion surfaces as an explicit error instead of silent corruption.
 struct SharedEventPool {
     pool: ze::EventPool,
-    next_index: AtomicU32,
-    pool_size: u32,
+    free_indices: Mutex<Vec<u32>>,
 }
 
 impl SharedEventPool {
     fn new(pool: ze::EventPool, pool_size: u32) -> Self {
         Self {
             pool,
-            next_index: AtomicU32::new(0),
-            pool_size,
+            free_indices: Mutex::new((0..pool_size).collect()),
         }
     }
 
-    /// Allocate a unique event from the pool with the next available index.
+    /// Allocate a unique event from the pool, taking the next free index.
+    ///
+    /// Returns `(event, index)` so the caller can return `index` on drop.
     fn create_event(
         &self,
         signal_scope: u32,
         wait_scope: u32,
-    ) -> ze::Result<ze::Event> {
-        let index = self.next_index.fetch_add(1, Ordering::Relaxed) % self.pool_size;
-        self.pool.create_event(index, signal_scope, wait_scope)
+    ) -> Result<(ze::Event, u32)> {
+        let index = self
+            .free_indices
+            .lock()
+            .expect("SharedEventPool lock poisoned")
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("Event pool exhausted — all slots in use"))?;
+        let event = self
+            .pool
+            .create_event(index, signal_scope, wait_scope)
+            .map_err(|e| anyhow::anyhow!("zeEventCreate failed for index {}: {:?}", index, e))?;
+        Ok((event, index))
+    }
+
+    /// Return a slot index to the free-list.
+    fn return_index(&self, index: u32) {
+        self.free_indices
+            .lock()
+            .expect("SharedEventPool lock poisoned")
+            .push(index);
     }
 }
 
-// SAFETY: EventPool is Send+Sync, AtomicU32 is Send+Sync.
+// SAFETY: EventPool is Send+Sync, Mutex<Vec<u32>> is Send+Sync.
 unsafe impl Send for SharedEventPool {}
 unsafe impl Sync for SharedEventPool {}
 
@@ -591,10 +606,9 @@ impl DeviceStreamOps for ZeStreamWrapper {
     }
 
     fn record_event(&self) -> Result<Box<dyn DeviceEventOps>> {
-        let event = self
+        let (event, index) = self
             .event_pool
-            .create_event(ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_HOST)
-            .map_err(|e| anyhow::anyhow!("Failed to create event: {:?}", e))?;
+            .create_event(ZE_EVENT_SCOPE_FLAG_HOST, ZE_EVENT_SCOPE_FLAG_HOST)?;
 
         event
             .host_reset()
@@ -604,7 +618,11 @@ impl DeviceStreamOps for ZeStreamWrapper {
             .append_signal_event(&event)
             .map_err(|e| anyhow::anyhow!("Failed to signal event: {:?}", e))?;
 
-        Ok(Box::new(ZeEventWrapper { event }))
+        Ok(Box::new(ZeEventWrapper {
+            event: std::mem::ManuallyDrop::new(event),
+            index,
+            pool: Arc::clone(&self.event_pool),
+        }))
     }
 
     fn synchronize(&self) -> Result<()> {
@@ -616,8 +634,34 @@ impl DeviceStreamOps for ZeStreamWrapper {
 }
 
 /// XPU event wrapper.
+///
+/// On drop, destroys the Level-Zero event first (freeing the pool slot in the
+/// driver), then returns the index to the free-list so another caller can reuse it.
+/// Using `ManuallyDrop` ensures the event is destroyed before the index is recycled,
+/// preventing another thread from calling `zeEventCreate` on a slot whose old event
+/// still exists.
 pub struct ZeEventWrapper {
-    pub event: ze::Event,
+    event: std::mem::ManuallyDrop<ze::Event>,
+    index: u32,
+    pool: Arc<SharedEventPool>,
+}
+
+impl ZeEventWrapper {
+    /// Access the underlying event (e.g. for query / synchronize).
+    pub fn event(&self) -> &ze::Event {
+        &self.event
+    }
+}
+
+impl Drop for ZeEventWrapper {
+    fn drop(&mut self) {
+        // SAFETY: `event` is valid and has not been dropped yet (ManuallyDrop
+        // guarantees this is the only drop site). Destroying the event calls
+        // zeEventDestroy, which releases the pool slot in the driver.
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.event); }
+        // Now the slot is free in the driver — safe to recycle the index.
+        self.pool.return_index(self.index);
+    }
 }
 
 unsafe impl Send for ZeEventWrapper {}
@@ -625,7 +669,9 @@ unsafe impl Sync for ZeEventWrapper {}
 
 impl std::fmt::Debug for ZeEventWrapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ZeEventWrapper").finish()
+        f.debug_struct("ZeEventWrapper")
+            .field("index", &self.index)
+            .finish()
     }
 }
 
