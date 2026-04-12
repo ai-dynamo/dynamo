@@ -10,6 +10,7 @@ from typing import Optional
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
+from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
 from dynamo.planner.connectors.remote_client import RemotePlannerClient
 from dynamo.planner.errors import EmptyTargetReplicasError
@@ -53,6 +54,7 @@ class GlobalPlannerConnector(PlannerConnector):
         self.global_planner_component = global_planner_component
         self.model_name = model_name
         self.remote_client: Optional[RemotePlannerClient] = None
+        self.kube_api: Optional[KubernetesAPI] = None
 
         # Cache for predicted load (will be set by planner before scaling)
         self.last_predicted_load: Optional[dict] = None
@@ -213,21 +215,48 @@ class GlobalPlannerConnector(PlannerConnector):
 
     async def wait_for_deployment_ready(self, include_planner: bool = True):
         """
-        Wait for deployment to be ready (no-op for GlobalPlanner).
+        Wait for the local deployment to be ready before planner startup.
 
-        The GlobalPlanner manages deployment state, so we don't need to
-        wait locally in delegating mode.
+        Delegating scaling decisions to the GlobalPlanner does not change the
+        local planner's requirement that its worker deployment be fully rolled
+        out before load-based decisions begin.
         """
         graph_deployment_name = os.environ.get("DYN_PARENT_DGD_K8S_NAME")
         k8s_namespace = os.environ.get("POD_NAMESPACE")
+        if not graph_deployment_name or not k8s_namespace:
+            logger.warning(
+                "GlobalPlannerConnector: Missing local deployment context, "
+                "skipping readiness wait. include_planner=%s pod_namespace=%s "
+                "dgd=%s global_planner_namespace=%s",
+                include_planner,
+                k8s_namespace,
+                graph_deployment_name,
+                self.global_planner_namespace,
+            )
+            return
+
+        if self.kube_api is None or self.kube_api.current_namespace != k8s_namespace:
+            self.kube_api = KubernetesAPI(k8s_namespace)
+
         logger.info(
-            "GlobalPlannerConnector: Skipping deployment ready check "
-            "(GlobalPlanner manages deployment state). "
-            "include_planner=%s pod_namespace=%s dgd=%s global_planner_namespace=%s",
+            "GlobalPlannerConnector: Waiting for local deployment readiness "
+            "before delegating scaling. include_planner=%s pod_namespace=%s "
+            "dgd=%s global_planner_namespace=%s",
             include_planner,
             k8s_namespace,
             graph_deployment_name,
             self.global_planner_namespace,
+        )
+        await self.kube_api.wait_for_graph_deployment_ready(
+            graph_deployment_name,
+            include_planner=include_planner,
+        )
+        logger.info(
+            "GlobalPlannerConnector: Local deployment is ready. "
+            "include_planner=%s pod_namespace=%s dgd=%s",
+            include_planner,
+            k8s_namespace,
+            graph_deployment_name,
         )
 
     def get_model_name(self, **kwargs) -> str:

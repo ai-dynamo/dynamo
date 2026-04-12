@@ -326,7 +326,32 @@ async def test_connector_unsupported_and_noop_operations(connector):
     await connector.validate_deployment(
         prefill_component_name="p", decode_component_name="d"
     )
-    await connector.wait_for_deployment_ready()
+    with patch("dynamo.planner.connectors.global_planner.KubernetesAPI") as mock_kube:
+        await connector.wait_for_deployment_ready()
+        mock_kube.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_connector_waits_for_local_deployment_readiness(connector):
+    """Test GlobalPlannerConnector waits on the local DGD before startup."""
+    mock_kube_api = MagicMock()
+    mock_kube_api.wait_for_graph_deployment_ready = AsyncMock()
+
+    with patch.dict(
+        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "dgd", "POD_NAMESPACE": "ns"}
+    ):
+        with patch(
+            "dynamo.planner.connectors.global_planner.KubernetesAPI",
+            return_value=mock_kube_api,
+        ) as mock_kube:
+            await connector.wait_for_deployment_ready(include_planner=False)
+
+    mock_kube.assert_called_once_with("ns")
+    mock_kube_api.wait_for_graph_deployment_ready.assert_awaited_once_with(
+        "dgd",
+        include_planner=False,
+    )
+    assert connector.kube_api == mock_kube_api
 
 
 def test_connector_model_name_and_predicted_load(connector_runtime):
