@@ -31,7 +31,7 @@
 #     -t dynamo/dynamo-epp:dev .
 
 ARG RUST_IMAGE=rust:1.93.1
-ARG BUILDER_IMAGE=golang:1.24
+ARG BUILDER_IMAGE=golang:1.25
 ARG BASE_IMAGE=ubuntu:24.04
 
 # =============================================================================
