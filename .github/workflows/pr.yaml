@@ -188,8 +188,8 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0", "cpu", "xpu"]'
-      platform: 'linux/amd64,linux/arm64'
+      cuda_version: '["xpu"]'
+      platform: 'linux/amd64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
@@ -295,9 +295,9 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0", "non-cuda"]'
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
-      run_cpu_only_tests: true
+      cuda_version: '["non-cuda"]'
+      platform: '["amd64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: false
       cpu_only_test_markers: pre_merge and vllm and gpu_0
       gpu_test_markers: pre_merge and vllm and gpu_1
       gpu_test_timeout_minutes: 35

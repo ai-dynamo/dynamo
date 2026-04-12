@@ -84,15 +84,15 @@ on:
         default: ''
     secrets:
       AWS_DEFAULT_REGION:
-        required: true
+        required: false
       AWS_ACCOUNT_ID:
-        required: true
+        required: false
       AZURE_ACR_HOSTNAME:
-        required: true
+        required: false
       AZURE_ACR_USER:
-        required: true
+        required: false
       AZURE_ACR_PASSWORD:
-        required: true
+        required: false
       SCCACHE_S3_BUCKET:
         required: false
       AWS_ACCESS_KEY_ID:
