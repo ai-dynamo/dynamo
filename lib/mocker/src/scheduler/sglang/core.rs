@@ -207,7 +207,7 @@ impl SglangCore {
                 .iter()
                 .filter(|req| req.output_len() > 0)
                 .map(|req| req.current_sequence_len() as u64),
-            decode.end_ms / 1000.0,
+            (decode.end_ms - now_ms) / 1000.0,
         );
 
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
