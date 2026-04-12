@@ -84,7 +84,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
     // If the name is an absolute filesystem path that exists, return it directly
     // without attempting any HuggingFace download. This supports models loaded
     // from local storage (e.g., FSx Lustre, NFS, or other shared filesystems).
-    if name.is_absolute() && name.exists() {
+    if name.is_absolute() && name.try_exists().unwrap_or(false) {
         tracing::info!("Using local model path: {model_name}");
         return Ok(name.to_path_buf());
     }
