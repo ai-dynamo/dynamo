@@ -386,7 +386,7 @@ impl VllmCore {
         let (decode_time, output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
         let end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
 
-        let fpm = self.compute_fpm(&scheduled, end_ms / 1000.0);
+        let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);
 
         debug_assert_vllm_scheduler_state(&self.state);
         EnginePassResult {
