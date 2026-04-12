@@ -16,6 +16,7 @@ mode-specific flags and override ``_bootstrap_regression`` and
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING, Optional, Union
@@ -311,6 +312,80 @@ class NativePlannerBase:
     async def _bootstrap_regression(self) -> None:
         """Override in subclasses to bootstrap regression models."""
         pass
+
+    # ------------------------------------------------------------------
+    # Discovery backfill
+    # ------------------------------------------------------------------
+
+    def _populate_worker_info_from_discovery(self) -> None:
+        """Fill missing WorkerInfo fields from model cards observed by FPM subscribers.
+
+        The FPM subscriber's MDC discovery watch captures the full
+        ModelDeploymentCard (including runtime_config) for every engine
+        that registers.  When the connector does not provide WorkerInfo
+        fields like max_num_batched_tokens (e.g. VirtualConnector), this
+        method reads the first available model card and backfills them.
+
+        If a value is successfully backfilled, the state machine's
+        capabilities are updated so that subsequent scaling decisions
+        see the new value.
+        """
+        changed = False
+        for subscriber, worker_info, label in [
+            (self._prefill_fpm_sub, self.prefill_worker_info, "prefill"),
+            (self._decode_fpm_sub, self.decode_worker_info, "decode"),
+        ]:
+            if subscriber is None:
+                continue
+            if worker_info.max_num_batched_tokens:
+                continue
+            changed |= self._backfill_from_subscriber(subscriber, worker_info, label)
+
+        if changed and self._state_machine is not None:
+            self._state_machine._capabilities = build_worker_capabilities(
+                self.config,
+                self.prefill_worker_info,
+                self.decode_worker_info,
+            )
+
+    def _backfill_from_subscriber(
+        self,
+        subscriber: FpmEventSubscriber,
+        worker_info: WorkerInfo,
+        label: str,
+    ) -> bool:
+        """Try to backfill max_num_batched_tokens from a subscriber's model cards.
+
+        Returns True if a value was backfilled.
+        """
+        try:
+            cards = subscriber.get_model_cards()
+        except RuntimeError:
+            return False
+
+        for _wid, card_json_str in cards.items():
+            try:
+                card = json.loads(card_json_str)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            rc = card.get("runtime_config")
+            if not isinstance(rc, dict):
+                continue
+            val = rc.get("max_num_batched_tokens")
+            if val is None:
+                continue
+            try:
+                parsed = int(val)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                worker_info.max_num_batched_tokens = parsed
+                logger.info(
+                    f"Populated {label} max_num_batched_tokens={parsed} from "
+                    f"discovery model card (worker {_wid})"
+                )
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Data collection (runtime I/O)
@@ -609,6 +684,10 @@ class NativePlannerBase:
             if now < next_tick.at_s:
                 await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                 continue
+
+            # Try to backfill max_num_batched_tokens from discovery if the
+            # connector didn't provide it (e.g. VirtualConnector).
+            self._populate_worker_info_from_discovery()
 
             tick_input = await self._gather_tick_input(next_tick)
             effects = self.state_machine.on_tick(next_tick, tick_input)

@@ -910,6 +910,21 @@ class FpmEventSubscriber:
         """
         ...
 
+    def get_model_cards(self) -> dict[str, str]:
+        """
+        Return model deployment card JSON for every known worker.
+
+        Cards are captured from MDC discovery events by ``start_tracking()``.
+        Each card contains the full ``ModelDeploymentCard`` including
+        ``runtime_config`` with fields like ``max_num_batched_tokens``.
+
+        Raises RuntimeError if ``start_tracking()`` has not been called.
+
+        Returns:
+            dict mapping ``worker_id`` to card JSON string.
+        """
+        ...
+
     def shutdown(self) -> None:
         """Shut down the subscriber (all background tasks)."""
         ...

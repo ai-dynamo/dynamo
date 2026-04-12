@@ -23,7 +23,7 @@ use super::*;
 use crate::Endpoint;
 use crate::to_pyerr;
 use dynamo_runtime::component::Component;
-use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryQuery};
+use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
@@ -310,6 +310,12 @@ pub(crate) struct FpmEventSubscriber {
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
     // to filter out ghost entries without contending with Task 1's writes.
     known_workers: Arc<DashSet<String>>,
+    // ModelDeploymentCard JSON keyed by worker_id (stringified instance_id).
+    // Maintained by Task 2 alongside known_workers: inserted on Added,
+    // removed on Removed.  Exposed via get_model_cards() so the planner
+    // can read runtime_config (e.g. max_num_batched_tokens) without
+    // requiring a separate connector query.
+    model_cards: Arc<DashMap<String, serde_json::Value>>,
 }
 
 #[pymethods]
@@ -332,6 +338,7 @@ impl FpmEventSubscriber {
             tracking_started: Arc::new(AtomicBool::new(false)),
             latest_stats: Arc::new(DashMap::new()),
             known_workers: Arc::new(DashSet::new()),
+            model_cards: Arc::new(DashMap::new()),
         })
     }
 
@@ -511,11 +518,13 @@ impl FpmEventSubscriber {
         // normal scale-down path.  Any ghost entries created by the race
         // condition (FPM arriving *after* the Removed event) are caught by the
         // known_workers filter in get_recent_stats().
+        let cards = self.model_cards.clone();
         rt.spawn({
             let cancel = cancel.clone();
             let component = component.clone();
             let stats = stats.clone();
             let known = known.clone();
+            let cards = cards.clone();
             async move {
                 let discovery = component.drt().discovery();
                 let query = DiscoveryQuery::ComponentModels {
@@ -545,12 +554,17 @@ impl FpmEventSubscriber {
                             match event {
                                 Some(Ok(DiscoveryEvent::Added(instance))) => {
                                     let wid = instance.instance_id().to_string();
+                                    // Store model card JSON if this is a Model instance.
+                                    if let DiscoveryInstance::Model { ref card_json, .. } = instance {
+                                        cards.insert(wid.clone(), card_json.clone());
+                                    }
                                     known.insert(wid.clone());
                                     tracing::debug!("FPM tracker: worker {wid} added to known set");
                                 }
                                 Some(Ok(DiscoveryEvent::Removed(id))) => {
                                     let removed_id = id.instance_id().to_string();
                                     known.remove(&removed_id);
+                                    cards.remove(&removed_id);
 
                                     // Eagerly prune latest_stats for the common case
                                     // (worker removed cleanly before any late FPMs arrive).
@@ -603,6 +617,32 @@ impl FpmEventSubscriber {
             .iter()
             .filter(|entry| self.known_workers.contains(&entry.key().0))
             .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        Ok(snapshot)
+    }
+
+    /// Return the model deployment card JSON for every known worker.
+    ///
+    /// Cards are captured from MDC discovery `Added` events in
+    /// `start_tracking()`'s Task 2.  Each card contains the full
+    /// `ModelDeploymentCard` including `runtime_config` with fields
+    /// like `max_num_batched_tokens`.
+    ///
+    /// Returns:
+    ///     dict mapping `worker_id: str` to `card_json: str` (JSON).
+    fn get_model_cards(&self) -> PyResult<HashMap<String, String>> {
+        if !self.tracking_started.load(Ordering::SeqCst) {
+            return Err(PyRuntimeError::new_err(
+                "start_tracking() has not been called",
+            ));
+        }
+
+        let snapshot = self
+            .model_cards
+            .iter()
+            .filter(|entry| self.known_workers.contains(entry.key()))
+            .map(|entry| (entry.key().clone(), entry.value().to_string()))
             .collect();
 
         Ok(snapshot)
