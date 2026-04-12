@@ -8,25 +8,12 @@ import os
 import time
 from typing import Optional
 
-from kubernetes.client import ApiException
-from kubernetes.config.config_exception import ConfigException
-
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
-from dynamo.planner.connectors.kubernetes import KubernetesConnector
+from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleStatus
 from dynamo.planner.connectors.remote_client import RemotePlannerClient
-from dynamo.planner.errors import (
-    DeploymentModelNameMismatchError,
-    DeploymentValidationError,
-    EmptyTargetReplicasError,
-    ModelNameNotFoundError,
-    UserProvidedModelNameMismatchError,
-)
-from dynamo.planner.monitoring.worker_info import (
-    WorkerInfo,
-    build_worker_info_from_defaults,
-)
+from dynamo.planner.errors import EmptyTargetReplicasError
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -67,16 +54,10 @@ class GlobalPlannerConnector(PlannerConnector):
         self.global_planner_component = global_planner_component
         self.model_name = model_name
         self.remote_client: Optional[RemotePlannerClient] = None
+        self.kube_api: Optional[KubernetesAPI] = None
 
         # Cache for predicted load (will be set by planner before scaling)
         self.last_predicted_load: Optional[dict] = None
-
-        # Lazily-initialized KubernetesConnector scoped to the pool's own DGD.
-        # Used only to read pool-local MDC / DGD args for capability discovery
-        # (get_worker_info, get_model_name). Scaling actions still go through
-        # the RemotePlannerClient.
-        self._local_k8s_connector: Optional[KubernetesConnector] = None
-        self._local_k8s_init_attempted: bool = False
 
     async def _async_init(self):
         """Async initialization - creates RemotePlannerClient"""
@@ -234,88 +215,57 @@ class GlobalPlannerConnector(PlannerConnector):
 
     async def wait_for_deployment_ready(self, include_planner: bool = True):
         """
-        Wait for deployment to be ready (no-op for GlobalPlanner).
+        Wait for the local deployment to be ready before planner startup.
 
-        The GlobalPlanner manages deployment state, so we don't need to
-        wait locally in delegating mode.
+        Delegating scaling decisions to the GlobalPlanner does not change the
+        local planner's requirement that its worker deployment be fully rolled
+        out before load-based decisions begin.
         """
         graph_deployment_name = os.environ.get("DYN_PARENT_DGD_K8S_NAME")
         k8s_namespace = os.environ.get("POD_NAMESPACE")
+        if not graph_deployment_name or not k8s_namespace:
+            logger.warning(
+                "GlobalPlannerConnector: Missing local deployment context, "
+                "skipping readiness wait. include_planner=%s pod_namespace=%s "
+                "dgd=%s global_planner_namespace=%s",
+                include_planner,
+                k8s_namespace,
+                graph_deployment_name,
+                self.global_planner_namespace,
+            )
+            return
+
+        if self.kube_api is None or self.kube_api.current_namespace != k8s_namespace:
+            self.kube_api = KubernetesAPI(k8s_namespace)
+
         logger.info(
-            "GlobalPlannerConnector: Skipping deployment ready check "
-            "(GlobalPlanner manages deployment state). "
-            "include_planner=%s pod_namespace=%s dgd=%s global_planner_namespace=%s",
+            "GlobalPlannerConnector: Waiting for local deployment readiness "
+            "before delegating scaling. include_planner=%s pod_namespace=%s "
+            "dgd=%s global_planner_namespace=%s",
             include_planner,
             k8s_namespace,
             graph_deployment_name,
             self.global_planner_namespace,
         )
-
-    def _get_local_k8s_connector(self) -> Optional[KubernetesConnector]:
-        """Lazily build a KubernetesConnector scoped to the pool's own DGD.
-
-        The pool's Planner pod has access to its own DGD and the
-        DynamoWorkerMetadata CRs of its own workers, even under
-        ``environment: global-planner``. Querying them directly is the
-        simplest way to populate per-engine capabilities (context_length,
-        max_kv_tokens, ...) that load-scaling needs. Returns ``None`` if
-        the connector can't be created (e.g. running outside a cluster).
-        """
-        if self._local_k8s_init_attempted:
-            return self._local_k8s_connector
-        self._local_k8s_init_attempted = True
-        try:
-            self._local_k8s_connector = KubernetesConnector(
-                dynamo_namespace=self.dynamo_namespace,
-                model_name=self.model_name,
-            )
-        except (DeploymentValidationError, ConfigException, ApiException) as e:
-            logger.warning(
-                "GlobalPlannerConnector: could not initialize local "
-                f"KubernetesConnector for MDC capability lookup: {e}. "
-                "Falling back to hard-coded worker defaults; easy-mode "
-                "load scaling will be disabled."
-            )
-        return self._local_k8s_connector
-
-    def get_worker_info(
-        self,
-        sub_component_type: SubComponentType,
-        backend: str = "vllm",
-    ) -> WorkerInfo:
-        """Resolve per-worker capabilities from the pool's own MDC/DGD.
-
-        Without this, ``resolve_worker_info`` falls through to
-        ``build_worker_info_from_defaults`` which leaves ``context_length``
-        and ``max_kv_tokens`` unset, and load_scaling's easy-mode decisions
-        bail out every tick — so the pool Planner silently sends no
-        ScaleRequests.
-        """
-        local = self._get_local_k8s_connector()
-        if local is not None:
-            return local.get_worker_info(sub_component_type, backend)
-        return build_worker_info_from_defaults(backend, sub_component_type)
+        await self.kube_api.wait_for_graph_deployment_ready(
+            graph_deployment_name,
+            include_planner=include_planner,
+        )
+        logger.info(
+            "GlobalPlannerConnector: Local deployment is ready. "
+            "include_planner=%s pod_namespace=%s dgd=%s",
+            include_planner,
+            k8s_namespace,
+            graph_deployment_name,
+        )
 
     def get_model_name(self, **kwargs) -> str:
         """
         Get model name.
 
-        Prefers the value provided at init time, then the pool's own DGD
-        container args (via the local KubernetesConnector), and finally
-        falls back to a placeholder indicating the model is managed
-        remotely.
+        Returns the model name if provided during initialization, otherwise
+        returns a placeholder indicating the model is managed remotely.
         """
         if self.model_name:
             return self.model_name
-        local = self._get_local_k8s_connector()
-        if local is not None:
-            try:
-                return local.get_model_name(**kwargs)
-            except (
-                ModelNameNotFoundError,
-                DeploymentModelNameMismatchError,
-                UserProvidedModelNameMismatchError,
-                ApiException,
-            ) as e:
-                logger.warning(f"Could not resolve model name from local DGD args: {e}")
         return "managed-remotely"
