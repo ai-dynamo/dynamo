@@ -266,8 +266,6 @@ jobs:
     if: always()
     needs:
       - changed-files
-      - operator
-      - planner-test
       - vllm-copy-to-acr
       - sglang-copy-to-acr
       - trtllm-copy-to-acr
