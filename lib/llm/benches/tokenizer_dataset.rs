@@ -12,7 +12,7 @@
 //! Override tokenizer (default: Qwen/Qwen3-0.6B):
 //!   TOKENIZER_PATH=deepseek-ai/DeepSeek-V3 cargo bench --bench tokenizer_dataset
 //!
-//! Override dataset and sample count:
+//! Override dataset and sample count (default: 503 local, 20 in CI):
 //!   DATASET=RyokoAI/ShareGPT52K MAX_SAMPLES=50 cargo bench --bench tokenizer_dataset
 //!
 //! Batch benchmark (default: sequential):
@@ -28,6 +28,12 @@ const DEFAULT_HF_MODEL: &str = "Qwen/Qwen3-0.6B";
 
 /// Default dataset on HuggingFace Hub.
 const DEFAULT_DATASET: &str = "zai-org/LongBench-v2";
+
+/// Default sample count when MAX_SAMPLES is not set.
+/// CI environments (detected via the CI env var) use a small subset to stay
+/// within job timeouts; local runs use the full dataset.
+const DEFAULT_MAX_SAMPLES_CI: usize = 20;
+const DEFAULT_MAX_SAMPLES_LOCAL: usize = 503;
 
 /// Resolve tokenizer path: local file, HF model name, or default.
 fn resolve_tokenizer_path() -> String {
@@ -316,10 +322,15 @@ fn bench_batched(
 fn main() {
     let tokenizer_path = resolve_tokenizer_path();
     let dataset = std::env::var("DATASET").unwrap_or_else(|_| DEFAULT_DATASET.to_string());
+    let default_max = if std::env::var("CI").is_ok() {
+        DEFAULT_MAX_SAMPLES_CI
+    } else {
+        DEFAULT_MAX_SAMPLES_LOCAL
+    };
     let max_samples: usize = std::env::var("MAX_SAMPLES")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(503);
+        .unwrap_or(default_max);
     let batch_size: Option<usize> = std::env::var("BATCH_SIZE")
         .ok()
         .and_then(|v| v.parse().ok());
