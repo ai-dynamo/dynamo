@@ -235,6 +235,7 @@ class TestValidatePriorityOverrides:
             ]
         )
         config = GlobalRouterConfig(
+            mode="disagg",
             num_prefill_pools=2,
             num_decode_pools=2,
             prefill_pool_dynamo_namespaces=["a", "b"],
@@ -252,6 +253,7 @@ class TestValidatePriorityOverrides:
             ]
         )
         config = GlobalRouterConfig(
+            mode="disagg",
             num_prefill_pools=2,
             num_decode_pools=2,
             prefill_pool_dynamo_namespaces=["a", "b"],
@@ -269,6 +271,7 @@ class TestValidatePriorityOverrides:
             ]
         )
         config = GlobalRouterConfig(
+            mode="disagg",
             num_prefill_pools=2,
             num_decode_pools=2,
             prefill_pool_dynamo_namespaces=["a", "b"],
@@ -286,6 +289,7 @@ class TestValidatePriorityOverrides:
             ]
         )
         config = GlobalRouterConfig(
+            mode="disagg",
             num_prefill_pools=2,
             num_decode_pools=2,
             prefill_pool_dynamo_namespaces=["a", "b"],
@@ -294,3 +298,11 @@ class TestValidatePriorityOverrides:
             decode_pool_selection_strategy=_make_decode_strategy(),
         )
         config.validate()  # should not raise
+
+    def test_default_mode_is_disagg(self, tmp_path):
+        """Config without explicit mode defaults to disagg."""
+        config_data = _base_config()
+        # No "mode" key
+        config_path = _write_config(tmp_path, config_data)
+        config = load_config(config_path)
+        assert config.mode == "disagg"
