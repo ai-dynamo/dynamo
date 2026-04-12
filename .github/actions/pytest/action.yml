@@ -75,16 +75,25 @@ runs:
         # Start MinIO for S3-compatible object storage (used by LoRA tests)
         echo "🗄️  Starting MinIO service..."
 
-        # Remove any existing container
-        docker rm -f "${MINIO_CONTAINER_NAME}" 2>/dev/null || true
+        # Check container state
+        CONTAINER_STATE=$(docker inspect --format '{{.State.Status}}' "${MINIO_CONTAINER_NAME}" 2>/dev/null || echo "absent")
 
-        docker run -d \
-          --name "${MINIO_CONTAINER_NAME}" \
-          -p 9000:9000 \
-          -p 9001:9001 \
-          -e "MINIO_ROOT_USER=${MINIO_ACCESS_KEY}" \
-          -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}" \
-          quay.io/minio/minio server /data --console-address ':9001'
+        if [[ "${CONTAINER_STATE}" == "running" ]]; then
+          echo "✅ MinIO container is already running, skipping start"
+          exit 0
+        elif [[ "${CONTAINER_STATE}" == "exited" || "${CONTAINER_STATE}" == "created" || "${CONTAINER_STATE}" == "paused" ]]; then
+          echo "▶️  MinIO container exists but is stopped (${CONTAINER_STATE}), starting it..."
+          docker start "${MINIO_CONTAINER_NAME}"
+        else
+          echo "🆕 No MinIO container found, creating a new one..."
+          docker run -d \
+            --name "${MINIO_CONTAINER_NAME}" \
+            -p 9000:9000 \
+            -p 9001:9001 \
+            -e "MINIO_ROOT_USER=${MINIO_ACCESS_KEY}" \
+            -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}" \
+            quay.io/minio/minio server /data --console-address ':9001'
+        fi
 
         # Wait for MinIO to be ready
         echo "⏳ Waiting for MinIO to be ready..."
@@ -345,8 +354,8 @@ runs:
       if: always()
       shell: bash
       run: |
-        echo "🧹 Cleaning up MinIO container..."
-        docker rm -f dynamo-minio-test 2>/dev/null || true
+        #echo "🧹 Cleaning up MinIO container..."
+        #docker rm -f dynamo-minio-test 2>/dev/null || true
 
         echo "🧹 Cleaning up pytest containers..."
         # Clean up pytest containers that may be left over (especially from runner v1)
