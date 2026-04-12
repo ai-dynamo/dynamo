@@ -21,6 +21,35 @@ The planner supports two scaling modes that can be used independently or togethe
 - Enable **load-based scaling** when traffic is bursty. It reacts quickly to real-time load changes.
 - Enable **both** for the best of both worlds: throughput-based provides a capacity floor, load-based handles bursts above it. When both are enabled, use a longer `throughput_adjustment_interval`.
 
+## Operating Modes
+
+The planner supports three operating modes via the `scaling_mode` configuration:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `active` | Executes scaling decisions automatically (default) | Production deployments |
+| `advisory` | Computes and logs scaling recommendations without executing | Validation before enabling auto-scaling |
+| `noop` | Disables scaling entirely | Debugging or manual control |
+
+### Advisory Mode
+
+Advisory mode is useful for validating planner behavior in production environments without risking unwanted scaling actions. When enabled:
+
+1. The planner computes scaling decisions normally using FPM data and regression models
+2. Recommendations are logged at INFO level: `[ADVISORY] Scaling recommendation: current=X, recommended=Y`
+3. Prometheus metrics `dynamo_planner_advisory_recommended_replicas` and `dynamo_planner_advisory_current_replicas` are updated
+4. **No actual scaling is performed** — replica counts remain unchanged
+
+To enable advisory mode:
+
+```yaml
+features:
+  planner:
+    scaling_mode: advisory
+```
+
+Once you've validated the planner's recommendations, switch to `active` mode to enable automatic scaling.
+
 ## PlannerConfig Reference
 
 The planner is configured via a `PlannerConfig` JSON/YAML object. When using the profiler, this is placed under the `features.planner` section of the DGDR spec:
@@ -72,6 +101,8 @@ When throughput-based scaling is enabled, the planner needs engine performance d
 | `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
 | `load_metric_samples` | int | `10` | Number of metric samples to collect per decision. |
 | `load_min_observations` | int | `5` | Minimum observations before making scaling decisions. |
+| `scaling_mode` | string | `active` | Operating mode: `active` (execute scaling), `advisory` (log only), `noop` (disabled). |
+| `advisory_log_interval` | int | `60` | Seconds between advisory mode log entries. |
 
 ### General Settings
 

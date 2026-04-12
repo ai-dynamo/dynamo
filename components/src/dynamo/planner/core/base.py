@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Optional, Union
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import TargetReplica
+from dynamo.planner.config.defaults import ScalingMode, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
@@ -264,6 +264,25 @@ class NativePlannerBase:
                 await self._init_fpm_subscriber("decode")
 
         await self._bootstrap_regression()
+
+        # Log operating mode at startup
+        mode = self.config.scaling_mode
+        if mode == ScalingMode.ADVISORY:
+            logger.info(
+                "[ADVISORY] Planner started in ADVISORY mode — "
+                "scaling decisions will be logged but NOT executed. "
+                "Switch to 'active' mode to enable auto-scaling."
+            )
+        elif mode == ScalingMode.NOOP:
+            logger.info(
+                "[NOOP] Planner started in NOOP mode — "
+                "scaling is fully disabled."
+            )
+        else:
+            logger.info(
+                "Planner started in ACTIVE mode — "
+                "scaling decisions will be executed automatically."
+            )
 
     async def _init_worker_info(self) -> None:
         connector = getattr(self, "connector", None)
@@ -570,6 +589,66 @@ class NativePlannerBase:
         await self.connector.set_component_replicas(targets, blocking=blocking)
 
     # ------------------------------------------------------------------
+    # Advisory mode logging
+    # ------------------------------------------------------------------
+
+    def _log_advisory_decision(self, effects: PlannerEffects) -> None:
+        """Log scaling recommendation without executing (advisory mode).
+
+        The state machine computes the same ``ScalingDecision`` as in active
+        mode.  We log it at INFO level and expose it via Prometheus so
+        operators can validate planner behaviour before enabling auto-scaling.
+        """
+        decision = effects.scale_to
+        diag = effects.diagnostics
+
+        # Read current worker counts from the state machine inventory
+        sm = self.state_machine
+        current_p = sm._num_p_workers
+        current_d = sm._num_d_workers
+
+        rec_p = decision.num_prefill if decision else None
+        rec_d = decision.num_decode if decision else None
+
+        delta_p = (rec_p - current_p) if rec_p is not None else 0
+        delta_d = (rec_d - current_d) if rec_d is not None else 0
+
+        if decision is None:
+            action = "hold"
+        elif delta_p > 0 or delta_d > 0:
+            action = "scale_up"
+        elif delta_p < 0 or delta_d < 0:
+            action = "scale_down"
+        else:
+            action = "hold"
+
+        logger.info(
+            "[ADVISORY] %s | current: prefill=%d decode=%d | "
+            "recommended: prefill=%s decode=%s (delta: %+d / %+d) | "
+            "load_reason=%s throughput_reason=%s | "
+            "est_ttft=%.1fms est_itl=%.1fms",
+            action.upper(),
+            current_p,
+            current_d,
+            rec_p if rec_p is not None else "-",
+            rec_d if rec_d is not None else "-",
+            delta_p,
+            delta_d,
+            diag.load_decision_reason or "n/a",
+            diag.throughput_decision_reason or "n/a",
+            diag.estimated_ttft_ms or 0,
+            diag.estimated_itl_ms or 0,
+        )
+
+        # Prometheus gauges (always updated so Grafana dashboards work)
+        if self.prometheus_port != 0:
+            pm = self.prometheus_metrics
+            pm.advisory_recommended_replicas.set(
+                (rec_p or current_p) + (rec_d or current_d)
+            )
+            pm.advisory_current_replicas.set(current_p + current_d)
+
+    # ------------------------------------------------------------------
     # Diagnostics reporting (shared across all adapters)
     # ------------------------------------------------------------------
 
@@ -612,7 +691,14 @@ class NativePlannerBase:
 
             tick_input = await self._gather_tick_input(next_tick)
             effects = self.state_machine.on_tick(next_tick, tick_input)
-            await self._apply_effects(effects)
+
+            # Advisory mode handling: log recommendations without executing
+            if self.config.scaling_mode == ScalingMode.ADVISORY:
+                self._log_advisory_decision(effects)
+            elif self.config.scaling_mode == ScalingMode.ACTIVE:
+                await self._apply_effects(effects)
+            # NOOP mode: skip both logging and execution
+
             self._report_diagnostics(effects.diagnostics)
 
             if self._recorder.enabled:
