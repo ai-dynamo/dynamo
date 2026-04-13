@@ -302,7 +302,7 @@ async def init_llm_worker(
             module_path, class_name = tokenizer_path.rsplit(".", 1)
             tokenizer_class = getattr(import_module(module_path), class_name)
             tokenizer = tokenizer_class.from_pretrained(
-                arg_map["model"],
+                arg_map.get("tokenizer") or arg_map["model"],
                 trust_remote_code=arg_map.get("trust_remote_code", False),
             )
         except (ValueError, ImportError, AttributeError) as e:
