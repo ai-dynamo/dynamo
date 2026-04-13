@@ -44,7 +44,7 @@
             ],
             "Condition": {
                 "StringLike": {
-                    "kms:ViaService": "s3.region.amazonaws.com",
+                    "kms:ViaService": "s3.${AWS_REGION}.amazonaws.com",
                     "kms:EncryptionContext:aws:s3:arn": [
                         "arn:aws:s3:::${S3_BUCKET_NAME}",
                         "arn:aws:s3:::${S3_BUCKET_NAME}/*"

@@ -63,14 +63,14 @@ export VPC_CIDR=$(aws ec2 describe-vpcs \
   --output text)
 ```
 
-## Create a Security Group for EFS
+## Create a Security Group for S3 Files
 
 Create a security group that allows NFS traffic (port 2049) from within the VPC:
 
 ```bash
 export S3FILES_SG_ID=$(aws ec2 create-security-group \
   --group-name "${CLUSTER_NAME}-s3files-sg" \
-  --description "Security group for EFS access from EKS" \
+  --description "Security group for S3 Files access from EKS" \
   --vpc-id "$VPC_ID" \
   --region "$AWS_REGION" \
   --query "GroupId" \
@@ -94,7 +94,7 @@ aws ec2 authorize-security-group-ingress \
 export S3FILES_FS_ID=$(aws s3files create-file-system \
   --region "$AWS_REGION" \
   --bucket "arn:aws:s3:::$S3_BUCKET_NAME" \
-  --role-arn "arn:aws:iam::481368388379:role/${CLUSTER_NAME}-S3FilesRole" \
+  --role-arn "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${CLUSTER_NAME}-S3FilesRole" \
   --tags key=Name,value="fs-${S3_BUCKET_NAME}" \
   --query "fileSystemId" \
   --output text)
@@ -242,10 +242,10 @@ kubectl get pvc -n ${DYNAMO_NAMESPACE}
 You should see output similar to:
 
 ```
-NAME                STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS     VOLUMEATTRIBUTESCLASS   AGE
-compilation-cache   Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            efs-sc-dynamic   <unset>                 41s
-model-cache         Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            efs-sc-dynamic   <unset>                 42s
-perf-cache          Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            efs-sc-dynamic   <unset>                 41s
+NAME                STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS         VOLUMEATTRIBUTESCLASS   AGE
+compilation-cache   Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            s3files-sc-dynamic   <unset>                 41s
+model-cache         Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            s3files-sc-dynamic   <unset>                 42s
+perf-cache          Bound    pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   5Gi        RWX            s3files-sc-dynamic   <unset>                 41s
 ```
 
 ## Cleanup
