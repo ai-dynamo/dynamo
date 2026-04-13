@@ -120,11 +120,10 @@ JetStream mode requires `--router-durable-kv-events` on both frontend and worker
 python -m dynamo.frontend --router-mode kv --http-port 8002 --router-replica-sync
 ```
 
-<Note>
-If you need to start with a fresh state in JetStream mode, you have two options:
-1. Use a different namespace or component, which creates a new stream and NATS object store path.
-2. Launch a router with `--router-reset-states`, which purges the entire stream and radix snapshot. Only do this when launching the first router replica in a component, because it can bring existing replicas into an inconsistent state.
-</Note>
+>[!Note]
+> If you need to start with a fresh state in JetStream mode, you have two options:
+> 1. Use a different namespace or component, which creates a new stream and NATS object store path.
+> 2. Launch a router with `--router-reset-states`, which purges the entire stream and radix snapshot. Only do this when launching the first router replica in a component, because it can bring existing replicas into an inconsistent state.
 
 ## Additional Notes
 
