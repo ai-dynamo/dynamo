@@ -277,7 +277,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		require.NoError(t, err)
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
-			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity()},
+			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity(), GMS: true},
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
 				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 				IdentityHash: hash,
@@ -294,6 +294,7 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.True(t, info.Ready)
 		assert.Equal(t, hash, info.Hash)
 		assert.Equal(t, hash, info.CheckpointName)
+		assert.True(t, info.GMS)
 	})
 
 	t.Run("checkpointRef resolves not-ready CR", func(t *testing.T) {

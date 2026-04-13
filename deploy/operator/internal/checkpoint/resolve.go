@@ -35,6 +35,7 @@ type CheckpointInfo struct {
 	ArtifactVersion string
 	CheckpointName  string
 	Ready           bool
+	GMS             bool
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
@@ -51,6 +52,7 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 		ArtifactVersion: checkpointArtifactVersion(ckpt),
 		CheckpointName:  ckpt.Name,
 		Ready:           ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		GMS:             ckpt.Spec.GMS,
 	}, nil
 }
 

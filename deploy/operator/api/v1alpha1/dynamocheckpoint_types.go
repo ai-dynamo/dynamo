@@ -124,6 +124,11 @@ type DynamoCheckpointSpec struct {
 	// +kubebuilder:validation:Required
 	Identity DynamoCheckpointIdentity `json:"identity"`
 
+	// GMS enables GMS sidecars for checkpoint creation and restore when this
+	// checkpoint is referenced by operator-managed workloads.
+	// +optional
+	GMS bool `json:"gms,omitempty"`
+
 	// Job defines the configuration for the checkpoint creation Job
 	// +kubebuilder:validation:Required
 	Job DynamoCheckpointJobConfig `json:"job"`
