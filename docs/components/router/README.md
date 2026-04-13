@@ -29,7 +29,7 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. Workers automa
 
 You can also run the KV router as a standalone service (without the Dynamo frontend). See the [Standalone Router component](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/router/) for more details.
 
-For all CLI arguments, environment variables, K8s deployment examples, and tuning guidelines, see the [Router Guide](router-guide.md). For A/B benchmarking, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
+For deployment modes and quick start steps, see the [Router Guide](router-guide.md). For CLI arguments and tuning guidelines, see [Configuration and Tuning](router-configuration.md). For A/B benchmarking, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
 ## Prerequisites and Limitations
 
@@ -50,7 +50,11 @@ For basic model registration without KV routing, use `--router-mode round-robin`
 
 ## Next Steps
 
-- **[Router Guide](router-guide.md)**: Deep dive into KV cache routing, configuration, disaggregated serving, and tuning
+- **[Router Guide](router-guide.md)**: Deployment modes, quick start, and page map
+- **[Routing Concepts](router-concepts.md)**: Cost model and worker-selection behavior
+- **[Configuration and Tuning](router-configuration.md)**: Router flags, transport modes, and metrics
+- **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
+- **[Router Operations](router-operations.md)**: Replicas, persistence, and recovery
 - **[Router Examples](router-examples.md)**: Python API usage, K8s examples, and custom routing patterns
 - **[Standalone Indexer](standalone-indexer.md)**: Run the KV indexer as a separate service for independent scaling
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details, algorithms, and event transport modes
