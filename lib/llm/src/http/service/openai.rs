@@ -94,6 +94,9 @@ pub(crate) struct ErrorMessage {
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
+        // 499 is not IANA-registered (nginx convention for client-closed-request),
+        // so canonical_reason() returns None. Use the de facto standard name.
+        None if code.as_u16() == 499 => "Client Closed Request".to_string(),
         None => "UnknownError".to_string(),
     }
 }
@@ -114,6 +117,7 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
         StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
         StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503
         StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
+        _ if code.as_u16() == 499 => ErrorType::Cancelled, // 499 Client Closed Request
         _ if code.is_client_error() => ErrorType::Validation, // other 4xx
         _ => ErrorType::Internal,                     // everything else
     }
@@ -216,6 +220,20 @@ impl ErrorMessage {
                     message: dynamo_err.message().to_string(),
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
+                }),
+            );
+        }
+
+        // Check for Cancelled anywhere in the error chain → HTTP 499 (Client Closed Request)
+        if super::metrics::request_was_cancelled(err.as_ref()) {
+            let code = StatusCode::from_u16(499).unwrap();
+            tracing::debug!("Request cancelled before response: {err}");
+            return (
+                code,
+                Json(ErrorMessage {
+                    message: err.to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
                 }),
             );
         }
@@ -2521,6 +2539,38 @@ mod tests {
         assert_eq!(
             response.1.message,
             "ResourceExhausted: All workers are busy, please retry later"
+        );
+    }
+
+    #[test]
+    fn test_cancelled_error_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("Context id abc-123 is stopped or killed")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(
+            response.0.as_u16(),
+            499,
+            "Cancelled errors should return HTTP 499"
+        );
+        assert_eq!(response.1.code, 499);
+        assert_eq!(response.1.error_type, "Client Closed Request");
+        assert!(response.1.message.contains("stopped or killed"));
+    }
+
+    #[test]
+    fn test_cancelled_error_metrics_classification() {
+        // HTTP 499 should be classified as Cancelled for metrics
+        let error_type =
+            classify_error_for_metrics(StatusCode::from_u16(499).unwrap(), "cancelled request");
+        assert_eq!(
+            error_type,
+            ErrorType::Cancelled,
+            "HTTP 499 should map to ErrorType::Cancelled in metrics"
         );
     }
 
