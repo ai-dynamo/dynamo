@@ -55,7 +55,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen3-vl-2b-video",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.pre_merge, pytest.mark.xpu_1], # mirrors GPU pre_merge parity
+                marks=[
+                    pytest.mark.pre_merge,
+                    pytest.mark.xpu_1,
+                ],  # mirrors GPU pre_merge parity
                 timeout_s=600,
                 delayed_start=60,
             ),
