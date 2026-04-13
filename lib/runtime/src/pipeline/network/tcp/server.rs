@@ -68,6 +68,21 @@ pub struct ServerOptions {
 
     #[builder(default)]
     pub interface: Option<String>,
+
+    /// Explicit bind host address. Takes priority over interface and auto-detection.
+    #[builder(default)]
+    pub host: Option<String>,
+
+    /// Override the host address advertised to peers.
+    /// If set, this address is used in connection_info instead of the bind address.
+    /// The server still binds to the resolved local IP; only the advertised address changes.
+    #[builder(default)]
+    pub advertise_host: Option<String>,
+
+    /// Override the port advertised to peers.
+    /// If set, this port is used in connection_info instead of the actual listening port.
+    #[builder(default)]
+    pub advertise_port: Option<u16>,
 }
 
 impl ServerOptions {
@@ -82,6 +97,8 @@ impl ServerOptions {
 pub struct TcpStreamServer {
     local_ip: String,
     local_port: u16,
+    advertise_ip: String,
+    advertise_port: u16,
     state: Arc<Mutex<State>>,
 }
 
@@ -138,48 +155,46 @@ impl TcpStreamServer {
         options: ServerOptions,
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
-        let local_ip = match options.interface {
-            Some(interface) => {
-                let interfaces: HashMap<String, std::net::IpAddr> =
-                    list_afinet_netifas()?.into_iter().collect();
+        let local_ip = if let Some(host) = options.host {
+            host
+        } else if let Some(interface) = options.interface {
+            let interfaces: HashMap<String, std::net::IpAddr> =
+                list_afinet_netifas()?.into_iter().collect();
 
-                interfaces
-                    .get(&interface)
-                    .ok_or(PipelineError::Generic(format!(
-                        "Interface not found: {}",
-                        interface
-                    )))?
-                    .to_string()
-            }
-            None => {
-                let resolved_ip = resolver.local_ip().or_else(|err| match err {
-                    Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-                    _ => Err(err),
-                });
-
-                match resolved_ip {
-                    Ok(addr) => addr,
-                    // Only fall back to loopback when no routable IP exists at all;
-                    // propagate other resolver errors (I/O, platform) so
-                    // misconfigured hosts fail fast instead of silently binding
-                    // to 127.0.0.1.
-                    Err(Error::LocalIpAddressNotFound) => {
-                        tracing::warn!(
-                            "No routable local IP address found; falling back to 127.0.0.1"
-                        );
-                        IpAddr::from([127, 0, 0, 1])
-                    }
-                    Err(err) => {
-                        return Err(PipelineError::Generic(format!(
-                            "Failed to resolve local IP address: {err}"
-                        )));
-                    }
-                }
+            interfaces
+                .get(&interface)
+                .ok_or(PipelineError::Generic(format!(
+                    "Interface not found: {}",
+                    interface
+                )))?
                 .to_string()
+        } else {
+            let resolved_ip = resolver.local_ip().or_else(|err| match err {
+                Error::LocalIpAddressNotFound => resolver.local_ipv6(),
+                _ => Err(err),
+            });
+
+            match resolved_ip {
+                Ok(addr) => addr,
+                Err(Error::LocalIpAddressNotFound) => {
+                    tracing::warn!(
+                        "No routable local IP address found; falling back to 127.0.0.1"
+                    );
+                    IpAddr::from([127, 0, 0, 1])
+                }
+                Err(err) => {
+                    return Err(PipelineError::Generic(format!(
+                        "Failed to resolve local IP address: {err}"
+                    )));
+                }
             }
+            .to_string()
         };
 
         let state = Arc::new(Mutex::new(State::default()));
+
+        let advertise_host = options.advertise_host;
+        let advertise_port_override = options.advertise_port;
 
         let local_port = Self::start(local_ip.clone(), options.port, state.clone())
             .await
@@ -187,11 +202,16 @@ impl TcpStreamServer {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
             })?;
 
-        tracing::debug!("tcp transport service on {local_ip}:{local_port}");
+        let advertise_ip = advertise_host.unwrap_or_else(|| local_ip.clone());
+        let advertise_port = advertise_port_override.unwrap_or(local_port);
+
+        tracing::debug!("tcp transport service on {local_ip}:{local_port}, advertising as {advertise_ip}:{advertise_port}");
 
         Ok(Arc::new(Self {
             local_ip,
             local_port,
+            advertise_ip,
+            advertise_port,
             state,
         }))
     }
@@ -239,7 +259,7 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        let address = format!("{}:{}", self.advertise_ip, self.advertise_port);
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
