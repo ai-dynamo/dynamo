@@ -53,7 +53,9 @@ class TrtllmLLMEngine(LLMEngine):
         self._active_requests: dict[str, Any] = {}
 
     @classmethod
-    async def from_args(cls, argv: list[str] | None = None) -> TrtllmLLMEngine:
+    async def from_args(
+        cls, argv: list[str] | None = None
+    ) -> tuple[TrtllmLLMEngine, WorkerConfig]:
         config = parse_args(argv)
 
         gpus_per_node = config.gpus_per_node or device_count()
@@ -83,15 +85,15 @@ class TrtllmLLMEngine(LLMEngine):
             max_num_tokens=config.max_num_tokens,
             kv_block_size=config.kv_block_size,
         )
-        engine.worker_config = WorkerConfig.from_runtime_config(
+        worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,
             model_input=ModelInput.Tokens,
         )
-        return engine
+        return engine, worker_config
 
-    async def init(self) -> EngineConfig:
+    async def start(self) -> EngineConfig:
         self._engine = TensorRTLLMEngine(self.engine_args)
         await self._engine.initialize()
 
@@ -114,13 +116,14 @@ class TrtllmLLMEngine(LLMEngine):
             self._default_sampling_params, request
         )
 
-        max_tokens = request["stop_conditions"].get("max_tokens")
+        stop_conditions = request.get("stop_conditions", {})
+        max_tokens = stop_conditions.get("max_tokens")
         if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
         elif self.max_seq_len is not None:
             sampling_params.max_tokens = max(1, self.max_seq_len - len(token_ids))
 
-        ignore_eos = request["stop_conditions"].get("ignore_eos")
+        ignore_eos = stop_conditions.get("ignore_eos")
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
 
@@ -183,7 +186,7 @@ class TrtllmLLMEngine(LLMEngine):
     ) -> SamplingParams:
         overrides = {
             key: value
-            for key, value in request["sampling_options"].items()
+            for key, value in request.get("sampling_options", {}).items()
             if value is not None
         }
 

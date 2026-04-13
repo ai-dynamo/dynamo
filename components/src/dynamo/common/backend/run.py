@@ -20,8 +20,8 @@ from .worker import Worker
 
 
 async def _start(engine_cls: type[LLMEngine], argv: list[str] | None = None):
-    engine = await engine_cls.from_args(argv)
-    w = Worker(engine)
+    engine, worker_config = await engine_cls.from_args(argv)
+    w = Worker(engine, worker_config)
     await w.run()
 
 

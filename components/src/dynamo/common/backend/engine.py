@@ -29,32 +29,33 @@ class LLMEngine(ABC):
     """Abstract base for inference engines.
 
     Lifecycle:
-        1. from_args(argv) -- parse CLI args, construct engine (NOT started yet)
-        2. init()          -- start the engine, return EngineConfig metadata.
-                              After init() returns, generate() MUST be ready
+        1. from_args(argv) -- parse CLI args, return (engine, WorkerConfig)
+        2. start()         -- start the engine, return EngineConfig metadata.
+                              After start() returns, generate() MUST be ready
                               to accept calls. Worker begins serving
-                              immediately after init().
+                              immediately after start().
         3. generate()      -- called for each request (concurrent calls expected)
         4. abort()         -- called when a request is cancelled (optional, default no-op)
         5. cleanup()       -- called once on shutdown, release all resources
     """
 
-    worker_config: WorkerConfig
-
     @classmethod
     @abstractmethod
-    async def from_args(cls, argv: list[str] | None = None) -> LLMEngine:
+    async def from_args(
+        cls, argv: list[str] | None = None
+    ) -> tuple[LLMEngine, WorkerConfig]:
         """Parse CLI args and construct the engine (not yet started).
-
-        Implementations must set ``worker_config`` on the returned instance.
 
         Args:
             argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
+
+        Returns:
+            A ``(engine, worker_config)`` pair.
         """
         ...
 
     @abstractmethod
-    async def init(self) -> EngineConfig:
+    async def start(self) -> EngineConfig:
         """Start the engine and return registration metadata.
 
         After this returns the engine MUST be ready to accept ``generate()``

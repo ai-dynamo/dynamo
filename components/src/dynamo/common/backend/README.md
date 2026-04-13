@@ -11,8 +11,8 @@ all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
 
 ```
 LLMEngine (ABC)                <-- engine boundary (engine.py)
-    |   - from_args(argv) -> LLMEngine  (factory: parse args, set worker_config)
-    |   - init() -> EngineConfig        (start engine, return metadata)
+    |   - from_args(argv) -> (LLMEngine, WorkerConfig)  (factory)
+    |   - start() -> EngineConfig        (start engine, return metadata)
     |   - generate(request, context)    (streaming inference)
     |   - abort(context)                (cancel request, optional)
     |   - cleanup()                     (shutdown)
@@ -23,10 +23,10 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     +-- SampleLLMEngine        <-- sample_engine.py
 
 Worker                  <-- runtime integration (worker.py)
-    - reads engine.worker_config
+    - receives WorkerConfig from from_args()
     - creates DistributedRuntime
     - sets up endpoints, signal handlers
-    - calls engine.init(), registers model
+    - calls engine.start(), registers model
     - serves generate endpoint with cancellation monitoring
     - calls engine.cleanup() on shutdown
 ```
@@ -73,14 +73,14 @@ from dynamo.common.backend import LLMEngine, EngineConfig, WorkerConfig
 class MyEngine(LLMEngine):
     @classmethod
     async def from_args(cls, argv=None):
-        # Parse CLI args, construct engine, set worker_config.
+        # Parse CLI args, construct engine and worker_config.
         engine = cls(...)
-        engine.worker_config = WorkerConfig(
+        worker_config = WorkerConfig(
             namespace="dynamo", component="my-backend", ...
         )
-        return engine
+        return engine, worker_config
 
-    async def init(self) -> EngineConfig:
+    async def start(self) -> EngineConfig:
         # Start the engine, return metadata for model registration.
         # After this returns, generate() MUST be ready to accept calls.
         return EngineConfig(

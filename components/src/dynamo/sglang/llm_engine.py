@@ -34,7 +34,9 @@ class SglangLLMEngine(LLMEngine):
         self._skip_tokenizer_init = server_args.skip_tokenizer_init
 
     @classmethod
-    async def from_args(cls, argv: list[str] | None = None) -> SglangLLMEngine:
+    async def from_args(
+        cls, argv: list[str] | None = None
+    ) -> tuple[SglangLLMEngine, WorkerConfig]:
         config = await parse_args(argv if argv is not None else sys.argv[1:])
         server_args = config.server_args
         dynamo_args = config.dynamo_args
@@ -46,15 +48,15 @@ class SglangLLMEngine(LLMEngine):
         )
 
         engine = cls(server_args)
-        engine.worker_config = WorkerConfig.from_runtime_config(
+        worker_config = WorkerConfig.from_runtime_config(
             dynamo_args,
             model_name=server_args.model_path,
             served_model_name=server_args.served_model_name,
             model_input=model_input,
         )
-        return engine
+        return engine, worker_config
 
-    async def init(self) -> EngineConfig:
+    async def start(self) -> EngineConfig:
         self.engine = sgl.Engine(server_args=self.server_args)
 
         tokenizer = (
@@ -64,11 +66,25 @@ class SglangLLMEngine(LLMEngine):
         )
         self._input_param_manager = InputParamManager(tokenizer)
 
+        # Capacity fields -- sourced the same way as register.py in the
+        # non-unified path so the Rust runtime gets consistent values.
+        total_kv_blocks = None
+        scheduler_info = getattr(self.engine, "scheduler_info", None) or {}
+        max_total_tokens = scheduler_info.get("max_total_num_tokens")
+        page_size = self.server_args.page_size
+        if max_total_tokens and page_size:
+            total_kv_blocks = (max_total_tokens + page_size - 1) // page_size
+
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
             context_length=self.server_args.context_length,
-            kv_cache_block_size=self.server_args.page_size,
+            kv_cache_block_size=page_size,
+            total_kv_blocks=total_kv_blocks,
+            max_num_seqs=getattr(self.server_args, "max_running_requests", None),
+            max_num_batched_tokens=getattr(
+                self.server_args, "max_prefill_tokens", None
+            ),
         )
 
     async def generate(

@@ -6,15 +6,15 @@ Two-class abstraction: `Worker` (runtime integration) and
 ## Engine Lifecycle
 
 ```
-from_args(argv)  ->  init()  ->  generate() / abort()  ->  cleanup()
+from_args(argv)  ->  start()  ->  generate() / abort()  ->  cleanup()
      |                  |              |                        |
   parse args,      start engine,    serve requests         shutdown,
-  set config       return metadata  (concurrent)           release resources
+  return config    return metadata  (concurrent)           release resources
 ```
 
-1. `from_args(argv)` -- classmethod factory. Parses CLI args, constructs the
-   engine, and sets `worker_config`. Engine is NOT started yet.
-2. `init()` -- starts the engine, returns `EngineConfig`. After this returns
+1. `from_args(argv)` -- classmethod factory. Parses CLI args, returns
+   `(engine, WorkerConfig)`. Engine is NOT started yet.
+2. `start()` -- starts the engine, returns `EngineConfig`. After this returns
    `generate()` MUST be ready to accept calls.
 3. `generate(request, context)` -- streaming inference, called concurrently.
 4. `abort(context)` -- cancel an in-flight request (optional, default no-op).
@@ -34,9 +34,9 @@ from_args(argv)  ->  init()  ->  generate() / abort()  ->  cleanup()
 - **Exactly two classes.** `Worker` owns runtime lifecycle.
   `LLMEngine` owns inference. Do not add intermediate base classes or mixins.
 
-- **Engine owns its config.** `LLMEngine.from_args()` sets `worker_config`
-  on the instance. `Worker` reads it from the engine -- it does not
-  accept a separate config argument.
+- **`from_args()` returns `(engine, WorkerConfig)`.**  The tuple return
+  makes the contract statically checkable -- a subclass that forgets to
+  build a `WorkerConfig` is a type error, not a runtime `AttributeError`.
 
 - **`generate()` delegates to engine with cancellation monitoring.**
   `Worker.generate()` runs a background task that watches
@@ -45,9 +45,9 @@ from_args(argv)  ->  init()  ->  generate() / abort()  ->  cleanup()
   chunk. Sampling params, prompt building, and output formatting stay inside
   each engine -- they are deeply engine-specific.
 
-- **`init()` returns `EngineConfig`.** The model class needs registration
+- **`start()` returns `EngineConfig`.** The model class needs registration
   metadata (`context_length`, `block_size`, `total_kv_blocks`) but must not
-  reach into engine internals. `init()` returns this metadata so the boundary
+  reach into engine internals. `start()` returns this metadata so the boundary
   stays clean.
 
 - **No hooks.** If behavior needs to be shared across engines, put it in
@@ -71,9 +71,9 @@ Build the `completion_usage` dict inline. Finish reason normalization
 ## Adding a New Engine
 
 1. Create `<backend>/llm_engine.py` subclassing `LLMEngine`
-2. Implement `from_args()`, `init()`, `generate()`, `cleanup()` (required)
+2. Implement `from_args()`, `start()`, `generate()`, `cleanup()` (required)
    and `abort()` (optional)
-3. `from_args()` must parse args, construct the engine, and set `worker_config`
+3. `from_args()` must parse args and return `(engine, WorkerConfig)`
 4. Create `<backend>/unified_main.py` calling `run(<YourEngine>)`
 5. Use `sample_engine.py` as the reference implementation
 

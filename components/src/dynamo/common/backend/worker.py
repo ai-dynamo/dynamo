@@ -79,8 +79,8 @@ class WorkerConfig:
 
 
 class Worker:
-    def __init__(self, engine: LLMEngine):
-        self.config = engine.worker_config
+    def __init__(self, engine: LLMEngine, config: WorkerConfig):
+        self.config = config
         self.engine = engine
 
     async def generate(
@@ -134,7 +134,7 @@ class Worker:
         install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
         try:
-            engine_config = await self.engine.init()
+            engine_config = await self.engine.start()
         except DynamoException:
             raise
         except Exception as exc:

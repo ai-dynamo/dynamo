@@ -39,8 +39,10 @@ class VllmLLMEngine(LLMEngine):
         self._model_max_len = None
 
     @classmethod
-    async def from_args(cls, argv: list[str] | None = None) -> VllmLLMEngine:
-        config = parse_args()
+    async def from_args(
+        cls, argv: list[str] | None = None
+    ) -> tuple[VllmLLMEngine, WorkerConfig]:
+        config = parse_args(argv)
 
         if not config.served_model_name:
             config.served_model_name = (
@@ -48,15 +50,15 @@ class VllmLLMEngine(LLMEngine):
             ) = config.model
 
         engine = cls(config.engine_args)
-        engine.worker_config = WorkerConfig.from_runtime_config(
+        worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,
             model_input=ModelInput.Tokens,
         )
-        return engine
+        return engine, worker_config
 
-    async def init(self) -> EngineConfig:
+    async def start(self) -> EngineConfig:
         os.environ["VLLM_NO_USAGE_STATS"] = "1"
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -146,5 +148,8 @@ class VllmLLMEngine(LLMEngine):
             logger.debug("Aborted request %s", request_id)
 
     async def cleanup(self) -> None:
+        if self.engine_client is not None:
+            self.engine_client.shutdown()
         if self._prometheus_temp_dir is not None:
             self._prometheus_temp_dir.cleanup()
+        logger.info("vLLM engine shutdown")

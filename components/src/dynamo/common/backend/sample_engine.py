@@ -32,7 +32,9 @@ class SampleLLMEngine(LLMEngine):
         self.delay = delay
 
     @classmethod
-    async def from_args(cls, argv: list[str] | None = None) -> SampleLLMEngine:
+    async def from_args(
+        cls, argv: list[str] | None = None
+    ) -> tuple[SampleLLMEngine, WorkerConfig]:
         parser = argparse.ArgumentParser(description="Sample Dynamo backend")
         parser.add_argument("--model-name", default="sample-model")
         parser.add_argument("--namespace", default="dynamo")
@@ -51,7 +53,7 @@ class SampleLLMEngine(LLMEngine):
             max_tokens=args.max_tokens,
             delay=args.delay,
         )
-        engine.worker_config = WorkerConfig(
+        worker_config = WorkerConfig(
             namespace=args.namespace,
             component=args.component,
             endpoint=args.endpoint,
@@ -62,9 +64,9 @@ class SampleLLMEngine(LLMEngine):
             request_plane=args.request_plane,
             event_plane=args.event_plane,
         )
-        return engine
+        return engine, worker_config
 
-    async def init(self) -> EngineConfig:
+    async def start(self) -> EngineConfig:
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.model_name,
