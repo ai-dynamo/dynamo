@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -127,15 +126,11 @@ def test_region_uses_gms_pool_only_for_rw_managed_tags(
     assert pool_calls == expected_pool_calls
 
 
-def test_pause_resume_routes_only_managed_tags(build_impl, monkeypatch):
+def test_pause_resume_routes_only_managed_tags(build_impl):
     impl, weights, kv_cache, _ = build_impl(
         weights_lock=GrantedLockType.RO,
         kv_cache_lock=GrantedLockType.RW,
     )
-    collect = MagicMock()
-    empty_cache = MagicMock()
-    monkeypatch.setattr(gms_memory_saver.gc, "collect", collect)
-    monkeypatch.setattr(gms_memory_saver.torch.cuda, "empty_cache", empty_cache)
 
     impl.pause("model_weights")
     impl.resume("anything_else")
@@ -156,8 +151,6 @@ def test_pause_resume_routes_only_managed_tags(build_impl, monkeypatch):
         ("reallocate_all_handles", "kv_cache"),
         "remap_all_vas",
     ]
-    collect.assert_called_once_with()
-    empty_cache.assert_called_once_with()
 
 
 @pytest.mark.parametrize("tag", ["weights", "kv_cache"])

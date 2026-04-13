@@ -153,7 +153,6 @@ class GMSMemorySaverImpl:
         )
 
     def pause(self, tag: Optional[str] = None) -> None:
-        did_pause = False
         for target_tag in _pause_resume_tags(tag):
             if self.allocators[target_tag].is_unmapped:
                 continue
@@ -162,10 +161,8 @@ class GMSMemorySaverImpl:
             # abort() drops the current session after unmapping while keeping
             # the VA reservation alive for the next resume().
             self.allocators[target_tag].abort()
-            did_pause = True
-        if did_pause:
-            gc.collect()
-            torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def resume(self, tag: Optional[str] = None) -> None:
         for target_tag in _pause_resume_tags(tag):
