@@ -229,7 +229,7 @@ class NativePlannerBase:
         if hasattr(self, "connector") and hasattr(self.connector, "_async_init"):
             await self.connector._async_init()
 
-        if not self.config.no_operation:
+        if not self.config.no_operation and self.config.scaling_mode == ScalingMode.ACTIVE:
             defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
             logger.info("Validating deployment...")
             await self.connector.validate_deployment(
@@ -292,7 +292,7 @@ class NativePlannerBase:
             require_decode=self.require_decode,
             connector=connector,
             config_model_name=getattr(self.config, "model_name", ""),
-            no_operation=self.config.no_operation,
+            no_operation=self.config.no_operation or self.config.scaling_mode != ScalingMode.ACTIVE,
         )
         self.model_name = (
             self.decode_worker_info.model_name or self.prefill_worker_info.model_name
