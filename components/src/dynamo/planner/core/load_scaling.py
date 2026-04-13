@@ -41,8 +41,6 @@ class LoadScalingMixin:
     _diag_estimated_ttft_ms: Optional[float]
     _diag_estimated_itl_ms: Optional[float]
     _diag_load_reason: Optional[str]
-    _diag_easy_prefill_queue_ratio: Optional[float]
-    _diag_easy_decode_kv_util: Optional[float]
 
     def _advance_load(self, obs: FpmObservations) -> Optional[ScalingDecision]:
         if not self._config.enable_load_scaling:
@@ -455,8 +453,6 @@ class LoadScalingMixin:
             self._diag_load_reason = "insufficient_data"
             return None
 
-        self._diag_easy_prefill_queue_ratio = max(ratios)
-
         # Scale up if ANY engine above threshold
         if any(r >= up_thresh for r in ratios):
             logger.info(
@@ -521,8 +517,6 @@ class LoadScalingMixin:
             self._diag_load_reason = "insufficient_data"
             return None
 
-        self._diag_easy_decode_kv_util = max(utils)
-
         if any(u > up_thresh for u in utils):
             logger.info(
                 f"Easy decode: engine(s) above scale-up threshold "
@@ -576,8 +570,6 @@ class LoadScalingMixin:
         if not utils:
             self._diag_load_reason = "insufficient_data"
             return None
-
-        self._diag_easy_decode_kv_util = max(utils)
 
         if any(u > up_thresh for u in utils):
             logger.info(

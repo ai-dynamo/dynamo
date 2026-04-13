@@ -135,16 +135,6 @@ class PlannerPrometheusMetrics:
             states=THROUGHPUT_DECISION_STATES,
         )
 
-        # -- Diagnostics: easy-mode metrics --------------------------------
-        self.easy_prefill_queue_ratio = Gauge(
-            f"{PREFIX}_easy_prefill_queue_ratio",
-            "Max queued prefill tokens / context_length across engines",
-        )
-        self.easy_decode_kv_utilization = Gauge(
-            f"{PREFIX}_easy_decode_kv_utilization",
-            "Max KV cache utilization across engines",
-        )
-
         # -- Diagnostics: per-engine FPM queue depths ---------------------
         _engine_labels = ["worker_id", "dp_rank"]
         self.engine_queued_prefill_tokens = Gauge(

@@ -116,8 +116,6 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_engine_rps_decode: Optional[float] = None
         self._diag_load_reason: Optional[str] = None
         self._diag_throughput_reason: Optional[str] = None
-        self._diag_easy_prefill_queue_ratio: Optional[float] = None
-        self._diag_easy_decode_kv_util: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -200,8 +198,6 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_engine_rps_decode = None
         self._diag_load_reason = None
         self._diag_throughput_reason = None
-        self._diag_easy_prefill_queue_ratio = None
-        self._diag_easy_decode_kv_util = None
 
     def _build_diagnostics(self) -> TickDiagnostics:
         return TickDiagnostics(
@@ -214,8 +210,6 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             engine_rps_decode=self._diag_engine_rps_decode,
             load_decision_reason=self._diag_load_reason,
             throughput_decision_reason=self._diag_throughput_reason,
-            easy_prefill_queue_ratio=self._diag_easy_prefill_queue_ratio,
-            easy_decode_kv_utilization=self._diag_easy_decode_kv_util,
         )
 
     # ------------------------------------------------------------------

@@ -597,11 +597,6 @@ class NativePlannerBase:
         pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
         pm.throughput_scaling_decision.state(diag.throughput_decision_reason or "unset")
 
-        if diag.easy_prefill_queue_ratio is not None:
-            pm.easy_prefill_queue_ratio.set(diag.easy_prefill_queue_ratio)
-        if diag.easy_decode_kv_utilization is not None:
-            pm.easy_decode_kv_utilization.set(diag.easy_decode_kv_utilization)
-
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
