@@ -895,7 +895,7 @@ impl HFConfig {
         // 1. generation_config.json;
         // 2. config.json, or text_config field in config.json.
         // https://github.com/huggingface/transformers/issues/25395#issuecomment-1671863257
-        let final_eos_token_ids: Vec<TokenIdType> = {
+        let mut final_eos_token_ids: Vec<TokenIdType> = {
                 // Firstly check the generation_config.json
                 crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
                 .inspect_err(
@@ -952,10 +952,78 @@ impl HFConfig {
                     "missing eos_token_id in config.json and generation_config.json, cannot load"
                 )
             })?;
+        // Also check tokenizer_config.json for the tokenizer's eos_token.
+        // Some models (e.g. Qwen3.5) have text_config.eos_token_id = <|endoftext|>
+        // but the tokenizer's eos_token is <|im_end|> — the token the model actually
+        // emits to end generation. Merge the tokenizer's EOS into the set so both
+        // are recognized as stop tokens.
+        let tokenizer_cfg_path = file_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("tokenizer_config.json");
+        if let Ok(tokenizer_eos_id) =
+            resolve_eos_token_id_from_tokenizer_config(&tokenizer_cfg_path)
+            && !final_eos_token_ids.contains(&tokenizer_eos_id)
+        {
+            final_eos_token_ids.push(tokenizer_eos_id);
+        }
+
         text_config.final_eos_token_ids = final_eos_token_ids;
 
         Ok(Arc::new(config))
     }
+}
+
+/// Resolve the tokenizer's `eos_token` to a token ID by reading `tokenizer_config.json`.
+///
+/// Reads the `eos_token` field (string) and looks it up in `added_tokens_decoder`
+/// to find the corresponding token ID. This handles models where the tokenizer's
+/// EOS token differs from `config.json`'s `eos_token_id`.
+fn resolve_eos_token_id_from_tokenizer_config(path: &Path) -> anyhow::Result<TokenIdType> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read tokenizer_config.json: {:?}", path))?;
+    let config: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse tokenizer_config.json: {:?}", path))?;
+
+    // Get eos_token — can be a plain string or a dict with a "content" field (older HF format)
+    let eos_token_str = match config.get("eos_token") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Object(obj)) => obj
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("eos_token is an object without 'content' field"))?,
+        _ => anyhow::bail!("eos_token not found or not a string in tokenizer_config.json"),
+    };
+
+    // Look up the token string in added_tokens_decoder to get its ID
+    let added_tokens = config
+        .get("added_tokens_decoder")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            anyhow::anyhow!("added_tokens_decoder not found in tokenizer_config.json")
+        })?;
+
+    for (id_str, token_info) in added_tokens {
+        let content = token_info
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if content == eos_token_str {
+            let token_id: TokenIdType = id_str.parse().with_context(|| {
+                format!(
+                    "Failed to parse token ID '{}' from added_tokens_decoder",
+                    id_str
+                )
+            })?;
+            return Ok(token_id);
+        }
+    }
+
+    anyhow::bail!(
+        "eos_token '{}' not found in added_tokens_decoder",
+        eos_token_str
+    )
 }
 
 impl ModelInfo for HFConfig {
@@ -1169,5 +1237,27 @@ mod tests {
         dynamo_runtime::logging::init();
         let path = "tests/data/sample-models/NVIDIA-Nemotron-Nano-12B-v2-Base/config.json";
         let _ = HFConfig::from_json_file(path).unwrap();
+    }
+
+    /// Qwen3.5 models have text_config.eos_token_id = 248044 (<|endoftext|>) but the
+    /// tokenizer's eos_token is <|im_end|> (248046). The model actually emits <|im_end|>
+    /// to end generation. Verify that both are included in the resolved EOS set.
+    #[test]
+    fn test_config_json_qwen35_eos_from_tokenizer() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-qwen3.5-0.8B/config.json");
+        let config = HFConfig::from_json_file(&config_file)?;
+        let eos_token_id_set: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
+        // Must include both: 248044 (<|endoftext|>) from text_config and
+        // 248046 (<|im_end|>) from tokenizer_config.json
+        assert!(
+            eos_token_id_set.contains(&248044),
+            "Should contain text_config eos_token_id (248044 <|endoftext|>)"
+        );
+        assert!(
+            eos_token_id_set.contains(&248046),
+            "Should contain tokenizer eos_token (248046 <|im_end|>)"
+        );
+        Ok(())
     }
 }
