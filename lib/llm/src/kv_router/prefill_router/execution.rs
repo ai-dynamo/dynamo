@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -10,11 +9,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId};
-use dynamo_runtime::{
-    engine::AsyncEngineContext,
-    pipeline::{AsyncEngineContextProvider, Context, SingleIn},
-    protocols::maybe_error::MaybeError,
-};
+use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
 use crate::protocols::common::{
@@ -318,12 +313,9 @@ impl PrefillRouter {
     }
 }
 
-pub(super) fn link_child_context<T: Send + Sync + 'static>(
-    engine_ctx: &Arc<dyn AsyncEngineContext>,
-    request: T,
-    request_id: &str,
-) -> Context<T> {
-    let child_context = Context::with_id(request, request_id.to_string());
-    engine_ctx.link_child(child_context.context());
-    child_context
-}
+// NVBugs 5969206: link_child_context removed — linking prefill as a child of
+// engine_context caused kill propagation that tears down the RPC transport,
+// interrupting NIXL KV cache transfers and leaking blocks permanently.
+// Prefill context is now created without linking (Context::with_id only).
+// Abort on the decode side is deferred via kv_transfer_complete_event in
+// handler_base.py until the first generation result confirms KV receipt.

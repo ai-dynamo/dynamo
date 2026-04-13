@@ -274,6 +274,28 @@ impl LocalKvIndexer {
         }
     }
 
+    /// Check if a query can likely be served from the buffer (fast path).
+    /// Returns true if:
+    /// - start_id is Some (not a full dump request)
+    /// - buffer is not empty
+    /// - start_id is within or after the buffer range
+    ///
+    /// Note: This is a heuristic - the buffer state may change between this check
+    /// and the actual query, so a tree dump may still occur even if this returns true.
+    pub fn likely_served_from_buffer(&self, start_id: Option<u64>) -> bool {
+        if start_id.is_none() {
+            return false;
+        }
+
+        let buffer = self.event_buffer.lock().unwrap();
+        if buffer.is_empty() {
+            return false;
+        }
+
+        let first_buffered = buffer.front().unwrap().event.event_id;
+        start_id.unwrap() >= first_buffered
+    }
+
     /// Record an event in the buffer
     fn record_event(&self, event: RouterEvent) -> bool {
         let mut buffer = self.event_buffer.lock().unwrap();

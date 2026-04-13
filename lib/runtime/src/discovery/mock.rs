@@ -170,13 +170,13 @@ impl Discovery for MockDiscovery {
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
-        let instance_id = instance.instance_id();
+        let target_id = instance.id();
 
         self.registry
             .instances
             .lock()
             .unwrap()
-            .retain(|i| i.instance_id() != instance_id);
+            .retain(|i| i.id() != target_id);
 
         Ok(())
     }
@@ -304,7 +304,7 @@ mod tests {
         let mut stream = client1.list_and_watch(query.clone(), None).await.unwrap();
 
         // Add first instance
-        client1.register(spec.clone()).await.unwrap();
+        let instance1 = client1.register(spec.clone()).await.unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
@@ -326,11 +326,7 @@ mod tests {
         }
 
         // Remove first instance
-        registry.instances.lock().unwrap().retain(|i| match i {
-            DiscoveryInstance::Endpoint(inst) => inst.instance_id != 1,
-            DiscoveryInstance::Model { instance_id, .. } => *instance_id != 1,
-            DiscoveryInstance::EventChannel { instance_id, .. } => *instance_id != 1,
-        });
+        client1.unregister(instance1).await.unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
