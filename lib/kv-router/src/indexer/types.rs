@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
@@ -47,15 +47,23 @@ pub struct WorkerKvQueryRequest {
 
     /// Start event ID (inclusive). If `None`, dumps entire tree.
     pub start_event_id: Option<u64>,
-    /// End event ID (inclusive). If `None`, returns up to newest available.
+    /// End event ID (inclusive). Used for validation and `TooNew` responses.
+    /// Successful buffer-backed recovery may still return through the current
+    /// newest buffered event.
     pub end_event_id: Option<u64>,
 }
 
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WorkerKvQueryResponse {
-    /// Events served from the circular buffer (with original event IDs)
-    Events(Vec<RouterEvent>),
+    /// Events served from the circular buffer (with original event IDs),
+    /// always covering the requested `start_event_id` through the current
+    /// buffered tail. `last_event_id` is taken from the same buffer snapshot
+    /// and should be used as the recovery watermark after applying the batch.
+    Events {
+        events: Vec<RouterEvent>,
+        last_event_id: u64,
+    },
     /// Full tree dump (with synthetic 0-indexed event IDs).
     /// Includes `last_event_id`: the newest real event ID in the worker's buffer
     /// at the time of the dump, so the caller can set its tracking cursor correctly.
@@ -110,14 +118,14 @@ impl dynamo_runtime::protocols::maybe_error::MaybeError for WorkerKvQueryRespons
 
 /// Endpoint name for the standalone KV indexer query service.
 pub const KV_INDEXER_QUERY_ENDPOINT: &str = "kv_indexer_query";
+/// Endpoint name for recording approximate-mode routing decisions on a remote indexer.
+pub const KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT: &str = "kv_indexer_record_routing_decision";
 
-/// Request to query the standalone KV indexer for overlap scores.
+/// Request to query a served KV indexer for overlap scores.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexerQueryRequest {
     /// Model name to query the indexer for.
     pub model_name: String,
-    /// Dynamo namespace (used as tenant_id for indexer lookup).
-    pub namespace: String,
     /// Block hashes to find matches for in the radix tree.
     pub block_hashes: Vec<LocalBlockHash>,
 }
@@ -153,7 +161,7 @@ impl From<WireOverlapScores> for OverlapScores {
     }
 }
 
-/// Response from the standalone KV indexer.
+/// Response from a served KV indexer query.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IndexerQueryResponse {
     /// Overlap scores per worker.
@@ -184,6 +192,57 @@ impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerQueryResponse
     fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
         match self {
             IndexerQueryResponse::Error(msg) => {
+                Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Request to record a routing decision on a served approximate-mode indexer.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IndexerRecordRoutingDecisionRequest {
+    /// Model name to update.
+    pub model_name: String,
+    /// Selected worker for this routing decision.
+    pub worker: WorkerWithDpRank,
+    /// Locally-computed block hashes for the routed request.
+    pub local_hashes: Vec<LocalBlockHash>,
+    /// Locally-computed rolling sequence hashes for the routed request.
+    pub sequence_hashes: Vec<SequenceHash>,
+}
+
+/// Response from a served approximate-mode routing-decision endpoint.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum IndexerRecordRoutingDecisionResponse {
+    Recorded,
+    Error(String),
+}
+
+impl MaybeError for IndexerRecordRoutingDecisionResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        IndexerRecordRoutingDecisionResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
+        match self {
+            IndexerRecordRoutingDecisionResponse::Error(msg) => {
+                Some(Box::new(std::io::Error::other(msg.clone())))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "runtime-protocols")]
+impl dynamo_runtime::protocols::maybe_error::MaybeError for IndexerRecordRoutingDecisionResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        IndexerRecordRoutingDecisionResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
+        match self {
+            IndexerRecordRoutingDecisionResponse::Error(msg) => {
                 Some(dynamo_runtime::error::DynamoError::msg(msg.clone()))
             }
             _ => None,
@@ -247,29 +306,4 @@ pub(super) struct RoutingDecisionRequest {
     pub(super) worker: WorkerWithDpRank,
     pub(super) local_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShardedMatchRequest {
-    pub(super) sequence: Vec<LocalBlockHash>,
-    pub(super) early_exit: bool,
-    pub(super) resp: mpsc::Sender<OverlapScores>,
-    #[cfg(feature = "bench")]
-    pub(super) created_at: Instant,
-}
-
-impl ShardedMatchRequest {
-    pub(super) fn new(
-        sequence: Vec<LocalBlockHash>,
-        early_exit: bool,
-        resp: mpsc::Sender<OverlapScores>,
-    ) -> Self {
-        Self {
-            sequence,
-            early_exit,
-            resp,
-            #[cfg(feature = "bench")]
-            created_at: Instant::now(),
-        }
-    }
 }

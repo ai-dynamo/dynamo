@@ -44,7 +44,7 @@ use std::time::Duration;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
-    frontend_service, labels, name_prefix, router_request, routing_overhead,
+    frontend_service, labels, name_prefix, router, router_request, routing_overhead,
 };
 
 /// Build a router metric name: `"router_" + frontend_service_suffix`.
@@ -327,6 +327,7 @@ pub struct RouterRequestMetrics {
     pub input_sequence_tokens: prometheus::Histogram,
     pub output_sequence_tokens: prometheus::Histogram,
     pub kv_hit_rate: prometheus::Histogram,
+    pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -393,6 +394,14 @@ impl RouterRequestMetrics {
                         Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
                     )
                     .expect("failed to create router_kv_hit_rate");
+                let kv_transfer_estimated_latency_seconds = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
+                        "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
+                        extra_labels,
+                        Some(generate_log_buckets(0.001, 10.0, 15)),
+                    )
+                    .expect("failed to create router_kv_transfer_estimated_latency_seconds");
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -400,9 +409,58 @@ impl RouterRequestMetrics {
                     input_sequence_tokens,
                     output_sequence_tokens,
                     kv_hit_rate,
+                    kv_transfer_estimated_latency_seconds,
                 })
             })
             .clone()
+    }
+}
+
+pub struct RemoteIndexerMetrics {
+    pub query_failures_total: prometheus::IntCounter,
+    pub write_failures_total: prometheus::IntCounter,
+}
+
+static REMOTE_INDEXER_METRICS: OnceLock<Arc<RemoteIndexerMetrics>> = OnceLock::new();
+
+impl RemoteIndexerMetrics {
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        REMOTE_INDEXER_METRICS
+            .get_or_init(|| {
+                let instance_id = component.drt().discovery().instance_id();
+                let router_id = instance_id.to_string();
+                let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
+
+                let metrics = component.metrics();
+                let query_failures_total = metrics
+                    .create_intcounter(
+                        router::REMOTE_INDEXER_QUERY_FAILURES_TOTAL,
+                        "Total number of remote indexer overlap queries that failed",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_indexer_query_failures_total");
+                let write_failures_total = metrics
+                    .create_intcounter(
+                        router::REMOTE_INDEXER_WRITE_FAILURES_TOTAL,
+                        "Total number of remote indexer routing-decision writes that failed",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_remote_indexer_write_failures_total");
+
+                Arc::new(Self {
+                    query_failures_total,
+                    write_failures_total,
+                })
+            })
+            .clone()
+    }
+
+    pub fn increment_query_failures(&self) {
+        self.query_failures_total.inc();
+    }
+
+    pub fn increment_write_failures(&self) {
+        self.write_failures_total.inc();
     }
 }
 
@@ -565,5 +623,48 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
             Duration::from_millis(1),
         );
         // Reaching here without panic confirms saturating_sub works
+    }
+
+    #[test]
+    fn test_kv_transfer_estimated_latency_metric_pef() {
+        // Verify the metric name is correctly composed from the constant
+        // and produces valid PEF when observed.
+        let registry = prometheus::Registry::new();
+        let name = format!(
+            "{}{}",
+            router_request::METRIC_PREFIX,
+            frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS,
+        );
+        let buckets = generate_log_buckets(0.001, 10.0, 15);
+        let histogram = prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new(
+                &name,
+                "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
+            )
+            .buckets(buckets),
+        )
+        .unwrap();
+        registry.register(Box::new(histogram.clone())).unwrap();
+
+        // Observe a 5ms latency
+        histogram.observe(0.005);
+
+        let output = gather_pef(&registry);
+        assert!(
+            output.contains("# HELP router_kv_transfer_estimated_latency_seconds"),
+            "PEF missing HELP line. Got:\n{output}"
+        );
+        assert!(
+            output.contains("# TYPE router_kv_transfer_estimated_latency_seconds histogram"),
+            "PEF missing TYPE line. Got:\n{output}"
+        );
+        assert!(
+            output.contains("router_kv_transfer_estimated_latency_seconds_count 1"),
+            "PEF missing observation count. Got:\n{output}"
+        );
+        assert!(
+            output.contains("router_kv_transfer_estimated_latency_seconds_sum 0.005"),
+            "PEF missing observation sum. Got:\n{output}"
+        );
     }
 }

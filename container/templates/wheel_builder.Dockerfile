@@ -439,9 +439,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,kv-indexer-runtime" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg,kv-indexer" --out /opt/dynamo/dist; \
     else \
-        maturin build --release --features "kv-indexer,kv-indexer-runtime" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer" --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
@@ -584,7 +584,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     source ${VIRTUAL_ENV}/bin/activate && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
-        maturin build --release --out target/wheels && \
+        KVBM_FEATURES=""; \
+        if [ "$DEVICE" = "cuda" ]; then KVBM_FEATURES="--features nccl"; fi && \
+        maturin build --release ${KVBM_FEATURES} --out target/wheels && \
         if [ "$DEVICE" = "cuda" ]; then \
             auditwheel repair \
                 --exclude libnixl.so \

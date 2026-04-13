@@ -101,6 +101,13 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=False,
             help="Run as video generation worker for video generation (T2V/I2V).",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-rl",
+            env_var="DYN_SGL_ENABLE_RL",
+            default=False,
+            help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
+        )
 
 
 class DynamoSGLangConfig(ConfigBase):
@@ -117,6 +124,7 @@ class DynamoSGLangConfig(ConfigBase):
     disagg_config_key: Optional[str] = None
 
     video_generation_worker: bool
+    enable_rl: bool
 
     def validate(self) -> None:
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):

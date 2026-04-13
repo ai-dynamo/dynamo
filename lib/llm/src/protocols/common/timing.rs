@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
@@ -22,16 +22,12 @@ use crate::http::service::metrics::{
 };
 use crate::protocols::openai::nvext::WorkerIdInfo;
 
-/// Sentinel value indicating no worker ID has been set.
-/// We use 0 as the sentinel since valid worker IDs are non-zero lease IDs from etcd.
-const NO_WORKER_ID: u64 = 0;
-const NO_DP_RANK: u32 = u32::MAX;
-
 /// Worker type constants for Prometheus metric labels.
 /// These are stored in RequestTracker at routing time to avoid costly MDC lookups
 /// when updating per-worker metrics (TTFT, ITL).
 pub const WORKER_TYPE_PREFILL: &str = "prefill";
 pub const WORKER_TYPE_DECODE: &str = "decode";
+const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Phase of the request in disaggregated serving.
 ///
@@ -81,8 +77,8 @@ impl std::fmt::Display for RequestPhase {
 /// phase's final finish naturally overwrites the prefill phase's earlier finish.
 /// `phase` also uses a Mutex since it transitions across phases.
 ///
-/// **`AtomicU64`/`AtomicU32`:** Used for frequently updated counters (`osl_tokens`)
-/// and worker IDs/ranks where `OnceLock`'s heap overhead is unnecessary.
+/// **`AtomicU64`:** Used for frequently updated counters (`osl_tokens`) and
+/// accumulated detokenize timing, where lock-free updates are beneficial.
 #[derive(Debug)]
 pub struct RequestTracker {
     /// When the request was received (monotonic clock for duration calculations)
@@ -98,6 +94,12 @@ pub struct RequestTracker {
     /// In disaggregated serving, the prefill phase records this first and the
     /// decode phase's attempt is silently ignored, preserving the real TTFT.
     first_token_time: OnceLock<Instant>,
+
+    /// When the decode worker produced its first token (set once via OnceLock).
+    /// Separate from `first_token_time` because in disaggregated serving, the prefill
+    /// phase locks `first_token_time` first. This field captures the decode phase's
+    /// first token for KV transfer latency estimation (`decode_first_token - prefill_complete`).
+    decode_first_token_time: OnceLock<Instant>,
 
     /// When the request finished. Mutex allows the last router phase to
     /// record the final finish time.
@@ -118,19 +120,17 @@ pub struct RequestTracker {
     /// Output sequence length in tokens - updated atomically as tokens stream back
     osl_tokens: AtomicU64,
 
-    /// Prefill worker ID (for disaggregated serving).
-    /// Uses atomic with compare-exchange for set-once semantics.
-    /// Value of 0 (NO_WORKER_ID) means not yet set.
-    prefill_worker_id: AtomicU64,
+    /// Prefill worker ID (for disaggregated serving) - set once when known.
+    prefill_worker_id: OnceLock<u64>,
 
-    /// Prefill DP rank. Value of u32::MAX (NO_DP_RANK) means not yet set.
-    prefill_dp_rank: AtomicU32,
+    /// Prefill DP rank - set once when known.
+    prefill_dp_rank: OnceLock<u32>,
 
-    /// Decode worker ID. Value of 0 (NO_WORKER_ID) means not yet set.
-    decode_worker_id: AtomicU64,
+    /// Decode worker ID - set once when known.
+    decode_worker_id: OnceLock<u64>,
 
-    /// Decode DP rank. Value of u32::MAX (NO_DP_RANK) means not yet set.
-    decode_dp_rank: AtomicU32,
+    /// Decode DP rank - set once when known.
+    decode_dp_rank: OnceLock<u32>,
 
     /// Worker type for the prefill worker ("prefill" or "decode").
     /// Stored at routing time to avoid MDC lookup when updating Prometheus metrics.
@@ -149,7 +149,7 @@ pub struct RequestTracker {
     /// Semaphore for coordinating phase transitions.
     /// Acquiring a permit blocks subsequent set_phase calls until the permit is dropped.
     /// This prevents race conditions in the bootstrap optimization path where prefill
-    /// runs in background and needs to complete record_worker_full before phase changes.
+    /// runs in background and needs to complete worker recording before phase changes.
     phase_semaphore: Arc<Semaphore>,
 
     /// How long it took to tokenize the input
@@ -163,6 +163,10 @@ pub struct RequestTracker {
 
     /// Router scheduler queue depth at routing time (how many requests were pending)
     router_queue_depth: OnceLock<usize>,
+
+    /// When the prefill result arrived at the router (disaggregated, original path only).
+    /// Set in execute_prefill() after the first output is received from the prefill worker.
+    prefill_complete_time: OnceLock<Instant>,
 }
 
 impl RequestTracker {
@@ -179,16 +183,17 @@ impl RequestTracker {
             request_received_epoch_ms: epoch_ms,
             prefill_start_time: OnceLock::new(),
             first_token_time: OnceLock::new(),
+            decode_first_token_time: OnceLock::new(),
             request_finish_time: Mutex::new(None),
             kv_overlap_blocks: OnceLock::new(),
             isl_blocks: OnceLock::new(),
             isl_tokens: OnceLock::new(),
             cached_tokens: OnceLock::new(),
             osl_tokens: AtomicU64::new(0),
-            prefill_worker_id: AtomicU64::new(NO_WORKER_ID),
-            prefill_dp_rank: AtomicU32::new(NO_DP_RANK),
-            decode_worker_id: AtomicU64::new(NO_WORKER_ID),
-            decode_dp_rank: AtomicU32::new(NO_DP_RANK),
+            prefill_worker_id: OnceLock::new(),
+            prefill_dp_rank: OnceLock::new(),
+            decode_worker_id: OnceLock::new(),
+            decode_dp_rank: OnceLock::new(),
             prefill_worker_type: OnceLock::new(),
             decode_worker_type: OnceLock::new(),
             phase: Mutex::new(RequestPhase::Aggregated),
@@ -197,6 +202,7 @@ impl RequestTracker {
             detokenize_total_ns: AtomicU64::new(0),
             detokenize_count: AtomicU64::new(0),
             router_queue_depth: OnceLock::new(),
+            prefill_complete_time: OnceLock::new(),
         }
     }
 
@@ -207,6 +213,12 @@ impl RequestTracker {
 
     pub fn record_first_token(&self) {
         let _ = self.first_token_time.set(Instant::now());
+    }
+
+    /// Record when the decode worker produced its first token.
+    /// Used for KV transfer latency estimation in disaggregated serving.
+    pub fn record_decode_first_token(&self) {
+        let _ = self.decode_first_token_time.set(Instant::now());
     }
 
     pub fn record_finish(&self) {
@@ -220,10 +232,12 @@ impl RequestTracker {
         overlap_set && isl_set
     }
 
-    /// Record input sequence length in tokens and cached token count.
-    pub fn record_isl(&self, isl_tokens: usize, cached_tokens: usize) {
+    /// Record input sequence length in tokens and cached token count when known.
+    pub fn record_isl(&self, isl_tokens: usize, cached_tokens: Option<usize>) {
         let _ = self.isl_tokens.set(isl_tokens);
-        let _ = self.cached_tokens.set(cached_tokens);
+        if let Some(cached_tokens) = cached_tokens {
+            let _ = self.cached_tokens.set(cached_tokens);
+        }
     }
 
     pub fn isl_tokens(&self) -> Option<usize> {
@@ -321,31 +335,96 @@ impl RequestTracker {
         *self.phase.lock()
     }
 
-    /// Record worker ID, DP rank, and worker type based on the current phase.
+    fn record_once_u64(slot: &OnceLock<u64>, value: u64, field_name: &'static str) {
+        if let Some(existing) = slot.get() {
+            if *existing != value {
+                tracing::error!(
+                    field = field_name,
+                    existing = *existing,
+                    new = value,
+                    "Conflicting request tracker write"
+                );
+            }
+            return;
+        }
+        let _ = slot.set(value);
+    }
+
+    fn record_once_u32(slot: &OnceLock<u32>, value: u32, field_name: &'static str) {
+        if let Some(existing) = slot.get() {
+            if *existing != value {
+                tracing::error!(
+                    field = field_name,
+                    existing = *existing,
+                    new = value,
+                    "Conflicting request tracker write"
+                );
+            }
+            return;
+        }
+        let _ = slot.set(value);
+    }
+
+    fn record_once_worker_type(
+        slot: &OnceLock<&'static str>,
+        value: &'static str,
+        field_name: &'static str,
+    ) {
+        if let Some(existing) = slot.get() {
+            if *existing != value {
+                tracing::error!(
+                    field = field_name,
+                    existing = *existing,
+                    new = value,
+                    "Conflicting request tracker write"
+                );
+            }
+            return;
+        }
+        let _ = slot.set(value);
+    }
+
+    fn record_prefill_worker(
+        &self,
+        instance_id: u64,
+        dp_rank: Option<u32>,
+        worker_type: &'static str,
+    ) {
+        Self::record_once_u64(&self.prefill_worker_id, instance_id, "prefill_worker_id");
+        if let Some(rank) = dp_rank {
+            Self::record_once_u32(&self.prefill_dp_rank, rank, "prefill_dp_rank");
+        }
+        Self::record_once_worker_type(
+            &self.prefill_worker_type,
+            worker_type,
+            "prefill_worker_type",
+        );
+    }
+
+    fn record_decode_worker(
+        &self,
+        instance_id: u64,
+        dp_rank: Option<u32>,
+        worker_type: &'static str,
+    ) {
+        Self::record_once_u64(&self.decode_worker_id, instance_id, "decode_worker_id");
+        if let Some(rank) = dp_rank {
+            Self::record_once_u32(&self.decode_dp_rank, rank, "decode_dp_rank");
+        }
+        Self::record_once_worker_type(&self.decode_worker_type, worker_type, "decode_worker_type");
+    }
+
+    /// Record worker ID, optional DP rank, and worker type based on the current phase.
     ///
-    /// Each slot is written exactly once by `KvPushRouter::generate()`:
-    /// - Prefill phase: stores as prefill worker
-    /// - Decode phase: stores as decode worker
-    /// - Aggregated phase: stores as both prefill and decode worker
-    pub fn record_worker_full(&self, instance_id: u64, dp_rank: u32, worker_type: &'static str) {
+    /// Worker ID and type are recorded as soon as they are known. DP rank is recorded only
+    /// when it is concrete, allowing the unresolved rank to remain unset until later.
+    pub fn record_worker(&self, instance_id: u64, dp_rank: Option<u32>, worker_type: &'static str) {
         match self.phase() {
-            RequestPhase::Prefill => {
-                self.prefill_worker_id.store(instance_id, Ordering::Relaxed);
-                self.prefill_dp_rank.store(dp_rank, Ordering::Relaxed);
-                let _ = self.prefill_worker_type.set(worker_type);
-            }
-            RequestPhase::Decode => {
-                self.decode_worker_id.store(instance_id, Ordering::Relaxed);
-                self.decode_dp_rank.store(dp_rank, Ordering::Relaxed);
-                let _ = self.decode_worker_type.set(worker_type);
-            }
+            RequestPhase::Prefill => self.record_prefill_worker(instance_id, dp_rank, worker_type),
+            RequestPhase::Decode => self.record_decode_worker(instance_id, dp_rank, worker_type),
             RequestPhase::Aggregated => {
-                self.prefill_worker_id.store(instance_id, Ordering::Relaxed);
-                self.prefill_dp_rank.store(dp_rank, Ordering::Relaxed);
-                let _ = self.prefill_worker_type.set(worker_type);
-                self.decode_worker_id.store(instance_id, Ordering::Relaxed);
-                self.decode_dp_rank.store(dp_rank, Ordering::Relaxed);
-                let _ = self.decode_worker_type.set(worker_type);
+                self.record_prefill_worker(instance_id, dp_rank, worker_type);
+                self.record_decode_worker(instance_id, dp_rank, worker_type);
             }
         }
     }
@@ -396,6 +475,23 @@ impl RequestTracker {
         self.router_queue_depth.get().copied()
     }
 
+    /// Record when the prefill result was received by the router.
+    /// Returns true if this was the first call (OnceLock first-write-wins).
+    pub fn record_prefill_complete(&self) -> bool {
+        self.prefill_complete_time.set(Instant::now()).is_ok()
+    }
+
+    /// Upper-bound estimation of KV cache transfer latency in seconds.
+    /// Computed as `decode_first_token_time - prefill_complete_time`, which captures:
+    /// router dispatch overhead + network + KV transfer (NIXL) + one decode forward pass.
+    /// Works for all disaggregated paths (original and bootstrap).
+    /// Returns None if either timestamp was not recorded.
+    pub fn kv_transfer_estimated_latency_secs(&self) -> Option<f64> {
+        let complete = *self.prefill_complete_time.get()?;
+        let first_tok = *self.decode_first_token_time.get()?;
+        Some(first_tok.saturating_duration_since(complete).as_secs_f64())
+    }
+
     /// Get worker ID information if any worker IDs have been recorded.
     pub fn get_worker_info(&self) -> Option<WorkerIdInfo> {
         let prefill = self.prefill_worker_id();
@@ -415,26 +511,22 @@ impl RequestTracker {
 
     /// Get the decode worker ID if recorded.
     pub fn decode_worker_id(&self) -> Option<u64> {
-        let id = self.decode_worker_id.load(Ordering::SeqCst);
-        if id == NO_WORKER_ID { None } else { Some(id) }
+        self.decode_worker_id.get().copied()
     }
 
     /// Get the decode DP rank if recorded.
     pub fn decode_dp_rank(&self) -> Option<u32> {
-        let rank = self.decode_dp_rank.load(Ordering::SeqCst);
-        if rank == NO_DP_RANK { None } else { Some(rank) }
+        self.decode_dp_rank.get().copied()
     }
 
     /// Get the prefill worker ID if recorded.
     pub fn prefill_worker_id(&self) -> Option<u64> {
-        let id = self.prefill_worker_id.load(Ordering::SeqCst);
-        if id == NO_WORKER_ID { None } else { Some(id) }
+        self.prefill_worker_id.get().copied()
     }
 
     /// Get the prefill DP rank if recorded.
     pub fn prefill_dp_rank(&self) -> Option<u32> {
-        let rank = self.prefill_dp_rank.load(Ordering::SeqCst);
-        if rank == NO_DP_RANK { None } else { Some(rank) }
+        self.prefill_dp_rank.get().copied()
     }
 
     /// Get the prefill worker type if recorded.
@@ -456,7 +548,7 @@ impl RequestTracker {
         let worker_id_str = worker_id.to_string();
         let dp_rank_str = self
             .prefill_dp_rank()
-            .map_or("0".to_string(), |r| r.to_string());
+            .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
         let worker_type = self.prefill_worker_type().unwrap_or(WORKER_TYPE_PREFILL);
         let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
 
@@ -481,7 +573,7 @@ impl RequestTracker {
         let worker_id_str = worker_id.to_string();
         let dp_rank_str = self
             .decode_dp_rank()
-            .map_or("0".to_string(), |r| r.to_string());
+            .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
         let worker_type = self.decode_worker_type().unwrap_or(WORKER_TYPE_DECODE);
         let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
 
@@ -501,6 +593,9 @@ impl RequestTracker {
             total_time_ms: self.total_time_ms(),
             kv_hit_rate: self.kv_hit_rate(),
             router_queue_depth: self.router_queue_depth(),
+            kv_transfer_estimated_latency_ms: self
+                .kv_transfer_estimated_latency_secs()
+                .map(|s| s * 1000.0),
         }
     }
 }
@@ -543,6 +638,11 @@ pub struct TimingInfo {
     /// Number of requests pending in the router scheduler queue at routing time
     #[serde(skip_serializing_if = "Option::is_none")]
     pub router_queue_depth: Option<usize>,
+
+    /// Upper-bound estimation of KV cache transfer latency in milliseconds (disaggregated only).
+    /// Measured as decode_first_token_time - prefill_complete_time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_estimated_latency_ms: Option<f64>,
 }
 
 #[cfg(test)]
@@ -555,7 +655,7 @@ mod tests {
     fn test_record_isl_osl() {
         let tracker = RequestTracker::new();
 
-        tracker.record_isl(512, 256);
+        tracker.record_isl(512, Some(256));
         assert_eq!(tracker.isl_tokens(), Some(512));
         assert_eq!(tracker.cached_tokens(), Some(256));
 
@@ -659,7 +759,7 @@ mod tests {
     fn test_observe_first_token_gauges_no_panic_without_worker() {
         let tracker = RequestTracker::new();
         tracker.record_first_token();
-        tracker.record_isl(100, 50);
+        tracker.record_isl(100, Some(50));
         // No worker recorded — should return early without panic
         tracker.observe_first_token_gauges();
     }
@@ -677,10 +777,10 @@ mod tests {
     #[test]
     fn test_observe_first_token_gauges_with_worker() {
         let tracker = RequestTracker::new();
-        tracker.record_worker_full(42, 0, WORKER_TYPE_PREFILL);
+        tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
         thread::sleep(Duration::from_millis(5));
         tracker.record_first_token();
-        tracker.record_isl(256, 128);
+        tracker.record_isl(256, Some(128));
 
         tracker.observe_first_token_gauges();
 
@@ -702,7 +802,7 @@ mod tests {
     #[test]
     fn test_observe_finish_gauges_with_worker() {
         let tracker = RequestTracker::new();
-        tracker.record_worker_full(99, 1, WORKER_TYPE_DECODE);
+        tracker.record_worker(99, Some(1), WORKER_TYPE_DECODE);
         tracker.record_first_token();
         thread::sleep(Duration::from_millis(10));
         tracker.record_osl(5);
@@ -717,6 +817,182 @@ mod tests {
         assert!(
             itl_val > 0.0,
             "ITL gauge should be positive after observe, got {itl_val}"
+        );
+    }
+
+    #[test]
+    fn test_kv_transfer_estimated_latency() {
+        let tracker = RequestTracker::new();
+        // Before any timestamps: returns None
+        assert!(tracker.kv_transfer_estimated_latency_secs().is_none());
+
+        tracker.record_prefill_complete();
+        thread::sleep(Duration::from_millis(10));
+        tracker.record_decode_first_token();
+
+        let latency = tracker.kv_transfer_estimated_latency_secs().unwrap();
+        assert!(
+            latency >= 0.005,
+            "latency should be at least 5ms, got {latency}"
+        );
+    }
+
+    #[test]
+    fn test_kv_transfer_estimated_latency_none_without_first_token() {
+        let tracker = RequestTracker::new();
+        tracker.record_prefill_complete();
+        assert!(
+            tracker.kv_transfer_estimated_latency_secs().is_none(),
+            "Should return None when decode_first_token_time is not set"
+        );
+    }
+
+    #[test]
+    fn test_kv_transfer_estimated_latency_none_without_prefill_complete() {
+        let tracker = RequestTracker::new();
+        tracker.record_decode_first_token();
+        assert!(
+            tracker.kv_transfer_estimated_latency_secs().is_none(),
+            "Should return None when prefill_complete_time is not set"
+        );
+    }
+
+    #[test]
+    fn test_kv_transfer_estimated_latency_oncelock_first_write_wins() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.record_prefill_complete()); // first call returns true
+        assert!(!tracker.record_prefill_complete()); // second call returns false (OnceLock)
+    }
+
+    #[test]
+    fn test_timing_info_includes_kv_transfer_estimated_latency() {
+        let tracker = RequestTracker::new();
+        tracker.record_prefill_complete();
+        thread::sleep(Duration::from_millis(10));
+        tracker.record_decode_first_token();
+
+        let info = tracker.get_timing_info();
+        let latency_ms = info
+            .kv_transfer_estimated_latency_ms
+            .expect("should be Some");
+        assert!(
+            latency_ms >= 5.0,
+            "latency should be at least 5ms, got {latency_ms}"
+        );
+    }
+
+    #[test]
+    fn test_timing_info_kv_transfer_estimated_latency_none_in_aggregated() {
+        let tracker = RequestTracker::new();
+        // No record_prefill_complete / record_first_token called
+        let info = tracker.get_timing_info();
+        assert!(
+            info.kv_transfer_estimated_latency_ms.is_none(),
+            "Should be None in aggregated mode (no timestamps recorded)"
+        );
+    }
+
+    /// Reproduces the original bug where kv_transfer_estimated_latency was always 0.
+    ///
+    /// The bug: in disaggregated serving, both `record_first_token()` and
+    /// `record_prefill_complete()` were called during the prefill phase with
+    /// ~nanoseconds between them, and the latency was computed as
+    /// `first_token_time - prefill_complete_time`. Since `first_token_time`
+    /// was set *before* `prefill_complete_time`, `saturating_duration_since`
+    /// clamped the negative duration to zero.
+    ///
+    /// The fix: use a separate `decode_first_token_time` field that is only
+    /// recorded during the Decode phase, giving a meaningful time gap.
+    #[test]
+    fn test_kv_transfer_latency_bug_prefill_timestamps_are_zero() {
+        let tracker = RequestTracker::new();
+
+        // Simulate the buggy prefill-phase sequence:
+        // 1. RequestGuard::on_item() calls record_first_token() during prefill
+        tracker.record_first_token();
+        // 2. execute_prefill() calls record_prefill_complete() immediately after
+        tracker.record_prefill_complete();
+
+        // The OLD computation (first_token_time - prefill_complete_time) would be 0
+        // because first_token_time < prefill_complete_time chronologically,
+        // and saturating_duration_since clamps to zero.
+        let first_tok = *tracker.first_token_time.get().unwrap();
+        let complete = *tracker.prefill_complete_time.get().unwrap();
+        let old_latency = first_tok.saturating_duration_since(complete).as_secs_f64();
+        assert_eq!(
+            old_latency, 0.0,
+            "Old computation should produce exactly 0.0 (the bug), got {old_latency}"
+        );
+
+        // The FIXED computation uses decode_first_token_time which hasn't been set
+        // yet, so it correctly returns None (no decode phase has run).
+        assert!(
+            tracker.kv_transfer_estimated_latency_secs().is_none(),
+            "Fixed metric should be None when decode hasn't started"
+        );
+
+        // Now simulate the decode phase producing its first token after a delay.
+        thread::sleep(Duration::from_millis(10));
+        tracker.record_decode_first_token();
+
+        // The FIXED computation (decode_first_token_time - prefill_complete_time)
+        // captures the actual KV transfer + decode startup latency.
+        let fixed_latency = tracker.kv_transfer_estimated_latency_secs().unwrap();
+        assert!(
+            fixed_latency >= 0.005,
+            "Fixed latency should be >= 5ms (actual KV transfer time), got {fixed_latency}"
+        );
+    }
+
+    /// Verifies that the decode phase's record_first_token() is rejected by OnceLock
+    /// (since prefill already set it), but record_decode_first_token() succeeds.
+    #[test]
+    fn test_decode_first_token_not_blocked_by_prefill_oncelock() {
+        let tracker = RequestTracker::new();
+
+        // Prefill phase sets first_token_time
+        tracker.record_first_token();
+        let prefill_first_tok = *tracker.first_token_time.get().unwrap();
+
+        thread::sleep(Duration::from_millis(5));
+
+        // Decode phase: record_first_token() is rejected (OnceLock already set)
+        tracker.record_first_token();
+        let still_prefill_tok = *tracker.first_token_time.get().unwrap();
+        assert_eq!(
+            prefill_first_tok, still_prefill_tok,
+            "first_token_time should be unchanged (OnceLock rejected decode's write)"
+        );
+
+        // But record_decode_first_token() succeeds on its own OnceLock
+        tracker.record_decode_first_token();
+        let decode_tok = *tracker.decode_first_token_time.get().unwrap();
+        assert!(
+            decode_tok > prefill_first_tok,
+            "decode_first_token_time should be later than first_token_time"
+        );
+    }
+
+    #[test]
+    fn test_timing_info_kv_transfer_estimated_latency_serialization() {
+        let tracker = RequestTracker::new();
+        // When not set, the field should be omitted from JSON (skip_serializing_if)
+        let info = tracker.get_timing_info();
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(
+            !json.contains("kv_transfer_estimated_latency_ms"),
+            "None field should be omitted from JSON, got: {json}"
+        );
+
+        // When set, it should appear
+        let tracker2 = RequestTracker::new();
+        tracker2.record_prefill_complete();
+        tracker2.record_decode_first_token();
+        let info2 = tracker2.get_timing_info();
+        let json2 = serde_json::to_string(&info2).unwrap();
+        assert!(
+            json2.contains("kv_transfer_estimated_latency_ms"),
+            "Set field should appear in JSON, got: {json2}"
         );
     }
 }

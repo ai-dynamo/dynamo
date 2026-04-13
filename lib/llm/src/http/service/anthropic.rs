@@ -7,8 +7,10 @@
 //! chat completions, processed by the existing engine, and responses/streams
 //! are converted back to Anthropic format.
 
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
@@ -20,7 +22,7 @@ use axum::{
         IntoResponse, Response,
         sse::{KeepAlive, Sse},
     },
-    routing::post,
+    routing::{get, post},
 };
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
@@ -71,6 +73,27 @@ pub fn anthropic_messages_router(
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc, count_doc], router)
+}
+
+/// Creates the router for model listing and retrieval.
+///
+/// When the `anthropic-version` header is present, returns the Anthropic model
+/// format (with `context_window`, `display_name`, etc.). Otherwise returns the
+/// standard OpenAI format. This keeps Anthropic-specific content negotiation
+/// out of the OpenAI handler.
+pub fn anthropic_models_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let models_path = path.unwrap_or("/v1/models".to_string());
+    let retrieve_path = format!("{}/{{*model_id}}", models_path);
+    let list_doc = RouteDoc::new(axum::http::Method::GET, &models_path);
+    let retrieve_doc = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    let router = Router::new()
+        .route(&models_path, get(list_models))
+        .route(&retrieve_path, get(get_model))
+        .with_state(state);
+    (vec![list_doc, retrieve_doc], router)
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +237,14 @@ async fn anthropic_messages(
         .as_ref()
         .is_some_and(|t| t.thinking_type == "disabled");
 
+    // Estimate input tokens before consuming the request via try_into().
+    // Only used in the streaming path to populate message_start.
+    let estimated_input_tokens = if streaming {
+        estimate_input_tokens(&orig_request)
+    } else {
+        0
+    };
+
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
         tracing::error!(
@@ -289,6 +320,16 @@ async fn anthropic_messages(
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
         }
+        // Check for cancelled request (client disconnected before response was sent)
+        if super::metrics::request_was_cancelled(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+            return anthropic_error(
+                StatusCode::from_u16(499).unwrap(),
+                "request_cancelled",
+                &format!("Request cancelled: {}", e),
+            );
+        }
+        inflight_guard.mark_error(super::metrics::ErrorType::Internal);
         anthropic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
@@ -324,8 +365,10 @@ async fn anthropic_messages(
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let mut converter = match anthropic_ctx {
-            Some(ctx) => AnthropicStreamConverter::with_context(model_for_resp, ctx),
-            None => AnthropicStreamConverter::new(model_for_resp),
+            Some(ctx) => {
+                AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx)
+            }
+            None => AnthropicStreamConverter::new(model_for_resp, estimated_input_tokens),
         };
         let start_events = converter.emit_start_events();
 
@@ -456,6 +499,195 @@ async fn handler_count_tokens(
 }
 
 // ---------------------------------------------------------------------------
+// Model listing / retrieval (content-negotiating)
+// ---------------------------------------------------------------------------
+
+/// Build a lookup of model display_name -> context_length from model cards.
+fn build_model_context_map(state: &service_v2::State) -> std::collections::HashMap<String, u32> {
+    state
+        .manager()
+        .get_model_cards()
+        .iter()
+        .map(|c| (c.display_name.clone(), c.context_length))
+        .collect()
+}
+
+/// Read optional env var overrides for context window and max output tokens.
+fn model_env_overrides() -> (Option<u64>, Option<u64>) {
+    let context_window = match std::env::var("DYN_CONTEXT_WINDOW") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_CONTEXT_WINDOW value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let max_output_tokens = match std::env::var("DYN_MAX_OUTPUT_TOKENS") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_MAX_OUTPUT_TOKENS value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    (context_window, max_output_tokens)
+}
+
+/// Resolve context_window for a model: env override takes precedence over MDC.
+fn resolve_context_window(
+    model_name: &str,
+    card_map: &std::collections::HashMap<String, u32>,
+    env_override: Option<u64>,
+) -> Option<u64> {
+    env_override.or_else(|| card_map.get(model_name).map(|&cl| cl as u64))
+}
+
+/// List all models. Returns Anthropic format when `anthropic-version` header
+/// is present, otherwise OpenAI format.
+async fn list_models(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+) -> Result<Response, super::openai::ErrorResponse> {
+    super::openai::check_ready(&state)?;
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let models: HashSet<String> = state.manager().model_display_names();
+    let card_map = build_model_context_map(&state);
+    let (cw_override, mot_override) = model_env_overrides();
+
+    if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let data: Vec<serde_json::Value> = models
+            .iter()
+            .map(|name| {
+                let mut obj = serde_json::json!({
+                    "id": name,
+                    "display_name": name,
+                    "type": "model",
+                    "created_at": created_at,
+                });
+                if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+                    obj["max_input_tokens"] = serde_json::json!(cw);
+                }
+                if let Some(mot) = mot_override {
+                    obj["max_tokens"] = serde_json::json!(mot);
+                }
+                obj
+            })
+            .collect();
+        let first_id = data
+            .first()
+            .and_then(|d| d["id"].as_str().map(String::from));
+        let last_id = data.last().and_then(|d| d["id"].as_str().map(String::from));
+        return Ok(Json(serde_json::json!({
+            "data": data,
+            "has_more": false,
+            "first_id": first_id,
+            "last_id": last_id,
+        }))
+        .into_response());
+    }
+
+    // OpenAI format fallback
+    let data: Vec<serde_json::Value> = models
+        .iter()
+        .map(|name| {
+            let mut obj = serde_json::json!({
+                "id": name,
+                "object": "model",
+                "created": created,
+                "owned_by": "nvidia",
+            });
+            if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+                obj["context_window"] = serde_json::json!(cw);
+            }
+            if let Some(mot) = mot_override {
+                obj["max_output_tokens"] = serde_json::json!(mot);
+            }
+            obj
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+    }))
+    .into_response())
+}
+
+/// Retrieve a single model by ID. Returns Anthropic format when
+/// `anthropic-version` header is present, otherwise OpenAI format.
+///
+/// The model ID may contain slashes (e.g. `Qwen/Qwen3.5-35B-A3B-FP8`),
+/// which is why this uses a wildcard `/{*model_id}` path parameter.
+async fn get_model(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    axum::extract::Path(model_id): axum::extract::Path<String>,
+) -> Result<Response, super::openai::ErrorResponse> {
+    super::openai::check_ready(&state)?;
+
+    // Strip leading slash from wildcard capture (axum `/{*key}` includes it).
+    let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    let models: HashSet<String> = state.manager().model_display_names();
+    if !models.contains(model_id) {
+        return Err(super::openai::ErrorMessage::model_not_found());
+    }
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let card_map = build_model_context_map(&state);
+    let (cw_override, mot_override) = model_env_overrides();
+    let context_window = resolve_context_window(model_id, &card_map, cw_override);
+
+    if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let mut obj = serde_json::json!({
+            "id": model_id,
+            "display_name": model_id,
+            "type": "model",
+            "created_at": created_at,
+        });
+        if let Some(cw) = context_window {
+            obj["max_input_tokens"] = serde_json::json!(cw);
+        }
+        if let Some(mot) = mot_override {
+            obj["max_tokens"] = serde_json::json!(mot);
+        }
+        Ok(Json(obj).into_response())
+    } else {
+        let mut obj = serde_json::json!({
+            "id": model_id,
+            "object": "model",
+            "created": created,
+            "owned_by": "nvidia",
+        });
+        if let Some(cw) = context_window {
+            obj["context_window"] = serde_json::json!(cw);
+        }
+        if let Some(mot) = mot_override {
+            obj["max_output_tokens"] = serde_json::json!(mot);
+        }
+        Ok(Json(obj).into_response())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -473,6 +705,23 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
             content.text = trimmed[newline_pos + 1..].to_string();
         }
     }
+}
+
+/// Estimate input token count for an Anthropic request.
+///
+/// Uses the same heuristic as `AnthropicCountTokensRequest::estimate_tokens()`
+/// (sum character lengths / 3). This populates `input_tokens` in the streaming
+/// `message_start` event, since the engine only reports prompt token counts on
+/// the final chunk.
+fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
+    // Build a temporary count-tokens request to reuse the existing estimator.
+    let count_req = AnthropicCountTokensRequest {
+        model: req.model.clone(),
+        messages: req.messages.clone(),
+        system: req.system.clone(),
+        tools: req.tools.clone(),
+    };
+    count_req.estimate_tokens()
 }
 
 /// Build an Anthropic-formatted error response.
