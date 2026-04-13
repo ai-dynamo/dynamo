@@ -93,7 +93,7 @@ where
 
         let metrics_scheduler = Arc::clone(&inner);
         let metrics_cancel_token = component.drt().child_token();
-        let mut remote_state_updates = inner.subscribe_remote_state_changes();
+        let mut queue_updates = inner.subscribe_queue_updates();
         tokio::spawn(async move {
             let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
             ROUTER_QUEUE_METRICS.set_pending(worker_type, metrics_scheduler.pending_count());
@@ -101,7 +101,7 @@ where
             loop {
                 tokio::select! {
                     _ = metrics_cancel_token.cancelled() => break,
-                    result = remote_state_updates.changed() => {
+                    result = queue_updates.changed() => {
                         if result.is_err() {
                             break;
                         }
