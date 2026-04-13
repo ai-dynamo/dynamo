@@ -190,7 +190,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _extract_logprobs(
-        meta_info: Dict[str, Any], num_output_logprobs_so_far: int
+        meta_info: Dict[str, Any],
+        num_output_logprobs_so_far: int,
+        return_tokens_as_token_ids: bool = False,
     ) -> tuple:
         """Extract logprobs from SGLang meta_info for new tokens.
 
@@ -234,11 +236,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         continue
                     position_list = []
                     for rank_idx, entry in enumerate(position_entries):
+                        tok_id = entry[1]
+                        token_str = (
+                            f"token_id:{tok_id}"
+                            if return_tokens_as_token_ids
+                            else entry[2]
+                        )
                         position_list.append(
                             {
                                 "rank": rank_idx + 1,
-                                "token_id": entry[1],
-                                "token": entry[2],
+                                "token_id": tok_id,
+                                "token": token_str,
                                 "logprob": float(entry[0]),
                             }
                         )
@@ -271,6 +279,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
+
+        output_options = request.get("output_options", {})
+        return_tokens_as_token_ids = bool(
+            output_options.get("return_tokens_as_token_ids")
+        )
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -310,7 +323,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
 
             if not self.use_sglang_tokenizer:
-                async for out in self._process_token_stream(decode, context):
+                async for out in self._process_token_stream(
+                    decode, context, return_tokens_as_token_ids
+                ):
                     yield out
             else:
                 async for out in self._process_text_stream(decode, context):
@@ -342,7 +357,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **self._priority_kwargs(priority),
             )
             if not self.use_sglang_tokenizer:
-                async for out in self._process_token_stream(agg, context):
+                async for out in self._process_token_stream(
+                    agg, context, return_tokens_as_token_ids
+                ):
                     yield out
             else:
                 async for out in self._process_text_stream(agg, context):
@@ -352,6 +369,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         stream_source: AsyncGenerator[Dict[str, Any], None],
         context: Context,
+        return_tokens_as_token_ids: bool = False,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -408,7 +426,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     log_probs,
                     top_logprobs,
                     num_output_logprobs_so_far,
-                ) = self._extract_logprobs(res["meta_info"], num_output_logprobs_so_far)
+                ) = self._extract_logprobs(
+                    res["meta_info"],
+                    num_output_logprobs_so_far,
+                    return_tokens_as_token_ids=return_tokens_as_token_ids,
+                )
                 if log_probs is not None:
                     out["log_probs"] = log_probs
                 if top_logprobs is not None:
