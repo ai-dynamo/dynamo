@@ -68,7 +68,7 @@ def patch_torch_memory_saver() -> None:
             # Get device from torch.cuda.current_device() (already set by SGLang)
             device_index = torch.cuda.current_device()
 
-            # Read lock mode set by setup_gms() (defaults to RW_OR_RO)
+            # Read lock mode set by setup_gms() (defaults to AUTO)
             gms_impl = GMSMemorySaverImpl(
                 device_index=device_index,
                 mode=gms_sglang._gms_lock_mode,

@@ -226,16 +226,16 @@ def test_rw_disconnect_aborts_layout_and_next_writer_starts_clean(real_gms):
         next_writer.close()
 
 
-def test_rw_or_ro_grants_rw_from_empty_and_ro_from_committed(real_gms):
+def test_auto_grants_rw_from_empty_and_ro_from_committed(real_gms):
     server, socket_path = real_gms
 
-    session = _GMSClientSession(socket_path, RequestedLockType.RW_OR_RO, 100)
+    session = _GMSClientSession(socket_path, RequestedLockType.AUTO, 100)
     assert session.lock_type == GrantedLockType.RW
     session.commit()
 
     _wait_for_server_state(server, ServerState.COMMITTED)
 
-    session = _GMSClientSession(socket_path, RequestedLockType.RW_OR_RO, 100)
+    session = _GMSClientSession(socket_path, RequestedLockType.AUTO, 100)
     try:
         assert session.lock_type == GrantedLockType.RO
         assert session.committed
@@ -388,7 +388,7 @@ def test_waiting_writer_blocks_new_readers_until_last_reader_disconnects(real_gm
         waiting_writer.close()
 
 
-def test_rw_or_ro_times_out_while_writer_waits_behind_reader(real_gms):
+def test_auto_times_out_while_writer_waits_behind_reader(real_gms):
     server, socket_path = real_gms
 
     writer = _GMSClientSession(socket_path, RequestedLockType.RW, None)
@@ -412,7 +412,7 @@ def test_rw_or_ro_times_out_while_writer_waits_behind_reader(real_gms):
     _wait_for_waiting_writers(server, 1)
 
     with pytest.raises(TimeoutError, match="Timeout waiting for lock"):
-        _GMSClientSession(socket_path, RequestedLockType.RW_OR_RO, 100)
+        _GMSClientSession(socket_path, RequestedLockType.AUTO, 100)
 
     reader.close()
     thread.join(timeout=2)

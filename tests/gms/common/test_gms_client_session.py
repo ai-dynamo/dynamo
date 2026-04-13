@@ -80,7 +80,7 @@ def test_client_session_records_granted_lock_and_committed(monkeypatch):
         ),
     )
 
-    session = _GMSClientSession("/tmp/gms-test.sock", RequestedLockType.RW_OR_RO, None)
+    session = _GMSClientSession("/tmp/gms-test.sock", RequestedLockType.AUTO, None)
 
     assert session.committed
     assert session.lock_type == GrantedLockType.RO
@@ -98,7 +98,7 @@ def test_client_session_requires_granted_lock_type(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="granted_lock_type"):
-        _GMSClientSession("/tmp/gms-test.sock", RequestedLockType.RW_OR_RO, None)
+        _GMSClientSession("/tmp/gms-test.sock", RequestedLockType.AUTO, None)
 
     assert closed["value"]
 

@@ -106,7 +106,7 @@ class GMSSessionManager:
             self._waiting_writers
         )
 
-    def _can_grant_rw_or_ro(self) -> bool:
+    def _can_resolve_auto_request(self) -> bool:
         if self._can_grant_ro():
             return True
         return self._can_grant_rw() and not self._locking.committed
@@ -148,13 +148,16 @@ class GMSSessionManager:
                     return None
             return GrantedLockType.RO
 
+        if mode != RequestedLockType.AUTO:
+            raise ValueError(f"Unsupported lock mode {mode!r}")
+
         async with self._condition:
             if self._can_grant_rw() and not self._locking.committed:
                 self._reserved_rw_session_id = session_id
                 return GrantedLockType.RW
             try:
                 await asyncio.wait_for(
-                    self._condition.wait_for(self._can_grant_rw_or_ro),
+                    self._condition.wait_for(self._can_resolve_auto_request),
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:

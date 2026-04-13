@@ -31,7 +31,7 @@ class VLLMWithGMSProcess(ManagedProcess):
         nixl_port: int,
         frontend_port: int,
         *,
-        read_only_weights: bool = False,
+        weights_lock_mode: str | None = None,
     ):
         self.engine_id = engine_id
         self.system_port = system_port
@@ -62,11 +62,11 @@ class VLLMWithGMSProcess(ManagedProcess):
             "--kv-events-config",
             kv_events_cfg,
         ]
-        if read_only_weights:
+        if weights_lock_mode is not None:
             command.extend(
                 [
                     "--model-loader-extra-config",
-                    json.dumps({"gms_read_only": True}),
+                    json.dumps({"gms_lock_mode": weights_lock_mode}),
                 ]
             )
         super().__init__(

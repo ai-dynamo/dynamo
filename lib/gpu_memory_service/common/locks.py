@@ -7,7 +7,7 @@ from enum import Enum
 class RequestedLockType(str, Enum):
     RW = "rw"
     RO = "ro"
-    RW_OR_RO = "rw_or_ro"
+    AUTO = "auto"
 
 
 class GrantedLockType(str, Enum):

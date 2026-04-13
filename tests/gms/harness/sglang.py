@@ -30,7 +30,7 @@ class SGLangWithGMSProcess(ManagedProcess):
         sglang_port: int,
         frontend_port: int,
         *,
-        read_only_weights: bool = False,
+        weights_lock_mode: str | None = None,
     ):
         self.engine_id = engine_id
         self.system_port = system_port
@@ -52,11 +52,11 @@ class SGLangWithGMSProcess(ManagedProcess):
             "--port",
             str(sglang_port),
         ]
-        if read_only_weights:
+        if weights_lock_mode is not None:
             command.extend(
                 [
                     "--model-loader-extra-config",
-                    '{"gms_read_only": true}',
+                    f'{{"gms_lock_mode": "{weights_lock_mode}"}}',
                 ]
             )
         super().__init__(

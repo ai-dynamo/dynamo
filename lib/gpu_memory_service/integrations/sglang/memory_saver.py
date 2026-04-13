@@ -69,7 +69,7 @@ class GMSMemorySaverImpl:
     ):
         self._device = torch.device("cuda", device_index)
         self.imported_weights_bytes = 0
-        requested_mode = mode or RequestedLockType.RW_OR_RO
+        requested_mode = mode or RequestedLockType.AUTO
         self.allocators = {
             tag: get_or_create_gms_client_memory_manager(
                 get_socket_path(device_index, tag),

@@ -386,7 +386,7 @@ async def test_reader_waiter_wakes_when_waiting_writer_times_out():
 
 
 @pytest.mark.asyncio
-async def test_rw_or_ro_waiter_becomes_rw_after_writer_abort():
+async def test_auto_waiter_becomes_rw_after_writer_abort():
     sessions = GMSSessionManager()
 
     writer_mode = await sessions.acquire_lock(
@@ -407,7 +407,7 @@ async def test_rw_or_ro_waiter_becomes_rw_after_writer_abort():
 
     waiter = asyncio.create_task(
         sessions.acquire_lock(
-            RequestedLockType.RW_OR_RO,
+            RequestedLockType.AUTO,
             timeout_ms=200,
             session_id="waiter_1",
         )

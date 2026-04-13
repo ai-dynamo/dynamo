@@ -480,8 +480,7 @@ def setup_vllm_engine(
             logger.info(
                 "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
             )
-            # ENGINE_ID=0 writes weights, all others import (RO).
-            # Prevents deadlock during TP>1 failover.
+            # Normalize gms_lock_mode so missing config becomes "auto".
             configure_gms_lock_mode(engine_args)
             validate_cudagraph_mode(engine_args)
 

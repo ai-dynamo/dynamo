@@ -256,7 +256,7 @@ def test_external_weight_mgr_vllm(
             ports["shadow_kv_event"],
             ports["shadow_nixl"],
             ports["frontend"],
-            read_only_weights=True,
+            weights_lock_mode="ro",
         ),
     )
 
@@ -284,6 +284,6 @@ def test_external_weight_mgr_sglang(
             ports["shadow_system"],
             ports["shadow_sglang"],
             ports["frontend"],
-            read_only_weights=True,
+            weights_lock_mode="ro",
         ),
     )

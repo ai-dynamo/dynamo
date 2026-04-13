@@ -359,9 +359,9 @@ sequenceDiagram
     end
 ```
 
-### Auto-Mode (RW_OR_RO)
+### Auto-Mode (AUTO)
 
-The `RW_OR_RO` mode automatically selects writer or reader based on server state, simplifying multi-worker deployments.
+The `AUTO` mode automatically selects writer or reader based on server state, simplifying multi-worker deployments.
 
 ```mermaid
 sequenceDiagram
@@ -372,8 +372,8 @@ sequenceDiagram
     Note over P,S: Auto-mode: try RW only when no committed layout exists
 
     P->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
-    P->>C: mgr.connect(RW_OR_RO)
-    C->>S: HandshakeRequest(lock_type=RW_OR_RO)
+    P->>C: mgr.connect(AUTO)
+    C->>S: HandshakeRequest(lock_type=AUTO)
 
     alt No committed weights AND no RW holder
         S->>S: Grant RW lock
@@ -529,9 +529,9 @@ GMS provides pre-built integrations for vLLM and SGLang. Enable GMS by passing `
 When `--load-format gms` is set:
 
 1. **A GMS server must already be running** for the target GPU device. The engine connects to it via a Unix socket derived from the GPU UUID.
-2. The engine uses `RW_OR_RO` mode by default: if no committed layout exists and no writer holds the lock, the first process gets RW and loads weights from disk. Otherwise clients wait for a committed layout and then get RO to import published weights.
+2. The engine uses `AUTO` mode by default: if no committed layout exists and no writer holds the lock, the first process gets RW and loads weights from disk. Otherwise clients wait for a committed layout and then get RO to import published weights.
 3. Both weights and KV cache are managed by GMS, but they use separate tags:
-   - `weights`: publish/import flow (`RW_OR_RO`, then `RO` after commit)
+   - `weights`: publish/import flow (`AUTO`, then `RO` after commit)
    - `kv_cache`: separate RW-only tag for mutable KV-cache memory
 
 #### vLLM
@@ -550,7 +550,7 @@ The integration uses a custom worker class (`GMSWorker`) that:
 - Registers a custom model loader (`GMSModelLoader`) for the `gms` load format
 - Patches `torch.cuda.empty_cache` to avoid releasing GMS-managed memory
 - Uses two GMS tags on the GPU:
-  - `weights`: normal publish/import flow (`RW_OR_RO`, then `RO` after commit)
+  - `weights`: normal publish/import flow (`AUTO`, then `RO` after commit)
   - `kv_cache`: separate RW-only tag for mutable KV-cache memory
 - Routes both weight and KV-cache allocation through a `CUDAPluggableAllocator` backed by the appropriate GMS tag
 
@@ -588,10 +588,10 @@ This enables a shadow engine to release its GPU memory, let a primary engine use
 
 ### Configuration via `model_loader_extra_config`
 
-To force read-only mode (import only, never load from disk), pass `gms_read_only` via the framework's `--model-loader-extra-config` flag:
+To control the weights lock mode, pass `gms_lock_mode` via the framework's `--model-loader-extra-config` flag:
 
 ```bash
---model-loader-extra-config '{"gms_read_only": true}'
+--model-loader-extra-config '{"gms_lock_mode": "ro"}'
 ```
 
-This forces `RO` lock mode instead of the default `RW_OR_RO` auto-detection. The engine will only import existing committed weights and fail if none are available.
+Supported values are `"auto"` (default), `"rw"`, and `"ro"`. `"auto"` picks RW for the first loader when no committed layout exists, then RO for later loaders. `"ro"` forces import-only mode and fails if no committed weights are available.

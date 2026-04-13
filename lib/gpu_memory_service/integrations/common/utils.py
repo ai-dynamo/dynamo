@@ -21,14 +21,33 @@ GMS_TAGS = ("weights", "kv_cache")
 
 
 def get_gms_lock_mode(extra_config: dict):
-    """Resolve GMS lock mode from model_loader_extra_config.
+    """Resolve GMS lock mode from model_loader_extra_config."""
+    if "gms_read_only" in extra_config:
+        raise ValueError(
+            "gms_read_only was removed. Use gms_lock_mode with one of: rw, ro, auto."
+        )
 
-    Returns RO if gms_read_only=True, otherwise RW_OR_RO (default).
-    """
-    if extra_config.get("gms_read_only", False):
-        logger.info("[GMS] gms_read_only=True, forcing RO mode")
-        return RequestedLockType.RO
-    return RequestedLockType.RW_OR_RO
+    raw_mode = extra_config.get("gms_lock_mode")
+    if raw_mode is None:
+        logger.info("[GMS] gms_lock_mode not set, defaulting to auto")
+        return RequestedLockType.AUTO
+
+    if isinstance(raw_mode, RequestedLockType):
+        return raw_mode
+    if not isinstance(raw_mode, str):
+        raise ValueError(
+            f"gms_lock_mode must be one of: rw, ro, auto; got {type(raw_mode).__name__}"
+        )
+
+    try:
+        mode = RequestedLockType(raw_mode.strip().lower())
+    except ValueError as exc:
+        raise ValueError(
+            f"gms_lock_mode must be one of: rw, ro, auto; got {raw_mode!r}"
+        ) from exc
+
+    logger.info("[GMS] gms_lock_mode=%s", mode.value)
+    return mode
 
 
 def strip_gms_model_loader_config(load_config, load_format: str):
