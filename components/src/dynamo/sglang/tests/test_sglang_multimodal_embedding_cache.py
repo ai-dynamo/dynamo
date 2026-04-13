@@ -42,6 +42,8 @@ async def test_encode_with_cache_partial_hit_and_reuse(
     cache_handler: MultimodalEncodeWorkerHandler,
 ) -> None:
     """Partial-hit should encode only misses and preserve URL order in output."""
+    from sglang.srt.managers.schedule_batch import Modality
+
     urls = [
         "http://example.com/a.jpg",
         "http://example.com/b.jpg",
@@ -60,12 +62,15 @@ async def test_encode_with_cache_partial_hit_and_reuse(
     cache_handler.encoder._encode.return_value = (
         torch.tensor([[1, 2, 4], [1, 2, 2]]),
         encoded,
+        None,  # aux_data (unused by cache path)
     )
 
     grid, full_embeddings = await cache_handler._encode_with_cache(urls)
 
     # Encoder called once for uncached URLs only
-    cache_handler.encoder._encode.assert_awaited_once_with([urls[0], urls[2]])
+    cache_handler.encoder._encode.assert_awaited_once_with(
+        [urls[0], urls[2]], Modality.IMAGE
+    )
 
     # Order should match original URL order: a(8), b(4 cached), c(4)
     assert grid.tolist() == [[1, 2, 4], [1, 2, 2], [1, 2, 2]]
