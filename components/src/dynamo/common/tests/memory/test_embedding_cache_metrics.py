@@ -13,7 +13,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.utils.prometheus import (
-    EMBEDDING_CACHE_METRIC_NAMES,
+    EmbeddingCacheMetrics,
     register_embedding_cache_metrics,
 )
 
@@ -25,7 +25,11 @@ pytestmark = [
 
 
 def _parse_metric(text: str, name: str) -> float | None:
-    """Parse a metric value from Prometheus expfmt text."""
+    """Parse a metric value from Prometheus expfmt text.
+
+    TODO: Consolidate with _get_metric_value() in trtllm/tests/test_trtllm_additional_metrics.py
+    into a shared test utility once more metric tests are added.
+    """
     for line in text.split("\n"):
         if line.startswith(name + "{") or line.startswith(name + " "):
             parts = line.rsplit(" ", 1)
@@ -174,7 +178,7 @@ class TestLabelsAndCompleteness:
         cache.get("k")
         cache.get("absent")
         text = callback()
-        for name in EMBEDDING_CACHE_METRIC_NAMES:
+        for name in EmbeddingCacheMetrics:
             assert (
                 _parse_metric(text, name) is not None
             ), f"metric {name} missing from output"

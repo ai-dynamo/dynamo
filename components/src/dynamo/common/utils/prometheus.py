@@ -11,6 +11,7 @@ Note: Engine metrics take time to appear after engine initialization,
 while Dynamo runtime metrics are available immediately after component creation.
 """
 
+import enum
 import logging
 import re
 import threading
@@ -34,15 +35,17 @@ if TYPE_CHECKING:
 # Rust counterpart: lib/runtime/src/metrics.rs create_metric() function
 # Label constants defined in: lib/runtime/src/metrics/prometheus_names.rs labels module
 
-# Single source of truth for embedding cache metric names (used by tests).
-EMBEDDING_CACHE_METRIC_NAMES = [
-    f"{name_prefix.COMPONENT}_embedding_cache_hits_total",
-    f"{name_prefix.COMPONENT}_embedding_cache_misses_total",
-    f"{name_prefix.COMPONENT}_embedding_cache_evictions_total",
-    f"{name_prefix.COMPONENT}_embedding_cache_utilization",
-    f"{name_prefix.COMPONENT}_embedding_cache_current_bytes",
-    f"{name_prefix.COMPONENT}_embedding_cache_entries",
-]
+
+# Single source of truth for embedding cache metric names.
+class EmbeddingCacheMetrics(str, enum.Enum):
+    """Prometheus metric names for the multimodal embedding cache."""
+
+    HITS_TOTAL = f"{name_prefix.COMPONENT}_embedding_cache_hits_total"
+    MISSES_TOTAL = f"{name_prefix.COMPONENT}_embedding_cache_misses_total"
+    EVICTIONS_TOTAL = f"{name_prefix.COMPONENT}_embedding_cache_evictions_total"
+    UTILIZATION = f"{name_prefix.COMPONENT}_embedding_cache_utilization"
+    CURRENT_BYTES = f"{name_prefix.COMPONENT}_embedding_cache_current_bytes"
+    ENTRIES = f"{name_prefix.COMPONENT}_embedding_cache_entries"
 
 
 def register_engine_metrics_callback(
@@ -419,21 +422,23 @@ def register_embedding_cache_metrics(
     label_names = [labels.MODEL, labels.COMPONENT]
     label_values = {labels.MODEL: model_name, labels.COMPONENT: component_name}
 
+    ECM = EmbeddingCacheMetrics
+
     # Counters (delta-incremented from cache's monotonic stats on each scrape)
     hits_counter = Counter(
-        f"{name_prefix.COMPONENT}_embedding_cache_hits_total",
+        ECM.HITS_TOTAL,
         "Total embedding cache hits.",
         labelnames=label_names,
         registry=registry,
     )
     misses_counter = Counter(
-        f"{name_prefix.COMPONENT}_embedding_cache_misses_total",
+        ECM.MISSES_TOTAL,
         "Total embedding cache misses.",
         labelnames=label_names,
         registry=registry,
     )
     evictions_counter = Counter(
-        f"{name_prefix.COMPONENT}_embedding_cache_evictions_total",
+        ECM.EVICTIONS_TOTAL,
         "Total embedding cache evictions.",
         labelnames=label_names,
         registry=registry,
@@ -441,19 +446,19 @@ def register_embedding_cache_metrics(
 
     # Gauges (snapshot values set on each scrape)
     utilization_gauge = Gauge(
-        f"{name_prefix.COMPONENT}_embedding_cache_utilization",
+        ECM.UTILIZATION,
         "Cache memory utilization ratio (0.0-1.0).",
         labelnames=label_names,
         registry=registry,
     )
     current_bytes_gauge = Gauge(
-        f"{name_prefix.COMPONENT}_embedding_cache_current_bytes",
+        ECM.CURRENT_BYTES,
         "Current cache memory usage in bytes.",
         labelnames=label_names,
         registry=registry,
     )
     entries_gauge = Gauge(
-        f"{name_prefix.COMPONENT}_embedding_cache_entries",
+        ECM.ENTRIES,
         "Number of entries in the cache.",
         labelnames=label_names,
         registry=registry,
