@@ -1194,7 +1194,6 @@ class KvRouterConfig:
         router_prune_target_ratio: float = 0.8,
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
-        router_enable_agent_controller: bool = False,
         router_queue_policy: str = "fcfs",
     ) -> None:
         """

@@ -34,10 +34,10 @@ use crate::{
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
-    /// Sticky session routing (always available when session_id is set).
-    sticky_sessions: Option<Arc<StickySessionRouter>>,
-    /// Session lifecycle RPCs (open/close). Requires --enable-event-plane.
-    agent_controller: Option<Arc<AgentController>>,
+    /// Sticky session routing. Lazily activated when requests carry session_control.
+    sticky_sessions: Arc<StickySessionRouter>,
+    /// Session lifecycle RPCs (open/close). Client is lazy (OnceCell).
+    agent_controller: Arc<AgentController>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -221,33 +221,25 @@ impl KvPushRouter {
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        let enable_event_plane = chooser.kv_router_config().router_enable_agent_controller;
-
         // Agent controller manages session lifecycle RPCs (open/close).
-        let agent_controller = if enable_event_plane {
-            let component = chooser.client().endpoint.component().clone();
-            Some(Arc::new(AgentController::new(component)))
-        } else {
-            None
-        };
+        // Always created; the event-plane client inside is lazy (OnceCell)
+        // so there is zero cost until a request actually carries session_control.
+        let component = chooser.client().endpoint.component().clone();
+        let agent_controller = Arc::new(AgentController::new(component));
 
         // Sticky sessions share expiry handling with the agent controller so
         // router-side reap also closes the worker session.
-        let sticky_sessions = if enable_event_plane {
-            let on_expire = agent_controller.as_ref().map(|controller| {
-                let controller = controller.clone();
-                Arc::new(move |session_id: String, worker_id: u64| {
-                    controller
-                        .clone()
-                        .close_expired_session(session_id, worker_id);
-                }) as Arc<dyn Fn(String, u64) + Send + Sync>
-            });
-            Some(Arc::new(StickySessionRouter::new(
-                InMemoryAffinityStore::new_with_on_expire(on_expire),
-            )))
-        } else {
-            None
+        let on_expire = {
+            let controller = agent_controller.clone();
+            Arc::new(move |session_id: String, worker_id: u64| {
+                controller
+                    .clone()
+                    .close_expired_session(session_id, worker_id);
+            }) as Arc<dyn Fn(String, u64) + Send + Sync>
         };
+        let sticky_sessions = Arc::new(StickySessionRouter::new(
+            InMemoryAffinityStore::new_with_on_expire(Some(on_expire)),
+        ));
 
         KvPushRouter {
             inner,
@@ -436,18 +428,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Resolve session affinity: if the request has a session_id, inject the
         // pinned worker_id into backend_instance_id before worker selection.
         // Skip entirely for non-session requests to keep them off the sticky path.
-        if let Some(ref sticky) = self.sticky_sessions
-            && request
-                .routing
-                .as_ref()
-                .and_then(|r| r.session_control.as_ref())
-                .is_some()
+        if request
+            .routing
+            .as_ref()
+            .and_then(|r| r.session_control.as_ref())
+            .is_some()
             && request
                 .routing
                 .as_ref()
                 .and_then(|r| r.backend_instance_id)
                 .is_none()
-            && let Some(worker_id) = sticky.resolve(&request)
+            && let Some(worker_id) = self.sticky_sessions.resolve(&request)
         {
             request.routing_mut().backend_instance_id = Some(worker_id);
         }
@@ -569,18 +560,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         // Session lifecycle RPCs via agent controller.
         // Fails fast if session_control.open is requested but the client can't be created.
-        let deferred_close = match self.agent_controller.as_ref() {
-            Some(ctrl) => {
-                ctrl.on_routed(
-                    &request,
-                    instance_id,
-                    &context_id,
-                    self.sticky_sessions.as_deref(),
-                )
-                .await?
-            }
-            None => None,
-        };
+        let deferred_close = self
+            .agent_controller
+            .on_routed(
+                &request,
+                instance_id,
+                &context_id,
+                Some(&*self.sticky_sessions),
+            )
+            .await?;
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = backend_dp_rank;

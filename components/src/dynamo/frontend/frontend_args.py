@@ -106,8 +106,6 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
-        if self.router_enable_agent_controller and self.router_mode != "kv":
-            raise ValueError("--enable-agent-controller requires --router-mode=kv")
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "

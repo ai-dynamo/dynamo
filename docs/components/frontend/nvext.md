@@ -152,7 +152,7 @@ Backend details:
 }
 ```
 
-Requires `--enable-agent-controller` and `--router-mode=kv` on the frontend. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for backend setup details.
+Requires `--router-mode=kv` on the frontend. Session control activates automatically when requests carry `nvext.session_control`. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for backend setup details.
 
 
 ## Response Extensions

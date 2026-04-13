@@ -111,16 +111,15 @@ for chunk in response:
 
 ### Enabling
 
+Session control is request-driven: the agent controller and sticky session
+routing activate automatically when a request carries `nvext.session_control`.
+No additional frontend flags are needed beyond `--router-mode kv`.
+
 ```bash
 python -m dynamo.frontend \
   --router-mode kv \
-  --enable-agent-controller \
   ...
 ```
-
-| Flag | Description |
-|------|-------------|
-| `--enable-agent-controller` | Enables the agent controller: session lifecycle RPCs and sticky session routing. Requires `--router-mode=kv`. |
 
 ## Session Control for Subagent KV Isolation (Experimental)
 
@@ -203,11 +202,10 @@ python -m dynamo.sglang \
 ```bash
 python -m dynamo.frontend \
   --router-mode kv \
-  --enable-agent-controller \
   ...
 ```
 
-The `--enable-agent-controller` flag enables the `AgentController` (session lifecycle RPCs) and `StickySessionRouter` (router-side session affinity).
+The `AgentController` (session lifecycle RPCs) and `StickySessionRouter` (router-side session affinity) activate automatically when requests carry `nvext.session_control`.
 
 ### Request Format
 

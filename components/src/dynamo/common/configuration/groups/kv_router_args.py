@@ -35,7 +35,6 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_prune_target_ratio",
     "router_queue_threshold",
     "router_event_threads",
-    "router_enable_agent_controller",
     "router_queue_policy",
     "use_remote_indexer",
     "serve_indexer",
@@ -62,7 +61,6 @@ class KvRouterConfigBase(ConfigBase):
     router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
     router_event_threads: int
-    router_enable_agent_controller: bool
     router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
@@ -276,17 +274,6 @@ class KvRouterArgGroup(ArgGroup):
                 "--no-router-kv-events is set."
             ),
             arg_type=int,
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--enable-agent-controller",
-            env_var="DYN_ENABLE_AGENT_CONTROLLER",
-            default=False,
-            dest="router_enable_agent_controller",
-            help=(
-                "KV Router: Enable the agent controller. Activates session lifecycle "
-                "RPCs (open/close for subagent KV isolation) and sticky session routing."
-            ),
         )
         add_argument(
             g,

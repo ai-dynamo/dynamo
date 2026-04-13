@@ -20,10 +20,10 @@ GPU_MEM_FRACTION=$(build_gpu_mem_args sglang --model "$MODEL")
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + Agent Controller" "$MODEL" "$HTTP_PORT"
 
-# Frontend with KV routing, agent controller, and state reset
+# Frontend with KV routing and state reset
+# Session control activates automatically when requests carry nvext.session_control
 python3 -m dynamo.frontend \
   --router-mode kv \
-  --enable-agent-controller \
   --router-reset-states &
 
 # Worker with streaming sessions, KV events, and metrics
