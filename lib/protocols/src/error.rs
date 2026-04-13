@@ -1,36 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Based on https://github.com/64bit/async-openai/ by Himanshu Neema
-// Original Copyright (c) 2022 Himanshu Neema
-// Licensed under MIT License (see ATTRIBUTIONS-Rust.md)
-//
-// Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
-// Licensed under Apache 2.0
 
-//! Errors originating from API calls, parsing responses, and reading-or-writing to the file system.
+//! Error types for protocol type operations.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenAIError {
-    /// Underlying error from reqwest library after an API call was made
-    #[error("http error: {0}")]
-    Reqwest(#[from] reqwest::Error),
     /// OpenAI returns error object with details of API call failure
     #[error("{0}")]
     ApiError(ApiError),
     /// Error when a response cannot be deserialized into a Rust type
     #[error("failed to deserialize api response: {0}")]
     JSONDeserialize(serde_json::Error),
-    /// Error on the client side when saving file to file system
-    #[error("failed to save file: {0}")]
-    FileSaveError(String),
-    /// Error on the client side when reading file from file system
-    #[error("failed to read file: {0}")]
-    FileReadError(String),
-    /// Error on SSE streaming
-    #[error("stream failed: {0}")]
-    StreamError(String),
     /// Error from client side validation
     /// or when builder fails to build request before making API call
     #[error("invalid args: {0}")]
@@ -47,9 +28,6 @@ pub struct ApiError {
 }
 
 impl std::fmt::Display for ApiError {
-    /// If all fields are available, `ApiError` is formatted as:
-    /// `{type}: {message} (param: {param}) (code: {code})`
-    /// Otherwise, missing fields will be ignored.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut parts = Vec::new();
 
@@ -75,12 +53,4 @@ impl std::fmt::Display for ApiError {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct WrappedError {
     pub error: ApiError,
-}
-
-pub(crate) fn map_deserialization_error(e: serde_json::Error, bytes: &[u8]) -> OpenAIError {
-    tracing::error!(
-        "failed deserialization of: {}",
-        String::from_utf8_lossy(bytes)
-    );
-    OpenAIError::JSONDeserialize(e)
 }

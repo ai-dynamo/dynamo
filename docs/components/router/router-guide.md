@@ -21,6 +21,7 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Frontend + KV (Aggregated)** | `python -m dynamo.frontend --router-mode kv` | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Aggregated | Production single-pool serving with cache reuse |
 | **Frontend + KV (Disaggregated)** | `python -m dynamo.frontend --router-mode kv` with prefill + decode workers | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Disaggregated (prefill + decode pools) | Separate prefill/decode for large-scale serving |
 | **Frontend + Least-Loaded** | `python -m dynamo.frontend --router-mode least-loaded` | Fewest active connections | None | Aggregated or disaggregated fallback | Simple load-aware balancing without KV awareness |
+| **Frontend + Device-Aware Weighted** | `python -m dynamo.frontend --router-mode device-aware-weighted` | Device-aware budget + least-loaded within selected device group | None | Aggregated or disaggregated fallback | Heterogeneous fleet balancing (CPU/non-CPU); degenerates to least-loaded when only one device class is present |
 | **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
 | **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / JetStream / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
 
@@ -32,7 +33,70 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Random** | `random` | Selects a random worker for each request |
 | **KV** | `kv` | Evaluates KV cache overlap and decode load per worker; picks lowest cost |
 | **Least-Loaded** | `least-loaded` | Routes to the worker with fewest active connections; in disaggregated prefill paths it skips bootstrap optimization and falls back to synchronous prefill |
+| **Device-Aware Weighted** | `device-aware-weighted` | Partitions workers into CPU and non-CPU groups, applies capability-normalized ratio budgeting using `DYN_ENCODER_CUDA_TO_CPU_RATIO` to decide which group receives the request, then selects the least-loaded worker within that group; when only one device class exists, behavior degenerates to least-loaded |
 | **Direct** | `direct` | Reads the target `worker_id` from the request's routing hints; no selection logic |
+
+### Device-Aware Weighted Routing
+
+`device-aware-weighted` is designed for **heterogeneous fleets** where workers of different compute capability — for example CPU embedding encoders alongside GPU embedding encoders — share the same endpoint.
+
+Raw in-flight counts are not directly comparable across device types: a GPU can sustain far more concurrent requests than a CPU before reaching the same relative load. Comparing raw counts would permanently starve CPU workers because GPUs would always look less loaded.
+
+#### Budget policy
+
+Workers are split into two groups: *CPU* and *non-CPU* (CUDA/GPU/etc.). A **capability-normalized load** is compared between the two groups:
+
+```
+normalized_load = total_inflight(group) / (instance_count(group) × throughput_weight)
+```
+
+where `throughput_weight` is **1** for CPU workers and **`DYN_ENCODER_CUDA_TO_CPU_RATIO`** for non-CPU workers. The request is routed to the group with the **lower normalized load**, i.e. the group that has more headroom relative to its compute capacity.
+
+This comparison rearranges to an equivalent integer budget check (avoiding floating-point division):
+
+```
+CPU group is selected when:
+  total_cpu_inflight  <  total_non_cpu_inflight × cpu_count / (ratio × non_cpu_count)
+```
+
+The right-hand side is the *allowed CPU in-flight budget*: the number of concurrent CPU requests that would produce the same relative load as the current non-CPU workload. When actual CPU in-flight is below that budget, CPUs are underloaded relative to GPUs and get the next request; once the budget is exhausted the router switches back to the non-CPU group.
+
+#### Example
+
+Ratio = 8 (default; each GPU handles 8× the requests of a CPU at equal normalized load).
+
+Current per-instance load:
+
+- GPU instance g1: 8 in-flight
+- GPU instance g2: 8 in-flight
+- CPU instance c1: 0 in-flight
+- CPU instance c2: 0 in-flight
+
+So `non_cpu_count = 2`, `cpu_count = 2`, `total_non_cpu_inflight = 16`, and `total_cpu_inflight = 0`:
+
+```
+allowed_cpu_inflight = 16 × 2 / (8 × 2) = 2
+total_cpu_inflight   = 0  <  2  →  route to CPU group
+```
+
+Interpretation: with this non-CPU load, the CPU group budget is 2 total in-flight requests, i.e. roughly 1 request per CPU instance before normalized load matches the GPU group.
+
+After c1=1 and c2=1 (total CPU in-flight = 2):
+
+```
+total_cpu_inflight = 2  <  2  is false  →  route to non-CPU group
+```
+
+This keeps both groups at roughly equal *normalized* load.
+
+#### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DYN_ENCODER_CUDA_TO_CPU_RATIO` | `8` | Throughput ratio of a non-CPU (GPU) worker relative to one CPU worker. Set to the approximate ratio of requests-per-second each device type can sustain under your workload. |
+
+> [!TIP]
+> When only one device class is present (all GPU or all CPU) the policy returns all instances and behavior degenerates to standard least-loaded selection within that single group.
 
 ### KV Event Transport Modes (within `--router-mode kv`)
 
@@ -42,7 +106,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 |------------|---------------|-------------|
 | **NATS Core (local indexer)** | Default (no extra flags) | Workers maintain a local indexer; router queries workers on startup and receives events via NATS Core |
 | **JetStream (durable)** | `--router-durable-kv-events` | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
-| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; standalone indexer aggregates events |
+| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; the standalone `dynamo.indexer` service aggregates events |
 | **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
 
 ### Aggregated vs. Disaggregated Topology
@@ -93,6 +157,8 @@ Backend workers register themselves using the `register_model` API, after which 
 | `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model. `aic` decays only the oldest active prefill using an AIC-predicted duration |
 | `--router-queue-threshold <float>` | `4.0` | Queue threshold fraction; enables priority scheduling via `priority` |
 | `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
+| `--serve-indexer` | `false` | Serve the Dynamo-native remote indexer from this frontend/router on the worker component |
+| `--use-remote-indexer` | `false` | Query the worker component's served remote indexer instead of maintaining a local overlap indexer |
 
 For all available options: `python -m dynamo.frontend --help`
 
@@ -266,6 +332,7 @@ We can then use the default routing methods exposed by the client class to send 
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
 - **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least-loaded`
   In disaggregated prefill paths it skips bootstrap optimization and uses the synchronous prefill path, matching power-of-two routing.
+- **Device-aware weighted routing**: Routes using CPU/non-CPU ratio budgeting plus least-loaded selection within the selected device group via `--router-mode device-aware-weighted`. Tune ratio with `DYN_ENCODER_CUDA_TO_CPU_RATIO` (default `8`). See [Device-Aware Weighted Routing](#device-aware-weighted-routing) below for a detailed explanation of the budget policy.
 
 KV Cache routing uses direct routing with a special worker selection algorithm.
 
@@ -443,6 +510,63 @@ graph TD
 ## Serving Multiple Router Replicas
 
 For improved fault tolerance, you can launch multiple frontend + router replicas. If multiple `dynamo.frontend` processes share the same host or network namespace, give each instance a different HTTP port. In Kubernetes or on separate hosts, replicas can usually reuse the same container port. Alternatively, you can deploy the router separately as the standalone `python -m dynamo.router` service; see the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md).
+
+### Dynamo-Native Remote Indexer
+
+For Dynamo-native deployments, the remote indexer is served by `dynamo.frontend` or `dynamo.router`, not by `dynamo.indexer`.
+
+- Use `--serve-indexer` on router/frontend replicas that should expose `kv_indexer_query` from the worker component.
+- Use `--use-remote-indexer` on consumer routers/frontends that should query that served endpoint instead of maintaining a local overlap indexer.
+- `dynamo.indexer` remains the standalone HTTP + ZMQ microservice for non-Dynamo / direct-ZMQ deployments.
+
+Frontend example:
+
+```bash
+# Serving anchors
+python -m dynamo.frontend --router-mode kv --serve-indexer
+
+# Consumer frontend
+python -m dynamo.frontend --router-mode kv --use-remote-indexer
+```
+
+The served service is request-plane only. Each serving router/frontend keeps its normal local KV event ingestion, gap detection, and worker-query recovery path; remote consumers only issue hash-based overlap queries.
+
+Approximate mode (`--no-router-kv-events`) is singleton-only for remote serving: only one `--serve-indexer` replica may exist for a given worker component. Event-driven mode allows multiple serving replicas behind the same worker component.
+
+```mermaid
+graph TD
+    subgraph "Workers"
+        W1["Worker 1"]
+        W2["Worker 2"]
+    end
+
+    subgraph "Event Plane"
+        EP["KV Events"]
+    end
+
+    subgraph "Serving Routers / Frontends"
+        S1["Router / Frontend A<br/>--serve-indexer"]
+        S2["Router / Frontend B<br/>--serve-indexer"]
+        I1["Local Indexer"]
+        I2["Local Indexer"]
+    end
+
+    subgraph "Request Plane"
+        RP["backend.kv_indexer_query"]
+    end
+
+    C["Consumer Router / Frontend<br/>--use-remote-indexer"]
+
+    W1 --> EP
+    W2 --> EP
+    EP --> S1
+    EP --> S2
+    S1 --> I1
+    S2 --> I2
+    C --> RP
+    RP --> S1
+    RP --> S2
+```
 
 ### Router State Management
 

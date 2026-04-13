@@ -94,6 +94,9 @@ pub(crate) struct ErrorMessage {
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
+        // 499 is not IANA-registered (nginx convention for client-closed-request),
+        // so canonical_reason() returns None. Use the de facto standard name.
+        None if code.as_u16() == 499 => "Client Closed Request".to_string(),
         None => "UnknownError".to_string(),
     }
 }
@@ -114,6 +117,7 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
         StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
         StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503
         StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
+        _ if code.as_u16() == 499 => ErrorType::Cancelled, // 499 Client Closed Request
         _ if code.is_client_error() => ErrorType::Validation, // other 4xx
         _ => ErrorType::Internal,                     // everything else
     }
@@ -216,6 +220,20 @@ impl ErrorMessage {
                     message: dynamo_err.message().to_string(),
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
+                }),
+            );
+        }
+
+        // Check for Cancelled anywhere in the error chain → HTTP 499 (Client Closed Request)
+        if super::metrics::request_was_cancelled(err.as_ref()) {
+            let code = StatusCode::from_u16(499).unwrap();
+            tracing::debug!("Request cancelled before response: {err}");
+            return (
+                code,
+                Json(ErrorMessage {
+                    message: err.to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
                 }),
             );
         }
@@ -1544,6 +1562,7 @@ async fn responses(
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
         max_output_tokens: request.inner.max_output_tokens,
+        parallel_tool_calls: request.inner.parallel_tool_calls,
         store: request.inner.store,
         tools: request.inner.tools.clone(),
         tool_choice: request.inner.tool_choice.clone(),
@@ -1788,11 +1807,6 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`prompt` is not supported.",
         ));
     }
-    if inner.store == Some(true) {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`store: true` is not supported.",
-        ));
-    }
     None
 }
 
@@ -1965,6 +1979,9 @@ async fn images(
         .map(|m| match m {
             dynamo_protocols::types::ImageModel::DallE2 => "dall-e-2".to_string(),
             dynamo_protocols::types::ImageModel::DallE3 => "dall-e-3".to_string(),
+            dynamo_protocols::types::ImageModel::GptImage1 => "gpt-image-1".to_string(),
+            dynamo_protocols::types::ImageModel::GptImage1dot5 => "gpt-image-1.5".to_string(),
+            dynamo_protocols::types::ImageModel::GptImage1Mini => "gpt-image-1-mini".to_string(),
             dynamo_protocols::types::ImageModel::Other(s) => s.clone(),
         })
         .unwrap_or_else(|| "diffusion".to_string());
@@ -2526,6 +2543,38 @@ mod tests {
     }
 
     #[test]
+    fn test_cancelled_error_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("Context id abc-123 is stopped or killed")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        assert_eq!(
+            response.0.as_u16(),
+            499,
+            "Cancelled errors should return HTTP 499"
+        );
+        assert_eq!(response.1.code, 499);
+        assert_eq!(response.1.error_type, "Client Closed Request");
+        assert!(response.1.message.contains("stopped or killed"));
+    }
+
+    #[test]
+    fn test_cancelled_error_metrics_classification() {
+        // HTTP 499 should be classified as Cancelled for metrics
+        let error_type =
+            classify_error_for_metrics(StatusCode::from_u16(499).unwrap(), "cancelled request");
+        assert_eq!(
+            error_type,
+            ErrorType::Cancelled,
+            "HTTP 499 should map to ErrorType::Cancelled in metrics"
+        );
+    }
+
+    #[test]
     fn test_validate_unsupported_fields_accepts_clean_request() {
         let request = make_base_request();
         let result = validate_response_unsupported_fields(&request);
@@ -2538,6 +2587,17 @@ mod tests {
         request.inner.parallel_tool_calls = Some(true);
         let result = validate_response_unsupported_fields(&request);
         assert!(result.is_none(), "parallel_tool_calls should be supported");
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_accepts_store() {
+        let mut request = make_base_request();
+        request.inner.store = Some(true);
+        let result = validate_response_unsupported_fields(&request);
+        assert!(
+            result.is_none(),
+            "store should be supported for audit opt-in"
+        );
     }
 
     #[test]
@@ -2559,7 +2619,6 @@ mod tests {
                     })
                 }),
             ),
-            ("store", Box::new(|r| r.store = Some(true))),
         ];
 
         for (field, set_field) in unsupported_cases {
@@ -3290,8 +3349,7 @@ mod tests {
 
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
-        ChatCompletionToolType, CreateChatCompletionStreamResponse, FinishReason,
-        FunctionCallStream,
+        CreateChatCompletionStreamResponse, FinishReason, FunctionCallStream, FunctionType,
     };
     use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -3444,7 +3502,7 @@ mod tests {
         let tool_call = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: id.map(|s| s.to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: name.map(|s| s.to_string()),
                 arguments: arguments.map(|s| s.to_string()),
@@ -3537,7 +3595,7 @@ mod tests {
         let tc1 = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: Some("call_1".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
@@ -3546,7 +3604,7 @@ mod tests {
         let tc2 = ChatCompletionMessageToolCallChunk {
             index: 1,
             id: Some("call_2".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_time".to_string()),
                 arguments: Some(r#"{"tz":"UTC"}"#.to_string()),
@@ -3609,7 +3667,7 @@ mod tests {
         let complete = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: Some("call_complete".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("get_weather".to_string()),
                 arguments: Some(r#"{"city":"Paris"}"#.to_string()),
@@ -3618,7 +3676,7 @@ mod tests {
         let incomplete = ChatCompletionMessageToolCallChunk {
             index: 1,
             id: Some("call_partial".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some("search".to_string()),
                 arguments: None, // still streaming
@@ -3658,7 +3716,7 @@ mod tests {
         let tool_call = ChatCompletionMessageToolCallChunk {
             index: 0,
             id: Some("call_999".to_string()),
-            r#type: Some(ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: None,
         };
         #[allow(deprecated)]
