@@ -287,6 +287,17 @@ class KvThompsonRouter:
         # Track this request
         self._prefix_request_counts[prefix_id] = requests_seen + 1
 
+        # --- Future workload aware w_prefill modulation ---
+        # If this prefix will be reused, cache overlap matters more — boost w_prefill.
+        # remaining_fraction decays from 1.0 (first request) to 0.0 (last request).
+        # At alpha_reuse=0.5: first request gets w_prefill*1.5, last gets w_prefill*1.0.
+        remaining_fraction = (
+            effective_reuse_budget / max(1, reuse_budget)
+            if reuse_budget > 0
+            else 0.0
+        )
+        effective_w_prefill = self.w_prefill * (1.0 + self.alpha_reuse * remaining_fraction)
+
         # --- Pass 1: Compute raw kv_native_score + per-worker signals ---
         # Need all scores before normalization.
         per_worker: list[dict] = []
@@ -299,10 +310,11 @@ class KvThompsonRouter:
             # KV-native score: matches native router formula in block units
             # potential_prefill_tokens includes active_tokens(decay) + new_tokens()
             # potential_decode_blocks includes active_blocks() + new_blocks()
+            # w_prefill is modulated by reuse_budget: high-reuse prefixes weight cache more
             potential_prefill = load_info.get("potential_prefill_tokens", 0)
             potential_decode = load_info.get("potential_decode_blocks", 0)
             prefill_blocks = potential_prefill / max(1, block_size)
-            kv_native_score = self.w_prefill * prefill_blocks + self.w_decode * potential_decode
+            kv_native_score = effective_w_prefill * prefill_blocks + self.w_decode * potential_decode
 
             # Overlap (for stickiness and worker_details)
             if indexer_overlap is not None:
