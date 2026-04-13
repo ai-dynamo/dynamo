@@ -21,39 +21,30 @@ RUN python3 -m pip install --upgrade pip setuptools wheel \
 
 FROM ${CUDA_RUNTIME_IMAGE}
 
-ARG PYTHON_VERSION
 ARG CUDA_PYTHON_VERSION
 
 ENV PIP_ROOT_USER_ACTION=ignore
 ENV PIP_NO_CACHE_DIR=1
 ENV PYTHONUNBUFFERED=1
-ENV LD_LIBRARY_PATH=/usr/local/cuda/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    python${PYTHON_VERSION} \
-    python${PYTHON_VERSION}-venv \
+    python3 \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
-
-RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python3 \
-    && ln -sf /usr/bin/python${PYTHON_VERSION} /usr/local/bin/python \
-    && ln -sf /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so.13 \
-        /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so
 
 RUN python3 -m venv /opt/gms
 
 ENV PATH=/opt/gms/bin:${PATH}
 
-RUN python3 -m pip install --upgrade pip setuptools wheel \
+RUN python3 -m pip install --upgrade pip \
     && python3 -m pip install \
         cuda-python==${CUDA_PYTHON_VERSION} \
-        nvidia-ml-py \
-        msgspec \
-        uvloop
+        nvidia-ml-py
 
 COPY --from=wheel-builder /dist/gpu_memory_service*.whl /tmp/
 
-RUN python3 -m pip install --no-deps /tmp/gpu_memory_service*.whl \
+RUN python3 -m pip install /tmp/gpu_memory_service*.whl \
     && rm -f /tmp/gpu_memory_service*.whl
 
 ENTRYPOINT ["gpu-memory-service"]
