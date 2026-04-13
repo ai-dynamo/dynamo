@@ -9,6 +9,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
@@ -47,6 +48,14 @@ type BaseComponentDefaults struct{}
 type DiscoveryContext struct {
 	Backend configv1alpha1.DiscoveryBackend
 	Mode    configv1alpha1.KubeDiscoveryMode
+}
+
+// NewDiscoveryContext resolves discovery settings from operator config and component annotations.
+func NewDiscoveryContext(defaultBackend configv1alpha1.DiscoveryBackend, annotations map[string]string) DiscoveryContext {
+	return DiscoveryContext{
+		Backend: controller_common.GetDiscoveryBackend(defaultBackend, annotations),
+		Mode:    controller_common.GetKubeDiscoveryMode(annotations),
+	}
 }
 
 type ComponentContext struct {
@@ -134,8 +143,6 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 		})
 	}
 
-	// Container mode: inject CONTAINER_NAME and DYN_KUBE_DISCOVERY_MODE.
-	// In failover pods, buildEngineContainer overrides CONTAINER_NAME to "engine-0"/"engine-1".
 	if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "CONTAINER_NAME",
