@@ -3,17 +3,6 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
-
-/// Check if an error chain indicates the worker should be reported as down.
-fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
-    const INHIBITED: &[ErrorType] = &[
-        ErrorType::CannotConnect,
-        ErrorType::Disconnected,
-        ErrorType::ConnectionTimeout,
-        ErrorType::Backend(BackendError::EngineShutdown),
-    ];
-    match_error_chain(err, INHIBITED, &[])
-}
 use crate::{
     component::{Client, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state},
     dynamo_nvtx_range,
@@ -42,6 +31,30 @@ use std::{
 };
 use tokio_stream::StreamExt;
 use tracing::Instrument;
+
+/// Check if an error chain indicates the worker should be reported as down.
+fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
+    const INHIBITED: &[ErrorType] = &[
+        ErrorType::CannotConnect,
+        ErrorType::Disconnected,
+        ErrorType::ConnectionTimeout,
+        ErrorType::ResponseTimeout,
+        ErrorType::Backend(BackendError::EngineShutdown),
+    ];
+    match_error_chain(err, INHIBITED, &[])
+}
+
+/// Read the backend response inactivity timeout from the environment.
+/// Reuses `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` — the same env var
+/// as the HTTP-layer safety net in `disconnect.rs`.
+fn response_inactivity_timeout() -> Option<std::time::Duration> {
+    use crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS;
+    std::env::var(DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(std::time::Duration::from_secs)
+}
 
 struct OccupancyPermit {
     state: Arc<RoutingOccupancyState>,
@@ -127,6 +140,10 @@ where
     /// instance list instead of the filtered avail list. Use for recovery/query paths
     /// where transient failures are expected.
     fault_detection_enabled: bool,
+
+    /// Cached response inactivity timeout. Read once at construction from
+    /// [`environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS`](crate::config::environment_names::llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS) to avoid a syscall per request.
+    response_timeout: Option<std::time::Duration>,
 
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
@@ -235,6 +252,7 @@ where
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             busy_threshold: None,
             fault_detection_enabled: false,
+            response_timeout: response_inactivity_timeout(),
             occupancy_state,
             _phantom: PhantomData,
         })
@@ -270,6 +288,7 @@ where
             round_robin_counter: Arc::new(AtomicU64::new(0)),
             busy_threshold,
             fault_detection_enabled: true,
+            response_timeout: response_inactivity_timeout(),
             occupancy_state,
             _phantom: PhantomData,
         };
@@ -490,7 +509,7 @@ where
 
     async fn generate_with_fault_detection(
         &self,
-        instance_id: u64,
+        mut instance_id: u64,
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
@@ -531,43 +550,77 @@ where
             }
         }
 
-        // Get the address based on discovered transport type
+        // Get the address based on discovered transport type.
+        // If the selected instance disappeared between selection and dispatch
+        // (e.g. deregistered during scale-down), fall back to another available
+        // instance rather than returning a spurious 500.
         let (address, _transport_kind) = {
             use crate::component::TransportType;
 
-            // Get the instance and use its actual transport type
-            let instances = self.client.instances();
-            let instance = instances
-                .iter()
-                .find(|i| i.instance_id == instance_id)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Instance {} not found in available instances", instance_id)
-                })?;
+            let resolve_transport = |id: u64| {
+                let instances = self.client.instances();
+                instances
+                    .iter()
+                    .find(|i| i.instance_id == id)
+                    .map(|instance| match &instance.transport {
+                        TransportType::Http(http_endpoint) => {
+                            tracing::debug!(
+                                instance_id = id,
+                                http_endpoint = %http_endpoint,
+                                "Using HTTP transport for instance"
+                            );
+                            (http_endpoint.clone(), "transport.http.request")
+                        }
+                        TransportType::Tcp(tcp_endpoint) => {
+                            tracing::debug!(
+                                instance_id = id,
+                                tcp_endpoint = %tcp_endpoint,
+                                "Using TCP transport for instance"
+                            );
+                            (tcp_endpoint.clone(), "transport.tcp.request")
+                        }
+                        TransportType::Nats(subject) => {
+                            tracing::debug!(
+                                instance_id = id,
+                                subject = %subject,
+                                "Using NATS transport for instance"
+                            );
+                            (subject.clone(), "transport.nats.request")
+                        }
+                    })
+            };
 
-            match &instance.transport {
-                TransportType::Http(http_endpoint) => {
-                    tracing::debug!(
-                        instance_id = instance_id,
-                        http_endpoint = %http_endpoint,
-                        "Using HTTP transport for instance"
-                    );
-                    (http_endpoint.clone(), "transport.http.request")
-                }
-                TransportType::Tcp(tcp_endpoint) => {
-                    tracing::debug!(
-                        instance_id = instance_id,
-                        tcp_endpoint = %tcp_endpoint,
-                        "Using TCP transport for instance"
-                    );
-                    (tcp_endpoint.clone(), "transport.tcp.request")
-                }
-                TransportType::Nats(subject) => {
-                    tracing::debug!(
-                        instance_id = instance_id,
-                        subject = %subject,
-                        "Using NATS transport for instance"
-                    );
-                    (subject.clone(), "transport.nats.request")
+            if let Some(result) = resolve_transport(instance_id) {
+                result
+            } else {
+                // Instance vanished — pick a different one from the current
+                // availability list and retry the lookup once.
+                let avail = self.client.instance_ids_avail();
+                let fallback_id = avail.iter().copied().find(|&id| id != instance_id);
+                match fallback_id {
+                    Some(id) => {
+                        tracing::warn!(
+                            original_instance = instance_id,
+                            fallback_instance = id,
+                            "Instance disappeared during routing, reselecting"
+                        );
+                        instance_id = id;
+                        resolve_transport(id).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Fallback instance {} also not found for endpoint {}",
+                                id,
+                                self.client.endpoint.id()
+                            )
+                        })?
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "Instance {} not found and no other instances available \
+                             for endpoint {}",
+                            instance_id,
+                            self.client.endpoint.id()
+                        ));
+                    }
                 }
             }
         };
@@ -591,6 +644,7 @@ where
                 }
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
+                let client_for_timeout = self.client.clone();
                 let stream = stream.map(move |res| {
                     // Check if the error is migratable (indicates worker/connection failure)
                     if let Some(err) = res.err()
@@ -603,7 +657,47 @@ where
                     }
                     res
                 });
-                Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+
+                // Request-plane inactivity timeout: emit a ResponseTimeout error item
+                // when the backend stops producing output. This triggers is_inhibited()
+                // → report_instance_down() to quarantine the worker.
+                let stream: Pin<Box<dyn Stream<Item = U> + Send>> = if let Some(timeout) =
+                    self.response_timeout
+                {
+                    Box::pin(async_stream::stream! {
+                        let mut inner = Box::pin(stream);
+                        loop {
+                            tokio::select! {
+                                biased;
+                                item = inner.next() => {
+                                    match item {
+                                        Some(item) => yield item,
+                                        None => break,
+                                    }
+                                }
+                                _ = tokio::time::sleep(timeout) => {
+                                    tracing::warn!(
+                                        instance_id,
+                                        timeout_secs = timeout.as_secs(),
+                                        "backend response inactivity timeout — quarantining worker"
+                                    );
+                                    client_for_timeout.report_instance_down(instance_id);
+                                    yield U::from_err(
+                                        crate::error::DynamoError::builder()
+                                            .error_type(crate::error::ErrorType::ResponseTimeout)
+                                            .message("backend response inactivity timeout")
+                                            .build()
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    })
+                } else {
+                    Box::pin(stream)
+                };
+
+                Ok(ResponseStream::new(stream, engine_ctx))
             }
             Err(err) => {
                 if self.fault_detection_enabled && is_inhibited(err.as_ref()) {
@@ -861,6 +955,106 @@ mod tests {
 
         assert_eq!(router.select_next_worker(), None);
         assert_eq!(router.peek_next_worker(), None);
+
+        rt.shutdown();
+    }
+
+    /// When the router selects an instance that has deregistered between selection
+    /// and transport resolution, it should fall back to another available instance
+    /// rather than returning a 500 error.
+    #[tokio::test]
+    async fn transport_resolution_falls_back_when_selected_instance_disappears() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_transport_fallback".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        // Register one real instance so it appears in instance_source.
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let real_id = client.instance_ids()[0];
+
+        // Inject a stale ID into instance_avail that does NOT exist in
+        // instance_source. This simulates the race window where an instance
+        // deregistered after selection but before transport resolution.
+        let stale_id = real_id + 1000;
+        client.override_instance_avail(vec![stale_id, real_id]);
+
+        // Build a router and call direct() targeting the *real* instance to
+        // verify the router can still resolve transport for known instances.
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
+                .await
+                .unwrap();
+
+        // Round robin should succeed — even if it picks stale_id first, the
+        // fallback logic should resolve transport via real_id.
+        // We cannot fully test the network send without a worker, but we can
+        // verify it doesn't fail at the transport resolution stage by checking
+        // that the error (if any) is a transport/network error, not
+        // "Instance not found".
+        let request = SingleIn::new(42u64);
+        let result = router.generate(request).await;
+
+        // The request may fail at the network level (no actual worker), but it
+        // must NOT fail with "Instance X not found" — that would mean the
+        // fallback did not work.
+        if let Err(err) = &result {
+            let msg = format!("{err}");
+            assert!(
+                !msg.contains("not found"),
+                "Transport resolution should have fallen back, but got: {msg}"
+            );
+        }
+
+        rt.shutdown();
+    }
+
+    /// When no instances are available at all (both primary and fallback),
+    /// the router should return a clear error.
+    #[tokio::test]
+    async fn transport_resolution_errors_when_no_instances_available() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_transport_no_fallback".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        // Register an instance so we can create the router (needs transport setup).
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::RoundRobin)
+                .await
+                .unwrap();
+
+        // Override avail to contain only a stale ID with no real backing
+        // instance AND no other available fallback.
+        let stale_id = 99999;
+        client.override_instance_avail(vec![stale_id]);
+
+        let request = SingleIn::new(42u64);
+        let result = router.generate(request).await;
+
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("not found") && msg.contains("no other instances available"),
+            "Expected clear error about missing instance with no fallback, got: {msg}"
+        );
 
         rt.shutdown();
     }

@@ -132,7 +132,7 @@ func TestCreateOrGetAutoCheckpointDeduplicatesConcurrentSameHashCheckpoint(t *te
 			Name:      "friendly-checkpoint",
 			Namespace: testNamespace,
 			Labels: map[string]string{
-				consts.KubeLabelCheckpointID: hash,
+				snapshotprotocol.CheckpointIDLabel: hash,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
@@ -177,7 +177,7 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 	ckpt, err := CreateOrGetAutoCheckpoint(ctx, c, testNamespace, testIdentity(), corev1.PodTemplateSpec{})
 	require.NoError(t, err)
 	require.NotNil(t, ckpt.Annotations)
-	assert.Equal(t, consts.DefaultCheckpointArtifactVersion, ckpt.Annotations[consts.KubeAnnotationCheckpointArtifactVersion])
+	assert.Equal(t, snapshotprotocol.DefaultCheckpointArtifactVersion, ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 }
 
 // --- InjectCheckpointIntoPodSpec tests ---
