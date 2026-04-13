@@ -149,6 +149,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// must be narrower than or equal to the spec-level packDomain.
 	// +optional
 	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// Priority for worker selection routing. Higher values are preferred by the
+	// frontend when multiple workers serve the same model. Workers at the highest
+	// priority tier receive all traffic; lower tiers only receive traffic when all
+	// higher-tier workers are unhealthy. Default: 0 (lowest priority).
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Priority *int32 `json:"priority,omitempty"`
 }
 
 type MultinodeSpec struct {

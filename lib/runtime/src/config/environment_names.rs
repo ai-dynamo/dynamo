@@ -117,6 +117,11 @@ pub mod runtime {
 pub mod worker {
     /// Graceful shutdown timeout in seconds
     pub const DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT: &str = "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT";
+
+    /// Worker selection priority for tiered routing.
+    /// Higher values are preferred by the frontend when multiple workers serve the same model.
+    /// Default: 0 (lowest priority).
+    pub const DYN_WORKER_PRIORITY: &str = "DYN_WORKER_PRIORITY";
 }
 
 /// NATS transport environment variables
@@ -457,6 +462,7 @@ mod tests {
             runtime::canary::DYN_CANARY_WAIT_TIME,
             // Worker
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+            worker::DYN_WORKER_PRIORITY,
             // NATS
             nats::NATS_SERVER,
             nats::auth::NATS_AUTH_USERNAME,

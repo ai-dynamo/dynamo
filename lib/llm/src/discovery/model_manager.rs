@@ -5,7 +5,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig, protocols::WorkerId};
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{KvWorkerMonitor, Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
@@ -33,14 +33,6 @@ use crate::{
     },
 };
 
-/// State for prefill router activation rendezvous
-enum PrefillActivationState {
-    /// Decode model registered, waiting for prefill endpoint
-    DecodeWaiting(oneshot::Sender<Endpoint>),
-    /// Prefill endpoint arrived, waiting for decode model to register
-    PrefillReady(oneshot::Receiver<Endpoint>),
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum ModelManagerError {
     #[error("Model not found: {0}")]
@@ -56,15 +48,20 @@ pub enum ModelManagerError {
 /// Each WorkerSet owns a complete pipeline built from its specific configuration.
 ///
 /// Note: Don't implement Clone for this, put it in an Arc instead.
+pub(crate) struct StoredModelCard {
+    pub(crate) card: ModelDeploymentCard,
+    pub(crate) priority: u32,
+}
+
 pub struct ModelManager {
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
     /// Per-instance model cards, keyed by instance path. Used for cleanup on worker removal.
-    cards: DashMap<String, ModelDeploymentCard>,
+    cards: DashMap<String, StoredModelCard>,
 
-    /// Prefill router activation rendezvous, keyed by "model_name:namespace".
-    prefill_router_activators: DashMap<String, PrefillActivationState>,
+    /// Shared prefill endpoints for disaggregated decode WorkerSets, keyed by "model_name:namespace".
+    prefill_router_activators: DashMap<String, watch::Sender<Option<Endpoint>>>,
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
@@ -133,18 +130,35 @@ impl ModelManager {
     // -- Model cards --
 
     pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
-        self.cards.iter().map(|r| r.value().clone()).collect()
+        self.cards.iter().map(|r| r.value().card.clone()).collect()
     }
 
     /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
-        self.cards.insert(key.to_string(), card);
+        self.save_model_card_with_priority(key, card, 0)
+    }
+
+    /// Save a ModelDeploymentCard and its worker selection priority from an instance's key so we
+    /// can fetch it later when the key is deleted.
+    pub fn save_model_card_with_priority(
+        &self,
+        key: &str,
+        card: ModelDeploymentCard,
+        priority: u32,
+    ) -> anyhow::Result<()> {
+        self.cards
+            .insert(key.to_string(), StoredModelCard { card, priority });
         Ok(())
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
+        self.remove_model_card_entry(key).map(|entry| entry.card)
+    }
+
+    /// Remove and return the stored model card metadata for this instance's key.
+    pub(crate) fn remove_model_card_entry(&self, key: &str) -> Option<StoredModelCard> {
         self.cards.remove(key).map(|(_, v)| v)
     }
 
@@ -616,8 +630,8 @@ impl ModelManager {
     }
 
     // -- Prefill router coordination --
-    // Keyed by "model_name:namespace" so each namespace's decode WorkerSet gets its own
-    // prefill router activated by same-namespace prefill workers.
+    // Keyed by "model_name:namespace" so all decode WorkerSets in a namespace share
+    // the same prefill endpoint activated by same-namespace prefill workers.
 
     /// Build a key for a (model, namespace) pair. Used for prefill router activators
     /// and registration guards.
@@ -625,53 +639,40 @@ impl ModelManager {
         format!("{}:{}", model_name, namespace)
     }
 
-    /// Register a prefill router for a decode WorkerSet. Returns a receiver that will be
-    /// activated when the corresponding prefill model in the same namespace is discovered.
-    /// Returns None if a decode WorkerSet in this namespace was already registered.
+    /// Register a prefill router for a decode WorkerSet.
+    /// All decode tiers in the same namespace share the same prefill endpoint receiver.
     pub fn register_prefill_router(
         &self,
         model_name: &str,
         namespace: &str,
-    ) -> Option<oneshot::Receiver<Endpoint>> {
+    ) -> watch::Receiver<Option<Endpoint>> {
         let key = Self::model_namespace_key(model_name, namespace);
-        match self.prefill_router_activators.remove(&key) {
-            Some((_, PrefillActivationState::PrefillReady(rx))) => {
-                // Prefill endpoint already arrived - rx will immediately resolve
+        // Keep register/activate on a single shared watch channel per key.
+        // Using entry() avoids the get-then-insert race that can otherwise
+        // leave decode tiers subscribed to a channel that never gets activated.
+        match self.prefill_router_activators.entry(key) {
+            Entry::Occupied(entry) => {
                 tracing::debug!(
                     model_name = %model_name,
                     namespace = %namespace,
-                    "Prefill endpoint already available for namespace, returning receiver"
+                    "Reusing shared prefill endpoint receiver for namespace"
                 );
-                Some(rx)
+                entry.get().subscribe()
             }
-            Some((key, PrefillActivationState::DecodeWaiting(tx))) => {
-                // Decode already registered - this shouldn't happen, restore state and return None
-                tracing::error!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Decode WorkerSet already registered for this prefill router"
-                );
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
-                None
-            }
-            None => {
-                // New registration: create tx/rx pair, store sender and return receiver
-                let (tx, rx) = oneshot::channel();
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::DecodeWaiting(tx));
+            Entry::Vacant(entry) => {
+                let (tx, rx) = watch::channel(None);
+                entry.insert(tx);
                 tracing::debug!(
                     model_name = %model_name,
                     namespace = %namespace,
-                    "No prefill endpoint for namespace yet, storing sender for future activation"
+                    "No prefill endpoint for namespace yet, creating shared receiver"
                 );
-                Some(rx)
+                rx
             }
         }
     }
 
-    /// Activate a prefill router by sending the endpoint through the oneshot channel.
-    /// The namespace must match the decode WorkerSet's namespace.
+    /// Activate the shared prefill endpoint for a namespace.
     pub fn activate_prefill_router(
         &self,
         model_name: &str,
@@ -679,52 +680,25 @@ impl ModelManager {
         endpoint: Endpoint,
     ) -> anyhow::Result<()> {
         let key = Self::model_namespace_key(model_name, namespace);
-        match self.prefill_router_activators.remove(&key) {
-            Some((_, PrefillActivationState::DecodeWaiting(sender))) => {
-                sender.send(endpoint).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Failed to send endpoint to prefill router activator for {}:{}",
-                        model_name,
-                        namespace
-                    )
-                })?;
-                tracing::info!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Activated prefill router for decode WorkerSet"
-                );
-                Ok(())
+        match self.prefill_router_activators.entry(key) {
+            Entry::Occupied(entry) => {
+                entry.get().send_replace(Some(endpoint));
             }
-            Some((_, PrefillActivationState::PrefillReady(_))) => {
-                anyhow::bail!(
-                    "Prefill router for {}:{} already activated",
-                    model_name,
-                    namespace
-                );
-            }
-            None => {
-                let (tx, rx) = oneshot::channel();
-                tx.send(endpoint).map_err(|_| {
-                    anyhow::anyhow!(
-                        "Failed to send endpoint for prefill model {}:{}",
-                        model_name,
-                        namespace
-                    )
-                })?;
-                self.prefill_router_activators
-                    .insert(key, PrefillActivationState::PrefillReady(rx));
-                tracing::info!(
-                    model_name = %model_name,
-                    namespace = %namespace,
-                    "Stored prefill endpoint for future decode WorkerSet registration"
-                );
-                Ok(())
+            Entry::Vacant(entry) => {
+                let (tx, _rx) = watch::channel(Some(endpoint));
+                entry.insert(tx);
             }
         }
+        tracing::info!(
+            model_name = %model_name,
+            namespace = %namespace,
+            "Stored shared prefill endpoint for namespace"
+        );
+        Ok(())
     }
 
     /// Remove the prefill router activator for a (model, namespace) pair.
-    /// Called when a WorkerSet is removed to prevent stale activators.
+    /// Called when prefill workers are removed to prevent stale activators.
     pub fn remove_prefill_activator(&self, model_name: &str, namespace: &str) {
         let key = Self::model_namespace_key(model_name, namespace);
         if self.prefill_router_activators.remove(&key).is_some() {
@@ -749,14 +723,14 @@ impl ModelManager {
         model_entry.load_threshold_config(config)
     }
 
-    /// Gets an existing worker monitor for a specific namespace of a model.
-    pub fn get_worker_monitor_for_namespace(
+    /// Gets an existing worker monitor for a specific worker-set key of a model.
+    pub fn get_worker_monitor_for_worker_set(
         &self,
         model: &str,
-        namespace: &str,
+        worker_set_key: &str,
     ) -> Option<KvWorkerMonitor> {
         let model_entry = self.models.get(model)?;
-        model_entry.get_worker_monitor_for_namespace(namespace)
+        model_entry.get_worker_monitor_for_worker_set(worker_set_key)
     }
 
     /// Lists all models with worker monitors configured.
@@ -1018,21 +992,20 @@ mod tests {
     fn test_prefill_router_register_new() {
         let mm = ModelManager::new();
 
-        // First registration for a (model, namespace) returns Some(rx)
+        // First registration for a (model, namespace) returns a receiver with no endpoint yet.
         let rx = mm.register_prefill_router("llama", "ns1");
-        assert!(rx.is_some());
+        assert!(rx.borrow().is_none());
     }
 
     #[test]
-    fn test_prefill_router_double_register_returns_none() {
+    fn test_prefill_router_same_namespace_shares_receiver() {
         let mm = ModelManager::new();
 
         let rx1 = mm.register_prefill_router("llama", "ns1");
-        assert!(rx1.is_some());
+        assert!(rx1.borrow().is_none());
 
-        // Second registration for the same (model, namespace) returns None
         let rx2 = mm.register_prefill_router("llama", "ns1");
-        assert!(rx2.is_none());
+        assert!(rx2.borrow().is_none());
     }
 
     #[test]
@@ -1042,8 +1015,8 @@ mod tests {
         // Different namespaces should be independent
         let rx1 = mm.register_prefill_router("llama", "ns1");
         let rx2 = mm.register_prefill_router("llama", "ns2");
-        assert!(rx1.is_some());
-        assert!(rx2.is_some());
+        assert!(rx1.borrow().is_none());
+        assert!(rx2.borrow().is_none());
     }
 
     #[test]
@@ -1053,8 +1026,8 @@ mod tests {
         // Different models should be independent
         let rx1 = mm.register_prefill_router("llama", "ns1");
         let rx2 = mm.register_prefill_router("gpt", "ns1");
-        assert!(rx1.is_some());
-        assert!(rx2.is_some());
+        assert!(rx1.borrow().is_none());
+        assert!(rx2.borrow().is_none());
     }
 
     #[test]
@@ -1062,14 +1035,14 @@ mod tests {
         let mm = ModelManager::new();
 
         let rx = mm.register_prefill_router("llama", "ns1");
-        assert!(rx.is_some());
+        assert!(rx.borrow().is_none());
 
         // Remove the activator
         mm.remove_prefill_activator("llama", "ns1");
 
         // Should be able to register again
         let rx2 = mm.register_prefill_router("llama", "ns1");
-        assert!(rx2.is_some());
+        assert!(rx2.borrow().is_none());
     }
 
     #[test]
@@ -1077,6 +1050,60 @@ mod tests {
         let mm = ModelManager::new();
         // Should not panic
         mm.remove_prefill_activator("llama", "ns1");
+    }
+
+    #[tokio::test]
+    async fn test_prefill_router_same_namespace_receivers_share_activation() {
+        let mm = ModelManager::new();
+        let rx1 = mm.register_prefill_router("llama", "ns1");
+        let rx2 = mm.register_prefill_router("llama", "ns1");
+
+        let rt = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            rt.clone(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("test-prefill-router")
+            .unwrap()
+            .component("prefill")
+            .unwrap()
+            .endpoint("generate");
+
+        mm.activate_prefill_router("llama", "ns1", endpoint.clone())
+            .unwrap();
+
+        assert_eq!(rx1.borrow().as_ref().map(|e| e.id()), Some(endpoint.id()));
+        assert_eq!(rx2.borrow().as_ref().map(|e| e.id()), Some(endpoint.id()));
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_prefill_router_late_registration_observes_existing_endpoint() {
+        let mm = ModelManager::new();
+
+        let rt = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            rt.clone(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace("test-prefill-router-late")
+            .unwrap()
+            .component("prefill")
+            .unwrap()
+            .endpoint("generate");
+
+        mm.activate_prefill_router("llama", "ns1", endpoint.clone())
+            .unwrap();
+
+        let rx = mm.register_prefill_router("llama", "ns1");
+        assert_eq!(rx.borrow().as_ref().map(|e| e.id()), Some(endpoint.id()));
+        rt.shutdown();
     }
 
     #[test]

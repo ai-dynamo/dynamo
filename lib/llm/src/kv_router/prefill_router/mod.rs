@@ -50,8 +50,8 @@ pub struct PrefillRouter {
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
-    /// Namespace used to look up the correct WorkerSet's worker monitor
-    namespace: String,
+    /// Decode WorkerSet key used to look up the correct worker monitor
+    worker_set_key: String,
     is_eagle: bool,
 }
 

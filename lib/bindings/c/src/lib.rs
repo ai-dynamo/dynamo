@@ -775,7 +775,7 @@ pub unsafe extern "C" fn create_routers(
         let mut prefill_config = kv_router_config;
         prefill_config.router_track_active_blocks = false;
 
-        let (prefill_tx, prefill_rx) = tokio::sync::oneshot::channel();
+        let (prefill_tx, prefill_rx) = tokio::sync::watch::channel(None);
         let prefill_router = PrefillRouter::new(
             prefill_rx,
             model_manager.clone(),
@@ -1360,7 +1360,7 @@ async fn init_preprocessor(
 fn spawn_prefill_discovery_watcher(
     drt: DistributedRuntime,
     target_namespace: String,
-    tx: tokio::sync::oneshot::Sender<dynamo_runtime::component::Endpoint>,
+    tx: tokio::sync::watch::Sender<Option<dynamo_runtime::component::Endpoint>>,
 ) {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_runtime::discovery::DiscoveryInstance;
@@ -1408,7 +1408,7 @@ fn spawn_prefill_discovery_watcher(
                             && let Ok(comp) = ns.component(component)
                         {
                             let ep = comp.endpoint(endpoint);
-                            if tx.send(ep).is_err() {
+                            if tx.send(Some(ep)).is_err() {
                                 tracing::debug!("PrefillRouter activation channel already closed");
                             }
                             return;
