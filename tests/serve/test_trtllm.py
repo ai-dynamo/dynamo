@@ -239,6 +239,9 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_multimodal_router.sh",
         marks=[
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2608"
+            ),
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,

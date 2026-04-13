@@ -41,6 +41,7 @@ import (
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -961,7 +962,7 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 	// the old pod is terminated before the restore placeholder is started.
 	if podTemplateSpec != nil &&
 		podTemplateSpec.Labels != nil &&
-		podTemplateSpec.Labels[commonconsts.KubeLabelIsRestoreTarget] == commonconsts.KubeLabelValueTrue {
+		podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue {
 		strategy = appsv1.DeploymentStrategy{
 			Type: appsv1.RecreateDeploymentStrategyType,
 		}

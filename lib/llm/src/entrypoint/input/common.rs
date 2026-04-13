@@ -106,6 +106,7 @@ pub async fn prepare_engine(
                 model_manager.clone(),
                 RouterConfig::default(),
                 local_model.migration_limit(),
+                local_model.migration_max_seq_len(),
                 None,
                 prefill_load_estimator,
                 metrics,
@@ -221,6 +222,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -250,6 +252,7 @@ where
         prefill_chooser,
         enforce_disagg,
         migration_limit,
+        migration_max_seq_len,
         metrics,
     )
     .await
@@ -268,6 +271,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -283,7 +287,8 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
-    let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
+    let migration =
+        Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics).into_operator();
     let min_initial_workers = min_initial_workers_from_env()?;
 
     // For KV routing, use the client from the chooser to ensure shared state
