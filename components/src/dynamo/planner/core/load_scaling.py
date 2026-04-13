@@ -436,8 +436,14 @@ class LoadScalingMixin:
             return None
 
         is_latency = self._config.optimization_target == "latency"
-        up_thresh = _PREFILL_LATENCY_SCALE_UP if is_latency else _PREFILL_THROUGHPUT_SCALE_UP
-        down_thresh = _PREFILL_LATENCY_SCALE_DOWN if is_latency else _PREFILL_THROUGHPUT_SCALE_DOWN
+        up_thresh = (
+            _PREFILL_LATENCY_SCALE_UP if is_latency else _PREFILL_THROUGHPUT_SCALE_UP
+        )
+        down_thresh = (
+            _PREFILL_LATENCY_SCALE_DOWN
+            if is_latency
+            else _PREFILL_THROUGHPUT_SCALE_DOWN
+        )
 
         ratios: list[float] = []
         for (wid, dp), fpm in fpm_stats.items():
@@ -489,9 +495,7 @@ class LoadScalingMixin:
         d_caps = self._capabilities.decode
         max_kv = d_caps.max_kv_tokens if d_caps else None
         if not max_kv or max_kv <= 0:
-            logger.warning(
-                "max_kv_tokens not available, skipping easy decode scaling"
-            )
+            logger.warning("max_kv_tokens not available, skipping easy decode scaling")
             self._diag_load_reason = "insufficient_data"
             return None
         if num_workers == 0:
@@ -499,8 +503,12 @@ class LoadScalingMixin:
             return None
 
         is_latency = self._config.optimization_target == "latency"
-        up_thresh = _DECODE_LATENCY_SCALE_UP if is_latency else _DECODE_THROUGHPUT_SCALE_UP
-        down_thresh = _DECODE_LATENCY_SCALE_DOWN if is_latency else _DECODE_THROUGHPUT_SCALE_DOWN
+        up_thresh = (
+            _DECODE_LATENCY_SCALE_UP if is_latency else _DECODE_THROUGHPUT_SCALE_UP
+        )
+        down_thresh = (
+            _DECODE_LATENCY_SCALE_DOWN if is_latency else _DECODE_THROUGHPUT_SCALE_DOWN
+        )
 
         utils: list[float] = []
         for (wid, dp), fpm in fpm_stats.items():
@@ -542,9 +550,7 @@ class LoadScalingMixin:
         d_caps = self._capabilities.decode
         max_kv = d_caps.max_kv_tokens if d_caps else None
         if not max_kv or max_kv <= 0:
-            logger.warning(
-                "max_kv_tokens not available, skipping easy agg scaling"
-            )
+            logger.warning("max_kv_tokens not available, skipping easy agg scaling")
             self._diag_load_reason = "insufficient_data"
             return None
         if num_workers == 0:
@@ -552,8 +558,12 @@ class LoadScalingMixin:
             return None
 
         is_latency = self._config.optimization_target == "latency"
-        up_thresh = _DECODE_LATENCY_SCALE_UP if is_latency else _DECODE_THROUGHPUT_SCALE_UP
-        down_thresh = _DECODE_LATENCY_SCALE_DOWN if is_latency else _DECODE_THROUGHPUT_SCALE_DOWN
+        up_thresh = (
+            _DECODE_LATENCY_SCALE_UP if is_latency else _DECODE_THROUGHPUT_SCALE_UP
+        )
+        down_thresh = (
+            _DECODE_LATENCY_SCALE_DOWN if is_latency else _DECODE_THROUGHPUT_SCALE_DOWN
+        )
 
         utils: list[float] = []
         for (wid, dp), fpm in fpm_stats.items():

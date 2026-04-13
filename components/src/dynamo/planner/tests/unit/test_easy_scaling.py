@@ -307,13 +307,15 @@ class TestDecodeThroughputEasy:
             mode="decode", optimization_target="throughput", caps=_decode_caps()
         )
         # util = (40000 + 0) / 100000 = 0.4 < 0.6
-        fpm1 = _make_fpm(worker_id="w1", sum_decode_kv_tokens=40000, queued_decode_kv_tokens=0)
-        fpm2 = _make_fpm(worker_id="w2", sum_decode_kv_tokens=40000, queued_decode_kv_tokens=0)
+        fpm1 = _make_fpm(
+            worker_id="w1", sum_decode_kv_tokens=40000, queued_decode_kv_tokens=0
+        )
+        fpm2 = _make_fpm(
+            worker_id="w2", sum_decode_kv_tokens=40000, queued_decode_kv_tokens=0
+        )
         tick = TickInput(
             now_s=5.0,
-            fpm_observations=FpmObservations(
-                decode={("w1", 0): fpm1, ("w2", 0): fpm2}
-            ),
+            fpm_observations=FpmObservations(decode={("w1", 0): fpm1, ("w2", 0): fpm2}),
             worker_counts=WorkerCounts(ready_num_decode=2),
         )
         effects = core.on_tick(_tick_for(tick), tick)
@@ -325,13 +327,15 @@ class TestDecodeThroughputEasy:
             mode="decode", optimization_target="throughput", caps=_decode_caps()
         )
         # util = (70000 + 0) / 100000 = 0.7 -> between 0.6 and 1.0
-        fpm1 = _make_fpm(worker_id="w1", sum_decode_kv_tokens=70000, queued_decode_kv_tokens=0)
-        fpm2 = _make_fpm(worker_id="w2", sum_decode_kv_tokens=70000, queued_decode_kv_tokens=0)
+        fpm1 = _make_fpm(
+            worker_id="w1", sum_decode_kv_tokens=70000, queued_decode_kv_tokens=0
+        )
+        fpm2 = _make_fpm(
+            worker_id="w2", sum_decode_kv_tokens=70000, queued_decode_kv_tokens=0
+        )
         tick = TickInput(
             now_s=5.0,
-            fpm_observations=FpmObservations(
-                decode={("w1", 0): fpm1, ("w2", 0): fpm2}
-            ),
+            fpm_observations=FpmObservations(decode={("w1", 0): fpm1, ("w2", 0): fpm2}),
             worker_counts=WorkerCounts(ready_num_decode=2),
         )
         effects = core.on_tick(_tick_for(tick), tick)
@@ -362,13 +366,15 @@ class TestDecodeLatencyEasy:
             mode="decode", optimization_target="latency", caps=_decode_caps()
         )
         # util = (5000 + 0) / 100000 = 0.05 < 0.1
-        fpm1 = _make_fpm(worker_id="w1", sum_decode_kv_tokens=5000, queued_decode_kv_tokens=0)
-        fpm2 = _make_fpm(worker_id="w2", sum_decode_kv_tokens=5000, queued_decode_kv_tokens=0)
+        fpm1 = _make_fpm(
+            worker_id="w1", sum_decode_kv_tokens=5000, queued_decode_kv_tokens=0
+        )
+        fpm2 = _make_fpm(
+            worker_id="w2", sum_decode_kv_tokens=5000, queued_decode_kv_tokens=0
+        )
         tick = TickInput(
             now_s=5.0,
-            fpm_observations=FpmObservations(
-                decode={("w1", 0): fpm1, ("w2", 0): fpm2}
-            ),
+            fpm_observations=FpmObservations(decode={("w1", 0): fpm1, ("w2", 0): fpm2}),
             worker_counts=WorkerCounts(ready_num_decode=2),
         )
         effects = core.on_tick(_tick_for(tick), tick)
@@ -548,9 +554,7 @@ class TestAggEasy:
         )
         tick = TickInput(
             now_s=5.0,
-            fpm_observations=FpmObservations(
-                decode={("w1", 0): fpm1, ("w2", 0): fpm2}
-            ),
+            fpm_observations=FpmObservations(decode={("w1", 0): fpm1, ("w2", 0): fpm2}),
             worker_counts=WorkerCounts(ready_num_decode=2),
         )
         effects = core.on_tick(_tick_for(tick), tick)
