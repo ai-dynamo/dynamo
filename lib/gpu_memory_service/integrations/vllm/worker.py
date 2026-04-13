@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import sys
 from contextlib import nullcontext
 from typing import List, Optional
@@ -30,7 +31,7 @@ from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, get_gms_lock_mode
 from gpu_memory_service.integrations.vllm.model_loader import (
-    get_mx_ctx,
+    get_mx_load_context,
     register_gms_loader,
 )
 from gpu_memory_service.integrations.vllm.patches import (
@@ -59,6 +60,20 @@ patch_memory_snapshot()
 apply_shadow_mode_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
+
+# MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency)
+if os.environ.get("MX_ENABLED", "0") == "1":
+    try:
+        from modelexpress.load_strategy import (
+            publish_metadata,
+            register_tensors,
+            unpublish_metadata,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "MX_ENABLED=1 but modelexpress is not installed. "
+            "Install with: pip install modelexpress"
+        ) from e
 
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
@@ -237,11 +252,9 @@ class GMSWorker(Worker):
 
         # Unpublish MX metadata before GMS unmap (CUDA handles still valid).
         # Stops heartbeat + worker gRPC server, marks STALE on MX server.
-        mx_ctx = get_mx_ctx()
+        mx_ctx = get_mx_load_context()
         if mx_ctx is not None:
             try:
-                from modelexpress.load_strategy import unpublish_metadata
-
                 unpublish_metadata(mx_ctx)
             except Exception as e:
                 logger.warning("[GMS-MX] Unpublish failed during sleep: %s", e)
@@ -322,14 +335,9 @@ class GMSWorker(Worker):
                 sys.exit(1)
 
             # Re-register MX after GMS remap (new handles, same VAs)
-            mx_ctx = get_mx_ctx()
+            mx_ctx = get_mx_load_context()
             if mx_ctx is not None:
                 try:
-                    from modelexpress.load_strategy import (
-                        publish_metadata,
-                        register_tensors,
-                    )
-
                     register_tensors(self.model_runner.model, mx_ctx)
                     publish_metadata(mx_ctx)
                 except Exception as e:

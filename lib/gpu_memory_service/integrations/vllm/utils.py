@@ -12,14 +12,17 @@ _logging_configured = False
 
 
 def configure_gms_logging() -> None:
-    """Attach a handler to gpu_memory_service and modelexpress loggers.
+    """Attach a handler to the gpu_memory_service logger.
 
     vLLM only configures the ``vllm`` logger. Without this, all
-    ``gpu_memory_service.*`` and ``modelexpress.*`` log messages are
-    silently dropped inside the EngineCore worker process.
+    ``gpu_memory_service.*`` log messages are silently dropped inside
+    the EngineCore worker process.
 
-    Reuses vLLM's handler and formatter when available so that GMS/MX
+    Reuses vLLM's handler and formatter when available so that GMS
     log lines match the surrounding vLLM output style.
+
+    ModelExpress configures its own logger separately via
+    ``modelexpress.configure_logging()``.
     """
     global _logging_configured
     if _logging_configured:
@@ -38,11 +41,10 @@ def configure_gms_logging() -> None:
             )
         )
 
-    for name in ("gpu_memory_service", "modelexpress"):
-        lg = logging.getLogger(name)
-        if not lg.handlers:
-            lg.addHandler(handler)
-            lg.setLevel(logging.INFO)
+    gms_logger = logging.getLogger("gpu_memory_service")
+    if not gms_logger.handlers:
+        gms_logger.addHandler(handler)
+        gms_logger.setLevel(logging.INFO)
 
 
 def is_shadow_mode() -> bool:

@@ -29,6 +29,20 @@ from gpu_memory_service.integrations.common.utils import (
     strip_gms_model_loader_config,
 )
 
+if os.environ.get("MX_ENABLED", "0") == "1":
+    try:
+        from modelexpress.load_strategy import (
+            LoadStrategyChain,
+            build_load_context,
+            publish_metadata,
+            register_tensors,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "MX_ENABLED=1 but modelexpress is not installed. "
+            "Install with: pip install modelexpress"
+        ) from e
+
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
@@ -56,15 +70,14 @@ def get_imported_weights_bytes() -> int:
 _mx_ctx = None  # type: LoadContext | None
 
 
-def get_mx_ctx(
+def get_mx_load_context(
     vllm_config=None,
     model_config=None,
-    device_id: int | None = None,
 ):
     """Get or create the process-global MX LoadContext singleton.
 
     With no arguments, returns the existing instance (or None).
-    When all arguments are provided, creates the singleton on first call.
+    When both arguments are provided, creates the singleton on first call.
     Checks MX_ENABLED env var, modelexpress installation, and NIXL
     availability.
     """
@@ -72,55 +85,17 @@ def get_mx_ctx(
     if _mx_ctx is not None:
         return _mx_ctx
 
-    if vllm_config is None or model_config is None or device_id is None:
+    if vllm_config is None or model_config is None:
         return None
 
     if os.environ.get("MX_ENABLED", "0") != "1":
         return None
 
-    try:
-        from modelexpress.client import MxClient
-        from modelexpress.load_strategy import LoadContext
-        from modelexpress.metadata import build_source_identity
-        from modelexpress.nixl_transfer import is_nixl_available
-    except ImportError:
-        logger.warning(
-            "[GMS-MX] MX_ENABLED=1 but modelexpress is not installed. "
-            "Skipping MX integration."
-        )
-        return None
-
-    if not is_nixl_available():
-        logger.warning(
-            "[GMS-MX] MX_ENABLED=1 but NIXL is not available. "
-            "Skipping MX integration."
-        )
-        return None
-
-    import uuid
-
-    try:
-        import torch.distributed as dist
-
-        global_rank = dist.get_rank() if dist.is_initialized() else device_id
-    except Exception:
-        global_rank = device_id
-
-    _mx_ctx = LoadContext(
-        vllm_config=vllm_config,
-        model_config=model_config,
-        load_config=vllm_config.load_config,
-        target_device=torch.device("cuda", device_id),
-        global_rank=global_rank,
-        device_id=device_id,
-        identity=build_source_identity(vllm_config, model_config),
-        mx_client=MxClient(),
-        worker_id=uuid.uuid4().hex[:8],
-    )
+    _mx_ctx = build_load_context(vllm_config, model_config)
     logger.info(
         "[GMS-MX] Created MX context (rank=%d, device=%d)",
-        global_rank,
-        device_id,
+        _mx_ctx.global_rank,
+        _mx_ctx.device_id,
     )
     return _mx_ctx
 
@@ -198,10 +173,8 @@ def _load_read_mode(
         materialize_module_from_gms(gms_client, model, device_index=device_index)
 
         # MX: register materialized tensors (available for P2P transfer)
-        mx_ctx = get_mx_ctx(vllm_config, model_config, device_index)
+        mx_ctx = get_mx_load_context(vllm_config, model_config)
         if mx_ctx is not None:
-            from modelexpress.load_strategy import publish_metadata, register_tensors
-
             try:
                 register_tensors(model, mx_ctx)
                 publish_metadata(mx_ctx)
@@ -243,8 +216,7 @@ def _load_write_mode(
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
-    device_id = target_device.index
-    mx_ctx = get_mx_ctx(vllm_config, model_config, device_id)
+    mx_ctx = get_mx_load_context(vllm_config, model_config)
 
     # Allocate model tensors using GMS memory pool
     with set_default_torch_dtype(model_config.dtype):
@@ -255,14 +227,9 @@ def _load_write_mode(
                 )
 
             if mx_ctx is not None:
-                # Full MX strategy chain: RDMA -> ModelStreamer -> GDS -> Default
-                # Chain handles weight loading, post-processing, NIXL registration,
-                # and metadata publishing.
-                from modelexpress.load_strategy import LoadStrategyChain
-
+                # Full MX load strategy chain: RDMA -> ModelStreamer -> GDS -> Default
                 LoadStrategyChain.run(model, mx_ctx)
             else:
-                # No MX: load from disk (existing behavior)
                 default_loader.load_weights(model, model_config)
                 process_weights_after_loading(model, model_config, target_device)
 
