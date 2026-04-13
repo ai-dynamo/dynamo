@@ -243,9 +243,14 @@ impl ModelWatcher {
 
                     match self.handle_put(&mcid, &mut card).await {
                         Ok(()) => {
+                            let mut available_chat_models =
+                                self.manager.list_chat_completions_models();
+                            available_chat_models.sort_unstable();
                             tracing::info!(
                                 model_name = card.name(),
                                 namespace = mcid.namespace,
+                                has_decode_model = self.manager.has_decode_model(card.name()),
+                                available_chat_models = ?available_chat_models,
                                 "added model"
                             );
                             self.notify_on_model.notify_waiters();
@@ -277,7 +282,14 @@ impl ModelWatcher {
                         .await
                     {
                         Ok(Some(model_name)) => {
-                            tracing::info!(model_name, "removed model");
+                            let mut available_chat_models =
+                                self.manager.list_chat_completions_models();
+                            available_chat_models.sort_unstable();
+                            tracing::info!(
+                                model_name,
+                                available_chat_models = ?available_chat_models,
+                                "removed model"
+                            );
                         }
                         Ok(None) => {
                             // There are other instances running this model, nothing to do
@@ -330,9 +342,14 @@ impl ModelWatcher {
                 // remove_prefill_activator uses deployment namespace (not ws_key)
                 self.manager
                     .remove_prefill_activator(&model_name, worker_namespace);
+                let mut available_chat_models = self.manager.list_chat_completions_models();
+                available_chat_models.sort_unstable();
                 tracing::info!(
                     model_name,
                     namespace = %worker_namespace,
+                    worker_set_key = %ws_key,
+                    has_decode_model = self.manager.has_decode_model(&model_name),
+                    available_chat_models = ?available_chat_models,
                     "Removed WorkerSet (no remaining instances in namespace)"
                 );
             }

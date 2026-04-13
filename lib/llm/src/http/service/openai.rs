@@ -258,6 +258,60 @@ impl From<HttpError> for ErrorMessage {
     }
 }
 
+fn log_model_lookup_failure(
+    state: &service_v2::State,
+    request_id: &str,
+    endpoint: &str,
+    model: &str,
+) {
+    let manager = state.manager();
+    let mut available_chat_models = manager.list_chat_completions_models();
+    let mut available_completion_models = manager.list_completions_models();
+    available_chat_models.sort_unstable();
+    available_completion_models.sort_unstable();
+
+    tracing::warn!(
+        request_id,
+        endpoint,
+        requested_model = model,
+        has_decode_model = manager.has_decode_model(model),
+        has_any_model_state = manager.has_model_any(model),
+        known_model_cards = manager.get_model_cards().len(),
+        available_chat_models = ?available_chat_models,
+        available_completion_models = ?available_completion_models,
+        "Model lookup failed"
+    );
+}
+
+fn log_engine_generate_failure(request_id: &str, endpoint: &str, model: &str, err: &anyhow::Error) {
+    tracing::error!(
+        request_id,
+        endpoint,
+        requested_model = model,
+        rejected = super::metrics::request_was_rejected(err.as_ref()),
+        error = %err,
+        error_chain = format!("{err:#}"),
+        "Engine generate failed"
+    );
+}
+
+fn log_backend_error_response(
+    request_id: &str,
+    endpoint: &str,
+    model: &str,
+    error_response: &ErrorResponse,
+) {
+    tracing::error!(
+        request_id,
+        endpoint,
+        requested_model = model,
+        status = error_response.0.as_u16(),
+        error_type = error_response.1.0.error_type.as_str(),
+        message = error_response.1.0.message.as_str(),
+        "Backend error detected before response aggregation"
+    );
+}
+
 // Problem: Currently we are using JSON from axum as the request validator. Whenever there is an invalid JSON, it will return a 422.
 // But all the downstream apps that relies on openai based APIs, expects to get 400 for all these cases otherwise they fail badly
 // Solution: Intercept the response from handlers and convert ANY 422 status codes to 400 with the actual error message.
@@ -452,6 +506,7 @@ async fn completions_single(
         .manager()
         .get_completions_engine_with_parsing(&model)
         .map_err(|_| {
+            log_model_lookup_failure(&state, &request_id, "completions", &model);
             let err_response = ErrorMessage::model_not_found();
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
@@ -469,6 +524,7 @@ async fn completions_single(
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Completions);
         }
+        log_engine_generate_failure(&request_id, "completions", &model, &e);
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -592,6 +648,7 @@ async fn completions_batch(
         .manager()
         .get_completions_engine_with_parsing(&model)
         .map_err(|_| {
+            log_model_lookup_failure(&state, &request_id, "completions_batch", &model);
             let err_response = ErrorMessage::model_not_found();
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
@@ -625,6 +682,7 @@ async fn completions_batch(
                     .metrics_clone()
                     .inc_rejection(&model, super::metrics::Endpoint::Completions);
             }
+            log_engine_generate_failure(&request_id, "completions_batch", &model, &e);
             let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
@@ -978,6 +1036,15 @@ pub(super) async fn check_for_backend_error(
     if let Some(first_event) = stream.next().await {
         // Check if it's an error event
         if let Some((error_msg, status_code)) = extract_backend_error_if_present(&first_event) {
+            tracing::error!(
+                status = status_code.as_u16(),
+                first_event_id = first_event.id.as_deref().unwrap_or(""),
+                backend_event = first_event.event.as_deref().unwrap_or(""),
+                has_data = first_event.data.is_some(),
+                comments = ?first_event.comment,
+                message = error_msg.as_str(),
+                "Backend returned an error in the first stream event"
+            );
             return Err((
                 status_code,
                 Json(ErrorMessage {
@@ -1183,6 +1250,7 @@ async fn chat_completions(
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|_| {
+            log_model_lookup_failure(&state, &request_id, "chat_completions", &model);
             let err_response = ErrorMessage::model_not_found();
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
@@ -1199,6 +1267,7 @@ async fn chat_completions(
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
         }
+        log_engine_generate_failure(&request_id, "chat_completions", &model, &e);
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -1291,7 +1360,12 @@ async fn chat_completions(
             check_for_backend_error(stream)
                 .await
                 .map_err(|error_response| {
-                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    log_backend_error_response(
+                        &request_id,
+                        "chat_completions",
+                        &model,
+                        &error_response,
+                    );
                     inflight_guard.mark_error(extract_error_type_from_response(&error_response));
                     error_response
                 })?;
@@ -1595,6 +1669,7 @@ async fn responses(
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|_| {
+            log_model_lookup_failure(&state, &request_id, "responses", &model);
             let err_response = ErrorMessage::model_not_found();
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
@@ -1611,6 +1686,7 @@ async fn responses(
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::Responses);
         }
+        log_engine_generate_failure(&request_id, "responses", &model, &e);
         let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
@@ -1714,7 +1790,7 @@ async fn responses(
             check_for_backend_error(engine_stream)
                 .await
                 .map_err(|error_response| {
-                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                    log_backend_error_response(&request_id, "responses", &model, &error_response);
                     inflight_guard.mark_error(extract_error_type_from_response(&error_response));
                     error_response
                 })?;
