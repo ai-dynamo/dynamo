@@ -245,7 +245,6 @@ class MinioService:
             snapshot_download(
                 self.config.lora_repo,
                 local_dir=self._temp_download_dir,
-                local_dir_use_symlinks=False,
             )
         finally:
             if old_offline is not None:
