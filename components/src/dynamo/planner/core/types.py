@@ -116,6 +116,11 @@ class TickDiagnostics:
     load_decision_reason: Optional[str] = None
     throughput_decision_reason: Optional[str] = None
 
+    # Easy-mode: max queued prefill tokens / context_length across engines
+    easy_prefill_queue_ratio: Optional[float] = None
+    # Easy-mode: max KV cache utilization across engines
+    easy_decode_kv_utilization: Optional[float] = None
+
 
 @dataclass
 class PlannerEffects:
@@ -134,6 +139,7 @@ class EngineCapabilities:
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
+    max_kv_tokens: Optional[int] = None
 
 
 @dataclass

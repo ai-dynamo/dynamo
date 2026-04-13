@@ -77,6 +77,7 @@ def _engine_caps(
         else None,
         max_num_seqs=worker_info.max_num_seqs if worker_info else None,
         context_length=worker_info.context_length if worker_info else None,
+        max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
     )
 
 
@@ -595,6 +596,11 @@ class NativePlannerBase:
 
         pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
         pm.throughput_scaling_decision.state(diag.throughput_decision_reason or "unset")
+
+        if diag.easy_prefill_queue_ratio is not None:
+            pm.easy_prefill_queue_ratio.set(diag.easy_prefill_queue_ratio)
+        if diag.easy_decode_kv_utilization is not None:
+            pm.easy_decode_kv_utilization.set(diag.easy_decode_kv_utilization)
 
     # ------------------------------------------------------------------
     # Main loop

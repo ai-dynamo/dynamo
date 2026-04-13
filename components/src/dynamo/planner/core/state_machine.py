@@ -66,31 +66,34 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._is_agg = config.mode == "agg"
         self._has_prefill = config.mode in ("disagg", "prefill")
         self._has_decode = config.mode in ("disagg", "decode", "agg")
+        self._is_easy = config.optimization_target != "sla"
 
-        if self._is_agg:
-            self._agg_regression = AggRegressionModel(
-                max_num_fpm_samples=config.max_num_fpm_samples,
-                min_observations=config.load_min_observations,
-                bucket_count=config.fpm_sample_bucket_size,
-            )
-        else:
-            if self._has_prefill:
-                self._prefill_regression = PrefillRegressionModel(
+        # Easy mode uses static thresholds -- no regression or predictors needed
+        if not self._is_easy:
+            if self._is_agg:
+                self._agg_regression = AggRegressionModel(
                     max_num_fpm_samples=config.max_num_fpm_samples,
                     min_observations=config.load_min_observations,
                     bucket_count=config.fpm_sample_bucket_size,
                 )
-            if self._has_decode:
-                self._decode_regression = DecodeRegressionModel(
-                    max_num_fpm_samples=config.max_num_fpm_samples,
-                    min_observations=config.load_min_observations,
-                    bucket_count=config.fpm_sample_bucket_size,
-                )
+            else:
+                if self._has_prefill:
+                    self._prefill_regression = PrefillRegressionModel(
+                        max_num_fpm_samples=config.max_num_fpm_samples,
+                        min_observations=config.load_min_observations,
+                        bucket_count=config.fpm_sample_bucket_size,
+                    )
+                if self._has_decode:
+                    self._decode_regression = DecodeRegressionModel(
+                        max_num_fpm_samples=config.max_num_fpm_samples,
+                        min_observations=config.load_min_observations,
+                        bucket_count=config.fpm_sample_bucket_size,
+                    )
 
-        predictor_cls = LOAD_PREDICTORS[config.load_predictor]
-        self._num_req_predictor = predictor_cls(config)
-        self._isl_predictor = predictor_cls(config)
-        self._osl_predictor = predictor_cls(config)
+            predictor_cls = LOAD_PREDICTORS[config.load_predictor]
+            self._num_req_predictor = predictor_cls(config)
+            self._isl_predictor = predictor_cls(config)
+            self._osl_predictor = predictor_cls(config)
 
         self._num_p_workers: int = 0
         self._num_d_workers: int = 0
@@ -113,6 +116,8 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_engine_rps_decode: Optional[float] = None
         self._diag_load_reason: Optional[str] = None
         self._diag_throughput_reason: Optional[str] = None
+        self._diag_easy_prefill_queue_ratio: Optional[float] = None
+        self._diag_easy_decode_kv_util: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -163,7 +168,8 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
 
         if tick.run_load_scaling:
             if tick_input.fpm_observations is not None:
-                self._observe_fpm(tick_input.fpm_observations)
+                if not self._is_easy:
+                    self._observe_fpm(tick_input.fpm_observations)
                 load_decision = self._advance_load(tick_input.fpm_observations)
                 if load_decision is not None:
                     effects.scale_to = load_decision
@@ -194,6 +200,8 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_engine_rps_decode = None
         self._diag_load_reason = None
         self._diag_throughput_reason = None
+        self._diag_easy_prefill_queue_ratio = None
+        self._diag_easy_decode_kv_util = None
 
     def _build_diagnostics(self) -> TickDiagnostics:
         return TickDiagnostics(
@@ -206,6 +214,8 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             engine_rps_decode=self._diag_engine_rps_decode,
             load_decision_reason=self._diag_load_reason,
             throughput_decision_reason=self._diag_throughput_reason,
+            easy_prefill_queue_ratio=self._diag_easy_prefill_queue_ratio,
+            easy_decode_kv_utilization=self._diag_easy_decode_kv_util,
         )
 
     # ------------------------------------------------------------------
