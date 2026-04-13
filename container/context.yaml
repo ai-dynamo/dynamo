@@ -71,7 +71,7 @@ vllm:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
-  enable_modelexpress_p2p: "false"
+  enable_modelexpress_p2p: "true"
   modelexpress_ref: "7c4853a61111dca83f457485f244cadeeda33651"
 
 sglang:
