@@ -24,6 +24,8 @@ const KIMI_PATTERN: &str = r#"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p
 pub struct TikTokenTokenizer {
     bpe: CoreBPE,
     special_token_ids: HashSet<u32>,
+    decoder_tokens: FxHashMap<u32, Vec<u8>>,
+    special_tokens_decoder: FxHashMap<u32, Vec<u8>>,
 }
 
 impl TikTokenTokenizer {
@@ -39,6 +41,14 @@ impl TikTokenTokenizer {
         special_tokens: FxHashMap<String, u32>,
     ) -> Result<Self> {
         let encoder = parse_tiktoken_file(path)?;
+        let decoder_tokens: FxHashMap<u32, Vec<u8>> = encoder
+            .iter()
+            .map(|(bytes, &id)| (id, bytes.clone()))
+            .collect();
+        let special_tokens_decoder: FxHashMap<u32, Vec<u8>> = special_tokens
+            .iter()
+            .map(|(token, &id)| (id, token.as_bytes().to_vec()))
+            .collect();
         let special_token_ids: HashSet<u32> = special_tokens.values().copied().collect();
 
         let bpe = CoreBPE::new(encoder, special_tokens, pattern)
@@ -47,6 +57,8 @@ impl TikTokenTokenizer {
         Ok(Self {
             bpe,
             special_token_ids,
+            decoder_tokens,
+            special_tokens_decoder,
         })
     }
 
@@ -62,9 +74,17 @@ impl TikTokenTokenizer {
 
         let pattern = detect_bpe_pattern(directory)?;
         let encoder = parse_tiktoken_file(path)?;
+        let decoder_tokens: FxHashMap<u32, Vec<u8>> = encoder
+            .iter()
+            .map(|(bytes, &id)| (id, bytes.clone()))
+            .collect();
         // Use max rank + 1 (not len) to avoid ID collisions with sparse/non-contiguous ranks
         let num_base_tokens = encoder.values().max().map_or(0, |&m| m + 1) as usize;
         let special_tokens = load_special_tokens(directory, num_base_tokens)?;
+        let special_tokens_decoder: FxHashMap<u32, Vec<u8>> = special_tokens
+            .iter()
+            .map(|(token, &id)| (id, token.as_bytes().to_vec()))
+            .collect();
         let special_token_ids: HashSet<u32> = special_tokens.values().copied().collect();
 
         let bpe = CoreBPE::new(encoder, special_tokens, pattern)
@@ -73,18 +93,32 @@ impl TikTokenTokenizer {
         Ok(Self {
             bpe,
             special_token_ids,
+            decoder_tokens,
+            special_tokens_decoder,
         })
     }
 }
 
 impl Encoder for TikTokenTokenizer {
     fn encode(&self, input: &str) -> Result<Encoding> {
-        let token_ids: Vec<u32> = self.bpe.encode_with_special_tokens(input);
-        Ok(Encoding::Sp(token_ids))
+        self.encode_with_special_tokens(input, true)
     }
 
     fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
         inputs.par_iter().map(|input| self.encode(input)).collect()
+    }
+
+    fn encode_with_special_tokens(
+        &self,
+        input: &str,
+        add_special_tokens: bool,
+    ) -> Result<Encoding> {
+        let token_ids: Vec<u32> = if add_special_tokens {
+            self.bpe.encode_with_special_tokens(input)
+        } else {
+            self.bpe.encode_ordinary(input)
+        };
+        Ok(Encoding::Sp(token_ids))
     }
 }
 
@@ -119,7 +153,20 @@ impl Decoder for TikTokenTokenizer {
     }
 }
 
-impl Tokenizer for TikTokenTokenizer {}
+impl Tokenizer for TikTokenTokenizer {
+    fn convert_ids_to_tokens(&self, token_ids: &[TokenIdType]) -> Result<Vec<String>> {
+        Ok(token_ids
+            .iter()
+            .map(|id| {
+                self.decoder_tokens
+                    .get(id)
+                    .or_else(|| self.special_tokens_decoder.get(id))
+                    .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+                    .unwrap_or_default()
+            })
+            .collect())
+    }
+}
 
 /// Parse a tiktoken model file (base64-encoded token + rank per line).
 fn parse_tiktoken_file(path: &str) -> Result<FxHashMap<Vec<u8>, u32>> {
