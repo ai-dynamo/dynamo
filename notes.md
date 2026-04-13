@@ -170,3 +170,36 @@ with open('output.png', 'wb') as f:
 print('Saved to output.png')
 "
 ```
+
+## End-to-End Testing Results (2026-04-13, 8x Intel Arc Pro B60)
+
+### Environment Setup
+- PyTorch 2.11.0+xpu, diffusers 0.37.1, ai-dynamo 1.0.1 (from PyPI)
+- User must be in `render` group (`sudo usermod -aG render $USER`) — GPU render devices are `660 root:render`
+- `xpu-smi discovery` shows "No device discovered" but PyTorch detects all 8 GPUs — use PyTorch as the definitive check
+
+### Performance (bf16, Intel Arc Pro B60)
+
+| Test | Size | Steps | Time | Throughput |
+|------|------|-------|------|------------|
+| Unit test (no Dynamo) | 512x512 | 5 | 4.8s | ~2.1 it/s |
+| Integration (first request) | 1024x1024 | 30 | 10.2s | ~9.3 it/s |
+| Integration (warmed up) | 1024x1024 | 30 | 8.4s | ~17 it/s |
+| Integration (small) | 512x512 | 10 | 1.9s | ~6.9 it/s |
+
+### Validated Features
+- Single image generation (n=1): works
+- Multiple image generation (n=2): works, returns distinct images
+- Seed reproducibility: works
+- Error handling: frontend returns HTTP 400 for invalid size format and missing prompt
+
+### Decision 9: Size is an Enum (discovered during testing)
+
+The Rust frontend validates the `size` field as an enum, not arbitrary WxH:
+- Allowed values: `256x256`, `512x512`, `1024x1024`, `1792x1024`, `1024x1792`
+- The worker's `_parse_size()` function still works correctly for these values
+- Updated README and worker docstring to reflect this
+
+### Decision 10: Dynamo Install via PyPI
+
+`pip install ai-dynamo` installs the full runtime (including Rust bindings) from PyPI without needing a Rust toolchain. Updated README to use this as the default install method, with source build as an alternative.
