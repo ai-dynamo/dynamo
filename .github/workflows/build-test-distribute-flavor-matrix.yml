@@ -25,7 +25,7 @@ on:
         type: string
         default: 'linux/amd64,linux/arm64'
       cuda_versions:
-        description: 'CUDA versions to build (JSON array, e.g., ["12.9", "13.0"])'
+        description: 'CUDA versions to build (JSON array, e.g., ["12.9", "13.0", "non-cuda"]). Use "non-cuda" to represent XPU/CPU.'
         required: false
         type: string
         default: '["12.9"]'
@@ -164,17 +164,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version_selector: ${{ fromJson(inputs.device == 'xpu' && '[""]' || inputs.cuda_versions) }}
+        version_selector: ${{ fromJson(inputs.cuda_versions) }}
     # This name weirdly shows in the checks overview, but not once you dive into
     # a specific workflow. Keeping it as a short placeholder
     name: matrix
     uses: ./.github/workflows/build-test-distribute-flavor.yml
     with:
       framework: ${{ inputs.framework }}
-      device: ${{ inputs.device }}
-      platform: ${{ inputs.platform }}
+      device: ${{ matrix.version_selector == 'non-cuda' && 'xpu' || inputs.device }}
+      platform: ${{ matrix.version_selector == 'non-cuda' && 'linux/amd64' || inputs.platform }}
       target: ${{ inputs.target }}
-      cuda_version: ${{ matrix.version_selector }}
+      cuda_version: ${{ matrix.version_selector == 'non-cuda' && '' || matrix.version_selector }}
       extra_tags: ${{ inputs.extra_tags }}
       no_cache: ${{ inputs.no_cache }}
       fresh_builder: ${{ inputs.fresh_builder }}
@@ -185,13 +185,13 @@ jobs:
       run_cpu_only_tests: ${{ inputs.run_cpu_only_tests }}
       cpu_only_test_markers: ${{ inputs.cpu_only_test_markers }}
       cpu_only_test_timeout_minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-      run_single_gpu_tests: ${{ inputs.run_single_gpu_tests }}
+      run_single_gpu_tests: "${{ matrix.version_selector != 'non-cuda' && inputs.run_single_gpu_tests }}"
       single_gpu_test_markers: ${{ inputs.single_gpu_test_markers }}
       single_gpu_test_timeout_minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
-      run_single_xpu_tests: ${{ inputs.run_single_xpu_tests }}
+      run_single_xpu_tests: ${{ matrix.version_selector == 'non-cuda' && inputs.run_single_xpu_tests }}
       single_xpu_test_markers: ${{ inputs.single_xpu_test_markers }}
       single_xpu_test_timeout_minutes: ${{ inputs.single_xpu_test_timeout_minutes }}
-      run_multi_gpu_tests: ${{ inputs.run_multi_gpu_tests }}
+      run_multi_gpu_tests: "${{ matrix.version_selector != 'non-cuda' && inputs.run_multi_gpu_tests }}"
       multi_gpu_test_markers: ${{ inputs.multi_gpu_test_markers }}
       multi_gpu_test_timeout_minutes: ${{ inputs.multi_gpu_test_timeout_minutes }}
       copy_to_acr: ${{ inputs.copy_to_acr }}
