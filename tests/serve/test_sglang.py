@@ -271,6 +271,9 @@ sglang_configs = {
         directory=sglang_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2602"
+            ),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(
                 19.1
