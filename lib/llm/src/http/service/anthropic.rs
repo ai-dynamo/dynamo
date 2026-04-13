@@ -289,6 +289,16 @@ async fn anthropic_messages(
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
         }
+        // Check for cancelled request (client disconnected before response was sent)
+        if super::metrics::request_was_cancelled(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+            return anthropic_error(
+                StatusCode::from_u16(499).unwrap(),
+                "request_cancelled",
+                &format!("Request cancelled: {}", e),
+            );
+        }
+        inflight_guard.mark_error(super::metrics::ErrorType::Internal);
         anthropic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
