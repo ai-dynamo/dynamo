@@ -92,6 +92,21 @@ func InjectCheckpointIntoPodSpec(
 		return err
 	}
 
+	if info.GMS {
+		storage, err := ResolveGMSCheckpointStorage(
+			ctx,
+			reader,
+			namespace,
+			info.Hash,
+			info.ArtifactVersion,
+		)
+		if err != nil {
+			return err
+		}
+		EnsureGMSRestoreSidecars(podSpec, mainContainer)
+		EnsureGMSRestoreHelperMounts(podSpec, storage)
+	}
+
 	EnsurePodInfoVolume(podSpec)
 	EnsurePodInfoMount(mainContainer)
 	return nil

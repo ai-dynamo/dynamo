@@ -67,6 +67,11 @@ spec:
             spec:
               description: DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
               properties:
+                gms:
+                  description: |-
+                    GMS enables GMS sidecars for checkpoint creation and restore when this
+                    checkpoint is referenced by operator-managed workloads.
+                  type: boolean
                 identity:
                   description: Identity defines the inputs that determine checkpoint equivalence
                   properties:

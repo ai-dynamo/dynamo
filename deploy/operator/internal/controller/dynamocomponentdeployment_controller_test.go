@@ -33,6 +33,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
+	"github.com/stretchr/testify/require"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1373,6 +1374,57 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
 			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
+		}
+	})
+
+	t.Run("ready gms checkpoint injects gms restore sidecars", func(t *testing.T) {
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity, GMS: true},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		podTemplateSpec, err := r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		if err != nil {
+			t.Fatalf("generatePodTemplateSpec failed: %v", err)
+		}
+
+		find := func(name string) *corev1.Container {
+			for i := range podTemplateSpec.Spec.Containers {
+				if podTemplateSpec.Spec.Containers[i].Name == name {
+					return &podTemplateSpec.Spec.Containers[i]
+				}
+			}
+			return nil
+		}
+
+		require.NotNil(t, find(checkpoint.GMSWeightsServerContainer))
+		require.NotNil(t, find(checkpoint.GMSKVCacheServerContainer))
+		loader := find(checkpoint.GMSLoaderContainer)
+		require.NotNil(t, loader)
+
+		mounts := map[string]string{}
+		for _, mount := range loader.VolumeMounts {
+			mounts[mount.Name] = mount.MountPath
+		}
+		if got := mounts[snapshotprotocol.CheckpointVolumeName]; got != "/checkpoints" {
+			t.Fatalf("expected gms loader checkpoint mount at /checkpoints, got %q", got)
 		}
 	})
 

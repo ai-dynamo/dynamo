@@ -4,6 +4,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -16,6 +17,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func buildCheckpointWorkerDefaultEnv(
@@ -48,6 +50,8 @@ func buildCheckpointWorkerDefaultEnv(
 }
 
 func buildCheckpointJob(
+	ctx context.Context,
+	reader ctrlclient.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
 	jobName string,
@@ -100,6 +104,22 @@ func buildCheckpointJob(
 	mainContainer.StartupProbe = nil
 	checkpoint.EnsurePodInfoMount(mainContainer)
 	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
+
+	if ckpt.Spec.GMS {
+		storage, err := checkpoint.ResolveGMSCheckpointStorage(
+			ctx,
+			reader,
+			ckpt.Namespace,
+			hash,
+			ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkpoint.EnsureGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage); err != nil {
+			return nil, err
+		}
+	}
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {

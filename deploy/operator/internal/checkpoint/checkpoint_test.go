@@ -235,6 +235,32 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Nil(t, podSpec.Containers[1].Args)
 	})
 
+	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
+		podSpec := testPodSpec()
+		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GMS: true}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		require.NotNil(t, findContainer(podSpec, GMSWeightsServerContainer))
+		require.NotNil(t, findContainer(podSpec, GMSKVCacheServerContainer))
+		loader := findContainer(podSpec, GMSLoaderContainer)
+		require.NotNil(t, loader)
+
+		mounts := map[string]string{}
+		for _, mount := range loader.VolumeMounts {
+			mounts[mount.Name] = mount.MountPath
+		}
+		assert.Equal(t, "/checkpoints", mounts[snapshotprotocol.CheckpointVolumeName])
+		assert.Equal(t, GMSControlDir, mounts[GMSControlVolumeName])
+		assert.Equal(t, GMSSocketDir, mounts[GMSSocketsVolumeName])
+
+		env := map[string]string{}
+		for _, item := range loader.Env {
+			env[item.Name] = item.Value
+		}
+		assert.Equal(t, "/checkpoints/"+testHash+"/versions/1", env["GMS_CHECKPOINT_DIR"])
+	})
+
 	t.Run("error cases", func(t *testing.T) {
 		for _, tc := range []struct {
 			name    string
