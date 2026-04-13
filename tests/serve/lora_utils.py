@@ -22,6 +22,7 @@ import boto3
 import requests
 from botocore.client import Config
 from botocore.exceptions import ClientError
+from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
     from mypy_boto3_s3.client import S3Client
@@ -237,29 +238,18 @@ class MinioService:
             f"Downloading LoRA {self.config.lora_repo} to {self._temp_download_dir}"
         )
 
-        # Run with HF_HUB_OFFLINE unset so the download works even when
+        # Temporarily unset HF_HUB_OFFLINE so the download works even when
         # the predownload_models fixture has already enabled offline mode.
-        # This only affects the subprocess env; the parent process is unchanged.
-        env = os.environ.copy()
-        env.pop("HF_HUB_OFFLINE", None)
-
-        result = subprocess.run(
-            [
-                "huggingface-cli",
-                "download",
+        old_offline = os.environ.pop("HF_HUB_OFFLINE", None)
+        try:
+            snapshot_download(
                 self.config.lora_repo,
-                "--local-dir",
-                self._temp_download_dir,
-                "--local-dir-use-symlinks",
-                "False",
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to download LoRA: {result.stderr}")
+                local_dir=self._temp_download_dir,
+                local_dir_use_symlinks=False,
+            )
+        finally:
+            if old_offline is not None:
+                os.environ["HF_HUB_OFFLINE"] = old_offline
 
         # Clean up cache directory
         cache_dir = os.path.join(self._temp_download_dir, ".cache")
