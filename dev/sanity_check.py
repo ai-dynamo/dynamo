@@ -149,6 +149,7 @@ Options:
 """
 
 import datetime
+import csv
 import glob
 import json
 import logging
@@ -818,9 +819,13 @@ class GPUInfo(NodeInfo):
                 "/usr/local/nvidia/bin/nvidia-smi",
             ],
         )
+        nvidia_failure_desc: Optional[str] = None
         if nvidia_smi:
-            self._init_nvidia_gpu_info(nvidia_smi)
-            return
+            if self._init_nvidia_gpu_info(nvidia_smi):
+                return
+            nvidia_failure_desc = self._failure_desc(
+                "nvidia-smi initialization failed"
+            )
 
         # Fall back to Intel XPU reporting on systems without nvidia-smi.
         xpu_smi = self._find_executable(
@@ -831,7 +836,58 @@ class GPUInfo(NodeInfo):
             ],
         )
         if xpu_smi:
-            self._init_xpu_gpu_info(xpu_smi)
+            if self._init_xpu_gpu_info(xpu_smi):
+                return
+            xpu_failure_desc = self._failure_desc("xpu-smi initialization failed")
+            self._finalize_gpu_probe_failure(
+                nvidia_failure_desc=nvidia_failure_desc,
+                xpu_failure_desc=xpu_failure_desc,
+                xpu_found=True,
+            )
+            return
+
+        self._finalize_gpu_probe_failure(
+            nvidia_failure_desc=nvidia_failure_desc,
+            xpu_failure_desc=None,
+            xpu_found=False,
+        )
+
+    def _failure_desc(self, default: str) -> str:
+        """Return the current node description when present, else a default message."""
+        return self.desc or default
+
+    def _finalize_gpu_probe_failure(
+        self,
+        nvidia_failure_desc: Optional[str],
+        xpu_failure_desc: Optional[str],
+        xpu_found: bool,
+    ) -> None:
+        """Set the final GPU error node after probe attempts.
+
+        Note: If only xpu-smi was attempted and it already initialized this node with
+        a concrete error, we keep that message and avoid overwriting it.
+        """
+        if nvidia_failure_desc and xpu_found and xpu_failure_desc:
+            super().__init__(
+                label="GPU",
+                desc=(
+                    f"nvidia-smi failed ({nvidia_failure_desc}); "
+                    f"xpu-smi failed ({xpu_failure_desc})"
+                ),
+                status=NodeStatus.ERROR,
+            )
+            return
+
+        if nvidia_failure_desc and not xpu_found:
+            super().__init__(
+                label="GPU",
+                desc=f"nvidia-smi failed ({nvidia_failure_desc}); xpu-smi not found",
+                status=NodeStatus.ERROR,
+            )
+            return
+
+        if xpu_found and xpu_failure_desc:
+            # Keep existing Intel XPU failure details from _init_xpu_gpu_info.
             return
 
         super().__init__(
@@ -879,15 +935,20 @@ class GPUInfo(NodeInfo):
         except json.JSONDecodeError:
             return None
 
-    def _init_nvidia_gpu_info(self, nvidia_smi: str):
-        """Populate the node using NVIDIA-specific tooling."""
+    def _init_nvidia_gpu_info(self, nvidia_smi: str) -> bool:
+        """Populate the node using NVIDIA-specific tooling.
+
+        Returns:
+            True when NVIDIA initialization succeeds and should be used.
+            False when initialization fails and caller should consider fallback.
+        """
         try:
             # Get GPU list
             result = self._run_command([nvidia_smi, "-L"])
 
             if result.returncode != 0:
                 # Extract and process error message from stderr or stdout
-                error_msg = "nvidia-smi failed"
+                error_msg = "nvidia-smi -L failed"
 
                 # Try stderr first, then stdout
                 for output in [result.stderr, result.stdout]:
@@ -907,7 +968,7 @@ class GPUInfo(NodeInfo):
                 super().__init__(
                     label="NVIDIA GPU", desc=error_msg, status=NodeStatus.ERROR
                 )
-                return
+                return False
 
             # Parse GPU names
             gpu_names = []
@@ -935,7 +996,7 @@ class GPUInfo(NodeInfo):
                     desc=f"not detected{driver_cuda_str}",
                     status=NodeStatus.ERROR,
                 )
-                return
+                return False
 
             # Get driver and CUDA versions
             driver, cuda = self._get_driver_cuda_versions(nvidia_smi)
@@ -974,13 +1035,21 @@ class GPUInfo(NodeInfo):
                 cuda_info = self._collect_cuda_info()
                 self.add_child(cuda_info)
 
+            return True
+
         except Exception:
             super().__init__(
                 label="NVIDIA GPU", desc="detection failed", status=NodeStatus.ERROR
             )
+            return False
 
-    def _init_xpu_gpu_info(self, xpu_smi: str):
-        """Populate the node using Intel XPU tooling."""
+    def _init_xpu_gpu_info(self, xpu_smi: str) -> bool:
+        """Populate the node using Intel XPU tooling.
+
+        Returns:
+            True when XPU initialization succeeds and should be used.
+            False when initialization fails.
+        """
         try:
             devices = self._get_xpu_devices(xpu_smi)
             if devices is None:
@@ -989,7 +1058,7 @@ class GPUInfo(NodeInfo):
                     desc="xpu-smi discovery failed",
                     status=NodeStatus.ERROR,
                 )
-                return
+                return False
 
             if not devices:
                 super().__init__(
@@ -997,7 +1066,7 @@ class GPUInfo(NodeInfo):
                     desc="not detected",
                     status=NodeStatus.ERROR,
                 )
-                return
+                return False
 
             if len(devices) == 1:
                 device = devices[0]
@@ -1057,10 +1126,13 @@ class GPUInfo(NodeInfo):
             if self.thorough_check:
                 self.add_child(self._collect_xpu_info(xpu_smi))
 
+            return True
+
         except Exception:
             super().__init__(
                 label="Intel XPU", desc="detection failed", status=NodeStatus.ERROR
             )
+            return False
 
     def _get_xpu_devices(self, xpu_smi: str) -> Optional[List[Dict[str, Any]]]:
         """Return summarized Intel XPU device info or None on discovery failure."""
@@ -1074,6 +1146,10 @@ class GPUInfo(NodeInfo):
         if not isinstance(raw_devices, list):
             return None
 
+        # Batch identity fields that would otherwise require per-device discovery.
+        # Call count impact for N devices: from (1 + 3N) to (2 + 2N).
+        discovery_dump = self._get_xpu_discovery_dump(xpu_smi)
+
         devices: List[Dict[str, Any]] = []
         for item in raw_devices:
             if not isinstance(item, dict):
@@ -1083,37 +1159,61 @@ class GPUInfo(NodeInfo):
             if device_id is None:
                 continue
 
-            # xpu-smi splits identity, stats, and config across different
-            # subcommands, so collect all three and merge them here.
-            detail_text = self._get_xpu_device_text(xpu_smi, device_id, "discovery")
+            # xpu-smi splits stats and config across subcommands.
             stats_text = self._get_xpu_device_text(xpu_smi, device_id, "stats")
             config_text = self._get_xpu_device_text(xpu_smi, device_id, "config")
+            dump_entry = discovery_dump.get(str(device_id), {})
 
             devices.append(
                 {
                     "device_id": device_id,
                     "name": item.get("device_name") or f"Device {device_id}",
-                    "driver_version": self._extract_xpu_field(
-                        detail_text, "Driver Version"
-                    ),
-                    "memory_total_mib": self._parse_xpu_mib_value(
-                        self._extract_xpu_field(detail_text, "Memory Physical Size")
-                    ),
+                    "driver_version": dump_entry.get("driver_version"),
+                    "memory_total_mib": dump_entry.get("memory_total_mib"),
                     "memory_used_mib": self._parse_xpu_int_value(
                         self._extract_table_value(
                             stats_text, "GPU Memory Used \\(MiB\\)"
                         )
                     ),
                     "power_draw_w": self._parse_xpu_float_value(
-                        self._extract_table_value(stats_text, "GPU Power \\(W\\)")
+                        self._extract_table_value(stats_text, "GPU Power \\([Ww]\\)")
                     ),
                     "power_limit_w": self._parse_xpu_float_value(
-                        self._extract_xpu_field(config_text, "Power Limit \\(w\\)")
+                        self._extract_xpu_field(config_text, "Power Limit \\([Ww]\\)")
                     ),
                 }
             )
 
         return devices
+
+    def _get_xpu_discovery_dump(self, xpu_smi: str) -> Dict[str, Dict[str, Any]]:
+        """Collect per-device identity fields in one command.
+
+        Uses `xpu-smi discovery --dump 1,8,16` where fields map to:
+        1: Device ID, 8: Driver Version, 16: Memory Physical Size.
+        """
+        result = self._run_command([xpu_smi, "discovery", "--dump", "1,8,16"])
+        if result.returncode != 0 or not result.stdout.strip():
+            return {}
+
+        output: Dict[str, Dict[str, Any]] = {}
+        try:
+            reader = csv.reader(result.stdout.splitlines())
+            next(reader, None)  # Header row.
+            for row in reader:
+                if len(row) < 3:
+                    continue
+                device_id = row[0].strip()
+                if not device_id:
+                    continue
+                output[device_id] = {
+                    "driver_version": row[1].strip() or None,
+                    "memory_total_mib": self._parse_xpu_mib_value(row[2].strip()),
+                }
+        except Exception:
+            return {}
+
+        return output
 
     def _get_xpu_device_text(
         self, xpu_smi: str, device_id: Any, subcommand: str
@@ -1554,6 +1654,30 @@ class GPUInfo(NodeInfo):
 
         has_any_output = False
         for label, cmd in signals:
+            if label == "xpu-smi":
+                cli_version, service_version, level_zero_version = self._get_xpu_versions(
+                    xpu_smi
+                )
+                if not any([cli_version, service_version, level_zero_version]):
+                    continue
+
+                has_any_output = True
+                parts = []
+                if cli_version:
+                    parts.append(f"CLI {cli_version}")
+                if service_version:
+                    parts.append(f"Service {service_version}")
+                if level_zero_version:
+                    parts.append(f"Level Zero {level_zero_version}")
+                node.add_child(
+                    NodeInfo(
+                        label=label,
+                        desc=", ".join(parts),
+                        status=NodeStatus.INFO,
+                    )
+                )
+                continue
+
             out = sh(cmd)
             lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
 
@@ -1562,35 +1686,7 @@ class GPUInfo(NodeInfo):
 
             has_any_output = True
 
-            if label == "xpu-smi":
-                cli_version = None
-                service_version = None
-                level_zero_version = None
-                current_section = None
-                for line in lines:
-                    if line == "CLI:":
-                        current_section = "cli"
-                    elif line == "Service:":
-                        current_section = "service"
-                    elif line.startswith("Version:"):
-                        version = line.split(":", 1)[1].strip()
-                        if current_section == "cli":
-                            cli_version = version
-                        elif current_section == "service":
-                            service_version = version
-                    elif line.startswith("Level Zero Version:"):
-                        level_zero_version = line.split(":", 1)[1].strip()
-
-                parts = []
-                if cli_version:
-                    parts.append(f"CLI {cli_version}")
-                if service_version:
-                    parts.append(f"Service {service_version}")
-                if level_zero_version:
-                    parts.append(f"Level Zero {level_zero_version}")
-                desc = ", ".join(parts) if parts else lines[0]
-                node.add_child(NodeInfo(label=label, desc=desc, status=NodeStatus.INFO))
-            elif label in (
+            if label in (
                 "ONEAPI_DEVICE_SELECTOR",
                 "SYCL_DEVICE_FILTER",
                 "ZE_AFFINITY_MASK",
