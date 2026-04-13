@@ -199,9 +199,7 @@ impl Drop for RequestGuard {
         let chooser = self.chooser.clone();
         let context_id = self.context_id.clone();
         handle.spawn(async move {
-            if needs_free
-                && let Err(e) = chooser.free(&context_id).await
-            {
+            if needs_free && let Err(e) = chooser.free(&context_id).await {
                 tracing::warn!("Failed to free request {context_id} (drop guard): {e}");
             }
             if let Some(close) = deferred_close {
