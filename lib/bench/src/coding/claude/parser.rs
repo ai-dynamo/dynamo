@@ -7,8 +7,9 @@ use crate::coding::common::{
 };
 use crate::coding::tokenizer::TokenizerWorker;
 use anyhow::Result;
+use rustc_hash::FxHashMap;
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -33,6 +34,19 @@ struct ToolCallSummary {
     name: String,
     normalized_id: Option<String>,
     arg_size_chars: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CachedProgressMetrics {
+    progress_event_count: usize,
+    agent_ids: BTreeSet<String>,
+    assistant_text_blocks: usize,
+    tool_counts: BTreeMap<String, usize>,
+    tool_result_count: usize,
+    tool_error_count: usize,
+    tool_intervals: Vec<(i64, i64)>,
+    first_ts: i64,
+    last_ts: i64,
 }
 
 #[derive(Debug)]
@@ -61,7 +75,7 @@ pub struct TurnDraft {
 
 #[derive(Debug, Default)]
 struct ToolIdNormalizer {
-    raw_to_normalized: HashMap<String, String>,
+    raw_to_normalized: FxHashMap<String, String>,
 }
 
 impl ToolIdNormalizer {
@@ -84,10 +98,11 @@ pub struct SessionTurnBuilder {
     export_session_id: String,
     records: Vec<TraceRecord>,
     top_level_indices: Vec<usize>,
-    progress_index: HashMap<String, Vec<usize>>,
+    progress_metrics_index: FxHashMap<String, CachedProgressMetrics>,
     top_level_cursor: usize,
     normalizer: ToolIdNormalizer,
     conversation_entries: Vec<ConversationEntry>,
+    prompt_text: String,
     previous_assistant_end_ms: Option<i64>,
     turn_index: usize,
     pending_compact_reset: bool,
@@ -102,6 +117,7 @@ impl SessionTurnBuilder {
         };
 
         let progress_index = build_progress_index(&records);
+        let progress_metrics_index = build_progress_metrics_index(&progress_index, &records);
         let top_level_indices = records
             .iter()
             .enumerate()
@@ -122,10 +138,11 @@ impl SessionTurnBuilder {
             export_session_id,
             records,
             top_level_indices,
-            progress_index,
+            progress_metrics_index,
             top_level_cursor: 0,
             normalizer: ToolIdNormalizer::default(),
             conversation_entries: Vec::new(),
+            prompt_text: String::new(),
             previous_assistant_end_ms: None,
             turn_index: 0,
             pending_compact_reset: false,
@@ -153,9 +170,9 @@ impl SessionTurnBuilder {
                 let message = object_field(&record.raw, "message");
                 let rendered_entries = render_user_entries(message, &mut self.normalizer)?;
                 if self.pending_compact_reset && is_compact_summary(record) {
-                    self.conversation_entries = rendered_entries;
+                    self.replace_conversation_entries(rendered_entries);
                 } else {
-                    self.conversation_entries.extend(rendered_entries);
+                    self.extend_conversation_entries(rendered_entries);
                 }
                 self.pending_compact_reset = false;
                 self.top_level_cursor += 1;
@@ -185,12 +202,7 @@ impl SessionTurnBuilder {
                 &mut self.normalizer,
                 tokenizer,
             )?;
-            let input_text = self
-                .conversation_entries
-                .iter()
-                .map(|entry| entry.rendered.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
+            let input_text = self.prompt_text.clone();
 
             let top_level_tool_names = group_summary
                 .top_level_tool_calls
@@ -259,10 +271,9 @@ impl SessionTurnBuilder {
 
             let progress_metrics = aggregate_progress_metrics(
                 &group_summary.raw_task_tool_ids,
-                &self.progress_index,
-                &self.records,
+                &self.progress_metrics_index,
                 &mut self.normalizer,
-            )?;
+            );
             if let Some(progress_map) = progress_metrics.as_object() {
                 for (key, value) in progress_map {
                     sidecar.insert(key.clone(), value.clone());
@@ -283,7 +294,7 @@ impl SessionTurnBuilder {
                 sidecar: Value::Object(sidecar),
             };
 
-            self.conversation_entries.extend(group_summary.entries);
+            self.extend_conversation_entries(group_summary.entries);
             self.previous_assistant_end_ms = Some(group_summary.end_ms);
             self.turn_index += 1;
             return Ok(Some(turn));
@@ -291,10 +302,20 @@ impl SessionTurnBuilder {
 
         Ok(None)
     }
+
+    fn replace_conversation_entries(&mut self, entries: Vec<ConversationEntry>) {
+        self.prompt_text = render_entry_buffer(&entries);
+        self.conversation_entries = entries;
+    }
+
+    fn extend_conversation_entries(&mut self, entries: Vec<ConversationEntry>) {
+        append_rendered_entries(&mut self.prompt_text, &entries);
+        self.conversation_entries.extend(entries);
+    }
 }
 
-pub fn load_trace_records(trace_files: &[PathBuf]) -> Result<HashMap<String, Vec<TraceRecord>>> {
-    let mut sessions: HashMap<String, Vec<TraceRecord>> = HashMap::new();
+pub fn load_trace_records(trace_files: &[PathBuf]) -> Result<FxHashMap<String, Vec<TraceRecord>>> {
+    let mut sessions: FxHashMap<String, Vec<TraceRecord>> = FxHashMap::default();
     let mut source_order = 0_u64;
 
     for trace_file in trace_files {
@@ -482,6 +503,21 @@ fn count_trailing_tool_results(entries: &[ConversationEntry]) -> usize {
         .count()
 }
 
+fn append_rendered_entries(buffer: &mut String, entries: &[ConversationEntry]) {
+    for entry in entries {
+        if !buffer.is_empty() {
+            buffer.push('\n');
+        }
+        buffer.push_str(&entry.rendered);
+    }
+}
+
+fn render_entry_buffer(entries: &[ConversationEntry]) -> String {
+    let mut buffer = String::new();
+    append_rendered_entries(&mut buffer, entries);
+    buffer
+}
+
 fn render_user_entries(
     message: Option<&Map<String, Value>>,
     normalizer: &mut ToolIdNormalizer,
@@ -647,11 +683,7 @@ fn summarize_assistant_group(
     let output_length = if let Some(max_length) = output_lengths.into_iter().max() {
         max_length
     } else {
-        let rendered_text = entries
-            .iter()
-            .map(|entry| entry.rendered.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let rendered_text = render_entry_buffer(&entries);
         tokenizer.encode(&rendered_text)?.len()
     };
 
@@ -688,8 +720,8 @@ fn progress_timestamp_ms(record: &TraceRecord) -> i64 {
         .unwrap_or(record.timestamp_ms)
 }
 
-fn build_progress_index(records: &[TraceRecord]) -> HashMap<String, Vec<usize>> {
-    let mut progress_index: HashMap<String, Vec<usize>> = HashMap::new();
+fn build_progress_index(records: &[TraceRecord]) -> FxHashMap<String, Vec<usize>> {
+    let mut progress_index: FxHashMap<String, Vec<usize>> = FxHashMap::default();
     for (index, record) in records.iter().enumerate() {
         if !record.row_type.contains("progress") {
             continue;
@@ -713,26 +745,39 @@ fn build_progress_index(records: &[TraceRecord]) -> HashMap<String, Vec<usize>> 
     progress_index
 }
 
+fn build_progress_metrics_index(
+    progress_index: &FxHashMap<String, Vec<usize>>,
+    records: &[TraceRecord],
+) -> FxHashMap<String, CachedProgressMetrics> {
+    progress_index
+        .iter()
+        .map(|(tool_id, indices)| {
+            (
+                tool_id.clone(),
+                summarize_progress_indices(indices, records),
+            )
+        })
+        .collect()
+}
+
 fn aggregate_progress_metrics(
     task_tool_ids: &[String],
-    progress_index: &HashMap<String, Vec<usize>>,
-    records: &[TraceRecord],
+    progress_metrics_index: &FxHashMap<String, CachedProgressMetrics>,
     normalizer: &mut ToolIdNormalizer,
-) -> Result<Value> {
-    let mut relevant_indices = Vec::new();
+) -> Value {
+    let mut selected_metrics = Vec::new();
+    let mut seen_task_ids = BTreeSet::new();
     for task_tool_id in task_tool_ids {
-        if let Some(indices) = progress_index.get(task_tool_id) {
-            relevant_indices.extend(indices.iter().copied());
+        if !seen_task_ids.insert(task_tool_id.as_str()) {
+            continue;
+        }
+        if let Some(metrics) = progress_metrics_index.get(task_tool_id) {
+            selected_metrics.push(metrics);
         }
     }
 
-    relevant_indices.sort_by_key(|index| {
-        let record = &records[*index];
-        (progress_timestamp_ms(record), record.source_order)
-    });
-
-    if relevant_indices.is_empty() {
-        return Ok(json!({
+    if selected_metrics.is_empty() {
+        return json!({
             "task_parent_tool_ids": task_tool_ids
                 .iter()
                 .filter_map(|tool_id| normalizer.normalize(Some(tool_id)))
@@ -750,21 +795,95 @@ fn aggregate_progress_metrics(
             "nested_tool_max_parallelism": 0,
             "nested_assistant_text_blocks": 0,
             "task_duration_ms": 0,
-        }));
+        });
     }
 
     let mut agent_ids = BTreeSet::new();
     let mut assistant_text_blocks = 0_usize;
     let mut tool_counts: BTreeMap<String, usize> = BTreeMap::new();
-    let mut tool_start_times: HashMap<String, i64> = HashMap::new();
     let mut tool_intervals = Vec::new();
     let mut tool_result_count = 0_usize;
     let mut tool_error_count = 0_usize;
-    let first_ts = progress_timestamp_ms(&records[relevant_indices[0]]);
-    let last_ts = progress_timestamp_ms(&records[*relevant_indices.last().unwrap()]);
+    let mut first_ts = i64::MAX;
+    let mut last_ts = i64::MIN;
+    let mut progress_event_count = 0_usize;
 
-    for index in relevant_indices {
-        let record = &records[index];
+    for metrics in selected_metrics {
+        progress_event_count += metrics.progress_event_count;
+        assistant_text_blocks += metrics.assistant_text_blocks;
+        tool_result_count += metrics.tool_result_count;
+        tool_error_count += metrics.tool_error_count;
+        first_ts = first_ts.min(metrics.first_ts);
+        last_ts = last_ts.max(metrics.last_ts);
+        agent_ids.extend(metrics.agent_ids.iter().cloned());
+        tool_intervals.extend(metrics.tool_intervals.iter().copied());
+        for (tool_name, count) in &metrics.tool_counts {
+            *tool_counts.entry(tool_name.clone()).or_insert(0) += count;
+        }
+    }
+
+    let total_latency: i64 = tool_intervals
+        .iter()
+        .map(|(start, end)| (end - start).max(0))
+        .sum();
+    let max_latency = tool_intervals
+        .iter()
+        .map(|(start, end)| (end - start).max(0))
+        .max()
+        .unwrap_or(0);
+    let avg_latency = if tool_intervals.is_empty() {
+        0
+    } else {
+        total_latency / tool_intervals.len() as i64
+    };
+
+    let mut parallel_events = Vec::new();
+    for (start_ms, end_ms) in &tool_intervals {
+        parallel_events.push((*start_ms, 1_i32));
+        parallel_events.push((*end_ms, -1_i32));
+    }
+    parallel_events.sort_by_key(|(timestamp, delta)| (*timestamp, -delta));
+    let mut current_parallelism = 0_i32;
+    let mut max_parallelism = 0_i32;
+    for (_, delta) in parallel_events {
+        current_parallelism += delta;
+        max_parallelism = max_parallelism.max(current_parallelism);
+    }
+
+    json!({
+        "task_parent_tool_ids": task_tool_ids
+            .iter()
+            .filter_map(|tool_id| normalizer.normalize(Some(tool_id)))
+            .collect::<Vec<_>>(),
+        "nested_progress_event_count": progress_event_count,
+        "nested_agent_count": agent_ids.len(),
+        "nested_tool_call_count": tool_counts.values().sum::<usize>(),
+        "nested_tool_result_count": tool_result_count,
+        "nested_tool_error_count": tool_error_count,
+        "nested_tool_counts": tool_counts,
+        "nested_tool_names": tool_counts.keys().cloned().collect::<Vec<_>>(),
+        "nested_tool_total_latency_ms": total_latency,
+        "nested_tool_max_latency_ms": max_latency,
+        "nested_tool_avg_latency_ms": avg_latency,
+        "nested_tool_max_parallelism": max_parallelism,
+        "nested_assistant_text_blocks": assistant_text_blocks,
+        "task_duration_ms": (last_ts - first_ts).max(0),
+    })
+}
+
+fn summarize_progress_indices(indices: &[usize], records: &[TraceRecord]) -> CachedProgressMetrics {
+    let mut agent_ids = BTreeSet::new();
+    let mut assistant_text_blocks = 0_usize;
+    let mut tool_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut tool_start_times: FxHashMap<String, i64> = FxHashMap::default();
+    let mut tool_intervals = Vec::new();
+    let mut tool_result_count = 0_usize;
+    let mut tool_error_count = 0_usize;
+    let first_ts = progress_timestamp_ms(&records[indices[0]]);
+    let last_ts = progress_timestamp_ms(&records[*indices.last().unwrap()]);
+
+    for index in indices {
+        let record = &records[*index];
         let timestamp_ms = progress_timestamp_ms(record);
         let Some(data) = record.raw.get("data").and_then(Value::as_object) else {
             continue;
@@ -839,53 +958,17 @@ fn aggregate_progress_metrics(
         }
     }
 
-    let total_latency: i64 = tool_intervals
-        .iter()
-        .map(|(start, end)| (end - start).max(0))
-        .sum();
-    let max_latency = tool_intervals
-        .iter()
-        .map(|(start, end)| (end - start).max(0))
-        .max()
-        .unwrap_or(0);
-    let avg_latency = if tool_intervals.is_empty() {
-        0
-    } else {
-        total_latency / tool_intervals.len() as i64
-    };
-
-    let mut parallel_events = Vec::new();
-    for (start_ms, end_ms) in &tool_intervals {
-        parallel_events.push((*start_ms, 1_i32));
-        parallel_events.push((*end_ms, -1_i32));
+    CachedProgressMetrics {
+        progress_event_count: tool_intervals.len() + tool_start_times.len(),
+        agent_ids,
+        assistant_text_blocks,
+        tool_counts,
+        tool_result_count,
+        tool_error_count,
+        tool_intervals,
+        first_ts,
+        last_ts,
     }
-    parallel_events.sort_by_key(|(timestamp, delta)| (*timestamp, -delta));
-    let mut current_parallelism = 0_i32;
-    let mut max_parallelism = 0_i32;
-    for (_, delta) in parallel_events {
-        current_parallelism += delta;
-        max_parallelism = max_parallelism.max(current_parallelism);
-    }
-
-    Ok(json!({
-        "task_parent_tool_ids": task_tool_ids
-            .iter()
-            .filter_map(|tool_id| normalizer.normalize(Some(tool_id)))
-            .collect::<Vec<_>>(),
-        "nested_progress_event_count": tool_intervals.len() + tool_start_times.len(),
-        "nested_agent_count": agent_ids.len(),
-        "nested_tool_call_count": tool_counts.values().sum::<usize>(),
-        "nested_tool_result_count": tool_result_count,
-        "nested_tool_error_count": tool_error_count,
-        "nested_tool_counts": tool_counts,
-        "nested_tool_names": tool_counts.keys().cloned().collect::<Vec<_>>(),
-        "nested_tool_total_latency_ms": total_latency,
-        "nested_tool_max_latency_ms": max_latency,
-        "nested_tool_avg_latency_ms": avg_latency,
-        "nested_tool_max_parallelism": max_parallelism,
-        "nested_assistant_text_blocks": assistant_text_blocks,
-        "task_duration_ms": (last_ts - first_ts).max(0),
-    }))
 }
 
 #[cfg(test)]

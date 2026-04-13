@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::coding::claude::parser::{SessionTurnBuilder, TurnDraft};
-use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker};
+use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker, last_word_overlap_start};
 use anyhow::{Context, Result, anyhow, bail};
 use bytemuck::cast_slice;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use dynamo_tokens::compute_hash_v2;
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, VecDeque};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -82,7 +83,8 @@ struct TokenizeJob {
     session_id: String,
     turn_key: u64,
     current_text: String,
-    previous_text: Option<String>,
+    overlap_start: Option<usize>,
+    previous_overlap_text: Option<String>,
     previous_tokens: Option<Vec<u32>>,
     overlap_words: usize,
 }
@@ -97,7 +99,7 @@ struct TokenizeResponse {
 pub fn write_streamed_mooncake_rows<F>(
     output_path: &Path,
     sidecar_path: &Path,
-    sessions: HashMap<String, Vec<crate::coding::claude::parser::TraceRecord>>,
+    sessions: FxHashMap<String, Vec<crate::coding::claude::parser::TraceRecord>>,
     preserve_session_ids: bool,
     tokenizer_factory: F,
     config: ExportConfig,
@@ -106,7 +108,7 @@ where
     F: TokenizerFactory,
 {
     let mut parser_tokenizer = tokenizer_factory.create_worker()?;
-    let mut states = HashMap::new();
+    let mut states = FxHashMap::default();
     let mut heap = BinaryHeap::new();
     let mut unscheduled_sessions = VecDeque::new();
     let mut global_trace_start_ms: Option<i64> = None;
@@ -301,7 +303,7 @@ fn push_heap_entry(
 }
 
 fn schedule_pending_jobs(
-    states: &mut HashMap<String, SessionState>,
+    states: &mut FxHashMap<String, SessionState>,
     unscheduled_sessions: &mut VecDeque<String>,
     job_tx: &Sender<TokenizeJob>,
     inflight_jobs: &mut usize,
@@ -324,12 +326,15 @@ fn schedule_pending_jobs(
 
         let overlap_base = state.overlap_base.take();
         let current_text = std::mem::take(&mut head.turn.input_text);
+        let (overlap_start, previous_overlap_text, previous_tokens) =
+            prepare_overlap_inputs(overlap_base, &current_text, overlap_words);
         let job = TokenizeJob {
             session_id: session_id.clone(),
             turn_key: head.turn_key,
             current_text,
-            previous_text: overlap_base.as_ref().map(|base| base.previous_text.clone()),
-            previous_tokens: overlap_base.map(|base| base.previous_tokens),
+            overlap_start,
+            previous_overlap_text,
+            previous_tokens,
             overlap_words,
         };
         job_tx
@@ -342,7 +347,7 @@ fn schedule_pending_jobs(
 }
 
 fn apply_tokenize_response(
-    states: &mut HashMap<String, SessionState>,
+    states: &mut FxHashMap<String, SessionState>,
     response: TokenizeResponse,
 ) -> Result<()> {
     let Some(state) = states.get_mut(&response.session_id) else {
@@ -362,6 +367,29 @@ fn apply_tokenize_response(
         }
         Err(message) => bail!("{message}"),
     }
+}
+
+fn prepare_overlap_inputs(
+    overlap_base: Option<OverlapBase>,
+    current_text: &str,
+    overlap_words: usize,
+) -> (Option<usize>, Option<String>, Option<Vec<u32>>) {
+    if overlap_words == 0 {
+        return (None, None, None);
+    }
+    let Some(overlap_base) = overlap_base else {
+        return (None, None, None);
+    };
+    if !current_text.starts_with(&overlap_base.previous_text) {
+        return (None, None, None);
+    }
+
+    let overlap_start = last_word_overlap_start(&overlap_base.previous_text, overlap_words);
+    (
+        Some(overlap_start),
+        Some(overlap_base.previous_text[overlap_start..].to_string()),
+        Some(overlap_base.previous_tokens),
+    )
 }
 
 fn spawn_tokenizer_workers<F>(
@@ -393,13 +421,7 @@ where
                     }
                 };
                 while let Ok(job) = job_rx.recv() {
-                    let outcome = tokenizer
-                        .encode_with_word_overlap(
-                            &job.current_text,
-                            job.previous_text.as_deref(),
-                            job.previous_tokens.as_deref(),
-                            job.overlap_words,
-                        )
+                    let outcome = tokenize_job(&mut tokenizer, &job)
                         .map(|tokens| ReadyTurn {
                             current_text: job.current_text,
                             tokens,
@@ -418,6 +440,31 @@ where
         .collect()
 }
 
+fn tokenize_job(tokenizer: &mut impl TokenizerWorker, job: &TokenizeJob) -> Result<Vec<u32>> {
+    let Some(overlap_start) = job.overlap_start else {
+        return tokenizer.encode(&job.current_text);
+    };
+    let Some(previous_overlap_text) = job.previous_overlap_text.as_deref() else {
+        return tokenizer.encode(&job.current_text);
+    };
+    let Some(previous_tokens) = job.previous_tokens.as_deref() else {
+        return tokenizer.encode(&job.current_text);
+    };
+    if job.overlap_words == 0 || !job.current_text.is_char_boundary(overlap_start) {
+        return tokenizer.encode(&job.current_text);
+    }
+
+    let previous_overlap_tokens = tokenizer.encode(previous_overlap_text)?;
+    let prefix_token_count = previous_tokens
+        .len()
+        .saturating_sub(previous_overlap_tokens.len());
+    let suffix_tokens = tokenizer.encode(&job.current_text[overlap_start..])?;
+    let mut merged = Vec::with_capacity(prefix_token_count + suffix_tokens.len());
+    merged.extend_from_slice(&previous_tokens[..prefix_token_count]);
+    merged.extend(suffix_tokens);
+    Ok(merged)
+}
+
 fn write_empty_files(output_path: &Path, sidecar_path: &Path) -> Result<()> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -432,7 +479,7 @@ fn write_empty_files(output_path: &Path, sidecar_path: &Path) -> Result<()> {
 
 struct RollingHasher {
     block_size: usize,
-    hash_to_id: HashMap<u64, u64>,
+    hash_to_id: FxHashMap<u64, u64>,
     next_id: u64,
 }
 
@@ -440,7 +487,7 @@ impl RollingHasher {
     fn new(block_size: usize) -> Self {
         Self {
             block_size,
-            hash_to_id: HashMap::new(),
+            hash_to_id: FxHashMap::default(),
             next_id: 0,
         }
     }
@@ -472,8 +519,8 @@ mod tests {
     use crate::coding::claude::parser::{SessionTurnBuilder, TraceRecord};
     use crate::coding::tokenizer::{TokenizerFactory, TokenizerWorker};
     use anyhow::Result;
+    use rustc_hash::FxHashMap;
     use serde_json::{Value, json};
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
@@ -529,7 +576,7 @@ mod tests {
 
     #[test]
     fn stale_result_is_dropped_by_turn_key() {
-        let mut states = HashMap::new();
+        let mut states = FxHashMap::default();
         states.insert(
             "session-a".to_string(),
             SessionState {
@@ -585,7 +632,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output_path = temp.path().join("trace.jsonl");
         let sidecar_path = temp.path().join("trace.sidecar.jsonl");
-        let mut sessions = HashMap::new();
+        let mut sessions = FxHashMap::default();
         sessions.insert(
             "session-a".to_string(),
             vec![

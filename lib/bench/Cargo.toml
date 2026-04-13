@@ -44,6 +44,7 @@ hf-hub = { workspace = true }
 indicatif = "0.18"
 rand = { workspace = true }
 reqwest = { workspace = true }
+rustc-hash = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"

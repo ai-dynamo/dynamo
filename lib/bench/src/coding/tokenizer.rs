@@ -121,7 +121,7 @@ fn resolve_tokenizer_path(model_or_path: &str) -> Result<PathBuf> {
     Ok(tokenizer_path)
 }
 
-fn last_word_overlap_start(text: &str, overlap_words: usize) -> usize {
+pub(crate) fn last_word_overlap_start(text: &str, overlap_words: usize) -> usize {
     if overlap_words == 0 || text.is_empty() {
         return text.len();
     }
