@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # TODO: make this using cli flag
 _DEFAULT_GRACE_PERIOD_SECS = 5.0
+_DEFAULT_DRAIN_TIMEOUT_SECS = 30.0
 _GRACE_PERIOD_ENV = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"
 _shutdown_started = asyncio.Event()
 
@@ -104,8 +105,15 @@ async def graceful_shutdown_with_discovery(
             "Draining in-flight transfers before shutdown (issue #7319 safeguard)"
         )
         try:
-            await drain_callback()
+            await asyncio.wait_for(
+                drain_callback(), timeout=_DEFAULT_DRAIN_TIMEOUT_SECS
+            )
             logger.info("Drain complete")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Drain callback timed out after %.0fs, proceeding with shutdown",
+                _DEFAULT_DRAIN_TIMEOUT_SECS,
+            )
         except Exception:
             logger.exception(
                 "Drain callback raised an exception; proceeding with shutdown"

@@ -24,6 +24,12 @@ pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
 # ---------------------------------------------------------------------------
 # Module loading: import graceful_shutdown without triggering the full dynamo
 # package (which requires dynamo.llm, CUDA, etc.)
+#
+# We cannot do `from dynamo.common.utils import graceful_shutdown` because the
+# dynamo package __init__ transitively imports dynamo._core, which is a native
+# extension (PyO3) requiring CUDA/NIXL libraries that are not available in
+# unit test environments. Instead, we stub dynamo._core and load the module
+# directly from its file path via importlib.
 # ---------------------------------------------------------------------------
 
 _GRACEFUL_SHUTDOWN_PATH = Path(__file__).parent.parent / "graceful_shutdown.py"
