@@ -21,6 +21,7 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Frontend + KV (Aggregated)** | `python -m dynamo.frontend --router-mode kv` | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Aggregated | Production single-pool serving with cache reuse |
 | **Frontend + KV (Disaggregated)** | `python -m dynamo.frontend --router-mode kv` with prefill + decode workers | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Disaggregated (prefill + decode pools) | Separate prefill/decode for large-scale serving |
 | **Frontend + Least-Loaded** | `python -m dynamo.frontend --router-mode least-loaded` | Fewest active connections | None | Aggregated or disaggregated fallback | Simple load-aware balancing without KV awareness |
+| **Frontend + Device-Aware Weighted** | `python -m dynamo.frontend --router-mode device-aware-weighted` | Device-aware budget + least-loaded within selected device group | None | Aggregated or disaggregated fallback | Heterogeneous fleet balancing (CPU/non-CPU); degenerates to least-loaded when only one device class is present |
 | **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
 | **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / JetStream / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
 
@@ -32,7 +33,24 @@ The Dynamo router can be deployed in several configurations. The table below sho
 | **Random** | `random` | Selects a random worker for each request |
 | **KV** | `kv` | Evaluates KV cache overlap and decode load per worker; picks lowest cost |
 | **Least-Loaded** | `least-loaded` | Routes to the worker with fewest active connections; in disaggregated prefill paths it skips bootstrap optimization and falls back to synchronous prefill |
+| **Device-Aware Weighted** | `device-aware-weighted` | Partitions workers into CPU and non-CPU groups, applies capability-normalized ratio budgeting using `DYN_ENCODER_CUDA_TO_CPU_RATIO` to decide which group receives the request, then selects the least-loaded worker within that group |
 | **Direct** | `direct` | Reads the target `worker_id` from the request's routing hints; no selection logic |
+
+### Device-Aware Weighted Routing
+
+`device-aware-weighted` is designed for heterogeneous fleets where workers of different compute capability, for example CPU embedding encoders alongside GPU embedding encoders, share the same endpoint.
+
+Workers are split into CPU and non-CPU groups. The router compares a capability-normalized load across the two groups:
+
+```text
+normalized_load = total_inflight(group) / (instance_count(group) x throughput_weight)
+```
+
+The throughput weight is `1` for CPU workers and `DYN_ENCODER_CUDA_TO_CPU_RATIO` for non-CPU workers. The next request is routed to the group with the lower normalized load, then to the least-loaded worker inside that group.
+
+Use `DYN_ENCODER_CUDA_TO_CPU_RATIO` to approximate the throughput ratio of a non-CPU worker relative to one CPU worker. The default is `8`.
+
+When only one device class is present, the policy degenerates to standard least-loaded routing.
 
 ### KV Event Transport Modes (within `--router-mode kv`)
 
@@ -183,6 +201,7 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS=false` | `true` |
 | `--router-kv-overlap-score-weight` | `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT` | `1.0` |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` |
+| `DYN_ENCODER_CUDA_TO_CPU_RATIO` | `8` | Throughput ratio of a non-CPU worker relative to one CPU worker for `device-aware-weighted` routing |
 
 For complete K8s examples and advanced configuration, see [K8s Examples](router-examples.md#k8s-examples) and [Configuration and Tuning](router-configuration.md).
 For A/B testing and advanced K8s setup, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).

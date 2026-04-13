@@ -20,6 +20,8 @@ This page collects the main router flags for frontend-embedded and standalone de
 `lcfs` orders by adjusted reverse arrival time (`priority_jump + arrival_offset`) and mainly serves controlled comparison experiments.
 `wspt` orders by `(1 + priority_jump) / isl_tokens` and optimizes average TTFT.
 
+For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
+
 ## KV Event Transport and Persistence
 
 - `--no-router-kv-events`: Disables KV event tracking. By default, the router uses KV events to monitor block creation and deletion from workers. When disabled, the router predicts cache state from routing decisions with TTL-based expiration and pruning.

@@ -46,7 +46,7 @@ For deployment modes and quick start steps, see the [Router Guide](router-guide.
 **Limitations:**
 - Static endpoints not supported—KV router requires dynamic model discovery via etcd to track worker instances and their KV cache states
 
-For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, or `--router-mode least-loaded` with both static and dynamic endpoints.
+For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, `--router-mode least-loaded`, or `--router-mode device-aware-weighted` with both static and dynamic endpoints.
 
 ## Next Steps
 

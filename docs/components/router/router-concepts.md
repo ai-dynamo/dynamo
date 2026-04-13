@@ -83,6 +83,7 @@ You can then use the default routing methods exposed by the client class to send
 - **Round-robin routing**: Cycles through available workers via `client.round_robin()`
 - **Direct routing**: Explicitly targets a specific worker via `client.direct(input, component_id)`
 - **Least-loaded routing**: Routes to the worker with fewest active connections via `--router-mode least-loaded`
+- **Device-aware weighted routing**: Routes using CPU/non-CPU ratio budgeting plus least-loaded selection within the selected device group via `--router-mode device-aware-weighted`
 
 In disaggregated prefill paths it skips bootstrap optimization and uses the synchronous prefill path, matching power-of-two routing.
 
@@ -90,3 +91,15 @@ KV cache routing uses direct routing with a special worker selection algorithm.
 
 For benchmarking KV router performance, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 For custom routing logic and advanced patterns, see [Routing Patterns](router-examples.md#routing-patterns).
+
+## Device-Aware Weighted Routing
+
+`device-aware-weighted` is designed for heterogeneous fleets where CPU and non-CPU workers share the same endpoint. Instead of comparing raw in-flight counts, the router compares a capability-normalized load across the CPU and non-CPU groups, then selects the least-loaded worker within the winning group.
+
+```text
+normalized_load = total_inflight(group) / (instance_count(group) x throughput_weight)
+```
+
+The throughput weight is `1` for CPU workers and `DYN_ENCODER_CUDA_TO_CPU_RATIO` for non-CPU workers. This lets the router route proportionally to device capability instead of permanently starving slower devices.
+
+When only one device class is present, the behavior degenerates to standard least-loaded routing.
