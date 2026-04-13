@@ -11,7 +11,7 @@ overlap, and forwards the request to that worker.
 Usage:
     python -m examples.backends.vllm.mm_router_worker \
         --model Qwen/Qwen3-VL-8B-Instruct \
-        --namespace default \
+        --namespace dynamo \
         --component mm_router \
         --endpoint generate \
         --downstream-component backend \
@@ -153,7 +153,9 @@ async def worker(runtime: DistributedRuntime) -> None:
         block_size=args.block_size,
         kv_router_config=kv_router_config,
     )
-    logger.info(f"KvRouter created successfully (use_kv_events={not args.no_router_kv_events})")
+    logger.info(
+        f"KvRouter created successfully (use_kv_events={not args.no_router_kv_events})"
+    )
 
     # Initialize tokenizer and processor for MM processing
     logger.info(f"Loading tokenizer from {args.model}...")
