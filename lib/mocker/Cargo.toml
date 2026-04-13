@@ -12,10 +12,20 @@ homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[features]
+kvbm = ["dep:kvbm-engine", "dep:kvbm-logical", "dep:kvbm-physical", "dep:velo", "dep:futures"]
+
 [dependencies]
 # repo
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
+
+# kvbm multi-tier KV cache offload (optional)
+kvbm-engine = { workspace = true, optional = true }
+kvbm-logical = { workspace = true, optional = true }
+kvbm-physical = { workspace = true, optional = true }
+velo = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 # workspace
 anyhow = { workspace = true }

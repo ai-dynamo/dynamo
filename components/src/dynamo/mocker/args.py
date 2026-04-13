@@ -484,6 +484,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
     )
 
+    # ── KVBM G1↔G2 offload ────────────────────────────────────────
+    parser.add_argument(
+        "--num-g2-blocks",
+        type=int,
+        default=0,
+        help="Number of G2 (host-memory) blocks for KVBM offload. 0 = disabled.",
+    )
+    parser.add_argument(
+        "--kvbm-offload-batch-size",
+        type=int,
+        default=32,
+        help="Max blocks per offload batch in the G1→G2 pipeline.",
+    )
+    parser.add_argument(
+        "--kvbm-bandwidth-g1-g2",
+        type=float,
+        default=14.0,
+        help="Simulated G1↔G2 bandwidth in GB/s (default: 14.0, PCIe Gen4 x16).",
+    )
+
     parser.add_argument(
         "--stagger-delay",
         type=float,
