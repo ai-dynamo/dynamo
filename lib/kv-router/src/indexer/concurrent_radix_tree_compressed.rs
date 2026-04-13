@@ -246,19 +246,55 @@ struct CleanupEdge {
     child: Weak<RwLock<Node>>,
 }
 
+struct CleanupState {
+    clock_origin: Instant,
+    last_cleanup_elapsed_ms: AtomicU64,
+    scheduled: AtomicBool,
+}
+
+impl CleanupState {
+    fn new() -> Self {
+        Self {
+            clock_origin: Instant::now(),
+            last_cleanup_elapsed_ms: AtomicU64::new(0),
+            scheduled: AtomicBool::new(false),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.clock_origin.elapsed().as_millis() as u64
+    }
+
+    fn try_schedule(&self) -> bool {
+        let now_ms = self.elapsed_ms();
+        let last_ms = self.last_cleanup_elapsed_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_ms) < CLEANUP_INTERVAL_MS {
+            return false;
+        }
+
+        self.scheduled
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    fn cancel(&self) {
+        self.scheduled.store(false, Ordering::Release);
+    }
+}
+
 struct CleanupGuard<'a> {
-    cleanup_scheduled: &'a AtomicBool,
-    last_cleanup_elapsed_ms: &'a AtomicU64,
+    state: &'a CleanupState,
     completed_elapsed_ms: Option<u64>,
 }
 
 impl Drop for CleanupGuard<'_> {
     fn drop(&mut self) {
         if let Some(elapsed_ms) = self.completed_elapsed_ms {
-            self.last_cleanup_elapsed_ms
+            self.state
+                .last_cleanup_elapsed_ms
                 .store(elapsed_ms, Ordering::Relaxed);
         }
-        self.cleanup_scheduled.store(false, Ordering::Release);
+        self.state.scheduled.store(false, Ordering::Release);
     }
 }
 
@@ -268,9 +304,7 @@ pub struct ConcurrentRadixTreeCompressed {
     root: SharedNode,
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
-    cleanup_clock_origin: Instant,
-    last_cleanup_elapsed_ms: AtomicU64,
-    cleanup_scheduled: AtomicBool,
+    cleanup: CleanupState,
 }
 
 impl Default for ConcurrentRadixTreeCompressed {
@@ -302,9 +336,7 @@ impl ConcurrentRadixTreeCompressed {
         Self {
             root: Arc::new(RwLock::new(Node::new())),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
-            cleanup_clock_origin: Instant::now(),
-            last_cleanup_elapsed_ms: AtomicU64::new(0),
-            cleanup_scheduled: AtomicBool::new(false),
+            cleanup: CleanupState::new(),
         }
     }
 
@@ -1328,31 +1360,21 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
     }
 
     fn try_schedule_cleanup(&self) -> bool {
-        let now_ms = self.cleanup_clock_origin.elapsed().as_millis() as u64;
-        let last_ms = self.last_cleanup_elapsed_ms.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last_ms) < CLEANUP_INTERVAL_MS {
-            return false;
-        }
-
-        self.cleanup_scheduled
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
+        self.cleanup.try_schedule()
     }
 
     fn cancel_scheduled_cleanup(&self) {
-        self.cleanup_scheduled.store(false, Ordering::Release);
+        self.cleanup.cancel();
     }
 
     fn run_cleanup_task(&self) {
         let mut cleanup_guard = CleanupGuard {
-            cleanup_scheduled: &self.cleanup_scheduled,
-            last_cleanup_elapsed_ms: &self.last_cleanup_elapsed_ms,
+            state: &self.cleanup,
             completed_elapsed_ms: None,
         };
 
         self.cleanup_stale_children();
-        cleanup_guard.completed_elapsed_ms =
-            Some(self.cleanup_clock_origin.elapsed().as_millis() as u64);
+        cleanup_guard.completed_elapsed_ms = Some(self.cleanup.elapsed_ms());
     }
 
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {
