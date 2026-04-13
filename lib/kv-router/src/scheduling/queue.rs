@@ -19,6 +19,7 @@ use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRe
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
+const MIN_SKIP_QUEUE_OVERLAP_RATIO: f64 = 0.90;
 
 /// Entry in the priority queue, ordered by key (higher key = higher priority).
 struct QueueEntry<K: Ord + Eq> {
@@ -64,6 +65,7 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
+    skip_queue_overlap_less_than_tokens: Option<usize>,
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
     block_size: u32,
@@ -79,10 +81,12 @@ impl<
     Sel: WorkerSelector<C>,
 > SchedulerQueue<P, C, S, Sel>
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
+        skip_queue_overlap_less_than_tokens: Option<usize>,
         block_size: u32,
         selector: Sel,
         policy: S,
@@ -97,6 +101,7 @@ impl<
             slots,
             workers_with_configs,
             threshold_frac,
+            skip_queue_overlap_less_than_tokens,
             start_time: Instant::now(),
             block_size,
             selector,
@@ -148,6 +153,11 @@ impl<
 
         let decay_now = Instant::now();
         if self.all_workers_busy(threshold, request.allowed_worker_ids.as_ref(), decay_now) {
+            if self.should_skip_queue_for_overlap(&request) {
+                tracing::debug!("all workers busy, but overlap-aware skip bypassed queue");
+                self.schedule(request, decay_now).await;
+                return;
+            }
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = self.policy.enqueue_key(arrival_offset, &request);
@@ -303,6 +313,37 @@ impl<
         self.pending_count.load(AtomicOrdering::Relaxed)
     }
 
+    /// for very small prefix requests (e.g. 64 tokens), queueing does not make sense
+    /// if any worker has a cache hit rate where it can be decoded right away, decode it there.
+    /// if worker selection is not deterministic, do not enable this feature or enable peer kv cache transfer.
+    fn should_skip_queue_for_overlap(&self, request: &SchedulingRequest) -> bool {
+        let Some(skip_threshold) = self.skip_queue_overlap_less_than_tokens else {
+            return false;
+        };
+
+        request
+            .overlaps
+            .scores
+            .values()
+            .copied()
+            .any(|overlap_blocks| {
+                if overlap_blocks == 0 {
+                    return false;
+                }
+
+                let overlap_tokens = (overlap_blocks as usize) * (self.block_size as usize);
+                let overlap_ratio = (overlap_tokens as f64) / (request.isl_tokens as f64);
+                // fixes abuse by small token request
+                // should be long enough such that the heuristics will make use of this.
+                if overlap_ratio < MIN_SKIP_QUEUE_OVERLAP_RATIO {
+                    return false;
+                }
+
+                let effective_prefill_tokens = request.isl_tokens.saturating_sub(overlap_tokens);
+                effective_prefill_tokens < skip_threshold
+            })
+    }
+
     /// Check if all eligible workers are busy based on threshold.
     /// When `allowed` is `Some`, only those worker IDs are considered;
     /// otherwise all registered workers are checked.
@@ -430,6 +471,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
+            None,
             block_size,
             selector,
             FcfsPolicy,
@@ -853,5 +895,203 @@ mod tests {
         let _ = slots.free(&"req-1".to_string(), decay_now());
         let _ = slots.mark_prefill_completed(&"req-2".to_string(), decay_now());
         let _ = slots.free(&"req-2".to_string(), decay_now());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_overlap_threshold_bypasses_pending_queue() {
+        let block_size = 16;
+        let isl = 256;
+
+        let dp_range: HashMap<u64, (u32, u32)> = [(0_u64, (0_u32, 1_u32))].into_iter().collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let configs = HashMap::from([(
+            0_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        )]);
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let selector = DefaultWorkerSelector::new(None, "test");
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            Some(0.0),
+            Some(8),
+            block_size,
+            selector,
+            FcfsPolicy,
+            None,
+        ));
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.unwrap().unwrap();
+
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        let mut overlaps = OverlapScores::default();
+        overlaps.scores.insert(WorkerWithDpRank::new(0, 0), 16_u32);
+        let req2 = SchedulingRequest {
+            maybe_request_id: Some("req-2".to_string()),
+            token_seq: None,
+            isl_tokens: isl,
+            overlaps,
+            decode_blocks: HashMap::new(),
+            prefill_tokens: HashMap::new(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: true,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            allowed_worker_ids: None,
+            resp_tx: Some(tx2),
+        };
+
+        queue.enqueue(req2).await;
+        let _ = rx2.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_overlap_threshold_does_not_bypass_when_effective_tokens_too_large() {
+        let block_size = 16;
+        let isl = 256;
+
+        let dp_range: HashMap<u64, (u32, u32)> = [(0_u64, (0_u32, 1_u32))].into_iter().collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let configs = HashMap::from([(
+            0_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        )]);
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let selector = DefaultWorkerSelector::new(None, "test");
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            Some(0.0),
+            Some(8),
+            block_size,
+            selector,
+            FcfsPolicy,
+            None,
+        ));
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.unwrap().unwrap();
+
+        let (tx2, mut rx2) = tokio::sync::oneshot::channel();
+        let mut overlaps = OverlapScores::default();
+        overlaps.scores.insert(WorkerWithDpRank::new(0, 0), 15_u32);
+        let req2 = SchedulingRequest {
+            maybe_request_id: Some("req-2".to_string()),
+            token_seq: None,
+            isl_tokens: isl,
+            overlaps,
+            decode_blocks: HashMap::new(),
+            prefill_tokens: HashMap::new(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: true,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            allowed_worker_ids: None,
+            resp_tx: Some(tx2),
+        };
+
+        queue.enqueue(req2).await;
+        assert!(rx2.try_recv().is_err(), "request should remain queued");
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_overlap_threshold_requires_high_cache_hit_ratio() {
+        let block_size = 16;
+        let isl = 511;
+
+        let dp_range: HashMap<u64, (u32, u32)> = [(0_u64, (0_u32, 1_u32))].into_iter().collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let configs = HashMap::from([(
+            0_u64,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(isl as u64),
+                ..Default::default()
+            },
+        )]);
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let selector = DefaultWorkerSelector::new(None, "test");
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            Some(0.0),
+            Some(512),
+            block_size,
+            selector,
+            FcfsPolicy,
+            None,
+        ));
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.unwrap().unwrap();
+
+        let (tx2, mut rx2) = tokio::sync::oneshot::channel();
+        let mut overlaps = OverlapScores::default();
+        overlaps.scores.insert(WorkerWithDpRank::new(0, 0), 16_u32);
+        let req2 = SchedulingRequest {
+            maybe_request_id: Some("req-2".to_string()),
+            token_seq: None,
+            isl_tokens: isl,
+            overlaps,
+            decode_blocks: HashMap::new(),
+            prefill_tokens: HashMap::new(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            update_states: true,
+            lora_name: None,
+            priority_jump: 0.0,
+            expected_output_tokens: None,
+            allowed_worker_ids: None,
+            resp_tx: Some(tx2),
+        };
+
+        queue.enqueue(req2).await;
+        assert!(
+            rx2.try_recv().is_err(),
+            "request should remain queued when cache-hit ratio is below 75%"
+        );
+        assert_eq!(queue.pending_count(), 1);
     }
 }

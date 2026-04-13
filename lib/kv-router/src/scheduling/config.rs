@@ -191,6 +191,13 @@ pub struct KvRouterConfig {
     #[validate(range(min = 0.0))]
     pub router_queue_threshold: Option<f64>,
 
+    /// Skip the router queue when the best possible KV overlap reduces the effective
+    /// prompt-side prefill work below this many new tokens.
+    ///
+    /// This only applies when queueing is otherwise enabled and at least one worker
+    /// has a non-zero overlap estimate for the request.
+    pub router_skip_queue_overlap_less_than_tokens: Option<usize>,
+
     /// Number of event processing threads for the KV indexer.
     /// When > 1, uses ConcurrentRadixTree with a thread pool instead of the
     /// single-threaded RadixTree. Default: 4.
@@ -235,6 +242,7 @@ impl Default for KvRouterConfig {
             router_max_tree_size: 2usize.pow(20), // 2^20 = 1048576, matches PruneConfig::default()
             router_prune_target_ratio: 0.8,
             router_queue_threshold: Some(4.0),
+            router_skip_queue_overlap_less_than_tokens: None,
             router_event_threads: 4,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),

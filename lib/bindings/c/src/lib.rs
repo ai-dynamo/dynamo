@@ -552,6 +552,9 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     fn env_f64(key: &str) -> Option<f64> {
         std::env::var(key).ok().and_then(|v| v.parse().ok())
     }
+    fn env_usize(key: &str) -> Option<usize> {
+        std::env::var(key).ok().and_then(|v| v.parse().ok())
+    }
     fn env_bool(key: &str) -> Option<bool> {
         std::env::var(key)
             .ok()
@@ -585,6 +588,9 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     }
     if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
         cfg.router_queue_threshold = Some(v);
+    }
+    if let Some(v) = env_usize("DYN_ROUTER_SKIP_QUEUE_OVERLAP_LESS_THAN_TOKENS") {
+        cfg.router_skip_queue_overlap_less_than_tokens = Some(v);
     }
 
     tracing::info!(

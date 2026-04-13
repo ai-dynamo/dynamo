@@ -80,6 +80,7 @@ where
             slots,
             workers_with_configs.clone(),
             kv_router_config.router_queue_threshold,
+            kv_router_config.router_skip_queue_overlap_less_than_tokens,
             block_size,
             selector,
             policy,

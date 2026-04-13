@@ -34,6 +34,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_max_tree_size",
     "router_prune_target_ratio",
     "router_queue_threshold",
+    "router_skip_queue_overlap_less_than_tokens",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
@@ -60,6 +61,7 @@ class KvRouterConfigBase(ConfigBase):
     router_max_tree_size: int
     router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
+    router_skip_queue_overlap_less_than_tokens: Optional[int]
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
@@ -262,6 +264,18 @@ class KvRouterArgGroup(ArgGroup):
                 "queueing sensitivity (queue as soon as any tokens are active)."
             ),
             arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-skip-queue-overlap-less-than-tokens",
+            env_var="DYN_ROUTER_SKIP_QUEUE_OVERLAP_LESS_THAN_TOKENS",
+            default=None,
+            help=(
+                "KV Router: Bypass the queue for requests with a possible KV hit when the "
+                "effective new-token prefill cost (ISL minus best overlap) is below this "
+                "threshold. Disabled by default."
+            ),
+            arg_type=int,
         )
         add_argument(
             g,
