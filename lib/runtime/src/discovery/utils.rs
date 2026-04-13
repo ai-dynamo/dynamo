@@ -145,6 +145,9 @@ where
                         break;
                     }
                 }
+                Ok(DiscoveryEvent::InitialSyncDone) => {
+                    // Not relevant for field extraction; ignore.
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "Discovery event stream error in watch_and_extract_field");
                     // Continue processing other events

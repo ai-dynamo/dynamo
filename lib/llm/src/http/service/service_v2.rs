@@ -161,6 +161,12 @@ impl State {
         self.discovery_client.clone()
     }
 
+    /// Returns `true` once the initial discovery scan has completed (or immediately for
+    /// in-process engines that don't use remote discovery).
+    pub fn is_discovery_ready(&self) -> bool {
+        self.manager.is_discovery_ready()
+    }
+
     /// Check if the service is shutting down
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token.is_cancelled()

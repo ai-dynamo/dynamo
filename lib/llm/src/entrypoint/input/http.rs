@@ -174,6 +174,11 @@ async fn run_watcher(
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
 ) -> anyhow::Result<()> {
+    // Mark discovery as pending *before* spawning the watcher task so that the
+    // HTTP server starts in the unready state and Kubernetes never routes traffic
+    // to this replica until the initial model table is fully populated.
+    model_manager.set_discovery_pending();
+
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,

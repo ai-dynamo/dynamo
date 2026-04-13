@@ -201,6 +201,7 @@ impl Discovery for MockDiscovery {
 
         let stream = async_stream::stream! {
             let mut known_instances: HashSet<DiscoveryInstanceId> = HashSet::new();
+            let mut initial_sync_done = false;
 
             loop {
                 let current: Vec<_> = {
@@ -226,6 +227,12 @@ impl Discovery for MockDiscovery {
                 for id in known_instances.difference(&current_ids).cloned().collect::<Vec<_>>() {
                     known_instances.remove(&id);
                     yield Ok(DiscoveryEvent::Removed(id));
+                }
+
+                // After the first poll, signal that the initial list is complete
+                if !initial_sync_done {
+                    initial_sync_done = true;
+                    yield Ok(DiscoveryEvent::InitialSyncDone);
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
