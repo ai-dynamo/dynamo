@@ -21,9 +21,14 @@ import msgspec
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
+try:
+    # vllm >= 0.19.0: MultiModalUUIDDict moved to vllm.inputs
+    from vllm.inputs import MultiModalUUIDDict  # noqa: F401
+except ImportError:
+    # vllm < 0.19.0: MultiModalUUIDDict lives in vllm.multimodal.inputs
+    from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 from vllm.logprobs import PromptLogprobs
-from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import RequestStateStats

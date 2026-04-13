@@ -17,7 +17,7 @@ from typing import Tuple
 import torch
 import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
