@@ -100,7 +100,7 @@ def run_dynamo_headless(config: Config) -> None:
             configure_gms_lock_mode(config.engine_args)
             validate_cudagraph_mode(config.engine_args)
 
-    elif config.engine_args.load_format in ("mx-source", "mx-target"):
+    elif config.engine_args.load_format == "mx":
         config.engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
 
     # Keep the upstream CLI import local so tests that only exercise
@@ -485,7 +485,7 @@ def setup_vllm_engine(
             configure_gms_lock_mode(engine_args)
             validate_cudagraph_mode(engine_args)
 
-    if engine_args.load_format in ("mx-source", "mx-target"):
+    if engine_args.load_format == "mx":
         try:
             from modelexpress import register_modelexpress_loaders
 
