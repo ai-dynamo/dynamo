@@ -130,6 +130,17 @@ func makeCheckpointLease(name string, renewTime time.Time, durationSeconds int32
 	}
 }
 
+func requireCheckpointContainer(t *testing.T, containers []corev1.Container, name string) *corev1.Container {
+	t.Helper()
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	t.Fatalf("container %q not found", name)
+	return nil
+}
+
 func TestBuildCheckpointJob(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
@@ -251,6 +262,59 @@ func TestBuildCheckpointJob(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
+}
+
+func TestBuildCheckpointJobTargetsMainContainerWhenSidecarIsFirst(t *testing.T) {
+	s := checkpointTestScheme()
+	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers = []corev1.Container{
+		{
+			Name:    "sidecar",
+			Image:   "sidecar:latest",
+			Command: []string{"sleep"},
+			Args:    []string{"infinity"},
+		},
+		{
+			Name:    consts.MainContainerName,
+			Image:   "test-image:latest",
+			Command: []string{"python3", "-m", "dynamo.vllm"},
+			Env:     []corev1.EnvVar{{Name: "HF_TOKEN", Value: "secret"}},
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("2"),
+				},
+			},
+		},
+	}
+
+	r := makeCheckpointReconciler(s, ckpt)
+	job, err := buildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
+	require.NoError(t, err)
+
+	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
+	assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
+	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
+	require.NotNil(t, main.ReadinessProbe)
+	assert.Equal(t, []string{"cat", "/tmp/ready-for-checkpoint"}, main.ReadinessProbe.Exec.Command)
+	assert.Nil(t, main.LivenessProbe)
+	assert.Nil(t, main.StartupProbe)
+
+	mainEnv := map[string]string{}
+	for _, env := range main.Env {
+		mainEnv[env.Name] = env.Value
+	}
+	assert.Equal(t, "/tmp/ready-for-checkpoint", mainEnv[consts.EnvReadyForCheckpointFile])
+	assert.Equal(t, "secret", mainEnv["HF_TOKEN"])
+
+	sidecar := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "sidecar")
+	assert.Equal(t, []string{"sleep"}, sidecar.Command)
+	assert.Equal(t, []string{"infinity"}, sidecar.Args)
+	assert.Nil(t, sidecar.ReadinessProbe)
+	assert.Nil(t, sidecar.LivenessProbe)
+	assert.Nil(t, sidecar.StartupProbe)
+	for _, env := range sidecar.Env {
+		assert.NotEqual(t, consts.EnvReadyForCheckpointFile, env.Name)
+	}
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {

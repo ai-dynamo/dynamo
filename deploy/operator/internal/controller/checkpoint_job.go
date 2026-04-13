@@ -74,31 +74,32 @@ func buildCheckpointJob(
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
-	if len(podTemplate.Spec.Containers) > 0 {
-		mainContainer := &podTemplate.Spec.Containers[0]
-		mainContainer.Env = dynamo.MergeEnvs(
-			buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
-			mainContainer.Env,
-		)
-		dynamo.AddStandardEnvVars(mainContainer, config)
-		mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
-			Name:  consts.EnvReadyForCheckpointFile,
-			Value: config.Checkpoint.ReadyForCheckpointFilePath,
-		})
-		mainContainer.ReadinessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{"cat", config.Checkpoint.ReadyForCheckpointFilePath},
-				},
-			},
-			InitialDelaySeconds: 15,
-			PeriodSeconds:       2,
-		}
-		mainContainer.LivenessProbe = nil
-		mainContainer.StartupProbe = nil
-		checkpoint.EnsurePodInfoMount(mainContainer)
-		dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
+	mainContainer, err := snapshotprotocol.ResolveCheckpointWorkerContainer(&podTemplate.Spec)
+	if err != nil {
+		return nil, err
 	}
+	mainContainer.Env = dynamo.MergeEnvs(
+		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
+		mainContainer.Env,
+	)
+	dynamo.AddStandardEnvVars(mainContainer, config)
+	mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
+		Name:  consts.EnvReadyForCheckpointFile,
+		Value: config.Checkpoint.ReadyForCheckpointFilePath,
+	})
+	mainContainer.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"cat", config.Checkpoint.ReadyForCheckpointFilePath},
+			},
+		},
+		InitialDelaySeconds: 15,
+		PeriodSeconds:       2,
+	}
+	mainContainer.LivenessProbe = nil
+	mainContainer.StartupProbe = nil
+	checkpoint.EnsurePodInfoMount(mainContainer)
+	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {
@@ -107,10 +108,8 @@ func buildCheckpointJob(
 	}
 
 	wrapLaunchJob := false
-	if len(podTemplate.Spec.Containers) != 0 {
-		if gpus, ok := podTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
-			wrapLaunchJob = gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
-		}
+	if gpus, ok := mainContainer.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
+		wrapLaunchJob = gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
 	}
 	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
 
