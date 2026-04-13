@@ -254,6 +254,10 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 		w.log.Info("Restore pod has no checkpoint-id label", "pod", podKey)
 		return
 	}
+	triggerToken := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreTriggerAnnotation])
+	if triggerToken == "" {
+		return
+	}
 
 	if strings.ContainsAny(checkpointID, "/\\") || strings.Contains(checkpointID, "..") || filepath.Clean(checkpointID) != checkpointID {
 		w.log.Error(fmt.Errorf("invalid checkpoint id %q", checkpointID), "Invalid checkpoint id on restore pod", "pod", podKey)
@@ -301,11 +305,19 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 	}
 
 	startedAt := time.Now()
-	w.log.Info("Restore target detected, triggering external restore", "pod", podKey, "checkpoint_id", checkpointID)
+	w.log.Info(
+		"Restore trigger accepted, triggering external restore",
+		"pod",
+		podKey,
+		"checkpoint_id",
+		checkpointID,
+		"trigger_token",
+		triggerToken,
+	)
 	emitPodEvent(ctx, w.clientset, w.log, pod, "snapshot", corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s", checkpointID))
 
 	go func() {
-		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, restoreAttemptKey, startedAt); err != nil {
+		if err := w.runRestore(ctx, pod, containerName, containerID, checkpointID, checkpointLocation, triggerToken, restoreAttemptKey, startedAt); err != nil {
 			opLog := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID)
 			opLog.Error(err, "Restore controller worker failed")
 			emitPodEvent(ctx, w.clientset, opLog, pod, "snapshot", corev1.EventTypeWarning, "RestoreWorkerFailed", err.Error())
@@ -461,7 +473,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 //  3. SIGCONT the restored process to wake it up
 //  4. Wait for the pod to become Ready
 //  5. Mark the container instance as completed
-func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID, checkpointLocation, restoreAttemptKey string, startedAt time.Time) error {
+func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, containerName, containerID, checkpointID, checkpointLocation, triggerToken, restoreAttemptKey string, startedAt time.Time) error {
 	releaseOnExit := true
 	defer func() {
 		if releaseOnExit {
@@ -478,8 +490,10 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
 	setRestoreStatus := func(value string) error {
 		annotations := map[string]string{
-			snapshotprotocol.RestoreStatusAnnotation:      value,
-			snapshotprotocol.RestoreContainerIDAnnotation: containerID,
+			snapshotprotocol.RestoreStatusAnnotation:            value,
+			snapshotprotocol.RestoreContainerIDAnnotation:       containerID,
+			snapshotprotocol.RestoreTriggerAnnotation:           triggerToken,
+			snapshotprotocol.RestoreTriggerObservedAtAnnotation: startedAt.UTC().Format(time.RFC3339Nano),
 		}
 		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
 			if value == snapshotprotocol.RestoreStatusCompleted || value == snapshotprotocol.RestoreStatusFailed {

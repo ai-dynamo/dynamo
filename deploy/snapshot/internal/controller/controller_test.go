@@ -255,6 +255,7 @@ func TestReconcileRestorePod(t *testing.T) {
 		hash                  string
 		annotationStatus      string
 		annotationContainerID string
+		clearTrigger          bool
 		createDir             bool // whether to create the checkpoint dir on disk
 		preSeed               bool
 		want                  bool
@@ -267,6 +268,16 @@ func TestReconcileRestorePod(t *testing.T) {
 			hash:      "abc123",
 			createDir: true,
 			want:      true,
+		},
+		{
+			name:         "missing restore trigger",
+			nodeName:     testNodeName,
+			phase:        corev1.PodRunning,
+			ready:        false,
+			hash:         "abc123",
+			clearTrigger: true,
+			createDir:    true,
+			want:         false,
 		},
 		{
 			name:      "wrong node",
@@ -409,12 +420,16 @@ func TestReconcileRestorePod(t *testing.T) {
 			}
 
 			w := makeTestController(t)
-			var annotations map[string]string
+			annotations := map[string]string{}
+			if !tc.clearTrigger {
+				annotations[snapshotprotocol.RestoreTriggerAnnotation] = "token"
+			}
 			if tc.annotationStatus != "" {
-				annotations = map[string]string{
-					snapshotprotocol.RestoreStatusAnnotation:      tc.annotationStatus,
-					snapshotprotocol.RestoreContainerIDAnnotation: tc.annotationContainerID,
-				}
+				annotations[snapshotprotocol.RestoreStatusAnnotation] = tc.annotationStatus
+				annotations[snapshotprotocol.RestoreContainerIDAnnotation] = tc.annotationContainerID
+			}
+			if len(annotations) == 0 {
+				annotations = nil
 			}
 
 			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)

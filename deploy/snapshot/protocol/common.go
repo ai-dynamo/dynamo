@@ -12,10 +12,12 @@ const (
 	CheckpointSourceLabel               = "nvidia.com/snapshot-is-checkpoint-source"
 	CheckpointIDLabel                   = "nvidia.com/snapshot-checkpoint-id"
 	RestoreTargetLabel                  = "nvidia.com/snapshot-is-restore-target"
+	RestoreTriggerAnnotation            = "nvidia.com/snapshot-restore-trigger"
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
 	CheckpointStatusAnnotation          = "nvidia.com/snapshot-checkpoint-status"
 	RestoreStatusAnnotation             = "nvidia.com/snapshot-restore-status"
 	RestoreContainerIDAnnotation        = "nvidia.com/snapshot-restore-container-id"
+	RestoreTriggerObservedAtAnnotation  = "nvidia.com/snapshot-restore-trigger-observed-at"
 	CheckpointVolumeName                = "checkpoint-storage"
 	DefaultCheckpointArtifactVersion    = "1"
 	DefaultCheckpointJobTTLSeconds      = int32(300)
@@ -72,8 +74,10 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	delete(labels, CheckpointIDLabel)
 	delete(annotations, CheckpointArtifactVersionAnnotation)
 	delete(annotations, CheckpointStatusAnnotation)
+	delete(annotations, RestoreTriggerAnnotation)
 	delete(annotations, RestoreStatusAnnotation)
 	delete(annotations, RestoreContainerIDAnnotation)
+	delete(annotations, RestoreTriggerObservedAtAnnotation)
 
 	if !enabled {
 		return

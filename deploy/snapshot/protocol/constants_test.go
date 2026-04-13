@@ -13,8 +13,10 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	annotations := map[string]string{
 		CheckpointArtifactVersionAnnotation: "old",
 		CheckpointStatusAnnotation:          "completed",
+		RestoreTriggerAnnotation:            "token-old",
 		RestoreStatusAnnotation:             "failed",
 		RestoreContainerIDAnnotation:        "dead-container",
+		RestoreTriggerObservedAtAnnotation:  "2026-04-13T00:00:00Z",
 	}
 
 	ApplyRestoreTargetMetadata(labels, annotations, true, "hash", "2")
@@ -34,11 +36,17 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
 		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
 	}
+	if _, ok := annotations[RestoreTriggerAnnotation]; ok {
+		t.Fatalf("restore trigger annotation was not cleared: %#v", annotations)
+	}
 	if _, ok := annotations[RestoreStatusAnnotation]; ok {
 		t.Fatalf("restore status annotation was not cleared: %#v", annotations)
 	}
 	if _, ok := annotations[RestoreContainerIDAnnotation]; ok {
 		t.Fatalf("restore container id annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreTriggerObservedAtAnnotation]; ok {
+		t.Fatalf("restore trigger observed-at annotation was not cleared: %#v", annotations)
 	}
 }
 
@@ -50,8 +58,10 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	annotations := map[string]string{
 		CheckpointArtifactVersionAnnotation: "2",
 		CheckpointStatusAnnotation:          "completed",
+		RestoreTriggerAnnotation:            "token-old",
 		RestoreStatusAnnotation:             "failed",
 		RestoreContainerIDAnnotation:        "dead-container",
+		RestoreTriggerObservedAtAnnotation:  "2026-04-13T00:00:00Z",
 	}
 
 	ApplyRestoreTargetMetadata(labels, annotations, false, "", "")
@@ -68,10 +78,16 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	if _, ok := annotations[CheckpointStatusAnnotation]; ok {
 		t.Fatalf("checkpoint status annotation was not cleared: %#v", annotations)
 	}
+	if _, ok := annotations[RestoreTriggerAnnotation]; ok {
+		t.Fatalf("restore trigger annotation was not cleared: %#v", annotations)
+	}
 	if _, ok := annotations[RestoreStatusAnnotation]; ok {
 		t.Fatalf("restore status annotation was not cleared: %#v", annotations)
 	}
 	if _, ok := annotations[RestoreContainerIDAnnotation]; ok {
 		t.Fatalf("restore container id annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreTriggerObservedAtAnnotation]; ok {
+		t.Fatalf("restore trigger observed-at annotation was not cleared: %#v", annotations)
 	}
 }
