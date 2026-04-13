@@ -179,6 +179,6 @@ All endpoint paths can be overridden via environment variables:
 - [Frontend Overview](README.md) — quick start and feature matrix
 - [Frontend Guide](frontend-guide.md) — KServe gRPC configuration
 - [NVIDIA Request Extensions (nvext)](nvext.md) — custom request fields
-- [Router Guide](../router/router-guide.md) — detailed routing configuration
+- [Configuration and Tuning](../router/router-configuration.md) — detailed routing configuration
 - [Metrics](../../observability/metrics.md) — available Prometheus metrics
 - [Fault Tolerance](../../fault-tolerance/README.md) — request migration and rejection

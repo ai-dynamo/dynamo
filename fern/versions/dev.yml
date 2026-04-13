@@ -220,8 +220,18 @@ navigation:
         contents:
           - page: Router Guide
             path: ../pages-dev/components/router/router-guide.md
+          - page: Routing Concepts
+            path: ../pages-dev/components/router/router-concepts.md
+          - page: Configuration and Tuning
+            path: ../pages-dev/components/router/router-configuration.md
+          - page: Disaggregated Serving
+            path: ../pages-dev/components/router/router-disaggregated-serving.md
+          - page: Router Operations
+            path: ../pages-dev/components/router/router-operations.md
           - page: Router Examples
             path: ../pages-dev/components/router/router-examples.md
+          - page: Standalone Indexer
+            path: ../pages-dev/components/router/standalone-indexer.md
           - page: KV Event Replay — Dynamo vs vLLM
             path: ../pages-dev/components/router/kv-event-replay-comparison.md
       - section: Planner

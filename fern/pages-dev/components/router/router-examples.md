@@ -294,5 +294,5 @@ For deployments with multiple worker pools, the **Global Router** enables hierar
 ## See Also
 
 - **[Router README](README.md)**: Quick start guide for the KV Router
-- **[Router Guide](router-guide.md)**: Configuration, tuning, and production setup
+- **[Configuration and Tuning](router-configuration.md)**: Router flags and production setup
 - **[Router Design](../../design-docs/router-design.md)**: Architecture details and event transport modes

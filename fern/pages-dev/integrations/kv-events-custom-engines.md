@@ -293,5 +293,5 @@ Stop background tasks (ZMQ listener, event forwarding).
 ## See Also
 
 - **[Event Plane](../design-docs/event-plane.md)**: Transport options (NATS, ZMQ) and configuration
-- **[Router Guide](../components/router/router-guide.md)**: Configuration, tuning, and production setup
+- **[Configuration and Tuning](../components/router/router-configuration.md)**: Router flags, tuning, and production setup
 - **[Router Design](../design-docs/router-design.md)**: Architecture details and event transport modes
