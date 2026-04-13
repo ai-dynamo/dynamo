@@ -192,7 +192,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -215,7 +215,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
+    needs: [vllm-test, sglang-test, trtllm-test, vllm-multi-gpu-test, sglang-multi-gpu-test, trtllm-multi-gpu-test]
     permissions:
       contents: read
     steps:

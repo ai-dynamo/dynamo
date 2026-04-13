@@ -283,7 +283,7 @@ jobs:
           no_load: ${{ inputs.no_load }}
           extra_build_args: |
             DYNAMO_COMMIT_SHA=${{ github.sha }}
-            EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || ''}}
+            EPP_IMAGE=${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
             ${{ inputs.extra_build_args }}
       - name: Refresh BuildKit builder
         if: ${{ inputs.target != 'dev' }}
