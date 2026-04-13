@@ -582,6 +582,9 @@ impl Discovery for KVStoreDiscovery {
                         );
                         Some(DiscoveryEvent::Removed(id))
                     }
+                    kv::WatchEvent::InitialSyncDone => {
+                        Some(DiscoveryEvent::InitialSyncDone)
+                    }
                 };
 
                 if let Some(event) = discovery_event {

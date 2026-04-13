@@ -1,7 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig, protocols::WorkerId};
@@ -68,6 +74,12 @@ pub struct ModelManager {
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
+
+    /// Set to `true` once the initial discovery scan has completed (or immediately for
+    /// in-process engines that don't use remote discovery).  The HTTP readiness probe
+    /// gates on this flag so that the frontend never becomes Kubernetes-Ready before
+    /// its local model table is fully populated.
+    discovery_ready: AtomicBool,
 }
 
 impl Default for ModelManager {
@@ -83,7 +95,31 @@ impl ModelManager {
             cards: DashMap::new(),
             prefill_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
+            // Default to ready so that in-process (non-discovery) engines are immediately
+            // reachable.  Remote-discovery engines call `set_discovery_pending()` before
+            // the HTTP server starts, and `mark_discovery_ready()` when the initial scan
+            // completes.
+            discovery_ready: AtomicBool::new(true),
         }
+    }
+
+    /// Mark that a remote discovery scan is in progress.  The HTTP readiness probe will
+    /// return 503 until `mark_discovery_ready()` is called.
+    pub fn set_discovery_pending(&self) {
+        self.discovery_ready.store(false, Ordering::Release);
+    }
+
+    /// Signal that the initial discovery replay has finished.  Called by `ModelWatcher`
+    /// when it receives `DiscoveryEvent::InitialSyncDone`.
+    pub fn mark_discovery_ready(&self) {
+        self.discovery_ready.store(true, Ordering::Release);
+        tracing::info!("Initial model discovery complete – frontend is ready");
+    }
+
+    /// Returns `true` once the initial discovery scan has completed (or immediately for
+    /// in-process engines).
+    pub fn is_discovery_ready(&self) -> bool {
+        self.discovery_ready.load(Ordering::Acquire)
     }
 
     // -- Model access --

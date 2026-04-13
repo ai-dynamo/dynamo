@@ -287,6 +287,9 @@ impl ModelWatcher {
                         }
                     }
                 }
+                DiscoveryEvent::InitialSyncDone => {
+                    self.manager.mark_discovery_ready();
+                }
             }
         }
     }

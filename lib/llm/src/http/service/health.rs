@@ -63,6 +63,16 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
+    if !state.is_discovery_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "starting",
+                "message": "Initial model discovery is in progress"
+            })),
+        );
+    }
+
     let instances = match list_all_instances(state.discovery()).await {
         Ok(instances) => instances,
         Err(err) => {

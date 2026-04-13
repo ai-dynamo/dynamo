@@ -678,6 +678,9 @@ pub enum DiscoveryEvent {
     Added(DiscoveryInstance),
     /// An instance was removed (identified by its unique ID)
     Removed(DiscoveryInstanceId),
+    /// All pre-existing instances have been replayed; subsequent events are live updates.
+    /// Consumers that gate readiness on discovery convergence should wait for this event.
+    InitialSyncDone,
 }
 
 /// Stream type for discovery events

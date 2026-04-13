@@ -109,6 +109,10 @@ impl KeyValue {
 pub enum WatchEvent {
     Put(KeyValue),
     Delete(Key),
+    /// Emitted once after all pre-existing entries have been replayed on a new watch.
+    /// Consumers that need to know when the initial list phase is complete should
+    /// wait for this event before marking themselves ready.
+    InitialSyncDone,
 }
 
 #[async_trait]
@@ -344,6 +348,14 @@ impl Manager {
                 {
                     tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding existing key to channel");
                 }
+            }
+
+            // Signal that all pre-existing entries have been replayed
+            if let Err(err) = tx
+                .send_timeout(WatchEvent::InitialSyncDone, WATCH_SEND_TIMEOUT)
+                .await
+            {
+                tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed sending InitialSyncDone");
             }
 
             // Now block waiting for new entries
