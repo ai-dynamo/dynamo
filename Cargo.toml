@@ -88,8 +88,8 @@ hf-hub = { version = "0.4.2", default-features = false, features = [
 ] }
 
 # ModelExpress for model downloading
-modelexpress-client = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "8b4b274997f4afa79864f36ea8c50598d01e0315" }
-modelexpress-common = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "8b4b274997f4afa79864f36ea8c50598d01e0315" }
+modelexpress-client = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "f74c8869acc49e2265a7c0c0f6cbcb9da5d6a6ad" }
+modelexpress-common = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "f74c8869acc49e2265a7c0c0f6cbcb9da5d6a6ad" }
 
 humantime = { version = "2.2.0" }
 indexmap = { version = "2" }
