@@ -27,7 +27,13 @@ export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-500}"
 export GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-100426}"
 export SINGLE_GPU="${SINGLE_GPU:-0}"
+export PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-0}"
 export PYTHONHASHSEED=0
+
+# frontend_pool scenario: enable preprocess worker pool
+if [[ "${ROUTER}" == "frontend_pool" ]]; then
+    export PREPROCESS_WORKERS="${PREPROCESS_WORKERS_COUNT:-4}"
+fi
 
 DATASET_DIR="${SCRIPT_DIR}/datasets"
 LOG_DIR="${LOG_DIR:-${SCRIPT_DIR}/logs}"

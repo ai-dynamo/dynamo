@@ -41,6 +41,7 @@ NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
 
 export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-500}"
+PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-0}"
 
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 FRONTEND_EXTRA_ARGS="${FRONTEND_EXTRA_ARGS:-}"
@@ -53,6 +54,7 @@ echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
 echo "SINGLE_GPU=${SINGLE_GPU}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE}"
+echo "PREPROCESS_WORKERS=${PREPROCESS_WORKERS}"
 echo
 
 PIDS=()
@@ -138,6 +140,11 @@ done
 # ---------------------------------------------------------------------------
 # Start frontend with vLLM processor + KV router
 # ---------------------------------------------------------------------------
+FRONTEND_POOL_ARGS=""
+if [[ "${PREPROCESS_WORKERS}" -gt 0 ]]; then
+    FRONTEND_POOL_ARGS="--dyn-preprocess-workers ${PREPROCESS_WORKERS}"
+fi
+
 echo "=== Starting frontend (vLLM processor + KV router) ==="
 env "${COMMON_ENV[@]}" \
     "DYN_LOG=info" \
@@ -147,6 +154,7 @@ env "${COMMON_ENV[@]}" \
         --router-mode kv \
         --kv-cache-block-size "${BLOCK_SIZE}" \
         --model-name "${MODEL}" \
+        ${FRONTEND_POOL_ARGS} \
         ${FRONTEND_EXTRA_ARGS} &
 PIDS+=($!)
 

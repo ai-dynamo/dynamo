@@ -29,6 +29,7 @@ mkdir -p "${LOG_DIR}"
 # Scenario definitions: name:launch_script
 ALL_SCENARIOS=(
     "frontend:launch_frontend_routing.sh"
+    "frontend_pool:launch_frontend_routing.sh"
     "mm:launch_mm_router_worker.sh"
     "rr:launch_rr_baseline.sh"
 )

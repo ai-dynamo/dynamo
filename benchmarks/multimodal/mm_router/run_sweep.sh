@@ -274,9 +274,10 @@ _run_pools() {
 # ---------------------------------------------------------------------------
 # Per-router sweeps
 # ---------------------------------------------------------------------------
-run_frontend() { _run_pools "frontend"; }
-run_mm()       { _run_pools "mm"; }
-run_rr()       { _run_pools "rr"; }
+run_frontend()      { _run_pools "frontend"; }
+run_frontend_pool() { _run_pools "frontend_pool"; }
+run_mm()            { _run_pools "mm"; }
+run_rr()            { _run_pools "rr"; }
 
 # ---------------------------------------------------------------------------
 # Main
@@ -284,11 +285,12 @@ run_rr()       { _run_pools "rr"; }
 run_warmup
 
 case "${ROUTER}" in
-    frontend)   run_frontend ;;
-    mm)         run_mm ;;
-    rr)         run_rr ;;
-    all)        run_frontend; run_mm; run_rr ;;
-    *)          echo "Unknown --router value: ${ROUTER} (use frontend | mm | rr | all)"; exit 1 ;;
+    frontend)      run_frontend ;;
+    frontend_pool) run_frontend_pool ;;
+    mm)            run_mm ;;
+    rr)            run_rr ;;
+    all)           run_frontend; run_frontend_pool; run_mm; run_rr ;;
+    *)             echo "Unknown --router value: ${ROUTER} (use frontend | frontend_pool | mm | rr | all)"; exit 1 ;;
 esac
 
 echo "=== Sweep complete. Logs in ${LOG_DIR} ==="
