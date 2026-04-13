@@ -138,6 +138,14 @@ class PlannerConfig(BaseModel):
         default="./planner_reports",
         description="Directory for HTML diagnostics reports.",
     )
+    live_dashboard_port: int = Field(
+        default=0,
+        description=(
+            "Port for the live diagnostics dashboard HTTP server. "
+            "Set to 0 to disable. When enabled, visit http://host:port/ "
+            "to view a real-time Plotly report of accumulated snapshots."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":

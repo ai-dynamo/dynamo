@@ -42,6 +42,7 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
+from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClient
 from dynamo.planner.monitoring.worker_info import WorkerInfo, resolve_worker_info
@@ -176,6 +177,9 @@ class NativePlannerBase:
         # Diagnostics recorder
         self._recorder = DiagnosticsRecorder(config=config)
 
+        # Live dashboard runner (started in _async_init)
+        self._dashboard_runner = None
+
         # State machine (created after WorkerInfo is resolved)
         self._state_machine: Optional[PlannerStateMachine] = None
 
@@ -264,6 +268,15 @@ class NativePlannerBase:
                 await self._init_fpm_subscriber("decode")
 
         await self._bootstrap_regression()
+
+        # Start live dashboard if configured
+        if self.config.live_dashboard_port:
+            try:
+                self._dashboard_runner = await start_live_dashboard(
+                    self._recorder, self.config.live_dashboard_port
+                )
+            except Exception as e:
+                logger.error(f"Failed to start live dashboard: {e}")
 
     async def _init_worker_info(self) -> None:
         connector = getattr(self, "connector", None)

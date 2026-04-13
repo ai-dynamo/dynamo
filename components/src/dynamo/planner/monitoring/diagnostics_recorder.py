@@ -193,10 +193,12 @@ class DiagnosticsRecorder:
             self._last_report_s = self._snapshots[0].timestamp_s
         return now_s - self._last_report_s >= self._interval_s
 
-    def generate_report(self) -> Optional[str]:
-        if not self._snapshots:
-            return None
+    def _build_report_html(self, snaps: list[TickSnapshot]) -> Optional[str]:
+        """Build the HTML report string from the given snapshots.
 
+        Returns the HTML string, or None if plotly is not available.
+        This method has no side effects (no file I/O, no snapshot clearing).
+        """
         try:
             import plotly.graph_objects as go  # type: ignore[import-untyped]
             from plotly.subplots import make_subplots  # type: ignore[import-untyped]
@@ -207,7 +209,6 @@ class DiagnosticsRecorder:
             )
             return None
 
-        snaps = self._snapshots
         ts = [s.timestamp_s for s in snaps]
         labels = [
             datetime.fromtimestamp(t, tz=timezone.utc).strftime("%H:%M:%S") for t in ts
@@ -588,6 +589,19 @@ class DiagnosticsRecorder:
             margin=dict(t=100),
         )
 
+        return fig.to_html(include_plotlyjs=True, full_html=True)
+
+    def generate_report(self) -> Optional[str]:
+        """Generate a periodic report, write it to disk, and clear snapshots."""
+        if not self._snapshots:
+            return None
+
+        html = self._build_report_html(list(self._snapshots))
+        if html is None:
+            return None
+
+        ts = [s.timestamp_s for s in self._snapshots]
+
         output_dir = self.config.report_output_dir
         os.makedirs(output_dir, exist_ok=True)
         self._report_count += 1
@@ -597,12 +611,23 @@ class DiagnosticsRecorder:
         filename = f"planner_report_{ts_label}_{self._report_count:03d}.html"
         filepath = os.path.join(output_dir, filename)
 
-        fig.write_html(filepath, include_plotlyjs=True, full_html=True)
+        with open(filepath, "w") as f:
+            f.write(html)
         logger.info(f"Planner diagnostics report written to {filepath}")
 
         self._last_report_s = ts[-1]
         self._snapshots.clear()
         return filepath
+
+    def render_live_html(self) -> Optional[str]:
+        """Render the current accumulated snapshots as HTML without side effects.
+
+        Unlike ``generate_report()``, this does NOT clear snapshots or write
+        to disk.  Intended for the live dashboard HTTP endpoint.
+        """
+        if not self._snapshots:
+            return None
+        return self._build_report_html(list(self._snapshots))
 
     def finalize(self) -> Optional[str]:
         if self._snapshots:
