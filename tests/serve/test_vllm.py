@@ -486,7 +486,7 @@ vllm_configs = {
                             },
                         }
                     ],
-                    "tool_choice": "auto",
+                    "tool_choice": "required",
                     "max_tokens": 1024,
                 },
                 repeat_count=1,
@@ -633,7 +633,7 @@ def test_serve_deployment(
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.gpu_2
+@pytest.mark.gpu_1
 @pytest.mark.nightly
 @pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
@@ -649,9 +649,10 @@ def test_multimodal_b64(
     This test is separate because it loads the required image at runtime
     (not collection time), ensuring it only fails when actually executed.
 
-    Uses ``@pytest.mark.model`` so nightly multi-GPU jobs (gpu_2 without the
-    gpu_1 multimodal_agg_qwen param) still predownload Qwen2.5-VL-7B before
-    ``HF_HUB_OFFLINE=1``.
+    Runs on gpu_1 alongside other single-GPU multimodal tests that use the
+    same model (mm_agg_qwen2.5-vl-7b).  The ``@pytest.mark.model`` mark is
+    kept as a safety net so the model is predownloaded even if no other
+    gpu_1 config collects this model in a given CI job.
     """
     # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
