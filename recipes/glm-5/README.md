@@ -38,7 +38,7 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 # Deploy one configuration
 kubectl apply -f trtllm/agg/deploy.yaml -n ${NAMESPACE}
-# OR MTP SpecDec configuration deployment: 
+# OR MTP SpecDec configuration deployment:
 # kubectl apply -f trtllm/agg/deploy-specdec.yaml -n ${NAMESPACE}
 ```
 
