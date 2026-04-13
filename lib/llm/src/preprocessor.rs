@@ -531,7 +531,9 @@ impl OpenAIPreprocessor {
 
                             // Use token_data when provided (TITO / EPP / RL),
                             // regardless of backend_instance_id.
-                            let (tokens_vec, skip_token_annotation) = if let Some(tokens) = token_data {
+                            let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
+                                token_data
+                            {
                                 tracing::trace!(
                                     "Using provided token_data: {} ids (backend_instance_id={has_backend_instance_id})",
                                     tokens.len()

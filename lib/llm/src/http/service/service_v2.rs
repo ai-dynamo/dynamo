@@ -593,6 +593,15 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_CHAT_PATH_ENV).ok(),
         );
+        // RL TITO (Token-In / Token-Out) endpoint -- mounted alongside chat completions.
+        // Accepts Prime-RL's `tokens` field, translates to nvext.token_data, and delegates
+        // to the standard chat completions pipeline. Eliminates the Python rl-admin proxy.
+        let (tito_docs, tito_route) = super::openai::chat_completions_tokens_router(
+            state.clone(),
+            request_template.clone(),
+            None,
+        );
+
         let (cmpl_docs, cmpl_route) =
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =
@@ -605,8 +614,13 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
+        // Merge TITO route and docs into the chat route (shares enable/disable flag)
+        let chat_route = chat_route.merge(tito_route);
+        let mut combined_chat_docs = chat_docs;
+        combined_chat_docs.extend(tito_docs);
+
         let mut endpoint_routes = HashMap::new();
-        endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
+        endpoint_routes.insert(EndpointType::Chat, (combined_chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));

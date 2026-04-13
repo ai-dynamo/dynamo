@@ -175,6 +175,21 @@ impl ErrorMessage {
     /// Not Implemented Error
     /// Return this error when the client requests a feature that is not yet implemented.
     /// This should be used for features that are planned but not available.
+    /// Bad Request Error
+    /// Return this error when the client sends an invalid request.
+    pub fn bad_request(msg: &str) -> ErrorResponse {
+        let code = StatusCode::BAD_REQUEST;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
     pub fn not_implemented_error<T: Display>(msg: T) -> ErrorResponse {
         tracing::error!("Not Implemented error: {msg}");
         let code = StatusCode::NOT_IMPLEMENTED;
@@ -1871,6 +1886,137 @@ pub fn chat_completions_router(
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc], router)
+}
+
+/// Create an Axum [`Router`] for the RL TITO (Token-In / Token-Out) endpoint.
+///
+/// This endpoint accepts Prime-RL's `tokens` field (pre-tokenized prompt),
+/// translates it to `nvext.token_data`, forces logprobs on, and delegates
+/// to the standard chat_completions handler -- all in Rust, eliminating the
+/// Python rl-admin proxy from the hot inference path.
+///
+/// If no path is provided, the default path is `/v1/chat/completions/tokens`
+pub fn chat_completions_tokens_router(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/chat/completions/tokens".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(handler_chat_completions_tokens))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state((state, template));
+    (vec![doc], router)
+}
+
+/// Handler for TITO (Token-In / Token-Out) chat completions.
+///
+/// Accepts Prime-RL's request format which includes a `tokens` field containing
+/// pre-tokenized prompt token IDs. The handler:
+/// 1. Extracts the `tokens` field
+/// 2. Injects them as `nvext.token_data` (Dynamo's native pre-tokenized input)
+/// 3. Requests `token_ids` and `completion_token_ids` in the response via `nvext.extra_fields`
+/// 4. Forces `logprobs = true` (RL always needs logprobs)
+/// 5. Ensures `messages` is non-empty (Dynamo requires it for chat template selection)
+/// 6. Delegates to the standard `chat_completions()` internal function (zero HTTP proxy)
+async fn handler_chat_completions_tokens(
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateChatCompletionRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    // Extract the tokens field (Prime-RL's TITO input)
+    let tokens = request.tokens.take();
+    // Clear return_token_ids (not supported by Dynamo, avoid confusion)
+    request.return_token_ids = None;
+
+    if let Some(token_ids) = tokens {
+        if token_ids.is_empty() {
+            return Err(ErrorMessage::bad_request(
+                "TITO endpoint requires non-empty 'tokens' field",
+            ));
+        }
+
+        // Inject tokens into nvext.token_data
+        let mut nvext = request.nvext.take().unwrap_or_default();
+        nvext.token_data = Some(token_ids);
+
+        // Request token echo and completion token IDs in response
+        let mut extra_fields = nvext.extra_fields.take().unwrap_or_default();
+        for field in &["token_ids", "completion_token_ids"] {
+            if !extra_fields.contains(&field.to_string()) {
+                extra_fields.push(field.to_string());
+            }
+        }
+        nvext.extra_fields = Some(extra_fields);
+        request.nvext = Some(nvext);
+
+        // Force logprobs on (RL always needs them)
+        if request.inner.logprobs.is_none() {
+            request.inner.logprobs = Some(true);
+        }
+
+        // Ensure messages is non-empty (Dynamo requires it for model lookup / chat template)
+        if request.inner.messages.is_empty() {
+            use dynamo_protocols::types::{
+                ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+                ChatCompletionRequestUserMessageContent,
+            };
+            request
+                .inner
+                .messages
+                .push(ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text(
+                            "(token-in mode)".to_string(),
+                        ),
+                        name: None,
+                    },
+                ));
+        }
+    } else {
+        return Err(ErrorMessage::bad_request(
+            "Missing 'tokens' field for TITO endpoint. \
+             Use /v1/chat/completions for message-based requests.",
+        ));
+    }
+
+    // Apply header routing overrides
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
+
+    // Delegate to the standard chat completions flow (no HTTP proxy!)
+    let request_id = get_or_create_request_id(&headers);
+    let streaming = request.inner.stream.unwrap_or(false);
+    let cancellation_labels = CancellationLabels {
+        model: request.inner.model.clone(),
+        endpoint: Endpoint::ChatCompletions.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
+    let request = Context::with_id(request, request_id);
+    let context = request.context();
+
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
+
+    let response =
+        tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
+            .await
+            .map_err(|e| {
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to await TITO chat completions task: {:?}",
+                    e,
+                ))
+            })?;
+
+    connection_handle.disarm();
+    response
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Embeddings endpoint

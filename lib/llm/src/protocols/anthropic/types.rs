@@ -138,6 +138,8 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             },
             media_io_kwargs: None,
             unsupported_fields: Default::default(),
+            tokens: None,
+            return_token_ids: None,
         })
     }
 }
