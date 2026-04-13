@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use kvbm_connector::connector::leader::scheduler::SchedulerOutput as RustSchedulerOutput;
 use kvbm_connector::BlockId;
+use kvbm_connector::connector::leader::scheduler::SchedulerOutput as RustSchedulerOutput;
 
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};

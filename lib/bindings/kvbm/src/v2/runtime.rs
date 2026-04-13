@@ -183,7 +183,10 @@ impl PyKvbmRuntime {
 
         // Create PeerInfo and register
         let peer_info = PeerInfo::new(instance_id, worker_address);
-        self.inner.messenger().register_peer(peer_info).map_err(to_pyerr)
+        self.inner
+            .messenger()
+            .register_peer(peer_info)
+            .map_err(to_pyerr)
     }
 
     /// Get the instance ID of this runtime as bytes.
