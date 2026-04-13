@@ -132,6 +132,33 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build EPP Image (For Frontend Only)
+        id: build-epp-image
+        if: ${{ inputs.target == 'frontend' }}
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_REPOSITORY: ai-dynamo/dynamo
+        timeout-minutes: 20
+        run: |
+          set -x
+          EPP_REPOSITORY="${{ env.IMAGE_REPOSITORY }}/dynamo-epp"
+          EPP_IMAGE_REPO="${{ env.ECR_HOSTNAME }}/${EPP_REPOSITORY}"
+          EPP_IMAGE_TAG="${{ github.sha }}"
+          EPP_IMAGE_REF="${EPP_REPOSITORY}:${EPP_IMAGE_TAG}"
+          echo "epp_image_ref=${EPP_IMAGE_REF}" >> $GITHUB_OUTPUT
+
+          CACHE_ARGS=""
+          CACHE_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache "
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            CACHE_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/${EPP_REPOSITORY}:cache,mode=max "
+          fi
+
+          make -C deploy/inference-gateway/epp image-multiarch-push \
+            IMAGE_REPO="${EPP_IMAGE_REPO}" \
+            GIT_TAG="${EPP_IMAGE_TAG}" \
+            DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/" \
+            EXTRA_BUILD_ARGS="${CACHE_ARGS}"
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
