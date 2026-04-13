@@ -14,7 +14,7 @@ back to the leader, and direct layer-wise offload.
 
 On worker bring-up the Python side builds a `KvbmRuntime` (Velo messenger
 + tokio) and a `ConnectorWorker` over it, exports its Velo peer info as
-`NovaPeerMetadata` for the leader's `set_xfer_handshake_metadata`, and
+`VeloPeerMetadata` for the leader's `set_xfer_handshake_metadata`, and
 defers NIXL registration until `register_kv_caches` — the actual NIXL
 bind happens later, when the leader's `initialize_workers()` RPC drives
 `configure_layouts` with final G2/G3 block counts.
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class NovaPeerMetadata(KVConnectorHandshakeMetadata):
+class VeloPeerMetadata(KVConnectorHandshakeMetadata):
     """
     Velo peer info exported by a worker for the leader handshake.
 
@@ -61,10 +61,6 @@ class NovaPeerMetadata(KVConnectorHandshakeMetadata):
     Attributes:
         instance_id: 16-byte UUID identifying the worker's Velo instance.
         worker_address: JSON-serialized `velo::WorkerAddress` of the worker peer.
-
-    Note: the class name is a legacy alias from the Nova→Velo rename and
-    is preserved so vLLM's registered KVConnectorHandshakeMetadata subclass
-    stays stable; the payload is Velo.
     """
 
     instance_id: bytes  # 16-byte UUID
@@ -76,7 +72,7 @@ class SchedulerConnectorWorker:
     vLLM KV-connector worker backed by the Rust ConnectorWorker.
 
     Responsibilities on the worker side:
-    - Build a `KvbmRuntime` + `ConnectorWorker` and export `NovaPeerMetadata`
+    - Build a `KvbmRuntime` + `ConnectorWorker` and export `VeloPeerMetadata`
       for the leader handshake.
     - Register vLLM's KV cache tensors with NIXL/UCX (deferred — the actual
       NIXL bind happens when the leader's init flow resolves G2/G3 block counts).
@@ -128,7 +124,7 @@ class SchedulerConnectorWorker:
 
         # Store peer info for handshake
         instance_id, worker_addr = self.runtime.peer_info()
-        self._handshake_metadata = NovaPeerMetadata(
+        self._handshake_metadata = VeloPeerMetadata(
             instance_id=instance_id,
             worker_address=worker_addr,
         )
@@ -337,7 +333,7 @@ class SchedulerConnectorWorker:
         Return this worker's Velo peer info for the leader handshake.
 
         Returns:
-            `NovaPeerMetadata` carrying the worker's Velo `instance_id`
+            `VeloPeerMetadata` carrying the worker's Velo `instance_id`
             (16-byte UUID) and JSON-serialized `velo::WorkerAddress`. The
             leader consumes these in `register_worker` to register us with
             its Velo messenger.

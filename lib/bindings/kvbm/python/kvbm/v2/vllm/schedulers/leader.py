@@ -28,7 +28,7 @@ import kvbm
 from kvbm.v2.vllm import KvbmVllmConfig
 
 from ..sched_output import process_scheduler_output
-from .worker import NovaPeerMetadata
+from .worker import VeloPeerMetadata
 
 # Import v2 bindings (requires v2 feature)
 if kvbm.v2.is_available():
@@ -209,7 +209,7 @@ class SchedulerConnectorLeader:
         Register all workers as Velo peers (rank-ordered) and drive init.
 
         Called by vLLM once after all TP workers have exported their
-        `NovaPeerMetadata`. Each (instance_id, worker_address) pair is
+        `VeloPeerMetadata`. Each (instance_id, worker_address) pair is
         registered with the Velo messenger and wrapped in a
         `ConnectorWorkerClient` + `VeloWorkerClient` on the Rust side.
         The final `initialize_workers()` call gathers SerializedLayout
@@ -219,7 +219,7 @@ class SchedulerConnectorLeader:
 
         Raises:
             ValueError: if the TP ranks are not a consecutive 0..N-1 range,
-                or if any entry is not a `NovaPeerMetadata`.
+                or if any entry is not a `VeloPeerMetadata`.
         """
         # Create sorted list of (tp_rank, worker_meta) tuples sorted by tp_rank
         sorted_workers = sorted(metadata.items(), key=lambda x: x[0])
@@ -237,9 +237,9 @@ class SchedulerConnectorLeader:
 
         # Validate all metadata types and register workers in sorted order
         for tp_rank, worker_meta in sorted_workers:
-            if not isinstance(worker_meta, NovaPeerMetadata):
+            if not isinstance(worker_meta, VeloPeerMetadata):
                 raise ValueError(
-                    f"Expected NovaPeerMetadata, got {type(worker_meta).__name__}"
+                    f"Expected VeloPeerMetadata, got {type(worker_meta).__name__}"
                 )
             self.leader.register_worker(
                 tp_rank, worker_meta.instance_id, worker_meta.worker_address

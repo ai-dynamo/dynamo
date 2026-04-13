@@ -9,6 +9,8 @@ disable-model-invocation: true
 
 Render a Dockerfile from Jinja2 templates and build a Dynamo container with vLLM + KVBM support.
 
+> **For local development on a dev box, prefer `/dynamo:kvbm:sandbox-venv` + `/dynamo:kvbm:maturin-dev`** — far faster iteration loop. This skill is the right choice when you need a hermetic image for CI, benchmarks, or multi-host deploys.
+
 ## Arguments
 
 `/dynamo:kvbm:build [--target TARGET] [--cuda-version VER] [--tag TAG]`
