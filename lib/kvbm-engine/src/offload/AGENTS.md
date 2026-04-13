@@ -2,17 +2,24 @@
 
 This document provides governance rules for AI agents (LLMs, copilots, etc.) that modify files in this offload module.
 
+## Related Documentation
+
+- Policies (P1–P6) and high-level architecture: `lib/kvbm-engine/docs/offload.md`
+- Implementation details and extension rules: `lib/kvbm-engine/docs/offload-developer.md`
+
+Both files are also included into the crate rustdoc via `#[doc = include_str!(...)]`.
+
 ## Before Making Any Changes
 
-1. **Read [README.md](README.md)** - Understand the documented policies
+1. **Read the offload policies doc** - Understand the documented P1–P6 policies
 2. **Evaluate alignment** - Does your proposed change align with the policies?
-3. **Consult [DEVELOPER.md](DEVELOPER.md)** - Understand implementation details
+3. **Consult the developer guide** - Understand implementation details
 
 ## Policy Alignment Check
 
 Before implementing any change to this module, you must:
 
-1. Identify which policy statements in README.md are affected by your change
+1. Identify which P1–P6 policy statements are affected by your change
 2. Determine if the change is:
    - **On-policy**: Aligns with documented behavior
    - **Off-policy**: Contradicts or extends documented behavior
@@ -26,9 +33,9 @@ Before implementing any change to this module, you must:
                       │
                       ▼
 ┌─────────────────────────────────────────────────┐
-│   Does it align with README.md policies?        │
+│   Does it align with the documented policies?   │
 │                                                 │
-│   Review policies P1-P6 in README.md            │
+│   Review P1–P6 in the offload policies doc      │
 └─────────────────────────────────────────────────┘
           │                         │
          YES                        NO
@@ -38,9 +45,9 @@ Before implementing any change to this module, you must:
 │ Proceed with      │   │ STOP: Prompt user to decide         │
 │ implementation    │   │                                     │
 │                   │   │ Ask: "This change conflicts with    │
-│ Update            │   │ policy [Pn]. Should I:              │
-│ DEVELOPER.md      │   │                                     │
-│ with details      │   │ 1. Update the README policy, OR     │
+│ Update the        │   │ policy [Pn]. Should I:              │
+│ developer guide   │   │                                     │
+│ with details      │   │ 1. Update the policy statement, OR  │
 │                   │   │ 2. Adapt the code to align with     │
 │                   │   │    the existing policy?"            │
 └───────────────────┘   └─────────────────────────────────────┘
@@ -51,8 +58,8 @@ Before implementing any change to this module, you must:
 If the change aligns with documented policies:
 
 1. **Implement the change**
-2. **Update DEVELOPER.md** with relevant implementation details
-3. **Do NOT modify README.md** policy statements
+2. **Update the developer guide** with relevant implementation details
+3. **Do NOT modify policy statements** in the policies doc
 
 Examples of on-policy changes:
 - Bug fixes that maintain documented behavior
@@ -66,25 +73,25 @@ If the change contradicts or extends documented policies:
 
 1. **Do not implement** without user approval
 2. **Present the conflict** to the user with:
-   - The exact policy being affected (quote from README.md)
+   - The exact policy being affected (quote from the policies doc)
    - How the proposed change conflicts
    - The decision options
 3. **Wait for user decision**:
-   - If updating policy: Modify README.md first, then implement
+   - If updating policy: Modify the policies doc first, then implement
    - If adapting code: Revise implementation to align with policy
 
 Example prompt to user:
 
 ```
 This change would allow cancellation after the upgrade step, which conflicts
-with policy P3 in README.md:
+with policy P3:
 
 > **P3: Upgrade is the Commitment Boundary**
 > The upgrade step (Weak → Strong) is the point of no return. After upgrade,
 > cancellation no longer applies.
 
 Should I:
-1. Update README.md to allow post-upgrade cancellation, OR
+1. Update the policies doc to allow post-upgrade cancellation, OR
 2. Adapt the code to perform cancellation before upgrade?
 ```
 
@@ -103,8 +110,8 @@ When modifying this module, specifically verify alignment with:
 
 ## Documentation Update Requirements
 
-| Change Type | README.md | DEVELOPER.md |
-|-------------|-----------|--------------|
+| Change Type | `docs/offload.md` (policies) | `docs/offload-developer.md` (impl) |
+|-------------|------------------------------|------------------------------------|
 | Bug fix (on-policy) | No change | Update if relevant |
 | Feature (on-policy) | No change | Add implementation section |
 | Policy change | Update affected policies | Update accordingly |
@@ -118,7 +125,7 @@ When modifying this module, specifically verify alignment with:
 
 1. Check: Does this affect cancellation boundaries? (P3, P4)
 2. Check: How does the token propagate through this stage? (P2)
-3. If on-policy: Implement and document in DEVELOPER.md
+3. If on-policy: Implement and document in the developer guide
 4. If off-policy: Ask user about policy updates
 
 ### Modifying Cancellation Behavior

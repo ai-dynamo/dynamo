@@ -4082,7 +4082,6 @@ dependencies = [
  "derive-getters",
  "dlpark",
  "dynamo-llm",
- "dynamo-memory",
  "dynamo-runtime",
  "kvbm-connector",
  "kvbm-kernels",
