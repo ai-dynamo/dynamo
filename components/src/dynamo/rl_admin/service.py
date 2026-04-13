@@ -339,13 +339,47 @@ def _inject_token_ids(body: dict, response_data: dict) -> dict:
     return response_data
 
 
+def _pretokenize_request(body: dict) -> list[int] | None:
+    """Pre-tokenize the prompt with the Python HF tokenizer.
+
+    Returns the prompt token IDs, or None if tokenization is not possible.
+    Also injects the token IDs into the request body via nvext.token_data
+    so the Rust frontend bypasses its own tokenizer and uses ours.
+    This ensures the model sees exactly the same tokens that Prime-RL's
+    trainer will use for KL computation -- eliminating the Rust/Python
+    tokenizer mismatch that causes is_masked noise.
+    """
+    try:
+        tok = _get_tokenizer()
+        messages = body.get("messages")
+        if not messages:
+            return None
+
+        prompt_ids = tok.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True,
+        )
+        if isinstance(prompt_ids, dict):
+            prompt_ids = prompt_ids["input_ids"]
+
+        # Inject into nvext.token_data so the Rust frontend uses our tokens
+        nvext = body.get("nvext") or {}
+        nvext["token_data"] = prompt_ids
+        body["nvext"] = nvext
+
+        return prompt_ids
+    except Exception as e:
+        logger.warning(f"[admin] Pre-tokenization failed, falling back to Rust tokenizer: {e}")
+        return None
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions_proxy(request: Request):
     """Proxy standard chat completions to Dynamo frontend.
 
-    Strips return_token_ids (unsupported by Dynamo) but ensures logprobs
-    are requested so we can reconstruct token_ids in the response for
-    Prime-RL's verifiers client.
+    Pre-tokenizes the prompt with the Python HF tokenizer and injects via
+    nvext.token_data so the Rust frontend uses the same tokens as the trainer.
+    On the response side, injects prompt_token_ids and choice.token_ids
+    for Prime-RL's verifiers client.
     """
     body = await request.json()
     wants_token_ids = body.pop("return_token_ids", False)
@@ -357,9 +391,14 @@ async def chat_completions_proxy(request: Request):
             body.pop("extra_body", None)
     _strip_unsupported(body)
 
-    # If caller wants token_ids, ensure logprobs are requested
-    if wants_token_ids and "logprobs" not in body:
+    # Always ensure logprobs for RL (needed for token_ids injection + training signal)
+    if "logprobs" not in body:
         body["logprobs"] = True
+
+    # Pre-tokenize prompt with Python HF tokenizer -> inject via nvext.token_data
+    # This bypasses the Rust frontend's tokenizer, ensuring the model sees
+    # the same tokens that Prime-RL's trainer uses for reference logprobs.
+    prompt_ids = _pretokenize_request(body)
 
     stream = body.get("stream", False)
 
@@ -382,8 +421,11 @@ async def chat_completions_proxy(request: Request):
     else:
         resp = await client.post(url, json=body, headers=headers)
         response_data = resp.json()
-        if wants_token_ids and resp.status_code == 200:
+        if resp.status_code == 200:
             response_data = _inject_token_ids(body, response_data)
+            # If we pre-tokenized, use our prompt_ids (they match the model's input exactly)
+            if prompt_ids is not None:
+                response_data["prompt_token_ids"] = prompt_ids
         return JSONResponse(content=response_data, status_code=resp.status_code)
 
 
