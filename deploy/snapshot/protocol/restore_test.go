@@ -13,7 +13,7 @@ func TestNewRestorePod(t *testing.T) {
 	readinessProbe := &corev1.Probe{PeriodSeconds: 7, TimeoutSeconds: 3}
 	livenessProbe := &corev1.Probe{InitialDelaySeconds: 11}
 	startupProbe := &corev1.Probe{FailureThreshold: 120}
-	restorePod := NewRestorePod(&corev1.Pod{
+	restorePod, err := NewRestorePod(&corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "worker",
 			Labels:      map[string]string{"existing": "label"},
@@ -43,6 +43,9 @@ func TestNewRestorePod(t *testing.T) {
 		},
 		SeccompProfile: DefaultSeccompLocalhostProfile,
 	})
+	if err != nil {
+		t.Fatalf("expected restore pod, got error: %v", err)
+	}
 
 	if restorePod.Name != "worker" || restorePod.Namespace != "test-ns" {
 		t.Fatalf("unexpected restore pod identity: %#v", restorePod.ObjectMeta)
@@ -283,7 +286,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	}
 }
 
-func TestValidateRestorePodSpecRequiresExactlyOneContainer(t *testing.T) {
+func TestValidateRestorePodSpecRequiresMainContainerWhenSidecarsExist(t *testing.T) {
 	profile := DefaultSeccompLocalhostProfile
 	podSpec := &corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{
@@ -318,8 +321,29 @@ func TestValidateRestorePodSpecRequiresExactlyOneContainer(t *testing.T) {
 		BasePath: "/checkpoints",
 	}
 
-	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "restore target must have exactly one container, got 2" {
-		t.Fatalf("expected multi-container restore target to be rejected, got %v", err)
+	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "restore target worker selection failed: pod spec has 2 containers; expected one named \"main\"" {
+		t.Fatalf("expected multi-container restore target without main to be rejected, got %v", err)
+	}
+}
+
+func TestNewRestorePodUsesMainContainerWhenSidecarsExist(t *testing.T) {
+	restorePod, err := NewRestorePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "metrics", Image: "sidecar:latest", Command: []string{"sleep", "1"}},
+				{Name: "main", Image: "main:latest", Command: []string{"python3", "-m", "dynamo.vllm"}},
+			},
+		},
+	}, PodOptions{})
+	if err != nil {
+		t.Fatalf("expected restore pod, got error: %v", err)
+	}
+	if len(restorePod.Spec.Containers[0].Command) != 2 || restorePod.Spec.Containers[0].Command[0] != "sleep" || restorePod.Spec.Containers[0].Command[1] != "1" {
+		t.Fatalf("expected sidecar command to stay untouched, got %#v", restorePod.Spec.Containers[0].Command)
+	}
+	if len(restorePod.Spec.Containers[1].Command) != 2 || restorePod.Spec.Containers[1].Command[0] != "sleep" || restorePod.Spec.Containers[1].Command[1] != "infinity" {
+		t.Fatalf("expected main container placeholder command, got %#v", restorePod.Spec.Containers[1].Command)
 	}
 }
 

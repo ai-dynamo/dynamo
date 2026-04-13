@@ -84,7 +84,7 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 	}
 
 	if createPodFromManifest {
-		restorePod := snapshotprotocol.NewRestorePod(&corev1.Pod{
+		restorePod, err := snapshotprotocol.NewRestorePod(&corev1.Pod{
 			TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        pod.Name,
@@ -100,6 +100,9 @@ func runRestoreFlow(ctx context.Context, opts restoreOptions) (*result, error) {
 			SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
 			ManualTrigger:   opts.ManualTrigger,
 		})
+		if err != nil {
+			return nil, err
+		}
 		_, err = clientset.CoreV1().Pods(namespace).Create(ctx, restorePod, metav1.CreateOptions{})
 		if apierrors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("restore pod %s/%s already exists", namespace, pod.Name)

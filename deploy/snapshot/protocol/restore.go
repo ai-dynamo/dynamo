@@ -31,7 +31,7 @@ type PodOptions struct {
 	ManualTrigger   bool
 }
 
-func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
+func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 	pod = pod.DeepCopy()
 	if pod.Labels == nil {
 		pod.Labels = map[string]string{}
@@ -47,10 +47,14 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
 		opts.CheckpointID,
 		opts.ArtifactVersion,
 	)
-	PrepareRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], opts.Storage, opts.SeccompProfile, true)
+	workerIndex, err := WorkerContainerIndex(pod.Spec.Containers)
+	if err != nil {
+		return nil, err
+	}
+	PrepareRestorePodSpec(&pod.Spec, &pod.Spec.Containers[workerIndex], opts.Storage, opts.SeccompProfile, true)
 	pod.Namespace = opts.Namespace
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
-	return pod
+	return pod, nil
 }
 
 func PrepareRestorePodSpec(
@@ -100,10 +104,11 @@ func ValidateRestorePodSpec(
 	if podSpec == nil {
 		return fmt.Errorf("pod spec is nil")
 	}
-	if len(podSpec.Containers) != 1 {
-		return fmt.Errorf("restore target must have exactly one container, got %d", len(podSpec.Containers))
+	workerIndex, err := WorkerContainerIndex(podSpec.Containers)
+	if err != nil {
+		return fmt.Errorf("restore target worker selection failed: %w", err)
 	}
-	container := &podSpec.Containers[0]
+	container := &podSpec.Containers[workerIndex]
 	if storage.PVCName != "" {
 		hasVolume := false
 		for _, volume := range podSpec.Volumes {

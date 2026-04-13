@@ -95,14 +95,11 @@ func loadPod(manifestPath string) (*corev1.Pod, error) {
 	if kind := strings.TrimSpace(pod.Kind); kind != "" && kind != "Pod" {
 		return nil, fmt.Errorf("manifest %s is kind %q, expected Pod", manifestPath, kind)
 	}
-	if len(pod.Spec.Containers) != 1 {
-		return nil, fmt.Errorf(
-			"manifest %s has %d containers; snapshotctl requires exactly one worker container",
-			manifestPath,
-			len(pod.Spec.Containers),
-		)
+	workerIndex, err := snapshotprotocol.WorkerContainerIndex(pod.Spec.Containers)
+	if err != nil {
+		return nil, fmt.Errorf("manifest %s: %w", manifestPath, err)
 	}
-	if strings.TrimSpace(pod.Spec.Containers[0].Image) == "" {
+	if strings.TrimSpace(pod.Spec.Containers[workerIndex].Image) == "" {
 		return nil, fmt.Errorf("manifest %s: worker container image is required", manifestPath)
 	}
 	if strings.TrimSpace(pod.Name) == "" {
