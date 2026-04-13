@@ -100,8 +100,8 @@ The chart includes built-in validation to prevent all operator conflicts:
 | file://components/operator | dynamo-operator | 1.0.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.6 |
-| oci://ghcr.io/nvidia/kai-scheduler | kai-scheduler | v0.13.0-rc1 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.7 |
+| oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
 
 ## Values
 
@@ -111,15 +111,15 @@ The chart includes built-in validation to prevent all operator conflicts:
 | global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
 | global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
-| global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
+| global.grove.enabled | bool | `true` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether to manage CRDs via a pre-install/pre-upgrade hook Job. The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port" |
 | dynamo-operator.nats.enabled | bool | `true` | Whether the NATS is enabled |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
-| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments. |
-| dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEPRECATED: Do not enable for new deployments. Namespace-restricted mode is deprecated. |
+| dynamo-operator.namespaceRestriction | object | `{"enabled":true,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments. |
+| dynamo-operator.namespaceRestriction.enabled | bool | `true` | DEPRECATED: Do not enable for new deployments. Namespace-restricted mode is deprecated. |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
 | dynamo-operator.namespaceRestriction.lease | object | `{"duration":"30s","renewInterval":"10s"}` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
 | dynamo-operator.namespaceRestriction.lease.duration | string | `"30s"` | DEPRECATED: Lease duration for namespace-restricted mode, which is deprecated. |
