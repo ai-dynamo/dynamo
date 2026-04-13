@@ -26,7 +26,12 @@ from dynamo.runtime import DistributedRuntime
 
 from .args import Config
 from .constants import DisaggregationMode
-from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
+from .handlers import (
+    BaseWorkerHandler,
+    DecodeWorkerHandler,
+    PrefillWorkerHandler,
+    get_dp_range_for_worker,
+)
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
@@ -331,7 +336,7 @@ class WorkerFactory:
             )
 
         # Register engine routes
-        handler.register_engine_routes(runtime)
+        self.register_engine_routes(runtime, handler)
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -560,8 +565,8 @@ class WorkerFactory:
             )
 
         # Register engine routes
-        handler.register_engine_routes(runtime)
-        
+        self.register_engine_routes(runtime, handler)
+
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
@@ -642,3 +647,21 @@ class WorkerFactory:
             logger.info("Connected to encode workers")
             return encode_worker_client
         return None
+
+    def register_engine_routes(
+        self, runtime: DistributedRuntime, handler: BaseWorkerHandler
+    ) -> None:
+        """Register all engine routes for this handler.
+
+        Args:
+            runtime: The DistributedRuntime instance to register routes on.
+        """
+        runtime.register_engine_route("start_profile", handler.start_profile)
+        runtime.register_engine_route("stop_profile", handler.stop_profile)
+        runtime.register_engine_route("sleep", handler.sleep)
+        runtime.register_engine_route("wake_up", handler.wake_up)
+        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+
+        logger.info(
+            "Registered engine routes: /engine/sleep, /engine/wake_up, /engine/scale_elastic_ep, /engine/start_profile, /engine/stop_profile"
+        )

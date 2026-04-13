@@ -49,7 +49,7 @@ from dynamo.llm import (
     unregister_model,
 )
 from dynamo.llm.exceptions import EngineShutdown
-from dynamo.runtime import Client, DistributedRuntime
+from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import Config
@@ -643,18 +643,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         await self.engine_client.stop_profile()
         return {"status": "ok", "message": "Profiling stopped"}
-
-    def register_engine_routes(self, runtime: DistributedRuntime) -> None:
-        """Register all engine routes for this handler.
-
-        Args:
-            runtime: The DistributedRuntime instance to register routes on.
-        """
-        runtime.register_engine_route("start_profile", self.start_profile)
-        runtime.register_engine_route("stop_profile", self.stop_profile)
-        runtime.register_engine_route("sleep", self.sleep)
-        runtime.register_engine_route("wake_up", self.wake_up)
-        runtime.register_engine_route("scale_elastic_ep", self.scale_elastic_ep)
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
