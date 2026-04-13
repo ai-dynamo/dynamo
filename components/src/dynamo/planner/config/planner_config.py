@@ -176,7 +176,10 @@ class PlannerConfig(BaseModel):
         if self.optimization_target != "sla":
             self.enable_load_scaling = True
             self.enable_throughput_scaling = False
-            if self.ttft != SLAPlannerDefaults.ttft or self.itl != SLAPlannerDefaults.itl:
+            if (
+                self.ttft != SLAPlannerDefaults.ttft
+                or self.itl != SLAPlannerDefaults.itl
+            ):
                 logger.warning(
                     "optimization_target=%s ignores ttft/itl values; "
                     "set optimization_target='sla' to use SLA-based scaling",
