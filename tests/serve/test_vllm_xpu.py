@@ -18,7 +18,7 @@ from tests.serve.common import (
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
 from tests.serve.lora_utils import MinioLoraConfig
-from tests.serve.multimodal_profiles.vllm import (
+from tests.serve.multimodal_profiles.vllm_xpu import (
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
 )
@@ -555,8 +555,8 @@ def test_multimodal_b64(
     This test is separate because it loads the required image at runtime
     (not collection time), ensuring it only fails when actually executed.
 
-    Uses ``@pytest.mark.model`` so nightly multi-GPU jobs (gpu_2 without the
-    gpu_1 multimodal_agg_qwen param) still predownload Qwen2.5-VL-7B before
+    Uses ``@pytest.mark.model`` so nightly multi-GPU jobs (xpu_2 without the
+    xpu_1 multimodal_agg_qwen param) still predownload Qwen2.5-VL-7B before
     ``HF_HUB_OFFLINE=1``.
     """
     # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)

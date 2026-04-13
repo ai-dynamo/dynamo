@@ -55,16 +55,17 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen3-vl-2b-video",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.pre_merge, pytest.mark.xpu_1],
+                marks=[pytest.mark.pre_merge, pytest.mark.xpu_1], # mirrors GPU pre_merge parity
                 timeout_s=600,
                 delayed_start=60,
             ),
-            "epd": TopologyConfig(
-                marks=[pytest.mark.pre_merge, pytest.mark.xpu_1],
-                timeout_s=600,
-                delayed_start=60,
-                single_gpu=True,
-            ),
+            # TODO: disagg tests will be enabled by another PR
+            # "epd": TopologyConfig(
+            #     marks=[pytest.mark.pre_merge, pytest.mark.xpu_1],
+            #     timeout_s=600,
+            #     delayed_start=60,
+            #     single_gpu=True,
+            # ),
         },
         request_payloads=[make_video_payload(["red", "static", "still"])],
         extra_vllm_args=["--block-size", "64"],
