@@ -55,6 +55,10 @@ use crate::protocols::openai::{
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
     responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
+    tokenization::{
+        DetokenizeRequest, DetokenizeResponse, TokenizeCompletionRequest, TokenizeRequest,
+        TokenizeResponse,
+    },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -1798,6 +1802,178 @@ fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
     //     return Err(ErrorMessage::service_unavailable());
     // }
     Ok(())
+}
+
+// ── Tokenize / Detokenize ────────────────────────────────────────────
+
+fn bad_request<T: Into<String>>(message: T) -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message: message.into(),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+        }),
+    )
+}
+
+fn resolve_tokenizer_model_name(
+    state: &Arc<service_v2::State>,
+    requested_model: Option<&str>,
+) -> Result<String, ErrorResponse> {
+    if let Some(model) = requested_model {
+        if state.manager().has_model_any(model) {
+            return Ok(model.to_string());
+        }
+        return Err(ErrorMessage::model_not_found());
+    }
+    let served_models = state.manager().model_display_names();
+    if served_models.len() == 1 {
+        return Ok(served_models.into_iter().next().unwrap());
+    }
+    Err(bad_request(
+        "Model must be specified when more than one model is served.",
+    ))
+}
+
+fn resolve_model_card(
+    state: &Arc<service_v2::State>,
+    requested_model: Option<&str>,
+) -> Result<(String, crate::model_card::ModelDeploymentCard), ErrorResponse> {
+    let model = resolve_tokenizer_model_name(state, requested_model)?;
+    let card = state
+        .manager()
+        .get_model_cards()
+        .into_iter()
+        .find(|card| card.display_name == model)
+        .ok_or_else(|| {
+            ErrorMessage::internal_server_error(&format!(
+                "Tokenizer metadata is not available for model '{}'",
+                model
+            ))
+        })?;
+    Ok((model, card))
+}
+
+async fn tokenize(
+    State(state): State<Arc<service_v2::State>>,
+    Json(request): Json<TokenizeRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let (_, card) = resolve_model_card(&state, request.model())?;
+    let tokenizer = card
+        .tokenizer()
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
+
+    let (tokens, token_strs) = match request {
+        TokenizeRequest::Completion(TokenizeCompletionRequest {
+            prompt,
+            add_special_tokens,
+            return_token_strs,
+            ..
+        }) => {
+            let encoding = tokenizer
+                .encode_with_special_tokens(&prompt, add_special_tokens)
+                .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to tokenize prompt"))?;
+            let token_ids = encoding.token_ids().to_vec();
+            let token_strs = if return_token_strs {
+                Some(tokenizer.convert_ids_to_tokens(&token_ids).map_err(|err| {
+                    ErrorMessage::from_anyhow(err, "Failed to resolve token strings")
+                })?)
+            } else {
+                None
+            };
+            (token_ids, token_strs)
+        }
+        TokenizeRequest::Chat(request) => {
+            let model = request
+                .model
+                .clone()
+                .unwrap_or_else(|| card.display_name.clone());
+            // Render the chat messages to a prompt string via the model's chat template
+            let formatter = crate::preprocessor::prompt::PromptFormatter::from_mdc(&card)
+                .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to build chat formatter"))?;
+            let inner_request = dynamo_protocols::types::CreateChatCompletionRequest {
+                model,
+                messages: request.messages.clone(),
+                tools: request.tools.clone(),
+                ..Default::default()
+            };
+            let wrapped =
+                crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest {
+                    inner: inner_request,
+                    common: Default::default(),
+                    nvext: None,
+                    chat_template_args: Some(request.merged_chat_template_kwargs()),
+                    media_io_kwargs: None,
+                    tokens: None,
+                    return_token_ids: None,
+                    unsupported_fields: Default::default(),
+                };
+            let prompt = match formatter {
+                crate::preprocessor::prompt::PromptFormatter::OAI(f) => f.render(&wrapped),
+            }
+            .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to render chat prompt"))?;
+
+            let encoding = tokenizer
+                .encode_with_special_tokens(&prompt, request.add_special_tokens)
+                .map_err(|err| {
+                    ErrorMessage::from_anyhow(err, "Failed to tokenize rendered chat prompt")
+                })?;
+            let token_ids = encoding.token_ids().to_vec();
+            let token_strs = if request.return_token_strs {
+                Some(tokenizer.convert_ids_to_tokens(&token_ids).map_err(|err| {
+                    ErrorMessage::from_anyhow(err, "Failed to resolve token strings")
+                })?)
+            } else {
+                None
+            };
+            (token_ids, token_strs)
+        }
+    };
+
+    Ok(Json(TokenizeResponse {
+        count: tokens.len(),
+        max_model_len: card.context_length,
+        tokens,
+        token_strs,
+    })
+    .into_response())
+}
+
+async fn detokenize(
+    State(state): State<Arc<service_v2::State>>,
+    Json(request): Json<DetokenizeRequest>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let (_, card) = resolve_model_card(&state, request.model.as_deref())?;
+    let tokenizer = card
+        .tokenizer()
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
+    let prompt = tokenizer
+        .decode(&request.tokens, false)
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to detokenize prompt"))?;
+
+    Ok(Json(DetokenizeResponse { prompt }).into_response())
+}
+
+pub fn tokenization_router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
+    let tokenize_path = "/tokenize";
+    let detokenize_path = "/detokenize";
+    let docs = vec![
+        RouteDoc::new(axum::http::Method::POST, tokenize_path),
+        RouteDoc::new(axum::http::Method::POST, detokenize_path),
+    ];
+    let router = Router::new()
+        .route(tokenize_path, post(tokenize))
+        .route(detokenize_path, post(detokenize))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (docs, router)
 }
 
 /// openai compatible format
