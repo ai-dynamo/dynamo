@@ -148,8 +148,8 @@ Options:
     --no-framework-check          Skip LLM framework package checks (vllm, sglang, tensorrt_llm)
 """
 
-import datetime
 import csv
+import datetime
 import glob
 import json
 import logging
@@ -823,9 +823,7 @@ class GPUInfo(NodeInfo):
         if nvidia_smi:
             if self._init_nvidia_gpu_info(nvidia_smi):
                 return
-            nvidia_failure_desc = self._failure_desc(
-                "nvidia-smi initialization failed"
-            )
+            nvidia_failure_desc = self._failure_desc("nvidia-smi initialization failed")
 
         # Fall back to Intel XPU reporting on systems without nvidia-smi.
         xpu_smi = self._find_executable(
@@ -1655,9 +1653,11 @@ class GPUInfo(NodeInfo):
         has_any_output = False
         for label, cmd in signals:
             if label == "xpu-smi":
-                cli_version, service_version, level_zero_version = self._get_xpu_versions(
-                    xpu_smi
-                )
+                (
+                    cli_version,
+                    service_version,
+                    level_zero_version,
+                ) = self._get_xpu_versions(xpu_smi)
                 if not any([cli_version, service_version, level_zero_version]):
                     continue
 
