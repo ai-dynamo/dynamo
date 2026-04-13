@@ -128,7 +128,7 @@ impl NvtxRangeGuard {
             if active {
                 cudarc::nvtx::result::range_push(name);
             }
-            return NvtxRangeGuard { active };
+            NvtxRangeGuard { active }
         }
         #[cfg(not(feature = "nvtx"))]
         {

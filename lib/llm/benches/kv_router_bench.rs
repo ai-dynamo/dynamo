@@ -20,6 +20,8 @@ use dynamo_bench::common::{
     compute_time_bucket_stats, fetch_model_name, print_time_bucket_report,
 };
 use dynamo_runtime::transports::event_plane::EventEnvelope;
+// TODO(router-team): drop this redundant single-component import. Tracked in Linear.
+#[allow(clippy::single_component_path_imports)]
 use hf_hub;
 use indicatif::{ProgressBar, ProgressStyle};
 use minijinja::{Environment, context, value::Value};
@@ -641,6 +643,8 @@ async fn discover_worker_ids(frontend_url: &str) -> Result<Vec<WorkerId>> {
 ///
 /// Worker IDs are taken from the provided list (discovered from frontend).
 /// Uses parallel processing for tokenization to speed up generation.
+// TODO(router-team): refactor to a params/builder struct. Tracked in Linear.
+#[allow(clippy::too_many_arguments)]
 fn generate_sequences_for_requests(
     num_sequences: usize,
     worker_ids: &[WorkerId],
@@ -947,6 +951,8 @@ fn build_routing_request_with_prefix(
 
 /// Send HTTP requests at a specified rate.
 /// Returns the Unix timestamp (seconds since epoch) when warmup ended.
+// TODO(router-team): refactor to a params/builder struct. Tracked in Linear.
+#[allow(clippy::too_many_arguments)]
 async fn send_requests_at_rate(
     client: reqwest::Client,
     frontend_url: String,

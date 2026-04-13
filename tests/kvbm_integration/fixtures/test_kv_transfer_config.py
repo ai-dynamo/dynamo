@@ -62,11 +62,24 @@ def test_v2_payload_omits_leader_nova(model_config: KvbmModelConfig) -> None:
 def test_v2_payload_has_required_leader_blocks(
     model_config: KvbmModelConfig, onboard_mode: str
 ) -> None:
-    cfg = build_kv_transfer_config("v2", model_config, onboard_mode=onboard_mode)
+    cfg = build_kv_transfer_config(
+        "v2", model_config, onboard_mode=onboard_mode, cpu_blocks=2000
+    )
     leader = cfg["kv_connector_extra_config"]["leader"]
-    assert leader["cache"]["host"]["cache_size_gb"] == 10.0  # phase-5 TODO: derive
+    assert leader["cache"]["host"] == {"num_blocks": 2000}
     assert leader["tokio"]["worker_threads"] == 2
     assert leader["onboard"] == {"mode": onboard_mode}
+
+
+def test_v2_payload_omits_cache_host_when_cpu_blocks_none(
+    model_config: KvbmModelConfig,
+) -> None:
+    """When cpu_blocks is None, the v2 leader config must NOT contain a
+    cache.host block — the Rust leader will then fail hard on startup per
+    the phase-5 mandatory-tier contract."""
+    cfg = build_kv_transfer_config("v2", model_config, cpu_blocks=None)
+    leader = cfg["kv_connector_extra_config"]["leader"]
+    assert "cache" not in leader
 
 
 def test_v2_payload_default_onboard_mode_is_intra(

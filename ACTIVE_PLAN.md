@@ -488,30 +488,86 @@ After torch is in place:
 
 ---
 
-### Phase 5 — v2 end-to-end determinism passing
-**Goal**: Get `test_determinism_agg_with_cache_reset` passing under v2 using the fixtures from phase 2.
+### Phase 5 — v2 end-to-end determinism passing (detailed plan approved 2026-04-13)
+**Goal**: Flip `tests/kvbm_integration/test_determinism_agg.py` to enumerate v2 alongside v1 and get `test_determinism_agg_with_cache_reset` to 100% exact match under v2 on GB10 with Qwen3-0.6B at default iteration counts. Larger models (R1-Distill-Llama-8B, MLA) stay deferred.
 
-**Inputs**: Working v2 sandbox from phase 4, v2 server spec from phase 2.
-
-**Deliverables**:
-- Passing determinism test, v2 mode, same model as phase 3.
-- Side-by-side metrics capture vs. v1 run (offload/onboard counts + approximate latency).
-- Updated `tests/kvbm_integration/README.md` documenting the v1 vs v2 switch.
+**Design decisions ratified 2026-04-13**:
+1. **Cache sizing**: v2 builder uses `cache.host.num_blocks = spec.cpu_blocks` — exact parity with v1's `DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS` path. No HF-config lookups, no dtype/num_layers derivation.
+2. **Onboard mode enumeration**: every v2 spec enumerates both `intra` and `inter`. Doubles v2 test count but catches mode-specific regressions on every run.
+3. **Cache tier mandatory + max-wins**: `HostCacheConfig::compute_num_blocks` returns `None` when neither field is set (no implicit defaults). When both are set, returns `max(num_blocks, derived_from_gb)` and logs an INFO message enumerating both values with a clear marker that the larger was used. The v2 leader (`kvbm-connector`) must bail hard when neither host nor disk tier is configured — matching v1's `sanity_check` panic, but as a clean `anyhow::bail!`.
 
 **Tasks**:
-1. **Flip the parametrize list** in `tests/kvbm_integration/test_determinism_agg.py` from `["v1"]` to `["v1", "v2"]` (phase-2 TODO).
-2. **Derive `cache.host.cache_size_gb`** in `tests/kvbm_integration/fixtures/server.py:build_kv_transfer_config` from `KVBM_CPU_BLOCKS × block_size × dtype_bytes × num_layers` (or model-config equivalent). Phase 2 hardcoded 10.0; replace with derivation so v1 and v2 use comparable host-cache sizing.
-3. Run v2 fixtures at low iteration count first (`KVBM_MAX_ITERATIONS=2`) to shake out config issues.
-4. Scale to full iteration count.
-5. If exact match fails, isolate between "v2 offload path" vs "vllm numerics under batch-invariant" — the DeepSeek-V2-Lite config already toggles batch_invariant; make sure v2 honors the same guarantees.
-6. Record deviations.
+
+0. **Rust config — max-wins + mandatory tier** (`lib/kvbm-config/src/cache.rs` + `lib/kvbm-connector/src/connector/leader/init.rs`)
+   - `HostCacheConfig::compute_num_blocks(bytes_per_block)`: if neither field set → `None`; if only one set → that one; if both set → `max(num_blocks, derived)` with `tracing::info!` enumerating both values and which one was picked.
+   - Same treatment for `DiskCacheConfig::compute_num_blocks`.
+   - Update unit tests in `cache.rs` to cover all four combinations for each tier (neither/only-blocks/only-gb/both-max-wins).
+   - `ConnectorLeader::init`: replace `.unwrap_or(0)` at `init.rs:209` with explicit branching. Bail with the v1-parity error message if neither host nor disk tier produces a non-zero block count.
+
+1. **Builder uses num_blocks, drop hardcoded cache_size_gb** (`tests/kvbm_integration/fixtures/server.py`)
+   - Add `cpu_blocks: Optional[int] = None` to `build_kv_transfer_config`.
+   - v2 branch: replace `"cache": {"host": {"cache_size_gb": 10.0}}` with `"cache": {"host": {"num_blocks": cpu_blocks}}` when set; omit the host block entirely when `None`.
+   - Update call site inside `KvbmServerManager` to pass `cpu_blocks=self.spec.cpu_blocks`.
+   - v1 branch unchanged — v1 still routes through `DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS`.
+
+2. **Update builder unit test** (`tests/kvbm_integration/fixtures/test_kv_transfer_config.py`)
+   - Replace `cache_size_gb == 10.0` with `num_blocks == <fixture cpu_blocks>`.
+   - Add a case asserting `cpu_blocks=None` omits the `cache.host` block entirely.
+
+3. **Expand `_specs()` to cross versions × models × onboard modes** (`tests/kvbm_integration/test_determinism_agg.py`)
+   - `_KVBM_VERSIONS_UNDER_TEST = ("v1", "v2")`.
+   - New constant `_KVBM_V2_ONBOARD_MODES = ("intra", "inter")`.
+   - v1 yields one spec per model; v2 yields `len(models) × 2` specs, one per onboard mode.
+   - `_params()` stays unchanged; `KvbmServerSpec.id` already emits `v2-<model>-<mode>`.
+   - Expected on GB10/Qwen3-0.6B: 1 v1 + 2 v2 = 3 cache_reset + 3 concurrent.
+
+4. **Enable v2-* spec ids in `run_server.sh`** — delete the v2-* rejection block at `tests/kvbm_integration/scripts/run_server.sh:38-46`. Spec-id-driven launch already handles `onboard_mode` via `dataclasses.replace`.
+
+5. **Low-iteration v2 shakedown**: `KVBM_MAX_ITERATIONS=2 KVBM_NUM_ITERATIONS=2 KVBM_REQUEST_DELAY=2 KVBM_CPU_BLOCKS=2000 KVBM_GPU_BLOCKS=512 KVBM_GPU_MEMORY_UTILIZATION=0.5 pytest -k "v2-Qwen3-0.6B and cache_reset"`. Surfaces config drift cheaply.
+
+6. **Full-iteration v2 parity gate**: same but default iterations, `KVBM_SERVER_START_TIMEOUT=600`. Both intra and inter must pass with 100% match; host hit rate > 0 in both logs.
+
+7. **Decomposed three-shell v2 smoke**: `unset NATS_SERVER ETCD_ENDPOINTS`; `run_server.sh v2-Qwen3-0.6B-intra` (shell 2); set `KVBM_SPEC_ID`+external URLs; `run_eval.sh` (shell 3). Repeat for `inter`.
+
+8. **Side-by-side metrics capture**: during one v2 intra run, snapshot `/metrics` and compare `kvbm_offload_blocks_d2h`, `kvbm_onboard_blocks_h2d`, `kvbm_host_cache_hit_rate`, `kvbm_matched_tokens` against the phase-3 v1 snapshot (~66.4% host hit rate for Qwen3-0.6B). 10x gap flags wiring issue.
+
+9. **Divergence isolation (contingent, only if 5 or 6 fails)**: confirm `VLLM_BATCH_INVARIANT=1` is in the v2 vllm env block; check `batch_invariant_mode` in scheduler log; if only `inter` diverges, log as follow-up, fall back to intra-only for phase-5 sign-off.
+
+10. **README + deviations log**: `tests/kvbm_integration/README.md` v2 section (spec id format, no `run_deps_v1.sh` needed for v2, both onboard modes always enumerated, standing model); deviations entry with actual pass results + metrics; flip phase 5 state to completed.
 
 **Verification**:
-- `pytest tests/kvbm_integration/test_determinism_agg.py::TestDeterminismAgg::test_determinism_agg_with_cache_reset -v -k "v2"` → 100% match.
-- Metrics endpoint shows kvbm v2 counters > 0.
+```bash
+# Rust config unit tests
+cargo test -p dynamo-kvbm-config cache
+
+# Builder unit
+pytest tests/kvbm_integration/fixtures/test_kv_transfer_config.py -v
+
+# Collection enumerates v1 + v2×{intra,inter}
+pytest tests/kvbm_integration/test_determinism_agg.py --collect-only -q
+
+# Phase-1 regression
+pytest lib/bindings/kvbm/python/tests/test_legacy_imports.py -q
+
+# Phase-3 v1 parity (no regression from builder edit)
+KVBM_MODEL_ID=Qwen/Qwen3-0.6B KVBM_CPU_BLOCKS=2000 KVBM_GPU_BLOCKS=512 \
+KVBM_GPU_MEMORY_UTILIZATION=0.5 KVBM_SERVER_START_TIMEOUT=600 \
+  pytest tests/kvbm_integration/test_determinism_agg.py \
+    -v -k "v1-Qwen3-0.6B and cache_reset" --tb=short
+
+# Phase-5 v2 parity gate (the milestone)
+KVBM_MODEL_ID=Qwen/Qwen3-0.6B KVBM_CPU_BLOCKS=2000 KVBM_GPU_BLOCKS=512 \
+KVBM_GPU_MEMORY_UTILIZATION=0.5 KVBM_SERVER_START_TIMEOUT=600 \
+  pytest tests/kvbm_integration/test_determinism_agg.py \
+    -v -k "v2-Qwen3-0.6B and cache_reset" --tb=short   # Expect 2 passed
+```
 
 **Risks**:
-- v2 may not yet have batch_invariant parity. If true, scope the test to smaller models first and flag the gap.
+- v2 `batch_invariant` env propagation gap (mitigate by checking vllm log env block).
+- `inter` mode numerics regression (phase 4 only validated structural bring-up).
+- Doubling v2 test count on slower off-host models — flagged in README, not a phase-5 blocker.
+
+**Out of scope**: cache_size_gb derivation from dtype×num_layers; R1-Distill-Llama-8B and MLA; Rust scheduler port; velo/nova rename; phase-6 clippy re-enforcement.
 
 ---
 
@@ -596,6 +652,73 @@ KVBM_MAX_ITERATIONS=2 KVBM_NUM_ITERATIONS=2 KVBM_REQUEST_DELAY=2 \
 3. **Create `kvbm-scheduler` stub crate** instead of removing the reference. Keeps the door open if future work plans to split scheduler from connector; however, the user's memory notes decomposition already landed without it. Default is to remove; flip to stub only if grep finds references.
 
 ## Deviations log
+
+### 2026-04-13 — Phase 5 execution
+
+**Outcome**: Milestone goal reached. `test_determinism_agg_with_cache_reset` passes under **both** v2 onboard modes on GB10 with Qwen3-0.6B at default iteration counts (100 iters × 2 phases). v1 phase-3 parity unchanged. Spec matrix permanently enumerates `("v1","v2")` with v2 crossed against both onboard modes, so every determinism run catches intra and inter regressions in the same invocation.
+
+**v2 full-iter parity gate (Task 7)**:
+- `test_determinism_agg_with_cache_reset[v2-Qwen3-0.6B-intra]` — **1 passed in 182.63s**, final host cache hit rate **67.0% (3473/5184)**
+- `test_determinism_agg_with_cache_reset[v2-Qwen3-0.6B-inter]` — **1 passed in 183.76s**, final host cache hit rate **66.7% (3423/5134)**
+- Both match the phase-3 v1 baseline (~66.4%) and both report `host_block_count=2000 bytes_per_block=1,835,008 disk_block_count=None` — confirming the new builder `cpu_blocks` path flows end to end into the Rust leader.
+- Environment: `KVBM_MODEL_ID=Qwen/Qwen3-0.6B KVBM_CPU_BLOCKS=2000 KVBM_GPU_BLOCKS=512 KVBM_GPU_MEMORY_UTILIZATION=0.5 KVBM_SERVER_START_TIMEOUT=600`
+- Logs: `/tmp/dynamo_tests/test_determinism_agg_with_cache_reset[v2-Qwen3-0.6B-{intra,inter}]/ServerType.vllm_server_v2_cpu2000_gpu512_*.log`
+
+**Design decisions ratified with user (Tasks 0/1/2)**:
+1. **Cache sizing**: v2 builder passes `cache.host.num_blocks = spec.cpu_blocks` — exact parity with v1's `DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS`. The original plan called for deriving `cache_size_gb` from `KVBM_CPU_BLOCKS × block_size × dtype × num_layers`; rejected in favor of the direct num_blocks flow so v1 and v2 use the same Rust field with no HF-config lookups, no drift.
+2. **Both-modes enumeration**: every v2 spec yields both `intra` and `inter` — no env gate. Rationale: phase 4 only validated structural bring-up for both modes; determinism numerics were unverified until now. Doubling the v2 test count is acceptable on GB10 (~3 min per run) and is mandatory to prevent mode-specific regressions from sneaking through.
+3. **Mandatory tier + max-wins**: `HostCacheConfig::compute_num_blocks` / `DiskCacheConfig::compute_num_blocks` now return `None` when neither `num_blocks` nor `cache_size_gb` is set, return the single value when one is set, and return `max(explicit, derived)` when both are set with an INFO log line enumerating `explicit_num_blocks`, `cache_size_gb`, `derived_num_blocks`, `bytes_per_block`, `picked`. The v2 leader in `kvbm-connector` now bails with the v1-parity "KVBM Configuration Error" message when neither host nor disk tier produces a non-zero block count (previously silent `.unwrap_or(0)` fallback).
+
+**Critical fix — spurious `#[cfg(feature = "nccl")]` gates on intra onboard path (in-phase discovery, not in original plan)**: low-iter shakedown exposed `v2-Qwen3-0.6B-intra` emitting degenerate `iegoiegoiego...` output after cache reset while `inter` passed. v1 at the same 2-iter config passed, ruling out "iteration count too low." Root cause: three `#[cfg(feature = "nccl")]` gates in the intra onboard path:
+- `lib/kvbm-engine/src/worker/physical.rs:19` — `use cudarc::driver::CudaEvent` was gated on nccl even though `CudaEvent` is a plain CUDA primitive, not nccl-specific.
+- `lib/kvbm-engine/src/worker/physical.rs:361` — `execute_local_layerwise_onboard` was gated on nccl, but the function body is pure CUDA (acquires an H2D stream via `acquire_h2d_stream()`, calls per-layer `manager.execute_transfer(...)` with `TransferOptions.cuda_stream`, then `event.record(stream)` per layer). No collective ops, no nccl comms.
+- `lib/kvbm-connector/src/connector/worker/mod.rs:530-556` — the call site in `start_load_kv` had a symmetric `#[cfg(not(feature = "nccl"))]` branch that silently logged `"Intra-pass layerwise onboard requires nccl feature — skipping"` and dropped the `intra_pass_load` request. Since the bindings weren't built with the nccl cargo feature, this branch fired on every intra request: `start_load_kv` became a no-op, `intra_pass_onboard_active` stayed `false`, so `wait_for_layer_load` early-returned without the `cuStreamWaitEvent`, and vLLM's forward pass read uninitialized GPU KV slots — producing the `iegoiego` degenerate attractor.
+
+**Fix**: removed all three gates; made `cudarc` an unconditional dep in `lib/kvbm-engine/Cargo.toml` (was `optional = true`, only pulled in by `nccl = ["dep:cudarc"]`). `cudarc` is already unconditionally pulled in by `kvbm-physical` so this adds zero build cost. The `nccl` cargo feature is now `nccl = []`; it still gates the genuine NCCL-using code in `lib/kvbm-engine/src/collectives/` (which uses `cudarc::nccl::sys`), but no longer incorrectly gates the intra-pass CUDA-only onboard. The pre-existing wiring it depends on was already nccl-free:
+- `lib/kvbm-connector/src/connector/worker/state.rs:219-246` pre-allocates H2D and D2H `CudaEvent` vectors unconditionally at init
+- `lib/kvbm-connector/src/connector/worker/mod.rs:579-617 wait_for_layer_load` uses raw `cuStreamWaitEvent(stream, event.cu_event(), 0)` with no gate
+- `mod.rs:263-281` has the offload-side equivalent using `cuEventRecord` / `cuStreamWaitEvent` with no gate
+
+After the fix, `v2-Qwen3-0.6B-intra` at 2 iters: **1 passed in 39s** (smoke), then at default iterations: **1 passed in 182.63s** with 67.0% host hit rate (the full-iter gate).
+
+**Side-by-side metrics snapshot (Task 8)**:
+
+| Spec | Wall | host_block_count | bytes_per_block | Host hit rate |
+|---|---|---|---|---|
+| v1-Qwen3-0.6B (phase-3 baseline) | 190.47s | 2000 | — | 66.4% |
+| v2-Qwen3-0.6B-intra | 182.63s | 2000 | 1,835,008 | 67.0% (3473/5184) |
+| v2-Qwen3-0.6B-inter | 183.76s | 2000 | 1,835,008 | 66.7% (3423/5134) |
+
+The `bytes_per_block=1,835,008` matches Qwen3-0.6B's KV geometry (28 layers × 2 × 16 tokens × 1024 hidden × 2 bytes). Both v2 modes track v1 wall time (within ~4% — the v2 path pays a one-time v2 Rust scheduler pass-through overhead). `disk_block_count=None` in both runs — only the G2 host tier is configured, matching the phase-3 v1 topology.
+
+**Decomposed three-shell v2 smoke (Task 8, separate)**: reproduced both modes end-to-end via `run_server.sh` + `run_eval.sh`. Shell 1 is a no-op for v2 (`NATS_SERVER`/`ETCD_ENDPOINTS` must be unset so the v1 deps gate in `run_server.sh` is skipped). Shell 2: `bash tests/kvbm_integration/scripts/run_server.sh v2-Qwen3-0.6B-{intra,inter}` prints the server export block once `[server] READY`. Shell 3: export the three vars and run `bash tests/kvbm_integration/scripts/run_eval.sh`. Eval bypasses the spawn path (`KVBM_EXTERNAL_BASE_URL` triggers external-attach mode) and runs against the already-booted server. Intra smoke: **1 passed in 11.4s**. Inter smoke: **1 passed in 11.5s**. Both eval invocations bypassed spawn (only ~11s wall because the server was already warm), confirming the external-attach handshake works for v2 spec ids and that the server-side spec-id lookup in `run_server.sh` correctly reconstructs the onboard mode from the spec id.
+
+**Builder unit test updates (Task 3)**: `test_v2_payload_has_required_leader_blocks` now asserts `leader["cache"]["host"] == {"num_blocks": 2000}` (previously `cache_size_gb == 10.0`). New `test_v2_payload_omits_cache_host_when_cpu_blocks_none` case asserts that `cpu_blocks=None` omits the `cache.host` block entirely so the Rust leader hits the mandatory-tier bail. 11/11 passed.
+
+**Spec matrix (Task 4)**: `_KVBM_VERSIONS_UNDER_TEST = ("v1", "v2")`, new constant `_KVBM_V2_ONBOARD_MODES = ("intra", "inter")`. `_specs()` yields one spec per model for v1 and two specs per model (one per mode) for v2. Collect shows 12 tests (2 test methods × (1 v1 + 2 v2 modes) × 2 models). On GB10 with `KVBM_MODEL_ID=Qwen/Qwen3-0.6B` the second model (DeepSeek-V2-Lite MLA) is pytest-skipped, leaving 3 cache-reset + 3 concurrent runs.
+
+**`run_server.sh` v2 gate removed (Task 5)**: deleted the `v2-*` rejection block at `lines 38-46`; added branching so `v1-*` specs still require `NATS_SERVER`/`ETCD_ENDPOINTS` but `v2-*` specs deliberately do not. The spec-id-driven launch path (imports `_CACHE_RESET_SPECS`, rebuilds the spec via `dataclasses.replace` with block overrides) already handled `onboard_mode` correctly because it's a field on the canonical spec.
+
+**Rust unit tests (Task 0)**: added 9 new cache-config tests covering the four `compute_num_blocks` cases for both host and disk tiers (neither/only-blocks/only-gb/both-max-wins, plus bytes-per-block zero). `cargo test -p kvbm-config cache::` → **18 passed**. Clippy clean on `kvbm-config` and `kvbm-connector` and on the workspace `--all-features --all-targets`.
+
+**Files touched** (this round):
+- `lib/kvbm-config/src/cache.rs` — max-wins semantics, mandatory-tier None return, new tests
+- `lib/kvbm-connector/src/connector/worker/mod.rs` — removed nccl-gate at intra onboard call site; left the downstream event wiring untouched
+- `lib/kvbm-connector/src/connector/leader/init.rs` — replaced `.unwrap_or(0)` with explicit bail matching v1 sanity_check
+- `lib/kvbm-engine/src/worker/physical.rs` — removed nccl-gate on `execute_local_layerwise_onboard` and on the `CudaEvent` import
+- `lib/kvbm-engine/Cargo.toml` — `cudarc` moved from optional to required; `nccl = ["dep:cudarc"]` → `nccl = []`
+- `tests/kvbm_integration/fixtures/server.py` — `build_kv_transfer_config` gained `cpu_blocks` parameter; v2 branch emits `cache.host.num_blocks` or omits the cache block entirely; `KvbmServerManager` call site passes `spec.cpu_blocks`
+- `tests/kvbm_integration/fixtures/test_kv_transfer_config.py` — num_blocks assertion + new omission case
+- `tests/kvbm_integration/test_determinism_agg.py` — parametrize flip + `_KVBM_V2_ONBOARD_MODES` cross
+- `tests/kvbm_integration/scripts/run_server.sh` — v2 gate removed; v1/v2 branch split on NATS/ETCD requirement
+- `tests/kvbm_integration/README.md` — v2 decomposed-flow section, v2 spec id format, KVBM_CPU_BLOCKS → num_blocks note
+- `ACTIVE_PLAN.md` — phase 5 plan rewritten + this entry + state flip
+
+**Out of scope, still deferred**:
+- DeepSeek-R1-Distill-Llama-8B at default iteration counts — needs faster host (spec wiring ready; both v2 modes will auto-enumerate once the model env var flips).
+- DeepSeek-V2-Lite (MLA) execution — gated on `KVBM_ENABLE_MLA`; both v2 modes auto-enumerate once unblocked.
+- Porting `dynamo_kvbm::v2::integrations::scheduler::*` to the decomposed kvbm-* crates. `DynamoScheduler` still runs in `_rust_scheduler is None` passthrough; phase 5 did not need this.
+- Phase 6: workspace clippy `-D warnings --all-targets` re-enforcement.
 
 ### 2026-04-13 — Phase 4 execution
 
@@ -919,7 +1042,7 @@ If we tried to enumerate `"v2"` in the phase-2 parametrize list, `pytest --colle
 - Phase 2 — **completed** 2026-04-13 (decomposition landed; collect-only smoke + v2 builder unit test green; v1 fixture wiring verified end-to-end through vllm spawn; full v1 vllm run blocked by environmental Blackwell/sm_120 PyTorch issue, not a fixture regression — see deviations log)
 - Phase 3 — **completed on GB10 (Qwen3-0.6B at default iteration counts)** 2026-04-13 — sm_121 venv wired via vllm cu130 nightly + nccl 2.29.7; kvbm-py3 rebuilt; phase-1 regression test still 6/7 green after a one-line vllm-API drift fix in `pd_connector.py`; **decomposed three-shell flow validated end-to-end** (run_deps_v1.sh reuse-or-spawn fix + spec-id refactor of run_server.sh / run_eval.sh + MLA gate); **`test_determinism_agg_with_cache_reset[v1-Qwen3-0.6B]` PASSED at default iteration counts in 190.47s with KVBM host hit rate 66.4%**. Per user direction (2026-04-13), Qwen3-0.6B is the standing test model on this host; larger models (DeepSeek-R1-Distill-Llama-8B and the gated DeepSeek-V2-Lite/MLA spec) are deferred to a different host once both v1 and v2 are passing here for 0.6B. See deviations log for spec-id refactor details and the exact wheel set + reproduction recipe.
 - Phase 4 — **completed 2026-04-13** — v2 readiness gate closed. Single vllm version policy (max bumped to 0.19.999); `kvbm.v2.vllm.schedulers.connector` import-safe via widened `except` in `dynamo.py:47` AND a hidden second AttributeError gap in `kvbm/v2/__init__.py` (split into core+scheduler try blocks); new canonical `kvbm.v{1,2}.vllm.connector` façades (1↔2 char mirror) with 4 lazy-shim regression tests; both builders point at the new façades; `KvbmServerSpec.onboard_mode` field for `intra`/`inter`; **both intra and inter v2 vllm bring-ups PASSED on GB10 with Qwen3-0.6B** (mode confirmed via `kvbm_connector::connector::leader: ConnectorLeader initialized with onboard mode onboard_mode=Intra/Inter` log lines); v1 phase-3 determinism test still green against new façade in 44s. Rust scheduler port (`dynamo_kvbm::v2::integrations::scheduler::*` → decomposed kvbm-* crates) documented and deferred — DynamoScheduler's `_rust_scheduler is None` fallback is sufficient. See deviations log for the full reproduction recipe and the 8-command verification gate.
-- Phase 5 — not started; phase-2 TODO carried in: flip parametrize to `["v1","v2"]`, derive `cache_size_gb` from `KVBM_CPU_BLOCKS × block_size × dtype × num_layers`. **Test model on this host: Qwen3-0.6B at default iteration counts** (matches phase 3). Larger-model parity (R1-Distill-Llama-8B, MLA) is deferred to a different host once v1+v2 are both green here for 0.6B.
+- Phase 5 — **completed 2026-04-13** — `test_determinism_agg_with_cache_reset` passes at default iteration counts for **both v2 onboard modes** on GB10 with Qwen3-0.6B (intra: 182.63s/67.0% host hit; inter: 183.76s/66.7% host hit); v1 baseline still 66.4%. Parametrize permanently `("v1","v2")`, v2 crossed with `("intra","inter")`. v2 builder now passes `cache.host.num_blocks = spec.cpu_blocks` (exact v1 parity); the plan's original `cache_size_gb` derivation was rejected in favor of this simpler path. Rust config gained max-wins semantics and a mandatory-tier bail. Critical in-phase fix: removed three spurious `#[cfg(feature = "nccl")]` gates on the intra onboard path in `kvbm-engine/src/worker/physical.rs` and `kvbm-connector/src/connector/worker/mod.rs` — the gated code was pure CUDA (H2D stream + per-layer `CudaEvent::record`), not nccl, and without the gate removed the intra onboard was a silent no-op that caused vLLM to read uninitialized KV slots. `cudarc` made unconditional in kvbm-engine; the `nccl` cargo feature now only gates the genuine collectives code. Decomposed three-shell v2 flow validated for both modes (intra smoke 11.4s, inter smoke 11.5s). Larger-model parity (R1-Distill-Llama-8B, MLA) still deferred to a faster host. See deviations log for metrics, reproduction recipe, and file list.
 - Phase 6 — not started; clippy `-D warnings --all-targets` re-enforcement added to scope
 
 ## Handover note

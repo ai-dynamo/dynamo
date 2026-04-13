@@ -15,9 +15,11 @@
 #   v1-DeepSeek-R1-Distill-Llama-8B
 #   v1-DeepSeek-V2-Lite          (gated; needs KVBM_ENABLE_MLA=1)
 #   v1-Qwen3-0.6B                (only if KVBM_MODEL_ID=Qwen/Qwen3-0.6B)
+#   v2-Qwen3-0.6B-intra          (v2, intra onboard mode)
+#   v2-Qwen3-0.6B-inter          (v2, inter onboard mode)
 #
 # v1 spec ids: require NATS_SERVER + ETCD_ENDPOINTS in env (from run_deps_v1.sh).
-# v2 spec ids: deferred to phase 5 — see ACTIVE_PLAN.md.
+# v2 spec ids: do NOT need NATS/etcd — leave NATS_SERVER/ETCD_ENDPOINTS unset.
 #
 # Env overrides honored:
 #   KVBM_CPU_BLOCKS              (override spec.cpu_blocks)
@@ -29,30 +31,22 @@ set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
     echo "usage: $0 <spec-id>" >&2
-    echo "       (e.g. v1-DeepSeek-R1-Distill-Llama-8B)" >&2
+    echo "       (e.g. v1-DeepSeek-R1-Distill-Llama-8B, v2-Qwen3-0.6B-intra)" >&2
     exit 2
 fi
 
 SPEC_ID="$1"
 
-if [[ "$SPEC_ID" == v2-* ]]; then
-    cat <<'EOF' >&2
-[server] v2 server launch is deferred to phase 5.
-Phase 4 must first land the v2 import-readiness fixes (see ACTIVE_PLAN.md):
-  - unify the dual vllm version policies in kvbm/v2/vllm/{config.py, version_check.py}
-  - make kvbm.v2.vllm.schedulers.connector import-safe
-EOF
-    exit 3
-fi
-
-if [[ "$SPEC_ID" != v1-* ]]; then
+if [[ "$SPEC_ID" != v1-* && "$SPEC_ID" != v2-* ]]; then
     echo "[server] unknown spec id prefix: $SPEC_ID (expected v1- or v2-)" >&2
     exit 2
 fi
 
-if [[ -z "${NATS_SERVER:-}" || -z "${ETCD_ENDPOINTS:-}" ]]; then
-    echo "[server] NATS_SERVER and ETCD_ENDPOINTS must be set (run scripts/run_deps_v1.sh first)" >&2
-    exit 4
+if [[ "$SPEC_ID" == v1-* ]]; then
+    if [[ -z "${NATS_SERVER:-}" || -z "${ETCD_ENDPOINTS:-}" ]]; then
+        echo "[server] v1 requires NATS_SERVER and ETCD_ENDPOINTS in env (run scripts/run_deps_v1.sh first)" >&2
+        exit 4
+    fi
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"

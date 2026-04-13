@@ -205,8 +205,7 @@ impl ConnectorLeader {
             .config()
             .cache
             .host
-            .compute_num_blocks(bytes_per_block)
-            .unwrap_or(0);
+            .compute_num_blocks(bytes_per_block);
 
         let disk_block_count = self
             .runtime
@@ -215,6 +214,29 @@ impl ConnectorLeader {
             .disk
             .as_ref()
             .and_then(|dc| dc.compute_num_blocks(bytes_per_block));
+
+        // Mirror v1 sanity_check: at least one cache tier must produce a
+        // non-zero block count, otherwise the leader has nothing to offload to.
+        // Fail loudly rather than silently falling back to zero host blocks.
+        let host_ok = host_block_count.is_some_and(|n| n > 0);
+        let disk_ok = disk_block_count.is_some_and(|n| n > 0);
+        if !host_ok && !disk_ok {
+            bail!(
+                "KVBM Configuration Error: At least one cache tier must be configured.\n\
+                \n\
+                Configure CPU cache (G2) for CPU memory offloading:\n\
+                • DYN_KVBM_CPU_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_CPU_CACHE_GB=4)\n\
+                • DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>  (e.g., DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS=1000)\n\
+                \n\
+                OR configure disk cache (G3) for direct GPU->Disk offloading:\n\
+                • DYN_KVBM_DISK_CACHE_GB=<size_in_gb>     (e.g., DYN_KVBM_DISK_CACHE_GB=8)\n\
+                • DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS=<num_blocks>\n\
+                \n\
+                Note: If only disk cache is configured, KVBM will offload directly from GPU (G1) to Disk (G3), bypassing CPU memory (G2)."
+            );
+        }
+
+        let host_block_count = host_block_count.unwrap_or(0);
 
         tracing::info!(
             host_block_count,

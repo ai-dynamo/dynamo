@@ -75,14 +75,12 @@ def build_kv_transfer_config(
     kvbm_version: KvbmVersion,
     model_config: KvbmModelConfig,
     onboard_mode: str = "intra",
+    cpu_blocks: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Build the vLLM ``--kv-transfer-config`` payload for the chosen KVBM version.
 
     Both v1 and v2 use the canonical ``kvbm.v{N}.vllm.connector`` façades
-    introduced in phase 4 (1↔2 char path mirror). The legacy
-    ``kvbm.vllm_integration.connector`` shim and the
-    ``kvbm.v{N}.vllm_integration.connector`` impl substrate stay in place
-    for external callers.
+    introduced in phase 4 (1↔2 char path mirror).
 
     v2 (agg) deliberately omits the ``leader.nova`` discovery block —
     `lib/kvbm-config/src/messenger.rs:43` defaults `discovery: None` and
@@ -93,10 +91,12 @@ def build_kv_transfer_config(
     the sandbox script default; `"inter"` is the alternative validated in
     phase 4. v1 ignores the flag.
 
-    NOTE: `cache.host.cache_size_gb` is hardcoded to 10.0 in phase 2 to match
-    the sandbox script verbatim. Phase 5 must derive it from
-    `KVBM_CPU_BLOCKS × block_size × dtype × num_layers` so v1/v2 host-cache
-    sizing is comparable. See ACTIVE_PLAN.md phase-5 TODO.
+    `cpu_blocks` (v2 only) sets ``cache.host.num_blocks`` on the v2 leader
+    config — exact parity with v1's ``DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS``
+    path. When ``None``, the ``cache.host`` block is omitted entirely; the v2
+    leader will then fail to start (matches v1's sanity_check) unless a disk
+    tier is configured through some other channel. Callers are expected to
+    pass ``spec.cpu_blocks`` from ``KvbmServerSpec``.
     """
     if kvbm_version == "v1":
         return {
@@ -110,16 +110,18 @@ def build_kv_transfer_config(
                 f"unknown onboard_mode: {onboard_mode!r} "
                 f"(expected one of {_VALID_ONBOARD_MODES})"
             )
+        leader: Dict[str, Any] = {
+            "tokio": {"worker_threads": 2},
+            "onboard": {"mode": onboard_mode},
+        }
+        if cpu_blocks is not None:
+            leader["cache"] = {"host": {"num_blocks": int(cpu_blocks)}}
         return {
             "kv_connector": "DynamoConnector",
             "kv_role": "kv_both",
             "kv_connector_module_path": "kvbm.v2.vllm.connector",
             "kv_connector_extra_config": {
-                "leader": {
-                    "cache": {"host": {"cache_size_gb": 10.0}},
-                    "tokio": {"worker_threads": 2},
-                    "onboard": {"mode": onboard_mode},
-                },
+                "leader": leader,
                 "worker": {
                     "nixl": {"backends": {"UCX": {}, "POSIX": {}}},
                     "tokio": {"worker_threads": 2},
@@ -251,6 +253,7 @@ class KvbmServerManager:
             self.kvbm_version,
             self.model_config,
             onboard_mode=self.spec.onboard_mode,
+            cpu_blocks=self.spec.cpu_blocks,
         )
 
         self.server_cmd = [

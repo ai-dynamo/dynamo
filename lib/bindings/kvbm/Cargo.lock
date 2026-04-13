@@ -3979,6 +3979,7 @@ dependencies = [
  "bytes",
  "chrono",
  "crossbeam-queue",
+ "cudarc",
  "dashmap",
  "derive_builder",
  "dynamo-memory",

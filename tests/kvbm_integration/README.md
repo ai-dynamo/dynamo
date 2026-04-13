@@ -14,9 +14,11 @@ and re-run the eval loop without re-spawning vLLM.
 | **C. Eval** | `fixtures/eval.py` | Bind `AggDeterminismTester` to the running server and run the determinism loop. |
 
 `test_determinism_agg.py` parametrizes a single `kvbm_server_spec` axis that
-bundles `(kvbm_version, model_config, cpu_blocks, gpu_blocks)`. Phase 2 only
-enumerates `kvbm_version="v1"`; the v2 builder ships inert pending phase 4 of
-ACTIVE_PLAN.md. Phase 5 will flip the parametrize list to `("v1", "v2")`.
+bundles `(kvbm_version, model_config, cpu_blocks, gpu_blocks, onboard_mode)`.
+As of phase 5 the list enumerates `("v1", "v2")` crossed with the model list;
+v2 is further crossed with both onboard modes (`intra` and `inter`), so every
+v2 spec appears twice — once per mode — to catch mode-specific regressions on
+every run. Spec ids take the form `v1-<model>` and `v2-<model>-<mode>`.
 
 ## Running — composed (one shell)
 
@@ -40,6 +42,8 @@ backend, block size, and `batch_invariant` always come from the
 canonical source. Scripts never hardcode per-model attributes.
 
 ```bash
+# ─── v1 flow (needs NATS + etcd) ───────────────────────────────────────
+
 # Shell 1 — bring up NATS + etcd (reuses if already reachable, else spawns
 # in the foreground and prints exports; Ctrl-C to stop the spawned form)
 bash tests/kvbm_integration/scripts/run_deps_v1.sh
@@ -56,6 +60,25 @@ export KVBM_EXTERNAL_BASE_URL=http://localhost:NNNN
 export KVBM_EXTERNAL_METRICS_PORT=NNNN
 export KVBM_SPEC_ID=v1-DeepSeek-R1-Distill-Llama-8B
 bash tests/kvbm_integration/scripts/run_eval.sh
+
+# ─── v2 flow (no NATS + etcd needed — agg discovery defaults to None) ──
+
+# Shell 1 for v2 is a no-op: the v2 leader's `discovery` field defaults
+# to None (lib/kvbm-config/src/messenger.rs:43) and `build_messenger`
+# short-circuits. Explicitly unset any v1 deps vars that may be in your
+# env so you don't accidentally inherit a previous shell's exports:
+unset NATS_SERVER ETCD_ENDPOINTS
+
+# Shell 2 — launch vllm for a v2 spec id. Each v2 spec carries its
+# onboard mode in the id (`intra` or `inter`).
+KVBM_MODEL_ID=Qwen/Qwen3-0.6B \
+    bash tests/kvbm_integration/scripts/run_server.sh v2-Qwen3-0.6B-intra
+
+# Shell 3 — same pattern as v1.
+export KVBM_EXTERNAL_BASE_URL=http://localhost:NNNN
+export KVBM_EXTERNAL_METRICS_PORT=NNNN
+export KVBM_SPEC_ID=v2-Qwen3-0.6B-intra
+bash tests/kvbm_integration/scripts/run_eval.sh
 ```
 
 `run_eval.sh` defaults to running `test_determinism_agg_with_cache_reset`
@@ -64,14 +87,15 @@ runs).
 
 `run_server.sh` honors `KVBM_CPU_BLOCKS` / `KVBM_GPU_BLOCKS` /
 `KVBM_SERVER_START_TIMEOUT` env overrides (applied via
-`dataclasses.replace` on the canonical spec).
+`dataclasses.replace` on the canonical spec). For v2 specs, `KVBM_CPU_BLOCKS`
+drives `cache.host.num_blocks` directly (exact parity with v1's
+`DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS` path). The Rust leader bails
+at startup if neither a host nor a disk cache tier is configured.
 
-`v1-DeepSeek-V2-Lite` is the suite's only MLA spec and is currently
-gated; set `KVBM_ENABLE_MLA=1` (in both the server shell and the
-eval shell) to opt in. Pytest reports it as `SKIPPED` otherwise.
-
-`run_server.sh v2-*` is intentionally an error until phase 5 — see
-`ACTIVE_PLAN.md` phase 4 for the v2 readiness gate.
+`v1-DeepSeek-V2-Lite` and `v2-DeepSeek-V2-Lite-{intra,inter}` are the suite's
+MLA specs and are currently gated; set `KVBM_ENABLE_MLA=1` (in both the
+server shell and the eval shell) to opt in. Pytest reports them as
+`SKIPPED` otherwise.
 
 ## External-attach mode
 
@@ -145,8 +169,9 @@ KVBM_MAX_ITERATIONS=2 KVBM_NUM_ITERATIONS=2 KVBM_REQUEST_DELAY=2 \
 - Logs are written under the per-test directory from `tests/conftest.py`
   (`resolve_test_output_path`) and include the vLLM stdout/stderr.
 - Warmup is critical — disabling it hides initialization-related determinism bugs.
-- v2 enumeration in the parametrize list is gated on phase 4 of `ACTIVE_PLAN.md`
-  (the v2 connector currently fails to import on this branch).
+- As of phase 5 the parametrize list enumerates both v1 and v2. Every v2 spec
+  is crossed with both onboard modes (`intra`, `inter`), so a single run exercises
+  both paths and catches mode-specific regressions immediately.
 
 ## Other tests in this directory
 

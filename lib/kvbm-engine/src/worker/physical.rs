@@ -16,7 +16,6 @@ pub use replicated::ReplicatedDataWorker;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-#[cfg(feature = "nccl")]
 use cudarc::driver::CudaEvent;
 use derive_builder::Builder;
 use futures::future::BoxFuture;
@@ -358,7 +357,6 @@ impl PhysicalWorker {
     /// - layer_events length doesn't match num_layers
     /// - G1 or G2 handles are not registered
     /// - Any layer transfer fails
-    #[cfg(feature = "nccl")]
     pub fn execute_local_layerwise_onboard(
         &self,
         src_block_ids: &[BlockId],

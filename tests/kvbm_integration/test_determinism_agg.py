@@ -88,10 +88,14 @@ pytestmark = [
 ]
 
 
-# Phase-2 ships the v2 builder inert: parametrize list is v1-only.
-# TODO(phase 5): once phase 4 lands the v2 import-readiness fixes
-# (see ACTIVE_PLAN.md phase 4), expand to ("v1", "v2").
-_KVBM_VERSIONS_UNDER_TEST = ("v1",)
+# Phase 5: v1 and v2 both enumerated. v2 specs are further crossed with
+# both onboard modes so every run exercises intra AND inter paths.
+_KVBM_VERSIONS_UNDER_TEST = ("v1", "v2")
+
+# v2 onboard modes enumerated on every run. Phase-4 validated structural
+# bring-up for both; phase 5 validates determinism numerics for both so any
+# mode-specific regression is caught immediately.
+_KVBM_V2_ONBOARD_MODES = ("intra", "inter")
 
 # MLA execution is gated for phase 3 (see ACTIVE_PLAN.md). The MLA spec
 # stays in _MODEL_CONFIGS so the test surface is preserved; specs whose
@@ -111,16 +115,31 @@ _MLA_SKIP_REASON = (
 def _specs(cpu_blocks_env: str, cpu_blocks_default: str) -> List[KvbmServerSpec]:
     cpu_blocks = int(os.environ.get(cpu_blocks_env, cpu_blocks_default))
     gpu_blocks = int(os.environ.get("KVBM_GPU_BLOCKS", "2048"))
-    return [
-        KvbmServerSpec(
-            kvbm_version=version,
-            model_config=cfg,
-            cpu_blocks=cpu_blocks,
-            gpu_blocks=gpu_blocks,
-        )
-        for version in _KVBM_VERSIONS_UNDER_TEST
-        for cfg in _MODEL_CONFIGS
-    ]
+    specs: List[KvbmServerSpec] = []
+    for version in _KVBM_VERSIONS_UNDER_TEST:
+        for cfg in _MODEL_CONFIGS:
+            if version == "v2":
+                # Cross with both onboard modes — one spec per (model, mode).
+                for mode in _KVBM_V2_ONBOARD_MODES:
+                    specs.append(
+                        KvbmServerSpec(
+                            kvbm_version=version,
+                            model_config=cfg,
+                            cpu_blocks=cpu_blocks,
+                            gpu_blocks=gpu_blocks,
+                            onboard_mode=mode,
+                        )
+                    )
+            else:
+                specs.append(
+                    KvbmServerSpec(
+                        kvbm_version=version,
+                        model_config=cfg,
+                        cpu_blocks=cpu_blocks,
+                        gpu_blocks=gpu_blocks,
+                    )
+                )
+    return specs
 
 
 def _params(specs: List[KvbmServerSpec]):
