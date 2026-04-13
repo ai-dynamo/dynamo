@@ -306,9 +306,12 @@ def _inject_token_ids(body: dict, response_data: dict) -> dict:
         response_data["prompt_token_ids"] = prompt_ids
 
         # Extract completion token IDs from logprobs content.
-        # Each logprob entry is one generated token.  Use convert_tokens_to_ids
-        # which handles special tokens (like <think>) correctly as single IDs,
-        # avoiding the re-encode problem where "<think>" becomes 3 tokens.
+        # Each logprob entry is exactly one generated token.  We must produce
+        # exactly one token ID per entry to keep lengths aligned.
+        #
+        # Strategy: try convert_tokens_to_ids (works for special tokens like
+        # <think>).  For byte-level tokens (e.g. "\n" -> None because the vocab
+        # entry is "Ċ"), encode the raw bytes and take the first ID.
         for choice in response_data.get("choices", []):
             lp = choice.get("logprobs")
             if lp and lp.get("content"):
@@ -317,17 +320,18 @@ def _inject_token_ids(body: dict, response_data: dict) -> dict:
                 for entry in logprobs_content:
                     token_str = entry.get("token", "")
                     tid = tok.convert_tokens_to_ids(token_str)
-                    if isinstance(tid, int) and tid != tok.unk_token_id:
+                    if isinstance(tid, int):
                         completion_ids.append(tid)
                     else:
-                        # Fallback for byte-level or unknown tokens: encode the bytes
+                        # Byte-level fallback: decode bytes, encode, take first ID.
+                        # Always append exactly 1 ID to keep alignment with logprobs.
                         token_bytes = entry.get("bytes")
                         if token_bytes is not None:
                             text = bytes(token_bytes).decode("utf-8", errors="replace")
                             ids = tok.encode(text, add_special_tokens=False)
-                            completion_ids.extend(ids if ids else [tok.unk_token_id or 0])
+                            completion_ids.append(ids[0] if ids else 0)
                         else:
-                            completion_ids.append(tok.unk_token_id or 0)
+                            completion_ids.append(0)
                 choice["token_ids"] = completion_ids
     except Exception as e:
         logger.warning(f"[admin] Failed to inject token_ids: {e}")
