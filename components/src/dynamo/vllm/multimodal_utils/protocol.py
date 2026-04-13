@@ -29,7 +29,6 @@ except ImportError:
     # For vLLM v0.18.1 or earlier (XPU currently supports vLLM v0.17)
     # TODO: Remove this fallback once XPU supports vLLM v0.18.1 or later
     from vllm.inputs.data import TokensPrompt
-    from vllm.multimodal.inputs import MultiModalUUIDDict
 
 from vllm.logprobs import PromptLogprobs
 from vllm.outputs import CompletionOutput
