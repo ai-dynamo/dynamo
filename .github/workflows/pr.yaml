@@ -282,6 +282,18 @@ jobs:
       build_timeout_minutes: 45
     secrets: inherit
 
+  frontend-build:
+    name: frontend
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: '["12.9"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 45
+    secrets: inherit
+
   # ============================================================================
   # TEST PIPELINES
   # ============================================================================
@@ -464,6 +476,18 @@ jobs:
       platform: '["amd64"]'
     secrets: inherit
 
+  frontend-compliance:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
+    needs: [frontend-build]
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: dynamo
+      target: frontend
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+    secrets: inherit
+
   # ============================================================================
   # IMAGE COPY PIPELINES
   # ============================================================================
@@ -549,7 +573,7 @@ jobs:
 
   deploy-test-vllm:
     name: vllm Deploy Test
-    needs: [changed-files, deploy-operator, vllm-copy-to-acr, vllm-multi-gpu-test]
+    needs: [changed-files, deploy-operator, vllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
@@ -565,7 +589,7 @@ jobs:
 
   deploy-test-sglang:
     name: sglang Deploy Test
-    needs: [changed-files, deploy-operator, sglang-copy-to-acr, sglang-multi-gpu-test]
+    needs: [changed-files, deploy-operator, sglang-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
@@ -581,7 +605,7 @@ jobs:
 
   deploy-test-trtllm:
     name: trtllm Deploy Test
-    needs: [changed-files, deploy-operator, trtllm-copy-to-acr, trtllm-multi-gpu-test]
+    needs: [changed-files, deploy-operator, trtllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')

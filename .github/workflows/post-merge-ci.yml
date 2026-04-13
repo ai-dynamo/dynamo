@@ -548,7 +548,7 @@ jobs:
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-test-vllm:
-    needs: [deploy-operator, vllm-test]
+    needs: [deploy-operator, vllm-copy-to-acr]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
@@ -560,7 +560,7 @@ jobs:
     secrets: inherit
 
   deploy-test-sglang:
-    needs: [deploy-operator, sglang-test]
+    needs: [deploy-operator, sglang-copy-to-acr]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
@@ -572,7 +572,7 @@ jobs:
     secrets: inherit
 
   deploy-test-trtllm:
-    needs: [deploy-operator, trtllm-test]
+    needs: [deploy-operator, trtllm-copy-to-acr]
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
@@ -603,7 +603,7 @@ jobs:
   deploy-test-gaie:
     name: GAIE Deploy Test
     runs-on: prod-default-small-v2
-    needs: [deploy-operator, frontend-build, vllm-test]
+    needs: [deploy-operator, frontend-copy-to-acr, vllm-copy-to-acr]
     timeout-minutes: 30
     permissions:
       contents: read
