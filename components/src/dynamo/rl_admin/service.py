@@ -93,7 +93,8 @@ async def pause(request: Request):
     """Pause inference engines (drain in-flight requests)."""
     result = await _call_engine_route("pause_generation")
     logger.info(f"[admin] POST /pause -> {result}")
-    return JSONResponse(content=result)
+    status_code = 200 if result.get("status") == "ok" else 502
+    return JSONResponse(content=result, status_code=status_code)
 
 
 @app.post("/resume")
@@ -101,7 +102,8 @@ async def resume():
     """Resume inference engines after weight update."""
     result = await _call_engine_route("resume_generation")
     logger.info(f"[admin] POST /resume -> {result}")
-    return JSONResponse(content=result)
+    status_code = 200 if result.get("status") == "ok" else 502
+    return JSONResponse(content=result, status_code=status_code)
 
 
 @app.post("/update_weights")
@@ -128,6 +130,8 @@ async def update_weights(request: Request):
     # So we just do the load + cache flush here.
     flush_result = await _call_engine_route("flush_cache")
     logger.info(f"[admin] flush_cache -> {flush_result}")
+    if flush_result.get("status") != "ok":
+        return JSONResponse(content=flush_result, status_code=502)
 
     load_result = await _call_engine_route(
         "update_weights_from_path",
@@ -135,7 +139,8 @@ async def update_weights(request: Request):
     )
     logger.info(f"[admin] update_weights_from_path -> {load_result}")
 
-    return JSONResponse(content=load_result)
+    status_code = 200 if load_result.get("status") == "ok" else 502
+    return JSONResponse(content=load_result, status_code=status_code)
 
 
 @app.post("/load_lora_adapter")
@@ -279,10 +284,79 @@ def _strip_unsupported(body: dict) -> dict:
     return body
 
 
+def _inject_token_ids(body: dict, response_data: dict) -> dict:
+    """Inject prompt_token_ids and choice.token_ids into the response.
+
+    Prime-RL's verifiers client requires these vLLM-specific fields to
+    extract per-token logprobs.  Dynamo doesn't support return_token_ids
+    natively, so we reconstruct the fields here using the HF tokenizer.
+    """
+    try:
+        tok = _get_tokenizer()
+        messages = body.get("messages", [])
+        if not messages:
+            return response_data
+
+        # Tokenize the prompt (same way the orchestrator will re-tokenize)
+        prompt_ids = tok.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True,
+        )
+        if isinstance(prompt_ids, dict):
+            prompt_ids = prompt_ids["input_ids"]
+        response_data["prompt_token_ids"] = prompt_ids
+
+        # Extract completion token IDs from logprobs content.
+        # Each logprob entry is one generated token.  Use convert_tokens_to_ids
+        # which handles special tokens (like <think>) correctly as single IDs,
+        # avoiding the re-encode problem where "<think>" becomes 3 tokens.
+        for choice in response_data.get("choices", []):
+            lp = choice.get("logprobs")
+            if lp and lp.get("content"):
+                logprobs_content = lp["content"]
+                completion_ids = []
+                for entry in logprobs_content:
+                    token_str = entry.get("token", "")
+                    tid = tok.convert_tokens_to_ids(token_str)
+                    if isinstance(tid, int) and tid != tok.unk_token_id:
+                        completion_ids.append(tid)
+                    else:
+                        # Fallback for byte-level or unknown tokens: encode the bytes
+                        token_bytes = entry.get("bytes")
+                        if token_bytes is not None:
+                            text = bytes(token_bytes).decode("utf-8", errors="replace")
+                            ids = tok.encode(text, add_special_tokens=False)
+                            completion_ids.extend(ids if ids else [tok.unk_token_id or 0])
+                        else:
+                            completion_ids.append(tok.unk_token_id or 0)
+                choice["token_ids"] = completion_ids
+    except Exception as e:
+        logger.warning(f"[admin] Failed to inject token_ids: {e}")
+
+    return response_data
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions_proxy(request: Request):
-    """Proxy standard chat completions to Dynamo frontend."""
-    body = _strip_unsupported(await request.json())
+    """Proxy standard chat completions to Dynamo frontend.
+
+    Strips return_token_ids (unsupported by Dynamo) but ensures logprobs
+    are requested so we can reconstruct token_ids in the response for
+    Prime-RL's verifiers client.
+    """
+    body = await request.json()
+    wants_token_ids = body.pop("return_token_ids", False)
+    # Also check extra_body
+    extra = body.get("extra_body", {})
+    if isinstance(extra, dict):
+        wants_token_ids = wants_token_ids or extra.pop("return_token_ids", False)
+        if not extra:
+            body.pop("extra_body", None)
+    _strip_unsupported(body)
+
+    # If caller wants token_ids, ensure logprobs are requested
+    if wants_token_ids and "logprobs" not in body:
+        body["logprobs"] = True
+
     stream = body.get("stream", False)
 
     client = _get_http_client()
@@ -303,7 +377,10 @@ async def chat_completions_proxy(request: Request):
         )
     else:
         resp = await client.post(url, json=body, headers=headers)
-        return JSONResponse(content=resp.json(), status_code=resp.status_code)
+        response_data = resp.json()
+        if wants_token_ids and resp.status_code == 200:
+            response_data = _inject_token_ids(body, response_data)
+        return JSONResponse(content=response_data, status_code=resp.status_code)
 
 
 # ══════════════════════════════════════════════════════════════════════

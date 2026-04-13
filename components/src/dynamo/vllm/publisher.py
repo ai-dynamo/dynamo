@@ -57,6 +57,10 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         *args: object,
         **kwargs: object,
     ) -> None:
+        # scheduler_stats can be None right after a weight reload / cache reset.
+        if scheduler_stats is None:
+            return
+
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
         self.inner.publish(self.dp_rank, active_decode_blocks)
 
