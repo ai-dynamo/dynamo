@@ -167,7 +167,8 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg_multimodal.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
 
 # XPU deployment
-bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
+DYN_CHAT_PROCESSOR=vllm \
+  bash launch/xpu/agg_multimodal_xpu.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
 ```
 
 ```mermaid
