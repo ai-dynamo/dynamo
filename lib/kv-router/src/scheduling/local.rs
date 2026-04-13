@@ -215,6 +215,10 @@ where
         self.queue.pending_count()
     }
 
+    pub fn pending_isl_tokens(&self) -> usize {
+        self.queue.pending_isl_tokens()
+    }
+
     pub fn worker_type(&self) -> &'static str {
         self.worker_type
     }
