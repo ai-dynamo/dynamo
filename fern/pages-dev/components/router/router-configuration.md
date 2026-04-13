@@ -47,6 +47,15 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 To implement KV event publishing for custom inference engines, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`), see [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints).
 
+### Session Control and Sticky Routing
+
+When a request carries `nvext.session_control`, the KV router activates two additional components:
+
+- **AgentController**: Sends session lifecycle RPCs (`open_session`, `close_session`) to the worker's `session_control` endpoint. The event-plane client is lazily initialized on the first session request.
+- **StickySessionRouter**: Maintains an in-memory `session_id -> worker_id` affinity map with sliding-window TTL. Subsequent requests with the same `session_id` are routed to the pinned worker, bypassing KV overlap scoring.
+
+These activate automatically with `--router-mode kv` -- no additional flags are needed. Requests without `session_control` are unaffected and follow the standard KV-aware routing path. Session control currently requires the SGLang backend with `--enable-streaming-session`. See [SGLang for Agentic Workloads -- Session Control](../../backends/sglang/agents.md#session-control-for-subagent-kv-isolation-experimental) for details.
+
 ## Tuning Guidelines
 
 `--router-kv-overlap-score-weight` is the primary knob for balancing prefill efficiency against decode load. Prefill-heavy workloads benefit from a higher weight, which steers requests toward workers with better cache overlap and reduces TTFT. Decode-heavy workloads benefit from a lower weight, which distributes decode load more evenly and reduces ITL. The default of 1.0 is a reasonable starting point. This weight can also be overridden per request via `nvext.agent_hints.kv_overlap_score_weight`.
