@@ -24,6 +24,8 @@ from dynamo.common.configuration.utils import (
 
 from . import __version__
 
+_U32_MAX = 2**32 - 1
+
 
 def validate_model_name(value: str) -> str:
     """Validate that model-name is a non-empty string."""
@@ -60,6 +62,7 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
     enforce_disagg: bool
 
     migration_limit: int
+    migration_max_seq_len: Optional[int]
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -91,9 +94,15 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
             )
-        if self.migration_limit < 0 or self.migration_limit > 4294967295:
+        if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
             raise ValueError(
-                "--migration-limit must be between 0 and 4294967295 (0=disabled)"
+                f"--migration-limit must be between 0 and {_U32_MAX} (0=disabled)"
+            )
+        if self.migration_max_seq_len is not None and (
+            self.migration_max_seq_len < 1 or self.migration_max_seq_len > _U32_MAX
+        ):
+            raise ValueError(
+                f"--migration-max-seq-len must be between 1 and {_U32_MAX}"
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
@@ -297,6 +306,20 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Maximum number of times a request may be migrated to a different engine worker. "
                 "When > 0, enables request migration on worker disconnect."
+            ),
+            arg_type=int,
+        )
+
+        add_argument(
+            g,
+            flag_name="--migration-max-seq-len",
+            env_var="DYN_MIGRATION_MAX_SEQ_LEN",
+            default=None,
+            help=(
+                "Maximum sequence length (prompt + generated tokens) for migration state tracking. "
+                "Once the accumulated token count exceeds this limit, the request becomes "
+                "non-migratable. Prevents unbounded memory growth from caching long sequences. "
+                "Default: no limit."
             ),
             arg_type=int,
         )

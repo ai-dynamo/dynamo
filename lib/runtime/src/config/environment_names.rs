@@ -292,6 +292,16 @@ pub mod llm {
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
 
+    /// Backend stream inactivity timeout in seconds.
+    ///
+    /// When set to a positive integer, the frontend will kill the engine context
+    /// and drop the inflight guard if no SSE event is received from the backend
+    /// within this many seconds. Acts as a circuit breaker for zombie workers
+    /// that hold a live TCP connection but never produce output.
+    ///
+    /// Set to `0` or leave unset to disable the timeout (default: disabled).
+    pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -477,6 +487,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
