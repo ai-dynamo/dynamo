@@ -614,8 +614,9 @@ class BaseWorkerHandler(RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
 
-    @staticmethod
-    def _session_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
+    def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        if not getattr(self.config.server_args, "enable_streaming_session", False):
+            return {}
         routing = request.get("routing") or {}
         session_control = routing.get("session_control") or {}
         session_id = session_control.get("session_id")

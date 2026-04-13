@@ -74,13 +74,14 @@ impl SessionCloseAction {
 /// Owns a lazy event plane client for the `session_control` endpoint
 /// and coordinates with [`StickySessionRouter`] for affinity management.
 pub struct AgentController {
-    session_control: OnceCell<EventPlaneClient>,
+    /// `None` means we checked and no worker exposes session_control.
+    session_control: OnceCell<Option<EventPlaneClient>>,
     component: Component,
 }
 
 impl AgentController {
     pub fn new(component: Component) -> Self {
-        tracing::info!("AgentController initialized (session lifecycle RPCs, lazy client)");
+        tracing::debug!("AgentController initialized");
         AgentController {
             session_control: OnceCell::new(),
             component,
@@ -89,35 +90,27 @@ impl AgentController {
 
     pub fn close_expired_session(self: Arc<Self>, session_id: String, instance_id: u64) {
         tokio::spawn(async move {
-            match self.get_session_control_client().await {
-                Ok(client) => {
-                    tracing::info!(
-                        worker_id = instance_id,
-                        session_id = %session_id,
-                        "Session affinity expired, closing worker session"
-                    );
-                    let request = serde_json::json!({
-                        "action": "close_session",
-                        "session_id": session_id,
-                    });
-                    send_session_request(
-                        &client,
-                        request,
-                        instance_id,
-                        &session_id,
-                        "session-affinity-reaper",
-                        "close_session",
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        worker_id = instance_id,
-                        session_id = %session_id,
-                        "Failed to create session_control client for affinity expiry close: {e}"
-                    );
-                }
-            }
+            let Some(client) = self.get_session_control_client().await else {
+                return;
+            };
+            tracing::info!(
+                worker_id = instance_id,
+                session_id = %session_id,
+                "Session affinity expired, closing worker session"
+            );
+            let request = serde_json::json!({
+                "action": "close_session",
+                "session_id": session_id,
+            });
+            send_session_request(
+                &client,
+                request,
+                instance_id,
+                &session_id,
+                "session-affinity-reaper",
+                "close_session",
+            )
+            .await;
         });
     }
 
@@ -127,8 +120,8 @@ impl AgentController {
     /// Also manages sticky session bindings: Open inserts affinity,
     /// Close removes it.
     ///
-    /// Returns Err if session_control.action == Open but the client
-    /// cannot be created (fail-fast: don't silently serve without isolation).
+    /// Returns `Ok(None)` if session control is unavailable or no action
+    /// is needed. The request proceeds normally without session isolation.
     pub async fn on_routed(
         &self,
         request: &crate::preprocessor::PreprocessedRequest,
@@ -152,7 +145,11 @@ impl AgentController {
 
         match action {
             SessionAction::Open => {
-                let client = self.get_session_control_client().await?;
+                let Some(client) = self.get_session_control_client().await else {
+                    // No session_control endpoint available -- skip session
+                    // lifecycle and let the request proceed without isolation.
+                    return Ok(None);
+                };
                 let worker_timeout_secs = sc
                     .timeout
                     .saturating_add(SESSION_TIMEOUT_FALLBACK_BUFFER_SECS);
@@ -198,37 +195,58 @@ impl AgentController {
 
                 // Defer close to after generation completes
                 match self.get_session_control_client().await {
-                    Ok(client) => Ok(Some(SessionCloseAction {
+                    Some(client) => Ok(Some(SessionCloseAction {
                         session_id: sc.session_id.clone(),
                         client,
                         instance_id,
                     })),
-                    Err(e) => {
-                        tracing::warn!(
-                            session_id = %sc.session_id,
-                            "Failed to create session_control client for close, \
-                             worker session will not be released: {e}"
-                        );
-                        Ok(None)
-                    }
+                    None => Ok(None),
                 }
             }
         }
     }
 
-    async fn get_session_control_client(&self) -> Result<EventPlaneClient> {
-        let client = self
+    async fn get_session_control_client(&self) -> Option<EventPlaneClient> {
+        let maybe_client = self
             .session_control
-            .get_or_try_init(|| async {
-                let c = self.component.endpoint("session_control").client().await?;
-                // Wait for at least one worker to register its session_control
-                // endpoint before returning. Without this, .direct() fails on
-                // the first call because discovery hasn't propagated yet.
-                c.wait_for_instances().await?;
-                EventPlaneClient::from_client_no_fault_detection(c, RouterMode::KV).await
+            .get_or_init(|| async {
+                let c = match self.component.endpoint("session_control").client().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create session_control client: {e}. \
+                             Session control will be ignored for all requests."
+                        );
+                        return None;
+                    }
+                };
+                // Wait briefly for at least one worker to register its
+                // session_control endpoint. If none appear, session control
+                // is unavailable (worker not launched with --enable-streaming-session).
+                match tokio::time::timeout(Duration::from_secs(5), c.wait_for_instances()).await {
+                    Ok(Ok(_)) => {}
+                    _ => {
+                        tracing::warn!(
+                            "No session_control endpoint registered. \
+                             Session control will be ignored. \
+                             To enable, launch the backend with --enable-streaming-session."
+                        );
+                        return None;
+                    }
+                }
+                match EventPlaneClient::from_client_no_fault_detection(c, RouterMode::KV).await {
+                    Ok(client) => Some(client),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create session_control event plane client: {e}. \
+                             Session control will be ignored."
+                        );
+                        None
+                    }
+                }
             })
-            .await?;
-        Ok(client.clone())
+            .await;
+        maybe_client.clone()
     }
 }
 

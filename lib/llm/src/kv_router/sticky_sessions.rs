@@ -139,7 +139,7 @@ pub struct StickySessionRouter {
 
 impl StickySessionRouter {
     pub fn new(store: impl AffinityStore + 'static) -> Self {
-        tracing::info!("StickySessionRouter initialized");
+        tracing::debug!("StickySessionRouter initialized");
         StickySessionRouter {
             store: Box::new(store),
         }

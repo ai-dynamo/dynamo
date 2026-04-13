@@ -109,18 +109,6 @@ for chunk in response:
         print(chunk.choices[0].delta.content, end="")
 ```
 
-### Enabling
-
-Session control is request-driven: the agent controller and sticky session
-routing activate automatically when a request carries `nvext.session_control`.
-No additional frontend flags are needed beyond `--router-mode kv`.
-
-```bash
-python -m dynamo.frontend \
-  --router-mode kv \
-  ...
-```
-
 ## Session Control for Subagent KV Isolation (Experimental)
 
 > [!WARNING]
@@ -181,8 +169,10 @@ Key behaviors:
 
 ### Enabling Session Control
 
+Session control is request-driven. The router's `AgentController` (session lifecycle RPCs) and `StickySessionRouter` (session affinity) activate automatically when a request carries `nvext.session_control` -- no additional frontend flags are needed beyond `--router-mode kv`. On the worker side, streaming sessions must be explicitly enabled.
+
 > [!NOTE]
-> Streaming sessions require the SGLang changes in [sgl-project/sglang#21875](https://github.com/sgl-project/sglang/pull/21875) (session-aware cache, deferred close, session metrics). This is not yet merged upstream.
+> Session control is currently supported only on the SGLang backend. vLLM and TensorRT-LLM do not yet expose the streaming session API.
 
 **SGLang worker:**
 
@@ -204,8 +194,6 @@ python -m dynamo.frontend \
   --router-mode kv \
   ...
 ```
-
-The `AgentController` (session lifecycle RPCs) and `StickySessionRouter` (router-side session affinity) activate automatically when requests carry `nvext.session_control`.
 
 ### Request Format
 
@@ -277,30 +265,21 @@ Include `action: "close"`. The close RPC fires after generation completes:
 
 ### Launch Script
 
-The `agg_agent.sh` script launches a single aggregated worker with the agent controller enabled (session control, sticky routing, KV events):
+The `agg_agent.sh` script launches a single aggregated worker with session control, sticky routing, and KV events:
 
 ```bash
-# Default model (Qwen3-0.6B, 1 GPU)
+# Default model (GLM-4.7-Flash, 2 GPUs)
 bash examples/backends/sglang/launch/agg_agent.sh
-
-# Larger model with tensor parallelism
-bash examples/backends/sglang/launch/agg_agent.sh --model-path <model> --tp 2
-
-# With reasoning and tool-call parsers
-bash examples/backends/sglang/launch/agg_agent.sh \
-  --model-path <model> --tp 2 \
-  --dyn-reasoning-parser <parser> \
-  --dyn-tool-call-parser <parser>
 ```
 
 The frontend listens on port 8000 (override with `DYN_HTTP_PORT`). Worker metrics are on port 8081.
 
 ### Testing with OpenCode
 
-[OpenCode](https://github.com/anomalyco/opencode) is an open-source AI coding agent with built-in support for subagents, tool calling, and OpenAI-compatible endpoints. The [Dynamo provider fork](https://github.com/ishandhanani/opencode/tree/idhanani/dynamo-provider) injects `nvext.session_control` on subagent requests, giving each spawned agent its own Dynamo streaming session with sticky routing and KV isolation.
+[OpenCode](https://github.com/opencode-ai/opencode) is an open-source AI coding agent with built-in support for subagents, tool calling, and OpenAI-compatible endpoints. The [Dynamo provider fork](https://github.com/ishandhanani/opencode/tree/idhanani/dynamo-provider) injects `nvext.session_control` on subagent requests, giving each spawned agent its own Dynamo streaming session with sticky routing and KV isolation.
 
 ```bash
-# Terminal 1 -- launch Dynamo with agent controller + tool/reasoning parsers
+# Terminal 1 -- launch Dynamo with session control + tool/reasoning parsers
 bash examples/backends/sglang/launch/agg_agent.sh \
   --model-path zai-org/GLM-4.7-Flash --tp 2
 
