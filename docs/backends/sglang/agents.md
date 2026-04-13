@@ -332,5 +332,5 @@ Model and endpoint are configured in `.opencode/opencode.jsonc`:
 ## See Also
 
 - **[NVIDIA Request Extensions (nvext)](../../components/frontend/nvext.md)**: Full `nvext` field reference including agent hints
-- **[Router Guide](../../components/router/router-guide.md)**: Router configuration and CLI arguments
+- **[Configuration and Tuning](../../components/router/router-configuration.md)**: Router configuration and CLI arguments
 - **[SGLang HiCache](../../integrations/sglang-hicache.md)**: Enabling hierarchical KV cache

@@ -79,14 +79,14 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image_tag: v0.5.9-runtime
+    runtime_image_tag: v0.5.10.post1-runtime
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.9-cu130-runtime
+    runtime_image_tag: v0.5.10.post1-cu130-runtime
   nixl_ref: 0.10.0
-  enable_media_ffmpeg: "false"
+  enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
 

@@ -273,8 +273,8 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 - **engine=None**: Multimodal encode worker passes `engine=None` to
   BaseWorkerHandler. Any code in the base class that touches engine must guard with
   `if engine is not None`.
-- **GenerationResult is a dataclass**: SGLang 0.5.9 changed `DiffGenerator.generate()`
-  to return `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
+- **GenerationResult is a dataclass**: SGLang `DiffGenerator.generate()`
+  returns `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
 - **output_modalities default**: Global default is `["text"]`. Image/video diffusion
   workers must override to `["image"]`/`["video"]` or the Rust registration path tries
   to load `config.json` (which doesn't exist for diffusers models).
