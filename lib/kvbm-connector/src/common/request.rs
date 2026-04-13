@@ -185,51 +185,19 @@ impl Request {
         max_tokens: Option<usize>,
         metadata: Option<RequestMetadata>,
     ) -> Self {
-        Self::with_priority(
-            request_id, tokens, lora_name, salt, min_tokens, max_tokens, None, // priority
-            metadata,
-        )
-    }
-
-    /// Create a new request with all parameters including priority.
-    pub fn with_priority(
-        request_id: impl Into<String>,
-        tokens: impl Into<Tokens>,
-        lora_name: Option<String>,
-        salt: Option<String>,
-        min_tokens: Option<usize>,
-        max_tokens: Option<usize>,
-        priority: Option<usize>,
-        metadata: Option<RequestMetadata>,
-    ) -> Self {
-        // Pack any data that needs to be included in the salt hash into [`SaltPayload`]
-        #[derive(Serialize)]
-        struct SaltPayload<'a> {
-            #[serde(skip_serializing_if = "Option::is_none")]
-            salt: Option<&'a str>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            lora_name: Option<&'a str>,
-        }
-
-        let request_id = request_id.into();
-        let payload = SaltPayload {
-            salt: salt.as_deref(),
-            lora_name: lora_name.as_deref(),
-        };
-        let salt_bytes = serde_json::to_vec(&payload).expect("failed to serialize salt payload");
-        let salt_hash = compute_hash_v2(&salt_bytes, 0);
-
-        Self {
-            request_id,
-            tokens: tokens.into(),
-            lora_name,
-            salt_hash,
-            min_tokens,
-            max_tokens,
-            priority,
-            restart_count: 0,
-            metadata,
-        }
+        let mut builder = Request::builder()
+            .request_id(request_id)
+            .tokens(tokens)
+            .lora_name(lora_name)
+            .min_tokens(min_tokens)
+            .max_tokens(max_tokens)
+            .metadata(metadata);
+        // Builder returns Option via strip_option setters on other fields; priority
+        // remains None by default.
+        builder = builder.priority(None);
+        builder
+            .build(salt.as_deref())
+            .expect("Request builder requires request_id and tokens")
     }
 
     /// Create a new request with optional metadata (backwards compatibility).

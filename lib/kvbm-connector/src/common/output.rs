@@ -3,8 +3,8 @@
 
 //! Scheduler output types shared between scheduler and connector.
 
-use kvbm_common::BlockId;
 use crate::connector::leader::scheduler::KvConnectorMetadata;
+use kvbm_common::BlockId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

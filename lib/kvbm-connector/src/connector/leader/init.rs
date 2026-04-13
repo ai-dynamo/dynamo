@@ -6,17 +6,17 @@ use std::sync::Arc;
 
 use super::ConnectorLeader;
 
-use kvbm_engine::leader::InstanceLeader;
-use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerClient, Worker};
 use crate::connector::worker::ConnectorWorkerClient;
-use kvbm_logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
-use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
+use crate::{G1, G2, G3, InstanceId};
+use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::object::{ObjectLockManager, create_lock_manager, create_object_client};
 use kvbm_engine::offload::{
     ObjectPipelineBuilder, ObjectPresenceFilter, OffloadEngine, PendingTracker, PipelineBuilder,
     S3PresenceChecker, create_policy_from_config,
 };
-use crate::{G1, G2, G3, InstanceId};
+use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerClient, Worker};
+use kvbm_logical::blocks::{BlockDuplicationPolicy, BlockRegistry};
+use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
 
 use anyhow::{Context, Result, anyhow, bail};
 use velo::{PeerInfo, WorkerAddress};
@@ -322,12 +322,14 @@ impl ConnectorLeader {
             page_size = reference_config.page_size,
             "Building G2 manager"
         );
+        let logical_metrics = self.runtime.observability().logical_aggregator();
         let g2_manager = Arc::new(
             BlockManager::<G2>::builder()
                 .block_count(host_block_count)
                 .block_size(reference_config.page_size)
                 .registry(registry.clone())
                 .with_lineage_backend()
+                .aggregator(logical_metrics.clone())
                 .duplication_policy(BlockDuplicationPolicy::Reject)
                 .build()
                 .expect("Should build G2 manager"),
@@ -347,6 +349,7 @@ impl ConnectorLeader {
                     .block_size(reference_config.page_size)
                     .registry(registry.clone())
                     .with_lineage_backend()
+                    .aggregator(logical_metrics.clone())
                     .duplication_policy(BlockDuplicationPolicy::Reject)
                     .build()
                     .expect("Should build G3 manager"),
@@ -499,8 +502,7 @@ impl ConnectorLeader {
             // Get parallel_worker from leader - it implements ObjectBlockOps and fans out to all workers
             if let Some(parallel_worker) = leader.parallel_worker() {
                 // parallel_worker implements ObjectBlockOps, we can cast it to the trait object
-                let object_ops: Arc<dyn kvbm_engine::object::ObjectBlockOps> =
-                    parallel_worker;
+                let object_ops: Arc<dyn kvbm_engine::object::ObjectBlockOps> = parallel_worker;
 
                 // Create S3 presence checker using the parallel worker
                 // When has_blocks is called, it queries all workers who check S3 with their rank-prefixed keys

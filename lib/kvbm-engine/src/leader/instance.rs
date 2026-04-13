@@ -1159,22 +1159,32 @@ impl Leader for InstanceLeader {
         let needs_remote_search =
             options.search_remote && (has_remote_leaders || has_object_client);
         let is_ready = matched_g3_blocks.is_empty() && !needs_remote_search;
+        let local_g2_count = matched_g2_blocks.len();
+        let local_g3_count = matched_g3_blocks.len();
 
         if is_ready {
             // No session needed - blocks owned directly by ReadyResult (RAII)
             return Ok(FindMatchesResult::Ready(ReadyResult::new(
                 matched_g2_blocks,
+                super::MatchBreakdown {
+                    host_blocks: local_g2_count,
+                    disk_blocks: 0,
+                    object_blocks: 0,
+                },
             )));
         }
 
         // AsyncSession path: G3 blocks found or remote search enabled
         let session_id = SessionId::from(Uuid::new_v4());
-        let local_g2_count = matched_g2_blocks.len();
-        let local_g3_count = matched_g3_blocks.len();
 
         // AsyncSession: staging locally and/or remote searching
         let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
         let all_g2_blocks = Arc::new(Mutex::new(None));
+        let match_breakdown = Arc::new(Mutex::new(super::MatchBreakdown {
+            host_blocks: local_g2_count,
+            disk_blocks: local_g3_count,
+            object_blocks: 0,
+        }));
 
         // Store session state to keep blocks alive
         let state = SessionState {
@@ -1200,6 +1210,7 @@ impl Leader for InstanceLeader {
                 session_id,
                 status_rx,
                 all_g2_blocks,
+                match_breakdown,
                 None, // No session handle for local-only staging (yet)
             )));
         }
@@ -1230,6 +1241,7 @@ impl Leader for InstanceLeader {
             self.transport.clone(),
             status_tx.clone(),
             all_g2_blocks.clone(),
+            match_breakdown.clone(),
             control_rx.unwrap_or_else(|| {
                 let (_, rx) = mpsc::channel(1);
                 rx
@@ -1256,6 +1268,7 @@ impl Leader for InstanceLeader {
             session_id,
             status_rx,
             all_g2_blocks,
+            match_breakdown,
             session_handle,
         )))
     }

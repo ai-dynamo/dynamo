@@ -17,6 +17,7 @@ use crate::transfer::BounceBufferInternal;
 use crate::transfer::{StorageKind, context::TransferCompleteNotification};
 use anyhow::Result;
 use cudarc::driver::CudaStream;
+use kvbm_common::KvbmTransferRoute;
 use std::ops::Range;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -132,6 +133,8 @@ pub(crate) struct TransferOptionsInternal {
     /// Override destination block layout interpretation.
     /// If None, uses the layout's block_layout() method.
     pub(crate) dst_kv_layout: Option<KvBlockLayout>,
+    /// Logical route used for transfer metrics.
+    pub(crate) metric_route: Option<KvbmTransferRoute>,
 }
 
 impl TransferOptionsInternal {
@@ -148,6 +151,7 @@ pub(crate) struct TransferOptionsInternalBuilder {
     cuda_stream: Option<Arc<CudaStream>>,
     src_kv_layout: Option<KvBlockLayout>,
     dst_kv_layout: Option<KvBlockLayout>,
+    metric_route: Option<KvbmTransferRoute>,
 }
 
 impl TransferOptionsInternalBuilder {
@@ -201,6 +205,11 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
+    pub(crate) fn metric_route(mut self, route: KvbmTransferRoute) -> Self {
+        self.metric_route = Some(route);
+        self
+    }
+
     pub(crate) fn build(self) -> Result<TransferOptionsInternal> {
         Ok(TransferOptionsInternal {
             layer_range: self.layer_range,
@@ -209,6 +218,7 @@ impl TransferOptionsInternalBuilder {
             cuda_stream: self.cuda_stream,
             src_kv_layout: self.src_kv_layout,
             dst_kv_layout: self.dst_kv_layout,
+            metric_route: self.metric_route,
         })
     }
 }

@@ -39,6 +39,7 @@ impl WorkerTransfers for VeloWorkerClient {
             nixl_write_notification: options.nixl_write_notification,
             bounce_buffer_handle: None,
             bounce_buffer_block_ids: None,
+            metric_route: options.metric_route,
         };
 
         // Create the message
@@ -92,6 +93,7 @@ impl WorkerTransfers for VeloWorkerClient {
             nixl_write_notification: options.nixl_write_notification,
             bounce_buffer_handle: None,
             bounce_buffer_block_ids: None,
+            metric_route: options.metric_route,
         };
 
         let message = RemoteOnboardMessage {
@@ -142,6 +144,7 @@ impl WorkerTransfers for VeloWorkerClient {
             nixl_write_notification: options.nixl_write_notification,
             bounce_buffer_handle: None,
             bounce_buffer_block_ids: None,
+            metric_route: options.metric_route,
         };
 
         let message = RemoteOffloadMessage {

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use bytes::Bytes;
-use velo::{Handler, Messenger};
 use std::sync::Arc;
+use velo::{Handler, Messenger};
 
 use kvbm_engine::worker::LeaderLayoutConfig;
 

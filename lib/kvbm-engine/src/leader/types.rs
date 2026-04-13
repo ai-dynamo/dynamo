@@ -71,16 +71,24 @@ pub enum FindMatchesResult {
 ///
 /// No session is created - blocks are owned directly by this struct (RAII).
 /// Dropping this struct will release the block references.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MatchBreakdown {
+    pub host_blocks: usize,
+    pub disk_blocks: usize,
+    pub object_blocks: usize,
+}
+
 #[derive(Debug)]
 pub struct ReadyResult {
     /// G2 blocks held directly via RAII
     blocks: Vec<ImmutableBlock<G2>>,
+    breakdown: MatchBreakdown,
 }
 
 impl ReadyResult {
     /// Create a new ready result with G2 blocks.
-    pub fn new(blocks: Vec<ImmutableBlock<G2>>) -> Self {
-        Self { blocks }
+    pub fn new(blocks: Vec<ImmutableBlock<G2>>, breakdown: MatchBreakdown) -> Self {
+        Self { blocks, breakdown }
     }
 
     /// Number of G2 blocks held.
@@ -99,6 +107,10 @@ impl ReadyResult {
     pub fn blocks(&self) -> &[ImmutableBlock<G2>] {
         &self.blocks
     }
+
+    pub fn match_breakdown(&self) -> MatchBreakdown {
+        self.breakdown
+    }
 }
 
 /// Async session result for staging and/or remote search operations.
@@ -107,6 +119,7 @@ pub struct AsyncSessionResult {
     session_id: SessionId,
     status_rx: watch::Receiver<OnboardingStatus>,
     blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
+    match_breakdown: Arc<Mutex<MatchBreakdown>>,
     session_handle: Option<SessionHandle>,
 }
 
@@ -116,12 +129,14 @@ impl AsyncSessionResult {
         session_id: SessionId,
         status_rx: watch::Receiver<OnboardingStatus>,
         blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
+        match_breakdown: Arc<Mutex<MatchBreakdown>>,
         session_handle: Option<SessionHandle>,
     ) -> Self {
         Self {
             session_id,
             status_rx,
             blocks,
+            match_breakdown,
             session_handle,
         }
     }
@@ -175,6 +190,13 @@ impl AsyncSessionResult {
 
             Ok(())
         })
+    }
+
+    pub fn match_breakdown(&self) -> MatchBreakdown {
+        self.match_breakdown
+            .try_lock()
+            .map(|v| *v)
+            .unwrap_or_default()
     }
 }
 
@@ -240,6 +262,13 @@ impl FindMatchesResult {
         match self {
             FindMatchesResult::Ready(r) => Some(r.take_g2_blocks()),
             FindMatchesResult::AsyncSession(a) => a.blocks.try_lock().ok()?.take(),
+        }
+    }
+
+    pub fn match_breakdown(&self) -> MatchBreakdown {
+        match self {
+            FindMatchesResult::Ready(r) => r.match_breakdown(),
+            FindMatchesResult::AsyncSession(a) => a.match_breakdown(),
         }
     }
 

@@ -6,16 +6,17 @@ mod request;
 mod slot;
 
 use super::worker::ConnectorWorkerClient;
+use crate::{BlockId, G2, InstanceId, KvbmRuntime};
+use kvbm_config::OnboardMode;
+use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::leader::{
     FindMatchesOptions, FindMatchesResult, Leader, OnboardingStatus, StagingMode,
 };
-use kvbm_engine::worker::VeloWorkerClient;
-use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
+use kvbm_engine::worker::VeloWorkerClient;
 use kvbm_logical::blocks::ImmutableBlock;
-use crate::{BlockId, G2, InstanceId, KvbmRuntime};
-use kvbm_config::OnboardMode;
+use kvbm_observability::CacheStatsTracker;
 
 use anyhow::{Result, anyhow, bail};
 use dashmap::DashMap;
@@ -23,6 +24,7 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use scheduler::{DefaultOracle, ForwardPassSample, Oracle};
 use slot::{MatchCheckOutcome, RequestSlot, TransactionState};
@@ -56,6 +58,7 @@ pub struct ConnectorLeader {
     pending_intra_pass_g2_blocks: Mutex<Vec<ImmutableBlock<G2>>>,
 
     forward_pass_samples: Mutex<Option<ForwardPassSample>>,
+    cache_stats: CacheStatsTracker,
 }
 
 #[derive(Default, Clone)]
@@ -97,6 +100,11 @@ impl ConnectorLeader {
         );
 
         Self {
+            cache_stats: CacheStatsTracker::new(
+                runtime.config().metrics.cache_stats_max_requests,
+                Duration::from_secs(runtime.config().metrics.cache_stats_log_interval_secs),
+                Some(runtime.messenger().instance_id().to_string()),
+            ),
             runtime,
             block_size,
             init: Arc::new(Mutex::new(WorkerClients::default())),
@@ -167,6 +175,37 @@ impl ConnectorLeader {
         Ok(())
     }
 
+    fn record_cache_metrics(
+        &self,
+        breakdown: &kvbm_engine::leader::MatchBreakdown,
+        blocks_queried: usize,
+    ) {
+        self.cache_stats.record(
+            breakdown.host_blocks,
+            breakdown.disk_blocks,
+            breakdown.object_blocks,
+            blocks_queried,
+        );
+        let (host_rate, disk_rate, object_rate) = self.cache_stats.rates();
+        self.runtime
+            .observability()
+            .compat_metrics()
+            .set_cache_hit_rates(host_rate, disk_rate, object_rate);
+        self.runtime
+            .observability()
+            .transfer_metrics()
+            .record_cache_hits("host", breakdown.host_blocks as u64);
+        self.runtime
+            .observability()
+            .transfer_metrics()
+            .record_cache_hits("disk", breakdown.disk_blocks as u64);
+        self.runtime
+            .observability()
+            .transfer_metrics()
+            .record_cache_hits("object", breakdown.object_blocks as u64);
+        self.cache_stats.maybe_log();
+    }
+
     /// Get the total number of tokens in a slot's sequence.
     ///
     /// This is used to compare with the vLLM Request's token count to detect
@@ -235,10 +274,27 @@ impl ConnectorLeader {
 
         // Determine the match outcome
         let outcome = self.process_match(&mut slot, num_computed_tokens);
+        let match_breakdown = slot
+            .onboarding_state()
+            .map(|state| state.find_session.match_breakdown())
+            .unwrap_or_default();
+        let blocks_queried = slot.match_query_blocks();
 
         // Single point for state transition
         match slot.finalize_match_check(outcome) {
             Ok((count, uses_async)) => {
+                if let Some(count) = count {
+                    self.record_cache_metrics(&match_breakdown, blocks_queried);
+
+                    if count > 0 && slot.mark_matched_tokens_reported() {
+                        self.runtime
+                            .observability()
+                            .compat_metrics()
+                            .matched_tokens
+                            .inc_by(count as u64);
+                    }
+                }
+
                 // For intra-pass mode, we always return false for the async flag
                 // since loading happens synchronously during the forward pass.
                 // For inter-pass mode, we preserve the async flag from finalize_match_check.

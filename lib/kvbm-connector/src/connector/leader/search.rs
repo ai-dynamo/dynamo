@@ -44,6 +44,7 @@ impl ConnectorLeader {
             };
 
             let search_sequence_hashes = &sequence_hashes[num_device_blocks..last_block_index];
+            slot.set_match_query_blocks(search_sequence_hashes.len());
 
             let options = FindMatchesOptions {
                 search_remote: true,

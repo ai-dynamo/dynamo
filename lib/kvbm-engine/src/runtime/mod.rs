@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 use dynamo_memory::nixl::NixlAgent;
 use kvbm_config::KvbmConfig;
+use kvbm_observability::SharedKvbmObservability;
 use tokio::runtime::Handle;
 use velo::Messenger;
 
@@ -58,6 +59,7 @@ pub struct KvbmRuntime {
     pub(crate) runtime: RuntimeHandle,
     pub(crate) messenger: Arc<Messenger>,
     pub(crate) nixl_agent: Option<NixlAgent>,
+    pub(crate) observability: SharedKvbmObservability,
 }
 
 impl KvbmRuntime {
@@ -94,6 +96,11 @@ impl KvbmRuntime {
     /// Get Messenger.
     pub fn messenger(&self) -> &Arc<Messenger> {
         &self.messenger
+    }
+
+    /// Get shared KVBM observability handles and registry.
+    pub fn observability(&self) -> &SharedKvbmObservability {
+        &self.observability
     }
 
     /// Get NixlAgent for RDMA/UCX transfers.

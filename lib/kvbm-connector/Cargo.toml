@@ -18,6 +18,7 @@ kvbm-common   = { workspace = true }
 kvbm-config   = { workspace = true }
 kvbm-engine   = { workspace = true }
 kvbm-logical  = { workspace = true }
+kvbm-observability = { workspace = true }
 kvbm-physical = { workspace = true }
 
 # Velo (git crates — mapped from dynamo_nova / dynamo_nova_backend)
@@ -52,8 +53,10 @@ serde_json     = { workspace = true }
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 insta = { version = "1.41", features = ["json", "redactions"] }
+rstest = "0.23"
 
 [features]
+static-kernels = ["kvbm-physical/static-kernels"]
 testing = [
     "kvbm-engine/testing",
     "kvbm-logical/testing",
@@ -64,3 +67,6 @@ testing = [
 ]
 # Gates NCCL-accelerated intra-pass layer-wise onboard (G2→G1 via cudarc).
 nccl = ["kvbm-engine/nccl"]
+# Opt-in S3 object-storage integration tests against MinIO.
+# Forwards to kvbm-engine/s3 so the S3ObjectBlockClient surface is available.
+s3 = ["kvbm-engine/s3"]

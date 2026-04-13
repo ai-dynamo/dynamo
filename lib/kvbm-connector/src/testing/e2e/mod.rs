@@ -9,7 +9,7 @@
 #[cfg(test)]
 mod find_blocks;
 
-#[cfg(feature = "s3")]
+#[cfg(all(test, feature = "s3"))]
 mod s3_object;
 
 #[cfg(test)]

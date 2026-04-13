@@ -1,0 +1,11 @@
+nats-py
+psutil
+# Test dependencies for KVBM integration tests
+# Install: uv pip install -r tests/kvbm_integration/requirements.txt
+pytest>=9.0
+pytest-asyncio
+pytest-benchmark
+pytest-mock
+pytest-timeout
+pyyaml
+requests

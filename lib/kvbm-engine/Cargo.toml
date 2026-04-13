@@ -14,6 +14,7 @@ description = "Distributed coordination primitives for KVBM"
 kvbm-common = { workspace = true }
 kvbm-config = { workspace = true }
 kvbm-logical = { workspace = true }
+kvbm-observability = { workspace = true }
 kvbm-physical = { workspace = true }
 velo = { workspace = true }
 

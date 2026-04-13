@@ -19,7 +19,7 @@ use kvbm_physical::transfer::TransferOptions;
 use super::staging;
 
 use super::{
-    super::{OnboardingStatus, SessionControl, StagingMode},
+    super::{MatchBreakdown, OnboardingStatus, SessionControl, StagingMode},
     BlockHolder, SessionId,
     messages::OnboardMessage,
     transport::MessageTransport,
@@ -112,6 +112,7 @@ pub struct InitiatorSession {
 
     // Shared with FindMatchesResult for block access
     all_g2_blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
+    match_breakdown: Arc<Mutex<MatchBreakdown>>,
 
     // Control channel for deferred operations
     control_rx: mpsc::Receiver<SessionControl>,
@@ -141,6 +142,7 @@ impl InitiatorSession {
         transport: Arc<MessageTransport>,
         status_tx: watch::Sender<OnboardingStatus>,
         all_g2_blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
+        match_breakdown: Arc<Mutex<MatchBreakdown>>,
         control_rx: mpsc::Receiver<SessionControl>,
         object_client: Option<Arc<dyn ObjectBlockOps>>,
     ) -> Self {
@@ -159,6 +161,7 @@ impl InitiatorSession {
             remote_g2_hashes: HashMap::new(),
             remote_g3_blocks: HashMap::new(),
             all_g2_blocks,
+            match_breakdown,
             control_rx,
             object_client,
             g4_state: G4SearchState::new(),
@@ -189,6 +192,7 @@ impl InitiatorSession {
         // Phase 1.5: Apply find policy (first-hole detection)
         // Trims results to first contiguous sequence from start
         self.apply_find_policy(&sequence_hashes).await?;
+        self.publish_match_breakdown();
 
         tracing::debug!(
             session_id = %self.session_id,
@@ -215,6 +219,16 @@ impl InitiatorSession {
         }
 
         Ok(())
+    }
+
+    fn publish_match_breakdown(&self) {
+        if let Ok(mut breakdown) = self.match_breakdown.try_lock() {
+            *breakdown = MatchBreakdown {
+                host_blocks: self.local_g2_blocks.count(),
+                disk_blocks: self.local_g3_blocks.count(),
+                object_blocks: self.g4_state.won_hashes.len(),
+            };
+        }
     }
 
     /// Phase 1: Search for blocks locally and remotely.

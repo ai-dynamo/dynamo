@@ -11,9 +11,7 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::connector::leader::scheduler::{
-    IntraPassLoad, IntraPassStore, KvConnectorMetadata,
-};
+use crate::connector::leader::scheduler::{IntraPassLoad, IntraPassStore, KvConnectorMetadata};
 use crate::testing::connector::{ConnectorTestConfig, TestConnectorInstance};
 
 use super::ConnectorWorkerInterface;
