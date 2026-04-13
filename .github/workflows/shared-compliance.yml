@@ -40,12 +40,14 @@ on:
 
 jobs:
   compliance:
-    if: ${{ matrix.cuda_version != 'xpu' || matrix.platform == 'amd64' }}
     strategy:
       fail-fast: false
       matrix:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
+        exclude:
+          - cuda_version: xpu
+            platform: arm64
     runs-on: prod-builder-v3
     # cuda_version xpu -- name: xpu, linux/amd64
     # cuda_version cpu -- name: cpu, linux/amd64
