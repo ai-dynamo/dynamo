@@ -617,7 +617,7 @@ def test_multimodal_b64_frontend_decoding(
     strip_inline_data_urls optimization does not break correctness.
 
     HF predownload: same model is already listed via ``@pytest.mark.model`` on
-    ``test_serve_deployment[multimodal_video_agg]`` (pre_merge + gpu_1), so no
+    ``test_serve_deployment[multimodal_video_agg]`` (pre_merge + xpu_1), so no
     extra ``model`` mark is needed here for PR CI.
     """
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
