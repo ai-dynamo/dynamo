@@ -541,6 +541,23 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	}
 
 	if restoreResumeWaitToken != "" {
+		if err := annotatePod(
+			ctx,
+			w.clientset,
+			log,
+			pod,
+			map[string]string{
+				snapshotprotocol.RestoreResumeWaitingTokenAnnotation: restoreResumeWaitToken,
+			},
+		); err != nil {
+			log.Error(err, "Failed to mark restore resume wait state")
+			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+			if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+				return statusErr
+			}
+			return fmt.Errorf("failed to persist restore resume wait state: %w", err)
+		}
+
 		log.Info(
 			"Waiting for restore resume token",
 			"annotation", snapshotprotocol.RestoreResumeReadyTokenAnnotation,

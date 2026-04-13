@@ -20,6 +20,7 @@ const (
 	RestoreTriggerAnnotation            = "nvidia.com/snapshot-restore-trigger"
 	RestoreProcessedTriggerAnnotation   = "nvidia.com/snapshot-restore-processed-trigger"
 	RestoreResumeWaitTokenAnnotation    = "nvidia.com/snapshot-restore-resume-wait-token"
+	RestoreResumeWaitingTokenAnnotation = "nvidia.com/snapshot-restore-resume-waiting-token"
 	RestoreResumeReadyTokenAnnotation   = "nvidia.com/snapshot-restore-resume-ready-token"
 	CheckpointVolumeName                = "checkpoint-storage"
 	DefaultCheckpointArtifactVersion    = "1"
@@ -84,6 +85,7 @@ func ApplyRestoreTargetMetadata(labels map[string]string, annotations map[string
 	delete(annotations, RestoreTriggerAnnotation)
 	delete(annotations, RestoreProcessedTriggerAnnotation)
 	delete(annotations, RestoreResumeWaitTokenAnnotation)
+	delete(annotations, RestoreResumeWaitingTokenAnnotation)
 	delete(annotations, RestoreResumeReadyTokenAnnotation)
 
 	if !enabled {
