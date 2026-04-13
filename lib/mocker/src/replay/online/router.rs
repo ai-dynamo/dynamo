@@ -136,6 +136,7 @@ impl KvReplayRouter {
             slots,
             worker_config_rx,
             config.router_queue_threshold,
+            config.router_skip_queue_overlap_less_than_tokens,
             args.block_size as u32,
             selector,
             policy,
