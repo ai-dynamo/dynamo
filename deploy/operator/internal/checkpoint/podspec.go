@@ -35,7 +35,14 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		hash = checkpointInfo.Hash
 		artifactVersion = checkpointInfo.ArtifactVersion
 	}
-	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
+	snapshotprotocol.ApplyRestoreTargetMetadata(
+		labels,
+		annotations,
+		enabled,
+		false,
+		hash,
+		artifactVersion,
+	)
 }
 
 func InjectCheckpointIntoPodSpec(

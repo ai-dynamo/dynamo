@@ -290,6 +290,47 @@ func waitForPodReady(ctx context.Context, clientset kubernetes.Interface, namesp
 	}
 }
 
+func waitForPodAnnotation(ctx context.Context, clientset kubernetes.Interface, namespace, podName, annotation, expectedValue string) error {
+	for {
+		pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get pod %s/%s: %w", namespace, podName, err)
+		}
+
+		if pod.Annotations[annotation] == expectedValue {
+			return nil
+		}
+
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.State.Terminated != nil {
+				return fmt.Errorf(
+					"pod %s/%s container %s terminated while waiting for %s=%s: reason=%s exitCode=%d",
+					namespace,
+					podName,
+					cs.Name,
+					annotation,
+					expectedValue,
+					cs.State.Terminated.Reason,
+					cs.State.Terminated.ExitCode,
+				)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"pod %s/%s did not reach %s=%s: %w",
+				namespace,
+				podName,
+				annotation,
+				expectedValue,
+				ctx.Err(),
+			)
+		case <-time.After(1 * time.Second):
+		}
+	}
+}
+
 func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, component, eventType, reason, message string) {
 	event := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{

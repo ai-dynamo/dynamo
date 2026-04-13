@@ -253,6 +253,9 @@ func TestReconcileRestorePod(t *testing.T) {
 		phase                 corev1.PodPhase
 		ready                 bool
 		hash                  string
+		restoreMode           string
+		restoreTrigger        string
+		processedTrigger      string
 		annotationStatus      string
 		annotationContainerID string
 		createDir             bool // whether to create the checkpoint dir on disk
@@ -313,6 +316,39 @@ func TestReconcileRestorePod(t *testing.T) {
 			want:      false,
 		},
 		{
+			name:        "manual restore waits for trigger",
+			nodeName:    testNodeName,
+			phase:       corev1.PodRunning,
+			ready:       false,
+			hash:        "abc123",
+			restoreMode: snapshotprotocol.RestoreModeManual,
+			createDir:   true,
+			want:        false,
+		},
+		{
+			name:           "manual restore triggers once token exists",
+			nodeName:       testNodeName,
+			phase:          corev1.PodRunning,
+			ready:          false,
+			hash:           "abc123",
+			restoreMode:    snapshotprotocol.RestoreModeManual,
+			restoreTrigger: "token-1",
+			createDir:      true,
+			want:           true,
+		},
+		{
+			name:             "manual restore skips processed trigger",
+			nodeName:         testNodeName,
+			phase:            corev1.PodRunning,
+			ready:            false,
+			hash:             "abc123",
+			restoreMode:      snapshotprotocol.RestoreModeManual,
+			restoreTrigger:   "token-1",
+			processedTrigger: "token-1",
+			createDir:        true,
+			want:             false,
+		},
+		{
 			name:                  "already completed for same container",
 			nodeName:              testNodeName,
 			phase:                 corev1.PodRunning,
@@ -324,7 +360,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			want:                  false,
 		},
 		{
-			name:                  "in progress for same container retries after restart",
+			name:                  "in progress for same container does not retrigger",
 			nodeName:              testNodeName,
 			phase:                 corev1.PodRunning,
 			ready:                 false,
@@ -332,7 +368,7 @@ func TestReconcileRestorePod(t *testing.T) {
 			annotationStatus:      "in_progress",
 			annotationContainerID: testContainerID,
 			createDir:             true,
-			want:                  true,
+			want:                  false,
 		},
 		{
 			name:                  "already failed for same container",
@@ -410,11 +446,21 @@ func TestReconcileRestorePod(t *testing.T) {
 
 			w := makeTestController(t)
 			var annotations map[string]string
+			if tc.annotationStatus != "" || tc.restoreMode != "" || tc.restoreTrigger != "" || tc.processedTrigger != "" {
+				annotations = map[string]string{}
+			}
 			if tc.annotationStatus != "" {
-				annotations = map[string]string{
-					snapshotprotocol.RestoreStatusAnnotation:      tc.annotationStatus,
-					snapshotprotocol.RestoreContainerIDAnnotation: tc.annotationContainerID,
-				}
+				annotations[snapshotprotocol.RestoreStatusAnnotation] = tc.annotationStatus
+				annotations[snapshotprotocol.RestoreContainerIDAnnotation] = tc.annotationContainerID
+			}
+			if tc.restoreMode != "" {
+				annotations[snapshotprotocol.RestoreModeAnnotation] = tc.restoreMode
+			}
+			if tc.restoreTrigger != "" {
+				annotations[snapshotprotocol.RestoreTriggerAnnotation] = tc.restoreTrigger
+			}
+			if tc.processedTrigger != "" {
+				annotations[snapshotprotocol.RestoreProcessedTriggerAnnotation] = tc.processedTrigger
 			}
 
 			pod := makePod("test-pod", "default", tc.nodeName, tc.phase, tc.ready, labels, annotations)

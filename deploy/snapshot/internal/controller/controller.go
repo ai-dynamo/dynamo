@@ -291,7 +291,19 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
 
 	annotationStatus := pod.Annotations[snapshotprotocol.RestoreStatusAnnotation]
 	annotationContainerID := pod.Annotations[snapshotprotocol.RestoreContainerIDAnnotation]
-	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
+	restoreMode := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreModeAnnotation])
+	restoreTrigger := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreTriggerAnnotation])
+	processedTrigger := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreProcessedTriggerAnnotation])
+	if restoreMode == snapshotprotocol.RestoreModeManual {
+		if restoreTrigger == "" {
+			w.log.V(1).Info("Restore pod is waiting for a manual trigger", "pod", podKey)
+			return
+		}
+		if processedTrigger == restoreTrigger {
+			return
+		}
+	}
+	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusInProgress || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
 		return
 	}
 
@@ -476,10 +488,15 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	}
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
+	restoreTrigger := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreTriggerAnnotation])
+	restoreResumeWaitToken := strings.TrimSpace(pod.Annotations[snapshotprotocol.RestoreResumeWaitTokenAnnotation])
 	setRestoreStatus := func(value string) error {
 		annotations := map[string]string{
 			snapshotprotocol.RestoreStatusAnnotation:      value,
 			snapshotprotocol.RestoreContainerIDAnnotation: containerID,
+		}
+		if restoreTrigger != "" {
+			annotations[snapshotprotocol.RestoreProcessedTriggerAnnotation] = restoreTrigger
 		}
 		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
 			if value == snapshotprotocol.RestoreStatusCompleted || value == snapshotprotocol.RestoreStatusFailed {
@@ -521,6 +538,29 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 			return fmt.Errorf("restore failed and placeholder could not be killed: %w", killErr)
 		}
 		return nil
+	}
+
+	if restoreResumeWaitToken != "" {
+		log.Info(
+			"Waiting for restore resume token",
+			"annotation", snapshotprotocol.RestoreResumeReadyTokenAnnotation,
+			"token", restoreResumeWaitToken,
+		)
+		if err := waitForPodAnnotation(
+			restoreCtx,
+			w.clientset,
+			pod.Namespace,
+			pod.Name,
+			snapshotprotocol.RestoreResumeReadyTokenAnnotation,
+			restoreResumeWaitToken,
+		); err != nil {
+			log.Error(err, "Restore resume token wait failed")
+			emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+			if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
+				return statusErr
+			}
+			return fmt.Errorf("restore resume token wait failed: %w", err)
+		}
 	}
 
 	// Step 2: SIGCONT the restored process via PID namespace

@@ -15,9 +15,14 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 		CheckpointStatusAnnotation:          "completed",
 		RestoreStatusAnnotation:             "failed",
 		RestoreContainerIDAnnotation:        "dead-container",
+		RestoreModeAnnotation:               RestoreModeManual,
+		RestoreTriggerAnnotation:            "stale-trigger",
+		RestoreProcessedTriggerAnnotation:   "stale-trigger",
+		RestoreResumeWaitTokenAnnotation:    "stale-token",
+		RestoreResumeReadyTokenAnnotation:   "stale-token",
 	}
 
-	ApplyRestoreTargetMetadata(labels, annotations, true, "hash", "2")
+	ApplyRestoreTargetMetadata(labels, annotations, true, true, "hash", "2")
 
 	if labels[RestoreTargetLabel] != "true" {
 		t.Fatalf("expected restore target label, got %#v", labels)
@@ -40,6 +45,21 @@ func TestApplyRestoreTargetMetadata(t *testing.T) {
 	if _, ok := annotations[RestoreContainerIDAnnotation]; ok {
 		t.Fatalf("restore container id annotation was not cleared: %#v", annotations)
 	}
+	if annotations[RestoreModeAnnotation] != RestoreModeManual {
+		t.Fatalf("expected manual restore mode annotation, got %#v", annotations)
+	}
+	if _, ok := annotations[RestoreTriggerAnnotation]; ok {
+		t.Fatalf("restore trigger annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreProcessedTriggerAnnotation]; ok {
+		t.Fatalf("restore processed trigger annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreResumeWaitTokenAnnotation]; ok {
+		t.Fatalf("restore resume wait token annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreResumeReadyTokenAnnotation]; ok {
+		t.Fatalf("restore resume ready token annotation was not cleared: %#v", annotations)
+	}
 }
 
 func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
@@ -52,9 +72,14 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 		CheckpointStatusAnnotation:          "completed",
 		RestoreStatusAnnotation:             "failed",
 		RestoreContainerIDAnnotation:        "dead-container",
+		RestoreModeAnnotation:               RestoreModeManual,
+		RestoreTriggerAnnotation:            "stale-trigger",
+		RestoreProcessedTriggerAnnotation:   "stale-trigger",
+		RestoreResumeWaitTokenAnnotation:    "stale-token",
+		RestoreResumeReadyTokenAnnotation:   "stale-token",
 	}
 
-	ApplyRestoreTargetMetadata(labels, annotations, false, "", "")
+	ApplyRestoreTargetMetadata(labels, annotations, false, false, "", "")
 
 	if _, ok := labels[RestoreTargetLabel]; ok {
 		t.Fatalf("restore target label was not cleared: %#v", labels)
@@ -73,5 +98,20 @@ func TestApplyRestoreTargetMetadataDisabledClearsState(t *testing.T) {
 	}
 	if _, ok := annotations[RestoreContainerIDAnnotation]; ok {
 		t.Fatalf("restore container id annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreModeAnnotation]; ok {
+		t.Fatalf("restore mode annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreTriggerAnnotation]; ok {
+		t.Fatalf("restore trigger annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreProcessedTriggerAnnotation]; ok {
+		t.Fatalf("restore processed trigger annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreResumeWaitTokenAnnotation]; ok {
+		t.Fatalf("restore resume wait token annotation was not cleared: %#v", annotations)
+	}
+	if _, ok := annotations[RestoreResumeReadyTokenAnnotation]; ok {
+		t.Fatalf("restore resume ready token annotation was not cleared: %#v", annotations)
 	}
 }

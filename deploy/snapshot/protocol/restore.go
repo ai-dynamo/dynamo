@@ -28,6 +28,7 @@ type PodOptions struct {
 	ArtifactVersion string
 	Storage         Storage
 	SeccompProfile  string
+	ManualTrigger   bool
 }
 
 func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
@@ -38,7 +39,14 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
+	ApplyRestoreTargetMetadata(
+		pod.Labels,
+		pod.Annotations,
+		true,
+		opts.ManualTrigger,
+		opts.CheckpointID,
+		opts.ArtifactVersion,
+	)
 	PrepareRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], opts.Storage, opts.SeccompProfile, true)
 	pod.Namespace = opts.Namespace
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
