@@ -48,6 +48,7 @@ required-features = ["kv-router-stress"]
 
 [dependencies]
 # repo
+dynamo-config = { workspace = true }
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
@@ -64,6 +65,7 @@ async-trait = { workspace = true }
 async-nats = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+dashmap = { workspace = true }
 derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
@@ -89,14 +91,14 @@ uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
+
+
 bitflags = { version = "2.4", features = ["serde"] }
 blake3 = { version = "1.8", features = ["mmap", "rayon"] }
 bytemuck = "1.22"
-# candle-core = { version = "0.9.1" }
 derive-getters = "0.5"
 offset-allocator = "0.2"
 rayon = "1"
-dashmap = { version = "5.5.3" }
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
 
 # lora
