@@ -266,6 +266,7 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
 }
@@ -684,6 +685,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_max_seq_len_exceeded_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL),
+                "Total number of times migration was disabled by max_seq_len limit",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         let model_cancellation_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_CANCELLATION_TOTAL),
@@ -722,6 +732,7 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
         }
@@ -828,6 +839,9 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(
+            self.model_migration_max_seq_len_exceeded_total.clone(),
+        ))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
         registry.register(Box::new(self.model_rejection_total.clone()))?;
 
@@ -910,6 +924,20 @@ impl Metrics {
     pub fn get_migration_ongoing_request_count(&self, model: &str) -> u64 {
         self.model_migration_total
             .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .get()
+    }
+
+    /// Increment the counter for migrations disabled by max_seq_len being exceeded
+    pub fn inc_migration_max_seq_len_exceeded(&self, model: &str) {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
+            .inc();
+    }
+
+    /// Get the current count of migrations disabled by max_seq_len being exceeded
+    pub fn get_migration_max_seq_len_exceeded_count(&self, model: &str) -> u64 {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
             .get()
     }
 
