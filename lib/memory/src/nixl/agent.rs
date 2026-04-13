@@ -65,11 +65,8 @@ impl NixlAgent {
 
     /// Add a backend to the agent with optional custom parameters.
     ///
-    /// If `custom_params` is non-empty, those parameters are used instead of
-    /// the plugin defaults. If empty, default parameters from the plugin are used.
-    ///
-    /// # Errors
-    /// Returns an error if custom parameters are provided (not yet supported until nixl_sys 0.9).
+    /// If `custom_params` is non-empty, those parameters are merged into the
+    /// plugin defaults. If empty, default parameters from the plugin are used.
     pub fn add_backend_with_params(
         &mut self,
         backend: &str,
@@ -80,20 +77,25 @@ impl NixlAgent {
             return Ok(());
         }
 
-        // TODO(DIS-1310): Custom params require nixl_sys 0.9+ which adds nixl_capi_params_add
-        if !custom_params.is_empty() {
-            anyhow::bail!(
-                "Custom NIXL backend parameters for {} are not yet supported. \
-                 This feature requires nixl_sys 0.9+. Params provided: {:?}",
-                backend_upper,
-                custom_params.keys().collect::<Vec<_>>()
-            );
-        }
-
         // Get default params from plugin
-        let (_, params) = match self.agent.get_plugin_params(&backend_upper) {
+        let (_, default_params) = match self.agent.get_plugin_params(&backend_upper) {
             Ok(result) => result,
             Err(_) => anyhow::bail!("No {} plugin found", backend_upper),
+        };
+
+        // Merge custom params into plugin defaults (nixl_sys 0.10+ has Params::clone + set)
+        let params = if custom_params.is_empty() {
+            default_params
+        } else {
+            let mut merged = default_params.clone().map_err(|e| {
+                anyhow::anyhow!("Failed to clone default params for {}: {}", backend_upper, e)
+            })?;
+            for (key, value) in custom_params {
+                merged.set(key, value).map_err(|e| {
+                    anyhow::anyhow!("Failed to set param {}={} for {}: {}", key, value, backend_upper, e)
+                })?;
+            }
+            merged
         };
 
         match self.agent.create_backend(&backend_upper, &params) {
@@ -255,36 +257,36 @@ mod tests {
     }
 
     #[test]
-    fn test_add_backend_with_custom_params_fails() {
+    fn test_add_backend_with_custom_params() {
         let mut agent = NixlAgent::new("test_custom_params").expect("Failed to create agent");
 
-        // Custom params should fail until nixl_sys 0.9
+        // Custom params are now merged into plugin defaults
         let mut params = HashMap::new();
         params.insert("some_key".to_string(), "some_value".to_string());
 
+        // UCX backend may or may not be available, but the params path itself shouldn't bail
         let result = agent.add_backend_with_params("UCX", &params);
-        assert!(result.is_err());
-
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not yet supported"));
-        assert!(err_msg.contains("nixl_sys 0.9"));
-        assert!(err_msg.contains("some_key"));
+        // If UCX plugin is present, this succeeds; if not, it fails with "No UCX plugin found"
+        if let Err(e) = &result {
+            let msg = e.to_string();
+            assert!(!msg.contains("not yet supported"), "Custom params should no longer bail: {}", msg);
+        }
     }
 
     #[test]
-    fn test_from_nixl_backend_config_with_custom_params_fails() {
-        // Config with custom params should fail
+    fn test_from_nixl_backend_config_with_custom_params() {
+        // Config with custom params should now work (merged into defaults)
         let mut params = HashMap::new();
         params.insert("threads".to_string(), "4".to_string());
 
         let config = NixlBackendConfig::default().with_backend_params("UCX", params);
 
         let result = NixlAgent::from_nixl_backend_config("test_config_params", config);
-        assert!(result.is_err());
-
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("not yet supported"));
-        assert!(err_msg.contains("threads"));
+        // May fail if UCX plugin unavailable, but should NOT say "not yet supported"
+        if let Err(e) = &result {
+            let msg = e.to_string();
+            assert!(!msg.contains("not yet supported"), "Custom params should no longer bail: {}", msg);
+        }
     }
 
     #[test]
