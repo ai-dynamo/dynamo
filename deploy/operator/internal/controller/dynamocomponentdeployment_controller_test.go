@@ -1376,6 +1376,56 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 	})
 
+	t.Run("ready checkpoint rewrites only main when extra sidecars are present", func(t *testing.T) {
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		dcd.Spec.ExtraPodSpec.PodSpec = &corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "gms-loader",
+				Image:   "sidecar:latest",
+				Command: []string{"python3"},
+				Args:    []string{"-m", "sidecar"},
+			}},
+		}
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		podTemplateSpec, err := r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		if err != nil {
+			t.Fatalf("generatePodTemplateSpec failed: %v", err)
+		}
+
+		if got := podTemplateSpec.Spec.Containers[0]; got.Name != "gms-loader" || len(got.Command) != 1 || got.Command[0] != "python3" {
+			t.Fatalf("expected sidecar container to remain unchanged, got %#v", got)
+		}
+		if got := podTemplateSpec.Spec.Containers[1]; got.Name != commonconsts.MainContainerName || len(got.Command) != 2 || got.Command[0] != "sleep" || got.Command[1] != "infinity" {
+			t.Fatalf("expected main container to be rewritten for restore, got %#v", got)
+		}
+		if podTemplateSpec.Spec.Containers[1].Args != nil {
+			t.Fatalf("expected main container args to be cleared, got %#v", podTemplateSpec.Spec.Containers[1].Args)
+		}
+		if got := podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel]; got != commonconsts.KubeLabelValueTrue {
+			t.Fatalf("expected %s label to be true, got %q", snapshotprotocol.RestoreTargetLabel, got)
+		}
+	})
+
 	t.Run("operator reasserts restore identity labels after metadata merge", func(t *testing.T) {
 		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
 		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
