@@ -202,6 +202,7 @@ def _build_dynamo_preproc(
         },
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],
+        "routing": request.get("routing"),
     }
 
     # Forward multimodal URLs so the backend handler can load the media.
