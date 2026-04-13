@@ -35,6 +35,7 @@ from dynamo.planner.core.types import (
     FpmObservations,
     PlannerEffects,
     ScheduledTick,
+    TickDiagnostics,
     TickInput,
     TrafficObservation,
     WorkerCapabilities,
@@ -102,6 +103,17 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._next_load_s: float = float("inf")
         self._next_throughput_s: float = float("inf")
 
+        # Diagnostics scratch fields populated by mixins, read by on_tick
+        self._diag_estimated_ttft_ms: Optional[float] = None
+        self._diag_estimated_itl_ms: Optional[float] = None
+        self._diag_predicted_num_req: Optional[float] = None
+        self._diag_predicted_isl: Optional[float] = None
+        self._diag_predicted_osl: Optional[float] = None
+        self._diag_engine_rps_prefill: Optional[float] = None
+        self._diag_engine_rps_decode: Optional[float] = None
+        self._diag_load_reason: Optional[str] = None
+        self._diag_throughput_reason: Optional[str] = None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -144,6 +156,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
 
     def on_tick(self, tick: ScheduledTick, tick_input: TickInput) -> PlannerEffects:
         effects = PlannerEffects()
+        self._reset_diag()
 
         if tick_input.worker_counts is not None:
             self._update_inventory(tick_input.worker_counts)
@@ -167,8 +180,33 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                 tick_input.now_s + self._config.throughput_adjustment_interval
             )
 
+        effects.diagnostics = self._build_diagnostics()
         effects.next_tick = self._next_scheduled_tick()
         return effects
+
+    def _reset_diag(self) -> None:
+        self._diag_estimated_ttft_ms = None
+        self._diag_estimated_itl_ms = None
+        self._diag_predicted_num_req = None
+        self._diag_predicted_isl = None
+        self._diag_predicted_osl = None
+        self._diag_engine_rps_prefill = None
+        self._diag_engine_rps_decode = None
+        self._diag_load_reason = None
+        self._diag_throughput_reason = None
+
+    def _build_diagnostics(self) -> TickDiagnostics:
+        return TickDiagnostics(
+            estimated_ttft_ms=self._diag_estimated_ttft_ms,
+            estimated_itl_ms=self._diag_estimated_itl_ms,
+            predicted_num_req=self._diag_predicted_num_req,
+            predicted_isl=self._diag_predicted_isl,
+            predicted_osl=self._diag_predicted_osl,
+            engine_rps_prefill=self._diag_engine_rps_prefill,
+            engine_rps_decode=self._diag_engine_rps_decode,
+            load_decision_reason=self._diag_load_reason,
+            throughput_decision_reason=self._diag_throughput_reason,
+        )
 
     # ------------------------------------------------------------------
     # Tick scheduling

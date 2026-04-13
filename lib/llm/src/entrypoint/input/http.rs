@@ -76,6 +76,7 @@ pub async fn run(
 
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
+            let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service
             // Create namespace filter from model configuration
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
@@ -87,6 +88,7 @@ pub async fn run(
                 http_service.state().manager_clone(),
                 router_config.clone(),
                 migration_limit,
+                migration_max_seq_len,
                 namespace_filter,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
@@ -165,6 +167,7 @@ async fn run_watcher(
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
@@ -176,6 +179,7 @@ async fn run_watcher(
         model_manager,
         router_config,
         migration_limit,
+        migration_max_seq_len,
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
