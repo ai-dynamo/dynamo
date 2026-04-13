@@ -72,9 +72,9 @@ def _engine_caps(
         return None
     return EngineCapabilities(
         num_gpu=num_gpu,
-        max_num_batched_tokens=worker_info.max_num_batched_tokens
-        if worker_info
-        else None,
+        max_num_batched_tokens=(
+            worker_info.max_num_batched_tokens if worker_info else None
+        ),
         max_num_seqs=worker_info.max_num_seqs if worker_info else None,
         context_length=worker_info.context_length if worker_info else None,
     )
@@ -229,7 +229,10 @@ class NativePlannerBase:
         if hasattr(self, "connector") and hasattr(self.connector, "_async_init"):
             await self.connector._async_init()
 
-        if not self.config.no_operation and self.config.scaling_mode == ScalingMode.ACTIVE:
+        if (
+            not self.config.no_operation
+            and self.config.scaling_mode == ScalingMode.ACTIVE
+        ):
             defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
             logger.info("Validating deployment...")
             await self.connector.validate_deployment(
@@ -275,8 +278,7 @@ class NativePlannerBase:
             )
         elif mode == ScalingMode.NOOP:
             logger.info(
-                "[NOOP] Planner started in NOOP mode — "
-                "scaling is fully disabled."
+                "[NOOP] Planner started in NOOP mode — " "scaling is fully disabled."
             )
         else:
             logger.info(
@@ -292,7 +294,8 @@ class NativePlannerBase:
             require_decode=self.require_decode,
             connector=connector,
             config_model_name=getattr(self.config, "model_name", ""),
-            no_operation=self.config.no_operation or self.config.scaling_mode != ScalingMode.ACTIVE,
+            no_operation=self.config.no_operation
+            or self.config.scaling_mode != ScalingMode.ACTIVE,
         )
         self.model_name = (
             self.decode_worker_info.model_name or self.prefill_worker_info.model_name
@@ -540,12 +543,12 @@ class NativePlannerBase:
         return WorkerCounts(
             ready_num_prefill=num_p if self.require_prefill else None,
             ready_num_decode=num_d if self.require_decode else None,
-            expected_num_prefill=(num_p if is_stable else None)
-            if self.require_prefill
-            else None,
-            expected_num_decode=(num_d if is_stable else None)
-            if self.require_decode
-            else None,
+            expected_num_prefill=(
+                (num_p if is_stable else None) if self.require_prefill else None
+            ),
+            expected_num_decode=(
+                (num_d if is_stable else None) if self.require_decode else None
+            ),
         )
 
     # ------------------------------------------------------------------
