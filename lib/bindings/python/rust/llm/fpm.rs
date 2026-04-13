@@ -564,6 +564,7 @@ impl FpmEventSubscriber {
                                         );
                                     }
                                 }
+                                Some(Ok(DiscoveryEvent::InitialListComplete)) => {}
                                 Some(Err(e)) => {
                                     tracing::warn!("FPM tracker: discovery error: {e}");
                                 }

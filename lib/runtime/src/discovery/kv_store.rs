@@ -582,6 +582,9 @@ impl Discovery for KVStoreDiscovery {
                         );
                         Some(DiscoveryEvent::Removed(id))
                     }
+                    kv::WatchEvent::InitialListComplete => {
+                        Some(DiscoveryEvent::InitialListComplete)
+                    }
                 };
 
                 if let Some(event) = discovery_event {
@@ -711,6 +714,10 @@ mod tests {
             };
             client_clone.register(spec).await.unwrap();
         });
+
+        // Consume the InitialListComplete sentinel (initial list is empty)
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event, DiscoveryEvent::InitialListComplete);
 
         // Wait for the added event
         let event = stream.next().await.unwrap().unwrap();

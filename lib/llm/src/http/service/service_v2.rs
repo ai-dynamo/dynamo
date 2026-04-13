@@ -60,6 +60,10 @@ pub struct State {
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
     cancel_token: CancellationToken,
+    /// True once the initial model discovery replay is complete.
+    /// Starts as `true` for in-process engine configs (no discovery needed).
+    /// Set to `false` for dynamic configs, then flipped to `true` by the model watcher.
+    discovery_ready: AtomicBool,
 }
 
 #[derive(Default, Debug)]
@@ -141,7 +145,23 @@ impl State {
                 anthropic_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            discovery_ready: AtomicBool::new(true),
         }
+    }
+
+    /// Returns true once the initial model discovery replay is complete.
+    pub fn is_discovery_ready(&self) -> bool {
+        self.discovery_ready.load(Ordering::Acquire)
+    }
+
+    /// Mark discovery as not yet ready (used by dynamic engine configs before starting the watcher).
+    pub fn set_discovery_not_ready(&self) {
+        self.discovery_ready.store(false, Ordering::Release);
+    }
+
+    /// Mark discovery as ready (called by the model watcher after initial replay).
+    pub fn set_discovery_ready(&self) {
+        self.discovery_ready.store(true, Ordering::Release);
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests

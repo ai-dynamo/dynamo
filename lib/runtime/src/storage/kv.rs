@@ -109,6 +109,8 @@ impl KeyValue {
 pub enum WatchEvent {
     Put(KeyValue),
     Delete(Key),
+    /// Sentinel: the initial list replay is complete; subsequent events are live changes.
+    InitialListComplete,
 }
 
 #[async_trait]
@@ -344,6 +346,14 @@ impl Manager {
                 {
                     tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding existing key to channel");
                 }
+            }
+
+            // Signal that the initial list replay is done
+            if let Err(err) = tx
+                .send_timeout(WatchEvent::InitialListComplete, WATCH_SEND_TIMEOUT)
+                .await
+            {
+                tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed sending InitialListComplete");
             }
 
             // Now block waiting for new entries

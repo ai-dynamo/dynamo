@@ -74,6 +74,10 @@ pub async fn run(
                 http_service_builder.discovery(Some(distributed_runtime.discovery()));
             let http_service = http_service_builder.build()?;
 
+            // Mark discovery as not ready until the initial model list replay is complete.
+            // This prevents Kubernetes from routing traffic before the model table is built.
+            http_service.state().set_discovery_not_ready();
+
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
             let migration_max_seq_len = model.migration_max_seq_len();
@@ -196,6 +200,12 @@ async fn run_watcher(
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     watch_obj.set_notify_on_model_update(tx);
+
+    // Register a callback to mark discovery as ready once initial list replay is done.
+    let state_for_ready = http_service.state_clone();
+    watch_obj.set_on_initial_list_complete(move || {
+        state_for_ready.set_discovery_ready();
+    });
 
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {

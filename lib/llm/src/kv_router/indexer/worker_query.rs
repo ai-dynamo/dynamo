@@ -246,6 +246,7 @@ impl WorkerQueryClient {
                     };
                     self.handle_removed_worker_dp(worker_id, dp_rank).await;
                 }
+                DiscoveryEvent::InitialListComplete => {}
             }
         }
 

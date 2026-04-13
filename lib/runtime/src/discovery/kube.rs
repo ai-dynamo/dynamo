@@ -327,6 +327,18 @@ impl Discovery for KubeDiscoveryClient {
                 }
             }
 
+            // Signal that the initial list replay is complete
+            if event_tx
+                .send(Ok(DiscoveryEvent::InitialListComplete))
+                .is_err()
+            {
+                tracing::debug!(
+                    stream_id = %stream_id,
+                    "Watch receiver dropped during initial sync"
+                );
+                return;
+            }
+
             // Track known instances by their unique ID
             let mut known: HashSet<DiscoveryInstanceId> = initial.into_keys().collect();
 

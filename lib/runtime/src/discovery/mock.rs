@@ -201,6 +201,7 @@ impl Discovery for MockDiscovery {
 
         let stream = async_stream::stream! {
             let mut known_instances: HashSet<DiscoveryInstanceId> = HashSet::new();
+            let mut initial_list_sent = false;
 
             loop {
                 let current: Vec<_> = {
@@ -226,6 +227,11 @@ impl Discovery for MockDiscovery {
                 for id in known_instances.difference(&current_ids).cloned().collect::<Vec<_>>() {
                     known_instances.remove(&id);
                     yield Ok(DiscoveryEvent::Removed(id));
+                }
+
+                if !initial_list_sent {
+                    initial_list_sent = true;
+                    yield Ok(DiscoveryEvent::InitialListComplete);
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -314,6 +320,10 @@ mod tests {
             }
             _ => panic!("Expected Added event for instance-1"),
         }
+
+        // Consume the InitialListComplete sentinel
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event, DiscoveryEvent::InitialListComplete);
 
         // Add second instance
         client2.register(spec.clone()).await.unwrap();

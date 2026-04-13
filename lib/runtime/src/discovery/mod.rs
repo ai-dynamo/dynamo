@@ -683,6 +683,9 @@ pub enum DiscoveryEvent {
     Added(DiscoveryInstance),
     /// An instance was removed (identified by its unique ID)
     Removed(DiscoveryInstanceId),
+    /// The initial list replay is complete; all subsequent events are live changes.
+    /// Consumers can use this to gate readiness (e.g. Kubernetes readiness probes).
+    InitialListComplete,
 }
 
 /// Stream type for discovery events

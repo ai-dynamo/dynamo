@@ -63,6 +63,18 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
+    // Gate on discovery readiness: the frontend must not report healthy
+    // until the initial model discovery replay is complete.
+    if !state.is_discovery_ready() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "message": "Model discovery is still in progress"
+            })),
+        );
+    }
+
     let instances = match list_all_instances(state.discovery()).await {
         Ok(instances) => instances,
         Err(err) => {

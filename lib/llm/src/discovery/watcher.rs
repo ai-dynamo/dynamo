@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
 
@@ -80,6 +81,8 @@ pub struct ModelWatcher {
     metrics: Arc<Metrics>,
     /// Guards against concurrent pipeline construction for the same (model, namespace).
     registering_worker_sets: DashSet<String>,
+    /// Called once when the initial discovery list replay is complete.
+    on_initial_list_complete: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -138,11 +141,17 @@ impl ModelWatcher {
             prefill_load_estimator,
             metrics,
             registering_worker_sets: DashSet::new(),
+            on_initial_list_complete: Mutex::new(None),
         }
     }
 
     pub fn set_notify_on_model_update(&mut self, tx: Sender<ModelUpdate>) {
         self.model_update_tx = Some(tx);
+    }
+
+    /// Register a callback that fires once when the initial discovery list replay is complete.
+    pub fn set_on_initial_list_complete(&self, callback: impl FnOnce() + Send + 'static) {
+        *self.on_initial_list_complete.lock().unwrap() = Some(Box::new(callback));
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -172,6 +181,13 @@ impl ModelWatcher {
             };
 
             match event {
+                DiscoveryEvent::InitialListComplete => {
+                    tracing::info!("Initial model discovery replay complete");
+                    if let Some(callback) = self.on_initial_list_complete.lock().unwrap().take() {
+                        callback();
+                    }
+                    continue;
+                }
                 DiscoveryEvent::Added(instance) => {
                     // Extract ModelCardInstanceId and card from the discovery instance
                     let (mcid, mut card) = match &instance {

@@ -352,6 +352,7 @@ impl Client {
                     DiscoveryEvent::Removed(id) => {
                         map.remove(&id.instance_id());
                     }
+                    DiscoveryEvent::InitialListComplete => {}
                 }
 
                 let instances: Vec<Instance> = map.values().cloned().collect();

@@ -145,7 +145,7 @@ impl ErrorMessage {
 
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
-    pub fn _service_unavailable() -> ErrorResponse {
+    pub fn service_unavailable() -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
         let error_type = map_error_code_to_error_type(code);
         (
@@ -1810,12 +1810,10 @@ pub fn validate_response_unsupported_fields(
     None
 }
 
-// todo - abstract this to the top level lib.rs to be reused
-// todo - move the service_observer to its own state/arc
-fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
-    // if state.service_observer.stage() != ServiceStage::Ready {
-    //     return Err(ErrorMessage::service_unavailable());
-    // }
+fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
+    if !state.is_discovery_ready() {
+        return Err(ErrorMessage::service_unavailable());
+    }
     Ok(())
 }
 
