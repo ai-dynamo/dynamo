@@ -30,10 +30,19 @@ sudo apt install -y intel-fw-gpu intel-i915-dkms xpu-smi \
     intel-level-zero-gpu level-zero intel-opencl-icd
 ```
 
+Ensure your user is in the `render` group (required to access GPU devices):
+
+```bash
+sudo usermod -aG render $USER
+# Log out and back in, or use: sg render -c "your_command"
+```
+
 Verify the GPU is visible:
 
 ```bash
 xpu-smi discovery
+# If xpu-smi shows "No device discovered" but the hardware is present,
+# verify via PyTorch instead (see step 2 below).
 ```
 
 ## Setup
@@ -74,10 +83,13 @@ pip install diffusers transformers accelerate safetensors Pillow uvloop
 ### 4. Install Dynamo
 
 ```bash
-# Build and install the Rust Python bindings
-cd lib/bindings/python && pip install maturin && maturin develop && cd -
+pip install ai-dynamo
+```
 
-# Install the Dynamo Python package
+Alternatively, to install from source (requires Rust toolchain):
+
+```bash
+cd lib/bindings/python && pip install maturin && maturin develop && cd -
 pip install -e .
 ```
 
@@ -201,7 +213,7 @@ for i, img in enumerate(resp['data']):
 |-----------|------|---------|-------------|
 | `prompt` | string | (required) | Text description of the desired image |
 | `model` | string | (required) | Must match the model the worker registered |
-| `size` | string | `"1024x1024"` | Image dimensions as `"WxH"` |
+| `size` | string | `"1024x1024"` | One of: `256x256`, `512x512`, `1024x1024`, `1792x1024`, `1024x1792` |
 | `n` | int | `1` | Number of images to generate (1-10) |
 | `nvext.num_inference_steps` | int | `30` | Denoising steps (more = higher quality, slower) |
 | `nvext.guidance_scale` | float | `7.5` | CFG scale (higher = more prompt-adherent) |
@@ -212,15 +224,22 @@ for i, img in enumerate(resp['data']):
 
 ### "Intel XPU is not available"
 
-1. Check that GPU drivers are installed:
+1. Check that your user is in the `render` group:
+   ```bash
+   groups  # should include "render"
+   sudo usermod -aG render $USER  # if not, add yourself and re-login
+   ```
+2. Check that GPU drivers are installed:
    ```bash
    xpu-smi discovery
+   # Note: xpu-smi may show "No device discovered" even when drivers work.
+   # Use PyTorch as the definitive check (step 3).
    ```
-2. Check that PyTorch was installed with XPU support:
+3. Check that PyTorch was installed with XPU support:
    ```bash
-   python3 -c "import torch; print(torch.__version__); print(torch.xpu.is_available())"
+   python3 -c "import torch; print(torch.__version__); print(torch.xpu.is_available()); print(torch.xpu.device_count())"
    ```
-3. If using Battlemage (Arc B-series), ensure kernel 6.11+ with `i915.force_probe=*` boot parameter.
+4. If using Battlemage (Arc B-series), ensure kernel 6.11+ with `i915.force_probe=*` boot parameter.
 
 ### Out of Memory
 

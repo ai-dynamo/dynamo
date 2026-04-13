@@ -29,7 +29,7 @@ Options:
 Request format (sent to /v1/images/generations):
   prompt:   text description of the desired image
   model:    HuggingFace model path (must match what the worker registered)
-  size:     "WxH" string, e.g. "1024x1024" (default: 1024x1024)
+  size:     one of "256x256", "512x512", "1024x1024", "1792x1024", "1024x1792"
   n:        number of images to generate (default: 1)
   nvext:
     num_inference_steps: denoising steps (default: 30)
