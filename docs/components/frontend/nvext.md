@@ -163,5 +163,5 @@ When the client requests response metadata via `extra_fields`, the response incl
 | Document | Description |
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
-| [Router Guide](../router/router-guide.md) | Full router configuration and CLI arguments |
+| [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
 | [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling and eviction policies |

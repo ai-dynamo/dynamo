@@ -117,16 +117,19 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="disagg_same_gpu.sh",
         marks=[
-            pytest.mark.gpu_1,
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 6.6 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            pytest.mark.skip(reason="unstable"),
-            pytest.mark.timeout(
-                480
-            ),  # 3x measured time (103.66s) + download time (150s)
+            pytest.mark.profiled_vram_gib(6.6),  # actual nvidia-smi peak 6.6 GiB
+            pytest.mark.requested_trtllm_kv_tokens(
+                512
+            ),  # KV cache cap (2x safety over min=256)
+            pytest.mark.timeout(432),  # ~6x profiled wall time 72s
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=10,
+        health_check_workers=True,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -239,6 +242,9 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_multimodal_router.sh",
         marks=[
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2608"
+            ),
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,

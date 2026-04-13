@@ -33,15 +33,27 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
 
 pub struct Migration {
     migration_limit: u32,
+    max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
 }
 
 impl Migration {
-    pub fn new(migration_limit: u32, model_name: String, metrics: Arc<Metrics>) -> Arc<Self> {
-        tracing::debug!("model {} migration limit {}", model_name, migration_limit);
+    pub fn new(
+        migration_limit: u32,
+        max_seq_len: Option<u32>,
+        model_name: String,
+        metrics: Arc<Metrics>,
+    ) -> Arc<Self> {
+        tracing::debug!(
+            "model {} migration limit {} max_seq_len {:?}",
+            model_name,
+            migration_limit,
+            max_seq_len
+        );
         Arc::new(Self {
             migration_limit,
+            max_seq_len,
             model_name: Arc::new(model_name),
             metrics,
         })
@@ -50,9 +62,15 @@ impl Migration {
     pub fn from_mdc(
         mdc: &ModelDeploymentCard,
         migration_limit: u32,
+        max_seq_len: Option<u32>,
         metrics: Arc<Metrics>,
     ) -> Arc<Self> {
-        Self::new(migration_limit, mdc.display_name.clone(), metrics)
+        Self::new(
+            migration_limit,
+            max_seq_len,
+            mdc.display_name.clone(),
+            metrics,
+        )
     }
 }
 
@@ -78,6 +96,7 @@ impl
             preprocessed_request,
             next,
             self.migration_limit,
+            self.max_seq_len,
             self.model_name.clone(),
             self.metrics.clone(),
         )
@@ -99,6 +118,7 @@ struct RetryManager {
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>>,
     next_stream: Option<ManyOut<Annotated<BackendOutput>>>,
     retries_left: u32,
+    max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
 }
@@ -109,6 +129,7 @@ impl RetryManager {
         preprocessed_request: PreprocessedRequest,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>>,
         mut retries_left: u32,
+        max_seq_len: Option<u32>,
         model_name: Arc<String>,
         metrics: Arc<Metrics>,
     ) -> Result<Self> {
@@ -137,10 +158,12 @@ impl RetryManager {
             next_generate: next,
             next_stream: None,
             retries_left: retries_left + 1, // +1 to account for the initial attempt
+            max_seq_len,
             model_name,
             metrics,
         };
         slf.new_stream().await?;
+        slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
         Ok(slf)
     }
 
@@ -181,10 +204,14 @@ impl RetryManager {
             self.context.link_child(request.context());
             if self.context.is_stopped() || self.context.is_killed() {
                 tracing::debug!("Abort creating new stream after context is stopped or killed");
-                return Err(Error::msg(format!(
-                    "Context id {} is stopped or killed",
-                    self.context.id()
-                )));
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::Cancelled)
+                    .message(format!(
+                        "Context id {} is stopped or killed",
+                        self.context.id()
+                    ))
+                    .build()
+                    .into());
             }
             response_stream = Some(self.next_generate.generate(request).await);
             if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
@@ -216,6 +243,9 @@ impl RetryManager {
             Some(output) => output,
             None => return,
         };
+        if self.exceed_max_seq_len(llm_engine_output.token_ids.len() as u32) {
+            return;
+        }
         if let Some(max_tokens) = self.request.stop_conditions.max_tokens {
             self.request.stop_conditions.max_tokens =
                 Some(max_tokens.saturating_sub(llm_engine_output.token_ids.len() as u32));
@@ -223,6 +253,27 @@ impl RetryManager {
         for token_id in llm_engine_output.token_ids.iter() {
             self.request.token_ids.push(*token_id);
         }
+    }
+
+    /// Returns `true` if the tracked request token length plus `new_output_len`
+    /// exceeds the configured max_seq_len, in which case migration is disabled.
+    fn exceed_max_seq_len(&mut self, new_output_len: u32) -> bool {
+        if let Some(max_seq_len) = self.max_seq_len {
+            let total_len = self.request.token_ids.len() as u32 + new_output_len;
+            if total_len > max_seq_len {
+                tracing::warn!(
+                    "Sequence length {} exceeds migration max_seq_len {}, \
+                     disabling migration",
+                    total_len,
+                    max_seq_len
+                );
+                self.metrics
+                    .inc_migration_max_seq_len_exceeded(&self.model_name);
+                self.retries_left = 0; // disable migration
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -581,6 +632,7 @@ mod tests {
             request,
             next_generate,
             0,
+            None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
         )
@@ -631,6 +683,7 @@ mod tests {
             request,
             next_generate,
             3,
+            None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
         )
@@ -682,6 +735,7 @@ mod tests {
             request,
             next_generate,
             3,
+            None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
         )
@@ -734,6 +788,7 @@ mod tests {
             request,
             next_generate,
             3,
+            None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
         )
@@ -773,6 +828,7 @@ mod tests {
             request,
             next_generate,
             3,
+            None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
         ) // 3 retries
@@ -831,6 +887,7 @@ mod tests {
             request,
             next_generate,
             3,
+            None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
         ) // 3 retries
@@ -894,6 +951,7 @@ mod tests {
             request,
             next_generate,
             3,
+            None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
         )
@@ -905,6 +963,15 @@ mod tests {
                 error
                     .to_string()
                     .contains(&format!("Context id {} is stopped or killed", context_id))
+            );
+            // Verify the error is a typed DynamoError with Cancelled type
+            let dynamo_err = error
+                .downcast_ref::<DynamoError>()
+                .expect("Error should be a DynamoError");
+            assert_eq!(
+                dynamo_err.error_type(),
+                ErrorType::Cancelled,
+                "Stopped/killed context should produce a Cancelled error"
             );
         }
 
@@ -962,6 +1029,7 @@ mod tests {
             request,
             next_generate,
             3, // migration_limit=3 — should be ignored for guided-decoding requests
+            None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
         )
@@ -1002,5 +1070,212 @@ mod tests {
             ErrorType::Disconnected,
             "Error type should be Disconnected"
         );
+    }
+
+    /// Test case 9: max_seq_len exceeded limit + 1 disables migration
+    ///
+    /// Boundary test: prompt has 3 tokens, max_seq_len = 5. After 2 generated tokens the
+    /// total is 5 (== max_seq_len) — still migratable. The 3rd generated token would push
+    /// the total to 6 (> max_seq_len), which disables migration and stops caching.
+    /// The failure is placed right at that point (fail_after: 3) so we see the error
+    /// propagated instead of retried.
+    #[tokio::test]
+    async fn test_retry_manager_max_seq_len_exceeded() {
+        dynamo_runtime::logging::init();
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        // Prompt = [1, 2, 3] (len 3). max_seq_len = 5.
+        // Token 101 → total 4 ≤ 5: tracked.
+        // Token 102 → total 5 ≤ 5: tracked.
+        // Token 103 → would-be 6 > 5: NOT tracked, migration disabled.
+        // Error follows immediately (fail_after: 3) → not retried.
+        let request = create_mock_request(10);
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::MidStreamFail { fail_after: 3 },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            request,
+            next_generate,
+            3,
+            Some(5), // prompt(3) + 3 generated = 6 > 5 → disables migration
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(response) = retry_manager.next().await {
+            responses.push(response);
+        }
+
+        // 3 successful tokens + 1 Disconnected error (migration disabled at token 103).
+        assert_eq!(
+            responses.len(),
+            4,
+            "Expected 3 successful + 1 error (migration disabled by max_seq_len)"
+        );
+
+        for (i, response) in responses[0..3].iter().enumerate() {
+            assert!(response.err().is_none(), "Response {} should be OK", i);
+        }
+
+        let err = responses[3]
+            .err()
+            .expect("Last response should be Disconnected error");
+        assert_eq!(err.error_type(), ErrorType::Disconnected);
+
+        // Migration was attempted but blocked because max_seq_len set retries_left to 0.
+        // The ongoing metric is still incremented (it counts attempts, not successes).
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+        // max_seq_len limit was triggered once (at token 103).
+        assert_eq!(
+            metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
+            1
+        );
+    }
+
+    /// Test case 10: Migration succeeds when sequence length is at max_seq_len
+    ///
+    /// Boundary test: prompt has 3 tokens, max_seq_len = 5. After 2 generated tokens
+    /// the total is exactly 5 (== max_seq_len). The failure occurs at that point
+    /// (fail_after: 2). Because we use strict inequality (> not >=), the request is
+    /// still migratable and the retry succeeds.
+    #[tokio::test]
+    async fn test_retry_manager_max_seq_len_at_limit() {
+        dynamo_runtime::logging::init();
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        // Prompt = [1, 2, 3] (len 3). max_seq_len = 5.
+        // Token 101 → total 4 ≤ 5: tracked.
+        // Token 102 → total 5 == 5: tracked (still migratable — strict >).
+        // Error (fail_after: 2) → migration succeeds, retry delivers remaining tokens.
+        let request = create_mock_request(10);
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::MidStreamFail { fail_after: 2 },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            request,
+            next_generate,
+            3,
+            Some(5), // prompt(3) + 2 generated = 5 == max_seq_len → still migratable
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(response) = retry_manager.next().await {
+            responses.push(response);
+        }
+
+        // Migration succeeds — all 10 responses delivered
+        assert_eq!(responses.len(), 10);
+        for response in &responses {
+            assert!(response.err().is_none());
+        }
+
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+
+        // Tracked token_ids must equal exactly max_seq_len (5).
+        // The 2 tokens from the first stream were tracked (prompt 3 + gen 2 = 5).
+        // After migration the retry stream delivers remaining tokens, but the first
+        // new token would push to 6 > 5, so tracking stops and no more are appended.
+        assert_eq!(
+            retry_manager.request.token_ids.len(),
+            5,
+            "tracked token_ids should be exactly max_seq_len"
+        );
+
+        // The limit was triggered once (first token of the retry stream exceeded 5).
+        assert_eq!(
+            metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
+            1
+        );
+    }
+
+    /// Test case 11: Prompt length alone exceeds max_seq_len
+    ///
+    /// When the prompt tokens already exceed max_seq_len, migration is disabled
+    /// in RetryManager::build before any tokens are generated. A mid-stream
+    /// failure should propagate the error without attempting migration.
+    #[tokio::test]
+    async fn test_retry_manager_max_seq_len_exceeded_by_prompt() {
+        dynamo_runtime::logging::init();
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        // Prompt = [1, 2, 3] (len 3). max_seq_len = 2, so prompt alone exceeds the limit.
+        let request = create_mock_request(10);
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::MidStreamFail { fail_after: 3 },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            request,
+            next_generate,
+            3,
+            Some(2), // prompt(3) > max_seq_len(2) → migration disabled at build time
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(response) = retry_manager.next().await {
+            responses.push(response);
+        }
+
+        // 3 successful tokens + 1 Disconnected error (migration disabled from the start).
+        assert_eq!(
+            responses.len(),
+            4,
+            "Expected 3 successful + 1 error (migration disabled by prompt exceeding max_seq_len)"
+        );
+
+        for (i, response) in responses[0..3].iter().enumerate() {
+            assert!(response.err().is_none(), "Response {} should be OK", i);
+        }
+
+        let err = responses[3]
+            .err()
+            .expect("Last response should be Disconnected error");
+        assert_eq!(err.error_type(), ErrorType::Disconnected);
+
+        // max_seq_len was exceeded at build time (prompt len 3 > 2).
+        assert_eq!(
+            metrics.get_migration_max_seq_len_exceeded_count(TEST_MODEL),
+            1
+        );
+        // Migration was attempted but blocked (retries_left was already 0).
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
     }
 }

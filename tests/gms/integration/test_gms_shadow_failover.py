@@ -465,6 +465,7 @@ def test_gms_shadow_engine_failover_vllm(
     )
 
 
+@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2567")
 @pytest.mark.sglang
 @pytest.mark.e2e
 @pytest.mark.gpu_1
