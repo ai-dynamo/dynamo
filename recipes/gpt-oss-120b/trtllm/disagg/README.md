@@ -18,7 +18,7 @@ disaggregated prefill/decode via Dynamo on GB200 nodes.
 ## Prerequisites
 
 1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../../../docs/kubernetes/README.md)
-2. **GB200 (Blackwell) GPU nodes** with ARM64 architecture
+2. **Blackwell GPU nodes** (GB200 or B200)
 3. **HuggingFace token** with access to the model
 
 ## Deploy

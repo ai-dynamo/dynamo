@@ -7,7 +7,7 @@ Production-ready deployment for **GPT-OSS-120B** using TensorRT-LLM on Blackwell
 | Configuration | GPUs | Mode | Description |
 |--------------|------|------|-------------|
 | [**trtllm/agg**](trtllm/agg/) | 4x GB200 | Aggregated | WideEP, ARM64 |
-| [**trtllm/disagg**](trtllm/disagg/) | 5x GB200 | Disaggregated | Prefill/Decode split, ARM64 |
+| [**trtllm/disagg**](trtllm/disagg/) | 5x Blackwell (GB200/B200) | Disaggregated | Prefill/Decode split |
 
 ## Prerequisites
 
