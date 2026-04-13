@@ -461,6 +461,41 @@ mod interface_tests {
     }
 
     #[tokio::test]
+    async fn test_concurrent_compressed_cleanup_prunes_dead_children_under_live_prefix() {
+        let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 32);
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).await;
+        index
+            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5]))
+            .await;
+        index
+            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[6, 7]))
+            .await;
+        flush_and_settle(&index).await;
+
+        index
+            .apply_event(make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]))
+            .await;
+        index
+            .apply_event(make_remove_event_with_parent(0, &[1, 2, 3], &[6, 7]))
+            .await;
+        flush_and_settle(&index).await;
+
+        let expected_snapshot = vec![make_store_event(0, &[1, 2, 3])];
+        assert_eq!(snapshot_tree(&index).await, expected_snapshot);
+        assert_eq!(index.backend().raw_child_edge_count(), 3);
+
+        index.backend().run_cleanup_for_test();
+
+        assert_eq!(index.backend().raw_child_edge_count(), 1);
+        assert_eq!(
+            snapshot_tree(&index).await,
+            vec![make_store_event(0, &[1, 2, 3])]
+        );
+        assert_score(&index, &[1, 2, 3], WorkerWithDpRank::new(0, 0), 3).await;
+    }
+
+    #[tokio::test]
     #[apply(indexer_template)]
     async fn test_partial_match(variant: &str) {
         let index = make_indexer(variant);
