@@ -12,9 +12,7 @@ These tests do NOT require visual_gen, torch, or GPU - they test logic only.
 import asyncio
 import threading
 import time
-from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -42,88 +40,11 @@ pytestmark = [
 
 # This part of the test has been covered in test_trtllm_video_diffusion.py
 
-# [gluo WIP] change below to fit with image diffusion
-
 # =============================================================================
 # Part 2: DiffusionConfig Tests
 # =============================================================================
 
-
-class TestDiffusionConfig:
-    """Tests for DiffusionConfig dataclass."""
-
-    def test_default_values(self):
-        """Test that default values are set correctly."""
-        config = DiffusionConfig()
-
-        # Dynamo runtime defaults
-        assert config.namespace == "dynamo"  # May be overridden by env var
-        assert config.component == "diffusion"
-        assert config.endpoint == "generate"
-
-        # Generation defaults
-        assert config.default_height == 480
-        assert config.default_width == 832
-        assert config.default_num_frames == 81
-        assert config.default_num_inference_steps == 50
-        assert config.default_guidance_scale == 5.0
-
-        # Media storage defaults
-        assert config.media_output_fs_url == "file:///tmp/dynamo_media"
-        assert config.media_output_http_url is None
-
-        # Optimization defaults
-        assert config.enable_teacache is False
-        assert config.attn_backend == "VANILLA"
-        assert config.quant_algo is None
-        assert config.enable_cuda_graph is False
-        assert config.skip_warmup is False
-        assert config.fuse_qkv is True
-
-        # Parallelism defaults
-        assert config.dit_dp_size == 1
-        assert config.dit_tp_size == 1
-
-    def test_custom_values(self):
-        """Test that custom values override defaults."""
-        config = DiffusionConfig(
-            default_height=720,
-            default_width=1280,
-            default_num_frames=120,
-            enable_teacache=True,
-            dit_tp_size=2,
-        )
-
-        assert config.default_height == 720
-        assert config.default_width == 1280
-        assert config.default_num_frames == 120
-        assert config.enable_teacache is True
-        assert config.dit_tp_size == 2
-
-    def test_custom_media_storage(self):
-        """Test that media storage fields can be overridden."""
-        config = DiffusionConfig(
-            media_output_fs_url="s3://my-bucket/videos",
-            media_output_http_url="https://cdn.example.com/videos",
-        )
-
-        assert config.media_output_fs_url == "s3://my-bucket/videos"
-        assert config.media_output_http_url == "https://cdn.example.com/videos"
-
-    def test_str_representation(self):
-        """Test that __str__ includes key fields."""
-        config = DiffusionConfig(
-            model_path="test/model",
-            default_height=480,
-        )
-
-        str_repr = str(config)
-
-        assert "DiffusionConfig(" in str_repr
-        assert "model_path=test/model" in str_repr
-        assert "default_height=480" in str_repr
-        assert "dit_tp_size=" in str_repr
-
+# This part of the test has been covered in test_trtllm_video_diffusion.py
 
 # =============================================================================
 # Part 3: VideoGenerationHandler Helper Tests
@@ -136,25 +57,15 @@ class MockDiffusionConfig:
     default_width: int = 832
     default_height: int = 480
     default_num_frames: int = 81
+    default_num_images_per_prompt: int = 1
     default_fps: int = 24
     default_seconds: int = 4
     max_width: int = 4096
     max_height: int = 4096
 
 
-@dataclass
-class MockVideoRequest:
-    """Mock video request for testing _compute_num_frames."""
-
-    prompt: str = "test prompt"
-    model: str = "test-model"
-    num_frames: Optional[int] = None
-    seconds: Optional[int] = None
-    fps: Optional[int] = None
-
-
-class TestVideHandlerParseSize:
-    """Tests for VideoGenerationHandler._parse_size method.
+class TestImageHandlerParseSize:
+    """Tests for ImageGenerationHandler._parse_size method.
 
     We test the method logic by creating a minimal mock handler.
     """
@@ -162,12 +73,12 @@ class TestVideHandlerParseSize:
     def setup_method(self):
         """Set up mock handler for each test."""
         # Import here to avoid issues if handler has complex imports
-        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
-            VideoGenerationHandler,
+        from dynamo.trtllm.request_handlers.diffusion.image_handler import (
+            ImageGenerationHandler,
         )
 
         # Create handler with mocked dependencies
-        self.handler = object.__new__(VideoGenerationHandler)
+        self.handler = object.__new__(ImageGenerationHandler)
         self.handler.config = MockDiffusionConfig()
 
     def test_parse_size_valid(self):
@@ -237,60 +148,11 @@ class TestVideHandlerParseSize:
         assert height == 4096
 
 
-class TestVideoHandlerComputeNumFrames:
-    """Tests for VideoGenerationHandler._compute_num_frames method."""
-
-    def setup_method(self):
-        """Set up mock handler for each test."""
-        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
-            VideoGenerationHandler,
-        )
-
-        self.handler = object.__new__(VideoGenerationHandler)
-        self.handler.config = MockDiffusionConfig()
-
-    def test_compute_num_frames_explicit(self):
-        """Test that explicit num_frames takes priority."""
-        req = NvCreateVideoRequest(prompt="test", model="test-model", seconds=10)
-        nvext = VideoNvExt(
-            num_frames=100,
-            fps=30,  # Should be ignored
-        )
-        assert self.handler._compute_num_frames(req, nvext) == 100
-
-    def test_compute_num_frames_from_seconds_fps(self):
-        """Test computation from seconds * fps."""
-        req = NvCreateVideoRequest(prompt="test", model="test-model", seconds=4)
-        nvext = VideoNvExt(fps=24)
-        assert self.handler._compute_num_frames(req, nvext) == 96  # 4 * 24
-
-    def test_compute_num_frames_only_seconds(self):
-        """Test seconds with default fps (24)."""
-        req = NvCreateVideoRequest(prompt="test", model="test-model", seconds=5)
-        nvext = VideoNvExt()
-        # seconds=5, default fps=24 -> 5 * 24 = 120
-        assert self.handler._compute_num_frames(req, nvext) == 120
-
-    def test_compute_num_frames_only_fps(self):
-        """Test fps with default seconds (4)."""
-        req = NvCreateVideoRequest(prompt="test", model="test-model")
-        nvext = VideoNvExt(fps=30)
-        # default seconds=4, fps=30 -> 4 * 30 = 120
-        assert self.handler._compute_num_frames(req, nvext) == 120
-
-    def test_compute_num_frames_defaults(self):
-        """Test all None uses config default."""
-        req = NvCreateVideoRequest(prompt="test", model="test-model")
-        nvext = VideoNvExt()
-        assert (
-            self.handler._compute_num_frames(req, nvext)
-            == MockDiffusionConfig.default_num_frames
-        )
-
-
 # =============================================================================
 # Part 4: Video Protocol Tests
 # =============================================================================
+
+# [gluo WIP] change below to fit with image diffusion
 
 
 class TestNvCreateVideoRequest:

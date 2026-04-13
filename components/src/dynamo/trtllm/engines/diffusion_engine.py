@@ -221,6 +221,7 @@ class DiffusionEngine:
         height: int = 480,
         width: int = 832,
         num_frames: int = 81,
+        num_images_per_prompt: int = 1,
         num_inference_steps: int = 50,
         guidance_scale: float = 5.0,
         seed: Optional[int] = None,
@@ -239,6 +240,7 @@ class DiffusionEngine:
             height: Output height in pixels.
             width: Output width in pixels.
             num_frames: Number of frames to generate (for video).
+            num_images_per_prompt: Number of images to generate per prompt (for image).
             num_inference_steps: Number of denoising steps.
             guidance_scale: CFG guidance scale.
             seed: Random seed for reproducibility.
@@ -273,6 +275,7 @@ class DiffusionEngine:
             height=height,
             width=width,
             num_frames=num_frames,
+            num_images_per_prompt=num_images_per_prompt,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             seed=seed if seed is not None else random.randint(0, 2**32 - 1),

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Video diffusion worker initialization for TensorRT-LLM backend.
+"""Image diffusion worker initialization for TensorRT-LLM backend.
 
-This module handles the initialization and lifecycle of video generation
+This module handles the initialization and lifecycle of image generation
 workers using diffusion models (Wan, Flux, Cosmos, etc.).
 """
 
@@ -22,7 +22,7 @@ async def init_image_diffusion_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
 ) -> None:
-    # [gluo WIP] make sure arguments for image diffusion are propagated correctly
+    # [gluo TODO] this can be the same as video diffusion worker, just need to update the handler and model type
     """Initialize and run the image diffusion worker.
 
     This function handles image_diffusion modality, loading the appropriate
@@ -131,14 +131,14 @@ async def init_image_diffusion_worker(
     # Register the model with Dynamo's discovery system
     model_name = config.served_model_name or config.model
 
-    # Use ModelType.Videos for video generation
-    if not hasattr(ModelType, "Videos"):
+    # Use ModelType.Images for image generation
+    if not hasattr(ModelType, "Images"):
         raise RuntimeError(
-            "ModelType.Videos not available in dynamo-runtime. "
-            "Video diffusion requires a compatible dynamo-runtime version. "
+            "ModelType.Images not available in dynamo-runtime. "
+            "Image diffusion requires a compatible dynamo-runtime version. "
             "See docs/backends/trtllm/README.md for setup instructions."
         )
-    model_type = ModelType.Videos
+    model_type = ModelType.Images
 
     logging.info(f"Registering model '{model_name}' with ModelType={model_type}")
 
