@@ -2,15 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Minimal scheduler connector leader implementation for testing.
+vLLM KV-connector leader wired to the Rust ConnectorLeader.
 
-This is a barebones implementation that returns minimal/no-op responses,
-used specifically for scheduler integration testing without actual KV transfer.
+The Python class adapts vLLM's KVConnectorBase_V1 scheduler-side hooks to
+the Rust `ConnectorLeader` in `lib/kvbm-connector/src/connector/leader/`,
+which owns the InstanceLeader, the OffloadEngine (G1→G2→G3), per-request
+RequestSlot state, and the cache-hit / forward-pass telemetry.
 
-For Phase 1, the leader:
-- Builds a KvbmRuntime with Nova (no etcd discovery)
-- Receives worker peer info via set_xfer_handshake_metadata()
-- Registers workers as Nova peers and tracks rank→instance_id mapping
+Bring-up flow:
+1. `__init__` builds a `KvbmRuntime` (Velo messenger + tokio) and a
+   `ConnectorLeader` over it.
+2. vLLM calls `set_xfer_handshake_metadata` with each worker's
+   `VeloPeerMetadata`; the leader registers them as Velo peers
+   (rank-ordered) and then `initialize_workers()` drives the async
+   layout-config gather and computes G2/G3 block counts from
+   `cache.host.num_blocks` / `cache.host.cache_size_gb`.
 """
 
 from __future__ import annotations
@@ -47,15 +53,21 @@ if TYPE_CHECKING:
 
 class SchedulerConnectorLeader:
     """
-    Minimal scheduler connector leader that returns no-op responses.
+    vLLM KV-connector leader backed by the Rust ConnectorLeader.
 
-    This connector is used for scheduler integration where no actual
-    KV transfer is needed. All methods return minimal valid responses.
+    Responsibilities on the scheduler side:
+    - Own per-request RequestSlots (created lazily in `get_num_new_matched_tokens`).
+    - Drive prefix-cache lookups against the G2/G3 tiers and surface the
+      matched-token count back to vLLM.
+    - Build per-iteration connector metadata from the vLLM SchedulerOutput,
+      including intra-pass onboard requests and the forward-pass completion
+      precondition handed to workers in `bind_connector_metadata`.
+    - Own Velo peer registration and trigger leader-driven worker init
+      (layout gather + G2/G3 block count resolution) on `set_xfer_handshake_metadata`.
+    - Track finished requests and gate block-freeing on offload completion.
 
-    In Phase 1, the leader:
-    - Builds a KvbmRuntime with Nova (no etcd discovery)
-    - Receives worker peer info via set_xfer_handshake_metadata()
-    - Registers workers as Nova peers and tracks rank→instance_id mapping
+    `KVBM_DECODE_OFFLOAD=true` enables opportunistic offload during decode
+    by re-syncing slot tokens from the live vLLM Request each iteration.
     """
 
     def __init__(
@@ -96,7 +108,7 @@ class SchedulerConnectorLeader:
 
         instance_id = self.runtime.instance_id()
         print(
-            f"SchedulerConnectorLeader initialized with Nova instance: {instance_id.hex()[:8]}...",
+            f"SchedulerConnectorLeader initialized with Velo instance: {instance_id.hex()[:8]}...",
             flush=True,
         )
 
@@ -114,9 +126,13 @@ class SchedulerConnectorLeader:
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ) -> None:
         """
-        No-op since we never have external tokens.
+        Forward the post-allocation state to the Rust slot.
 
-        This should never be called with num_external_tokens > 0.
+        vLLM hands us the device block IDs it just allocated for `request`
+        and any external (matched) token count from `get_num_new_matched_tokens`.
+        The Rust ConnectorLeader records the G1 destinations and — when
+        `num_external_tokens > 0` — queues the corresponding G2→G1 onboard
+        request that is emitted via the next connector metadata build.
         """
         block_ids = [int(block_id) for block_id in blocks.get_block_ids()[0]]
         self.leader.update_state_after_alloc(
@@ -150,10 +166,17 @@ class SchedulerConnectorLeader:
         _block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
-        Never delays block freeing.
+        Ask the Rust slot whether block freeing must be delayed.
+
+        The Rust side returns `Pending` while an offload from the
+        request's G1 blocks is still in flight — in that case we tell
+        vLLM to delay block freeing so the offload can finish reading
+        device memory. `Finished` / untracked requests return `False`.
 
         Returns:
-            (False, None): Don't delay block freeing, no KV transfer params
+            (delay, None): `delay=True` if the Rust slot is still
+            offloading; the second element is always None (KVBM does
+            not use vLLM's KV transfer params channel).
         """
         # we only use this to update the total tokens in the slot
         # its safe to remove it if it exists
@@ -183,17 +206,20 @@ class SchedulerConnectorLeader:
         self, metadata: dict[int, "KVConnectorHandshakeMetadata"]
     ) -> None:
         """
-        Register all worker Nova peers and trigger layout initialization.
+        Register all workers as Velo peers (rank-ordered) and drive init.
 
-        This is called by vLLM after aggregating handshake metadata from all
-        TP workers. We:
-        1. Register each worker as a Nova peer
-        2. Track the mapping from TP rank to instance_id
-        3. Determine G2/G3 layout configuration from vLLM config
-        4. Send configure_layouts RPC to each worker to trigger initialization
+        Called by vLLM once after all TP workers have exported their
+        `NovaPeerMetadata`. Each (instance_id, worker_address) pair is
+        registered with the Velo messenger and wrapped in a
+        `ConnectorWorkerClient` + `VeloWorkerClient` on the Rust side.
+        The final `initialize_workers()` call gathers SerializedLayout
+        from every worker, computes G2/G3 block counts from the runtime
+        config's `cache.host` / `cache.disk` blocks, and spins up the
+        OffloadEngine — failure here aborts bring-up.
 
-        Args:
-            metadata: Dictionary mapping tp_rank (int) to NovaPeerMetadata
+        Raises:
+            ValueError: if the TP ranks are not a consecutive 0..N-1 range,
+                or if any entry is not a `NovaPeerMetadata`.
         """
         # Create sorted list of (tp_rank, worker_meta) tuples sorted by tp_rank
         sorted_workers = sorted(metadata.items(), key=lambda x: x[0])

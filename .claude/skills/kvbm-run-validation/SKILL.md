@@ -1,192 +1,171 @@
 ---
 name: kvbm-run-validation
-description: Run KVBM accuracy/determinism validation tests (container or local)
+description: Run KVBM accuracy/determinism validation tests (container or local, auto-detects or asks)
 user-invocable: true
 disable-model-invocation: true
 ---
 
 # Run KVBM Validation Tests
 
-Run KVBM integration tests to validate accuracy, determinism, and correctness.
+Run KVBM integration tests to validate accuracy, determinism, and correctness. Supports two execution modes:
+
+- **local**: Runs pytest against the `.sandbox/` venv. Fast iteration loop. Requires `/dynamo:kvbm:sandbox-venv` + `/dynamo:kvbm:maturin-dev` first.
+- **container**: Runs pytest inside a dynamo vllm image (hermetic, mirrors CI). Requires a built image — see `/dynamo:kvbm:build`.
+
+This skill **detects or asks** which mode to use. It does not hardcode a default.
+
+For the faster three-shell local iteration flow (deps / server / eval — skip this wrapper), see `/dynamo:kvbm:decomposed-run`.
 
 ## Arguments
 
-`/dynamo:kvbm:run-validation [scope] [--model MODEL_ID] [--fast] [--image IMAGE] [--local]`
+`/dynamo:kvbm:run-validation [scope] [--spec SPEC_ID] [--fast] [--mode local|container] [--image IMAGE] [--enable-mla]`
 
 - **scope** (default: `quick`):
-  - `quick` — Pre-merge tests (`-m "kvbm and pre_merge"`). 1 GPU. ~5 min.
-  - `agg` — Aggregated determinism (`test_determinism_agg.py`). 1 GPU. ~15 min full / ~3 min fast.
-  - `disagg` — Disaggregated determinism (`test_determinism_disagg.py`). 2 GPUs. ~15 min.
-  - `full` — All KVBM tests (`-m "kvbm or kvbm_concurrency"`). 1-2 GPUs. ~30+ min.
-  - `<filename>` — Run a specific file (e.g., `test_chunked_prefill.py`).
-- **--model MODEL_ID** — Override default model via `KVBM_MODEL_ID` env var.
-- **--fast** — Use reduced iteration counts for `agg`/`disagg` scope.
-- **--image IMAGE** (default: `dynamo:latest-vllm`) — Container image to use. Ignored with `--local`.
-- **--local** — Run tests directly on host using `.sandbox` venv instead of a container. Requires NATS and etcd running on host.
+  - `quick` — Pre-merge marker (`-m "kvbm and pre_merge"`). 1 GPU. ~5 min.
+  - `agg-v1` — v1 determinism only (spec ids starting with `v1-`). ~15 min.
+  - `agg-v2-intra` — v2 intra-onboard determinism only. ~15 min.
+  - `agg-v2-inter` — v2 inter-onboard determinism only. ~15 min.
+  - `agg` — all v1 + v2 (intra + inter) determinism specs. ~45 min.
+  - `disagg` — `test_determinism_disagg.py`. 2 GPUs. ~15 min.
+  - `full` — All KVBM tests (`-m "kvbm or kvbm_concurrency"`). ~30+ min.
+  - `<filename>` — Run a specific file (e.g. `test_chunked_prefill.py`).
+- **--spec SPEC_ID** — Run a single parametrization by id (e.g. `v1-Qwen3-0.6B`). Maps to `-k $SPEC_ID`. Overrides scope marker filters.
+- **--fast** — `KVBM_MAX_ITERATIONS=2 KVBM_NUM_ITERATIONS=2 KVBM_REQUEST_DELAY=2`.
+- **--mode local|container** — Force a mode. When omitted, this skill probes and asks.
+- **--image IMAGE** (default: `dynamo:latest-vllm`) — Container image (container mode only).
+- **--enable-mla** — Set `KVBM_ENABLE_MLA=1` to unlock `DeepSeek-V2-Lite` specs.
 
-## Step 0: Determine Execution Mode
+## Step 0: Detect Or Ask Mode
 
-If `--local` is specified (or no `--image` is provided and `.sandbox` venv exists), use **local mode**. Otherwise use **container mode**.
-
-**Local mode prerequisites** — check these before proceeding:
-
-```bash
-# 1. Check .sandbox venv exists with kvbm installed
-.sandbox/bin/python -c "import kvbm; print(f'kvbm {kvbm.__version__}')"
-
-# 2. Check nats-server binary is available (tests start their own instances)
-which nats-server
-
-# 3. Check etcd binary is available (tests start their own instances)
-which etcd
-```
-
-**NATS/etcd port behavior:** Tests start their own NATS/etcd instances via pytest fixtures
-using dynamically allocated ports (4223+/2380+). This is safe alongside host NATS/etcd
-running on default ports (4222/2379).
-
-If `.sandbox` doesn't exist or kvbm isn't installed, set it up:
+**Always run the probe unless `--mode` was passed explicitly.**
 
 ```bash
-uv venv .sandbox --clear
-VIRTUAL_ENV=.sandbox PATH=.sandbox/bin:$PATH uv pip install \
-    -r tests/kvbm_integration/requirements.txt \
-    lib/bindings/kvbm/target/wheels/kvbm-*.whl
+# Local mode viable?
+LOCAL_OK=no
+if [ -x .sandbox/bin/python ] && .sandbox/bin/python -c "import kvbm" 2>/dev/null; then
+    LOCAL_OK=yes
+fi
+
+# Container mode viable?
+CONTAINER_OK=no
+if command -v docker >/dev/null 2>&1; then
+    if docker image inspect "${IMAGE:-dynamo:latest-vllm}" >/dev/null 2>&1; then
+        CONTAINER_OK=yes
+    fi
+fi
 ```
 
-If no kvbm wheel exists yet, build one first:
+Decision table:
+
+| LOCAL_OK | CONTAINER_OK | Action |
+|---|---|---|
+| yes | yes | **Ask** the user which mode to use. Show both. |
+| yes | no | Use local. Announce: "local mode selected (no usable container image)". |
+| no | yes | Use container. Announce: "container mode selected (no `.sandbox/` venv)". |
+| no | no | **Stop**. Tell the user: `run /dynamo:kvbm:sandbox-venv + /dynamo:kvbm:maturin-dev for local, or /dynamo:kvbm:build for container, then retry`. |
+
+If `--mode local` or `--mode container` is passed, skip the probe but still verify the chosen mode's prerequisite and bail with a clear pointer if missing.
+
+## Step 1: Map Scope To Pytest Args
+
+Spec ids are read from `_CACHE_RESET_SPECS` in `tests/kvbm_integration/test_determinism_agg.py`. Authoritative list via:
 
 ```bash
-cd lib/bindings/kvbm && maturin build --release --out target/wheels && cd -
+.sandbox/bin/python - <<'PY'
+from tests.kvbm_integration.test_determinism_agg import _CACHE_RESET_SPECS
+for s in _CACHE_RESET_SPECS: print(s.id)
+PY
 ```
-
-**vllm install:** Most KVBM tests require vllm. Read the pinned version from `pyproject.toml`
-(under `[project.optional-dependencies] vllm`) and install that exact version:
-
-```bash
-# Check pyproject.toml for the pinned version, e.g. vllm==0.19.0
-grep 'vllm\[' pyproject.toml
-# Install the matching version
-VIRTUAL_ENV=.sandbox PATH=.sandbox/bin:$PATH uv pip install "vllm[flashinfer]==<pinned_version>"
-```
-
-Always verify the installed version matches the Dynamo pin — a version mismatch will cause
-subtle test failures. Tests that require vllm will skip gracefully if it's not installed.
-
-## Step 1: Parse Arguments and Determine Test Scope
-
-Map the scope to the pytest command:
 
 | Scope | Pytest args | GPUs | Est. time |
-|-------|-------------|------|-----------|
+|---|---|---|---|
 | `quick` | `tests/kvbm_integration/ --continue-on-collection-errors -m "kvbm and pre_merge"` | 1 | ~5 min |
-| `agg` | `tests/kvbm_integration/test_determinism_agg.py` | 1 | 15 min / 3 min fast |
+| `agg-v1` | `tests/kvbm_integration/test_determinism_agg.py -k "v1-"` | 1 | ~15 min (8B) / ~3 min (0.6B) |
+| `agg-v2-intra` | `tests/kvbm_integration/test_determinism_agg.py -k "v2-" -k "intra"` | 1 | ~15 min / ~3 min |
+| `agg-v2-inter` | `tests/kvbm_integration/test_determinism_agg.py -k "v2-" -k "inter"` | 1 | ~15 min / ~3 min |
+| `agg` | `tests/kvbm_integration/test_determinism_agg.py` | 1 | ~45 min / ~10 min |
 | `disagg` | `tests/kvbm_integration/test_determinism_disagg.py` | 2 | ~15 min |
 | `full` | `tests/kvbm_integration/ --continue-on-collection-errors -m "kvbm or kvbm_concurrency"` | 1-2 | ~30+ min |
 | `<file>` | `tests/kvbm_integration/<file>` | varies | varies |
 
-### What each scope runs
+If `--spec SPEC_ID` was provided, use `-k $SPEC_ID` instead of the scope filter.
 
-**quick** (pre_merge marker):
-- `test_kvbm.py`: test_offload_and_onboard, test_gpu_cache_eviction, test_onboarding_determinism
-- `test_chunked_prefill.py`: chunked prefill offload validation
-- `test_kvbm_vllm_integration.py`: vLLM interface assumption tests (gpu_0)
-- `test_consolidator_router_e2e.py`: KV event consolidator + router E2E
+**Gotcha**: spec ids containing `Qwen3-0.6B` only exist when `KVBM_MODEL_ID=Qwen/Qwen3-0.6B` is set. The default first model is `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`.
 
-**agg** (test_determinism_agg.py):
-- `test_determinism_agg_with_cache_reset`: Determinism across offload→reset→onboard (DeepSeek-R1-8B, DeepSeek-V2-Lite)
-- `test_concurrent_determinism_under_load`: IFEval prompts under concurrent load (needs `kvbm_concurrency` marker)
+## Step 2: Show Plan And Confirm
 
-**disagg** (test_determinism_disagg.py):
-- Same as agg but with disaggregated prefill-decode on 2 GPUs. Threshold: >=95% match.
-
-## Step 2: Show Plan and Confirm
-
-Present to the user:
-
-**Local mode:**
 ```
 KVBM Validation Plan
 ────────────────────
-Mode:      local (.sandbox venv)
+Mode:      <local|container>
 Scope:     <scope>
+Spec:      <spec-id or "scope filter">
+Model:     <KVBM_MODEL_ID or "per-spec default">
+MLA gate:  <enabled|disabled>
+Fast mode: <yes|no>
 GPUs:      <count>
 Est. time: <estimate>
-Model:     <override or "default per test">
-Fast mode: <yes/no>
+[if container] Image: <image>
 
 Command:
-  RUST_BACKTRACE=1 .sandbox/bin/python -m pytest <pytest_args> -v --tb=short -s
+  <full command preview>
 ```
 
-**Container mode:**
-```
-KVBM Validation Plan
-────────────────────
-Mode:      container
-Scope:     <scope>
-Image:     <image>
-GPUs:      <count>
-Est. time: <estimate>
-Model:     <override or "default per test">
-Fast mode: <yes/no>
+For `agg` without `--fast`, suggest `--fast` and offer the decomposed flow:
 
-Command:
-  docker run --gpus all --rm --shm-size=10G --ulimit memlock=-1 \
-    --ulimit stack=67108864 --ulimit nofile=65536:65536 \
-    -e RUST_BACKTRACE=1 -e HF_TOKEN \
-    -v $(pwd):/workspace --cap-add CAP_SYS_PTRACE --ipc host \
-    -w /workspace <image> \
-    timeout <timeout> pytest <pytest_args> -v --tb=short -s
-```
-
-Note: Do NOT use `--network host` (conflicts with host NATS/etcd) or `--runtime nvidia`
-(not universally available; `--gpus all` is sufficient). Do NOT use `-it` flag when running
-from a non-interactive shell.
-
-For `agg` scope without `--fast`, suggest it:
-> Tip: Add `--fast` to reduce agg test time from ~15 min to ~3 min (uses KVBM_MAX_ITERATIONS=2).
+> Tip: `--fast` drops this to <5 min. For the three-shell iteration loop (iterate eval without re-spawning vllm), use `/dynamo:kvbm:decomposed-run <spec-id> --fast` instead.
 
 Confirm before proceeding.
 
 ## Step 3: Build Environment Variables
 
-Always set `RUST_BACKTRACE=1`.
-
-If `--model` provided: set `KVBM_MODEL_ID=<model>`.
-
-If `--fast` (or user accepts fast mode suggestion):
+Always:
 ```
+RUST_BACKTRACE=1
+```
+
+Conditional:
+```
+# --fast
 KVBM_MAX_ITERATIONS=2
 KVBM_NUM_ITERATIONS=2
 KVBM_REQUEST_DELAY=2
+
+# --enable-mla
+KVBM_ENABLE_MLA=1
+
+# KVBM_MODEL_ID — if the caller wants a Qwen spec id, this MUST be set
+KVBM_MODEL_ID=Qwen/Qwen3-0.6B
+```
+
+On GB10, the phase-3 reference knobs for Qwen3-0.6B:
+```
+KVBM_CPU_BLOCKS=2000
+KVBM_GPU_BLOCKS=512
+KVBM_GPU_MEMORY_UTILIZATION=0.5
+KVBM_SERVER_START_TIMEOUT=600
 ```
 
 ## Step 4: Run Tests
 
-Timeout values:
-- `quick`: 600 (10 min)
-- `agg` fast: 600 (10 min)
-- `agg` full: 1800 (30 min)
-- `disagg`: 1800 (30 min)
-- `full`: 3600 (60 min)
-- specific file: 900 (15 min)
+Timeouts:
+- `quick`: 600s
+- `agg-*` fast: 600s
+- `agg-*` full: 1800s (more for 8B specs — leave the per-test timeout at the computed value in `test_determinism_agg.py`)
+- `disagg`: 1800s
+- `full`: 3600s
+- single file/spec: 900s
 
 ### Local mode
 
-Run pytest directly using the `.sandbox` venv. Prepend env vars inline.
-
 ```bash
-RUST_BACKTRACE=1 <extra_env_vars> \
+RUST_BACKTRACE=1 <env_vars> \
     timeout <timeout> .sandbox/bin/python -m pytest <pytest_args> -v --tb=short -s
 ```
 
-Tests start their own NATS/etcd via fixtures using dynamic ports (safe alongside host
-NATS/etcd on default ports).
+Tests reuse host NATS/etcd on defaults (4222 / 2379) if reachable (aligned with `conftest.py:runtime_services` in phase 3). Otherwise fixtures spawn them.
 
 ### Container mode
-
-Run via docker with `--gpus all`. Do NOT use `--runtime nvidia`, `--network host`, or `-it`.
 
 ```bash
 docker run --gpus all --rm \
@@ -207,51 +186,69 @@ docker run --gpus all --rm \
     bash -c "pip install pytest-benchmark pytest-asyncio -q && timeout <timeout> pytest <pytest_args> -v --tb=short -s"
 ```
 
-Note: The runtime image is missing some test deps (`pytest-benchmark`, `pytest-asyncio`),
-so install them at container startup. Tests manage their own NATS/etcd servers via the
-`runtime_services` fixture when running in the container.
+Note: do NOT use `--network host` (conflicts with host NATS/etcd), `--runtime nvidia` (not portable), or `-it` (hangs in non-interactive shells). The runtime image is missing `pytest-benchmark` / `pytest-asyncio`, so install them at container startup.
 
 ## Step 5: Report Results
-
-Parse the pytest output and present:
 
 ```
 KVBM Validation Results
 ───────────────────────
-Passed:  X
-Failed:  Y
-Skipped: Z
-Errors:  W
-Duration: Nm Ns
+Mode:      <local|container>
+Passed:    X
+Failed:    Y
+Skipped:   Z
+Errors:    W
+Duration:  Nm Ns
 ```
 
-If failures occurred, show the `--tb=short` output for each and suggest next steps:
-- Determinism failures: "Check KVBM offload/onboard metrics. Re-run with `-e DYN_LOG=debug` for detail."
-- Server startup failures: "Check GPU memory with `nvidia-smi`. Try increasing `KVBM_SERVER_START_TIMEOUT`."
-- Import errors: "Verify the container image has kvbm and vllm installed: `docker run --rm <image> python -c 'import kvbm; import vllm'`"
+If failures, show `--tb=short` output and point at `/dynamo:kvbm:diagnose`:
+
+```
+For per-test log analysis and live /metrics inspection:
+  /dynamo:kvbm:diagnose
+```
+
+Stack health quick-check patterns (grep the newest per-test log under `/tmp/dynamo_tests/`):
+- `KvConnectorWorker initialized` — worker bootstrapped
+- `Auto-detected device layout` — tensor layout OK
+- `ConnectorLeader initialized with onboard mode onboard_mode=Intra|Inter` — v2 leader + mode
+- `Application startup complete` — vllm ready
+- `kvbm_offload_blocks_d2h > 0` in `/metrics` — offload active
 
 ## Reference: Test Files
 
-| File | Tests | Module markers | GPUs |
-|------|-------|----------------|------|
+| File | Tests | Markers | GPUs |
+|---|---|---|---|
 | `test_kvbm.py` | offload_and_onboard, gpu_cache_eviction, onboarding_determinism | kvbm, e2e, gpu_1, vllm, pre_merge | 1 |
 | `test_chunked_prefill.py` | chunked prefill offload | kvbm, e2e, gpu_1, vllm, pre_merge | 1 |
 | `test_kvbm_vllm_integration.py` | vLLM interface assumptions | kvbm, integration, gpu_0, vllm, nightly, pre_merge | 0 |
 | `test_consolidator_router_e2e.py` | consolidator + router E2E | kvbm, e2e, slow, gpu_1, pre_merge | 1 |
-| `test_determinism_agg.py` | cache_reset determinism, concurrent load | e2e, slow, gpu_1, nightly (methods add kvbm/kvbm_concurrency) | 1 |
-| `test_determinism_disagg.py` | disagg determinism with cache reset | kvbm, vllm, trtllm, e2e, slow, gpu_2, nightly | 2 |
+| `test_determinism_agg.py` | cache_reset, concurrent load | e2e, slow, gpu_1, nightly | 1 |
+| `test_determinism_disagg.py` | disagg determinism | kvbm, vllm, trtllm, e2e, slow, gpu_2, nightly | 2 |
 | `test_cuda_graph.py` | CUDA graph (TRT-LLM only) | kvbm, trtllm, nightly, gpu_1 | 1 |
 
 ## Reference: Key Environment Variables
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `KVBM_MODEL_ID` | per-test | Override model |
+|---|---|---|
+| `KVBM_MODEL_ID` | DeepSeek-R1-Distill-Llama-8B (1st spec only) | Override the first `_MODEL_CONFIGS` entry; required for Qwen spec ids |
 | `KVBM_CPU_BLOCKS` | 10000 | CPU cache block count |
 | `KVBM_GPU_BLOCKS` | 2048 | GPU cache block count |
-| `KVBM_MAX_ITERATIONS` | 100 | Max iterations (determinism tests) |
+| `KVBM_MAX_ITERATIONS` | 100 | Max iterations (cache-reset test) |
 | `KVBM_NUM_ITERATIONS` | 15 | Number of iterations (concurrent test) |
 | `KVBM_REQUEST_DELAY` | 30 | Delay between iterations (seconds) |
-| `KVBM_MAX_TOKENS` | per-test | Max tokens to generate |
-| `KVBM_SEED` | per-test | Random seed |
-| `KVBM_SERVER_START_TIMEOUT` | 600 | Server startup timeout (seconds) |
+| `KVBM_ENABLE_MLA` | unset | Unlock DeepSeek-V2-Lite specs |
+| `KVBM_SERVER_START_TIMEOUT` | 600 | Server startup timeout |
+| `KVBM_GPU_MEMORY_UTILIZATION` | per-spec | vllm memory fraction |
+| `KVBM_EXTERNAL_BASE_URL` | unset | External-attach mode (set by `run_server.sh`) |
+| `KVBM_EXTERNAL_METRICS_PORT` | unset | External-attach mode |
+| `KVBM_SPEC_ID` | unset | Spec id handshake for decomposed flow |
+
+## Related Skills
+
+- `/dynamo:kvbm:sandbox-venv` — set up `.sandbox/` (local mode prerequisite)
+- `/dynamo:kvbm:maturin-dev` — rebuild kvbm-py3 (local mode prerequisite)
+- `/dynamo:kvbm:decomposed-run` — three-shell iteration loop (bypasses this wrapper)
+- `/dynamo:kvbm:diagnose` — read-only triage of failed runs
+- `/dynamo:kvbm:build` — build the container image (container mode prerequisite)
+- `/dynamo:kvbm:rebuild-lockfiles` — regenerate all Cargo.lock files

@@ -2,13 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Minimal scheduler connector worker implementation for testing.
+vLLM KV-connector worker wired to the Rust ConnectorWorker.
 
-This is a barebones implementation that provides no-op responses,
-used specifically for scheduler integration testing without actual KV transfer.
+The Python class adapts vLLM's KVConnectorBase_V1 worker-side hooks to
+the Rust `ConnectorWorker` in `lib/kvbm-connector/src/connector/worker/`,
+which performs the four runtime actions documented at the top of that
+crate: intra-pass onboard (G2→G1 per-layer H2D with CudaEvent sync on
+the torch compute stream), inter-pass onboard driven by the leader via
+the VeloWorkerService/DirectWorker, forward-pass completion notification
+back to the leader, and direct layer-wise offload.
 
-For Phase 1, the worker instantiates a KvbmRuntime with Nova and returns
-peer information via get_handshake_metadata() for the leader to connect.
+On worker bring-up the Python side builds a `KvbmRuntime` (Velo messenger
++ tokio) and a `ConnectorWorker` over it, exports its Velo peer info as
+`NovaPeerMetadata` for the leader's `set_xfer_handshake_metadata`, and
+defers NIXL registration until `register_kv_caches` — the actual NIXL
+bind happens later, when the leader's `initialize_workers()` RPC drives
+`configure_layouts` with final G2/G3 block counts.
 """
 
 from __future__ import annotations
@@ -42,27 +51,46 @@ if TYPE_CHECKING:
 @dataclass
 class NovaPeerMetadata(KVConnectorHandshakeMetadata):
     """
-    Nova peer info for handshake between worker and leader.
+    Velo peer info exported by a worker for the leader handshake.
 
-    This metadata is returned by get_handshake_metadata() and contains
-    the serialized Nova PeerInfo needed for the leader to register this
-    worker as a peer.
+    The two fields map directly to `velo::PeerInfo { instance_id, worker_address }`
+    on the Rust side. The leader consumes these in `register_worker` and
+    registers the worker with the Velo messenger so subsequent RPCs
+    (layout config, connector metadata, offload acks) can be routed.
+
+    Attributes:
+        instance_id: 16-byte UUID identifying the worker's Velo instance.
+        worker_address: JSON-serialized `velo::WorkerAddress` of the worker peer.
+
+    Note: the class name is a legacy alias from the Nova→Velo rename and
+    is preserved so vLLM's registered KVConnectorHandshakeMetadata subclass
+    stays stable; the payload is Velo.
     """
 
     instance_id: bytes  # 16-byte UUID
-    worker_address: bytes  # JSON-serialized WorkerAddress
+    worker_address: bytes  # JSON-serialized velo::WorkerAddress
 
 
 class SchedulerConnectorWorker:
     """
-    Minimal scheduler connector worker that provides no-op implementations.
+    vLLM KV-connector worker backed by the Rust ConnectorWorker.
 
-    This connector is used for scheduler integration where no actual
-    KV transfer is needed. All methods are no-ops or return minimal responses.
-
-    In Phase 1, the worker:
-    - Builds a KvbmRuntime with Nova (no etcd discovery)
-    - Returns Nova peer info via get_handshake_metadata()
+    Responsibilities on the worker side:
+    - Build a `KvbmRuntime` + `ConnectorWorker` and export `NovaPeerMetadata`
+      for the leader handshake.
+    - Register vLLM's KV cache tensors with NIXL/UCX (deferred — the actual
+      NIXL bind happens when the leader's init flow resolves G2/G3 block counts).
+    - Drive the per-forward-pass dance on every layer:
+        * `start_load_kv` → if the bound metadata carries an intra-pass
+          onboard request, launch the per-layer H2D on a dedicated stream
+          and record a CudaEvent per layer.
+        * `wait_for_layer_load(layer_i, torch_stream)` → insert a
+          `cuStreamWaitEvent` on the torch compute stream so attention for
+          that layer cannot start before its KV slots are populated.
+        * `save_kv_layer(layer_i, torch_stream)` → on the final layer,
+          arm the forward-pass completion event the leader is waiting on.
+    - Surface finished request IDs and failed-onboarding block IDs back
+      to vLLM for state cleanup.
     """
 
     def __init__(
@@ -92,7 +120,7 @@ class SchedulerConnectorWorker:
         self.layer_onboarding_events = {}
         self.layer_offloading_events = {}
 
-        # Build KvbmRuntime with Nova
+        # Build KvbmRuntime (Velo messenger + tokio)
         self.runtime = KvbmRuntime.build_worker(self.kvbm_override_config)
 
         # Create the Rust ConnectorWorker that handles NIXL registration
@@ -111,7 +139,7 @@ class SchedulerConnectorWorker:
         self._last_layer_name: Optional[str] = None
 
         print(
-            f"SchedulerConnectorWorker initialized with Nova instance: {instance_id.hex()[:8]}...",
+            f"SchedulerConnectorWorker initialized with Velo instance: {instance_id.hex()[:8]}...",
             flush=True,
         )
 
@@ -209,7 +237,11 @@ class SchedulerConnectorWorker:
 
     def clear_connector_metadata(self) -> None:
         """
-        Clear connector metadata - no-op.
+        Release the per-iteration connector metadata held by the Rust worker.
+
+        Called after every forward pass. Drops the currently-bound metadata
+        and resets the intra-pass onboard / forward-pass-completion flags
+        so the next `bind_connector_metadata` starts from a clean state.
         """
         self.worker.clear_connector_metadata()
 
@@ -229,11 +261,15 @@ class SchedulerConnectorWorker:
         **kwargs,
     ) -> None:
         """
-        Save KV layer - always callable, returns early if no action needed.
+        Notify the Rust worker that vLLM just finished attending `layer_name`.
 
-        On the last layer, if there's a pending forward pass event,
-        we record a CUDA event on the current stream and spawn an async
-        task to wait for it before triggering the Nova forward pass event.
+        Always callable — the Rust side returns early unless this layer is
+        the last one and the bound metadata carries a forward-pass completion
+        event. When both conditions hold, the worker records a CudaEvent on
+        the current torch stream and spawns an async task that waits on it
+        and then fires the Velo active message back to the leader — that
+        message is the precondition the leader's offload engine is waiting
+        on before reading from the freshly-written G1 blocks.
         """
         layer_index = self.layer_name_to_index[layer_name]
 
@@ -264,7 +300,14 @@ class SchedulerConnectorWorker:
         self.worker.wait_for_layer_load(layer_index, stream_handle)
 
     def wait_for_save(self) -> None:
-        """No-op - no async saving."""
+        """
+        Intentional Python-side no-op.
+
+        The forward-pass completion event armed in `save_kv_layer` is
+        awaited asynchronously on the Rust side via the Velo messenger,
+        so there is nothing for vLLM's synchronous `wait_for_save` hook
+        to block on here.
+        """
         pass
 
     def get_finished(
@@ -291,10 +334,12 @@ class SchedulerConnectorWorker:
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata:
         """
-        Return Nova peer info for leader to connect.
+        Return this worker's Velo peer info for the leader handshake.
 
         Returns:
-            NovaPeerMetadata containing instance_id and worker_address bytes
-            that the leader will use to register this worker as a Nova peer.
+            `NovaPeerMetadata` carrying the worker's Velo `instance_id`
+            (16-byte UUID) and JSON-serialized `velo::WorkerAddress`. The
+            leader consumes these in `register_worker` to register us with
+            its Velo messenger.
         """
         return self._handshake_metadata
