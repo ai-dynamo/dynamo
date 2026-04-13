@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
@@ -47,10 +46,11 @@ def get_imported_weights_bytes() -> int:
 # =============================================================================
 # MX (ModelExpress) Integration — Optional P2P weight transfer
 #
-# Uses the refactored modelexpress primitives directly:
-#   LoadContext      — state bag (MxClient, NixlTransferManager, identity, ...)
-#   register_tensors — collect model tensors + NIXL register
-#   publish_metadata — publish to MX server + start heartbeat
+# Write mode: delegates to LoadStrategyChain which handles weight loading
+#   (RDMA P2P -> ModelStreamer -> GDS -> disk), post-processing, NIXL
+#   registration, and metadata publishing.
+# Read mode: uses register_tensors + publish_metadata directly to make
+#   GMS-imported tensors available as a P2P source.
 # =============================================================================
 
 _mx_ctx = None  # type: LoadContext | None
@@ -123,108 +123,6 @@ def get_mx_ctx(
         device_id,
     )
     return _mx_ctx
-
-
-def _mx_find_source(ctx):
-    """Find a READY RDMA source for this rank.
-
-    Returns (source_worker, mx_source_id) or None.
-    """
-    import random
-
-    from modelexpress import p2p_pb2
-
-    try:
-        resp = ctx.mx_client.list_sources(
-            identity=ctx.identity,
-            status_filter=p2p_pb2.SOURCE_STATUS_READY,
-        )
-    except Exception as e:
-        logger.warning("[GMS-MX] Error listing sources: %s", e)
-        return None
-
-    if not resp.instances:
-        return None
-
-    candidates = [i for i in resp.instances if i.worker_rank == ctx.global_rank]
-    random.shuffle(candidates)
-
-    for inst in candidates[:3]:
-        try:
-            meta = ctx.mx_client.get_metadata(inst.mx_source_id, inst.worker_id)
-        except Exception as e:
-            logger.warning("[GMS-MX] Failed to fetch metadata: %s", e)
-            continue
-        if meta.found and (meta.worker.tensors or meta.worker.worker_grpc_endpoint):
-            logger.info(
-                "[GMS-MX] Found source (mx_source_id=%s, worker=%s)",
-                inst.mx_source_id,
-                inst.worker_id,
-            )
-            return meta.worker, inst.mx_source_id
-
-    return None
-
-
-def _mx_receive(ctx, source_worker):
-    """RDMA receive from source. Called after register_tensors."""
-    from modelexpress.load_strategy import SourceTransferError
-    from modelexpress.types import TensorDescriptor
-
-    is_p2p = bool(source_worker.worker_grpc_endpoint)
-    remote_agent_name = None
-
-    if is_p2p:
-        from modelexpress.worker_server import fetch_tensor_manifest
-
-        tensor_protos = fetch_tensor_manifest(
-            endpoint=source_worker.worker_grpc_endpoint,
-            mx_source_id=source_worker.mx_source_id
-            if hasattr(source_worker, "mx_source_id")
-            else "",
-        )
-        source_tensors = [
-            TensorDescriptor(
-                name=t.name,
-                addr=t.addr,
-                size=t.size,
-                device_id=t.device_id,
-                dtype=t.dtype,
-            )
-            for t in tensor_protos
-        ]
-        host, port_str = source_worker.metadata_endpoint.rsplit(":", 1)
-        ctx.nixl_manager.fetch_remote_and_wait(
-            remote_agent_name=source_worker.agent_name,
-            ip=host,
-            port=int(port_str),
-        )
-        remote_agent_name = source_worker.agent_name
-    else:
-        source_tensors = [
-            TensorDescriptor(
-                name=t.name,
-                addr=t.addr,
-                size=t.size,
-                device_id=t.device_id,
-                dtype=t.dtype,
-            )
-            for t in source_worker.tensors
-        ]
-
-    coalesce = os.environ.get("MX_CONTIGUOUS_REG", "0") == "1"
-    try:
-        ctx.nixl_manager.receive_from_source(
-            source_metadata=source_worker.nixl_metadata,
-            source_tensors=source_tensors,
-            timeout_seconds=300.0,
-            coalesce_transfers=coalesce,
-            remote_agent_name=remote_agent_name,
-        )
-    except Exception as e:
-        raise SourceTransferError(f"RDMA receive failed: {e}") from e
-
-    torch.cuda.synchronize()
 
 
 def register_gms_loader(load_format: str = "gms") -> None:
@@ -333,9 +231,9 @@ def _load_write_mode(
     Initializes model using GMS memory pool, loads weights from disk,
     registers tensors with GMS, and commits for cross-process sharing.
 
-    When MX is active, detects whether a P2P source exists:
-    - Source (no existing source): loads from disk, registers with NIXL
-    - Target (source found): dummy-loads for tensor layout, receives via RDMA
+    When MX is active, uses LoadStrategyChain for automatic weight source
+    detection (RDMA P2P -> ModelStreamer -> GDS -> disk) with fallback.
+    The chain also handles NIXL registration and metadata publishing.
     """
     global _last_imported_weights_bytes
 
@@ -347,15 +245,6 @@ def _load_write_mode(
 
     device_id = target_device.index
     mx_ctx = get_mx_ctx(vllm_config, model_config, device_id)
-    source_info = _mx_find_source(mx_ctx) if mx_ctx is not None else None
-
-    loader = default_loader
-    if source_info is not None:
-        from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-
-        loader = DummyModelLoader(
-            replace(default_loader.load_config, load_format="dummy")
-        )
 
     # Allocate model tensors using GMS memory pool
     with set_default_torch_dtype(model_config.dtype):
@@ -365,25 +254,17 @@ def _load_write_mode(
                     vllm_config=vllm_config, model_config=model_config
                 )
 
-            loader.load_weights(model, model_config)
-            process_weights_after_loading(model, model_config, target_device)
-
-            # MX: register with NIXL, optionally receive via RDMA, publish
             if mx_ctx is not None:
-                from modelexpress.load_strategy import (
-                    publish_metadata,
-                    register_tensors,
-                )
+                # Full MX strategy chain: RDMA -> ModelStreamer -> GDS -> Default
+                # Chain handles weight loading, post-processing, NIXL registration,
+                # and metadata publishing.
+                from modelexpress.load_strategy import LoadStrategyChain
 
-                register_tensors(model, mx_ctx)
-                if source_info is not None:
-                    # Target: overwrite dummy weights via RDMA (failure is fatal)
-                    source_worker, _ = source_info
-                    _mx_receive(mx_ctx, source_worker)
-                try:
-                    publish_metadata(mx_ctx)
-                except Exception as e:
-                    logger.warning("[GMS-MX] Publish failed: %s", e)
+                LoadStrategyChain.run(model, mx_ctx)
+            else:
+                # No MX: load from disk (existing behavior)
+                default_loader.load_weights(model, model_config)
+                process_weights_after_loading(model, model_config, target_device)
 
             torch.cuda.empty_cache()
 

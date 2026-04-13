@@ -235,20 +235,16 @@ class GMSWorker(Worker):
         """
         free_bytes_before = torch.cuda.mem_get_info()[0]
 
-        # Deregister MX before GMS unmap (CUDA handles still valid)
+        # Unpublish MX metadata before GMS unmap (CUDA handles still valid).
+        # Stops heartbeat + worker gRPC server, marks STALE on MX server.
         mx_ctx = get_mx_ctx()
         if mx_ctx is not None:
             try:
-                from modelexpress.metadata import _heartbeat_threads, _worker_servers
+                from modelexpress.load_strategy import unpublish_metadata
 
-                hb = _heartbeat_threads.pop(mx_ctx.global_rank, None)
-                if hb is not None:
-                    hb.stop()  # marks STALE on MX server
-                ws = _worker_servers.pop(mx_ctx.device_id, None)
-                if ws is not None:
-                    ws.stop()
+                unpublish_metadata(mx_ctx)
             except Exception as e:
-                logger.warning("[GMS-MX] Deregister failed during sleep: %s", e)
+                logger.warning("[GMS-MX] Unpublish failed during sleep: %s", e)
 
         # Unmap GMS weights: synchronize + unmap all VAs + disconnect
         weights_manager = get_gms_client_memory_manager("weights")
@@ -329,20 +325,13 @@ class GMSWorker(Worker):
             mx_ctx = get_mx_ctx()
             if mx_ctx is not None:
                 try:
-                    from modelexpress.metadata import publish_metadata_and_ready
-                    from modelexpress.tensor_utils import collect_module_tensors
-
-                    mx_ctx.tensors = collect_module_tensors(self.model_runner.model)
-                    mx_ctx.nixl_manager.register_tensors(mx_ctx.tensors)
-                    publish_metadata_and_ready(
-                        mx_ctx.mx_client,
-                        mx_ctx.nixl_manager,
-                        mx_ctx.tensors,
-                        mx_ctx.global_rank,
-                        mx_ctx.device_id,
-                        mx_ctx.identity,
-                        mx_ctx.worker_id,
+                    from modelexpress.load_strategy import (
+                        publish_metadata,
+                        register_tensors,
                     )
+
+                    register_tensors(self.model_runner.model, mx_ctx)
+                    publish_metadata(mx_ctx)
                 except Exception as e:
                     logger.warning("[GMS-MX] Re-registration failed during wake: %s", e)
 
