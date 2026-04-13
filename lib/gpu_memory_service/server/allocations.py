@@ -132,12 +132,13 @@ class GMSAllocationManager:
             )
             await asyncio.sleep(self._allocation_retry_interval)
 
+        export_fd = int(cumem_export_to_shareable_handle(int(handle)))
         info = AllocationInfo(
             allocation_id=str(uuid4()),
             size=size,
             aligned_size=aligned_size,
             handle=int(handle),
-            export_fd=int(cumem_export_to_shareable_handle(int(handle))),
+            export_fd=export_fd,
             tag=tag,
             layout_slot=self._next_layout_slot,
             created_at=time.time(),
@@ -155,7 +156,8 @@ class GMSAllocationManager:
         return info
 
     def export_allocation(self, allocation_id: str) -> int:
-        return os.dup(self.get_allocation(allocation_id).export_fd)
+        info = self.get_allocation(allocation_id)
+        return os.dup(info.export_fd)
 
     def free_allocation(self, allocation_id: str) -> bool:
         info = self._allocations.get(allocation_id)
