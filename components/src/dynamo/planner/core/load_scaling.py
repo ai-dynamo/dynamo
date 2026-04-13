@@ -209,8 +209,8 @@ class LoadScalingMixin:
         if easy:
             desired = self._agg_easy_decision(fpm_stats, num_workers)
             # For agg easy mode, we directly get a single decision
+            # _agg_easy_decision already sets _diag_load_reason before returning None
             if desired is None:
-                self._diag_load_reason = "no_change"
                 return None
 
             original_desired = desired

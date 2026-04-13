@@ -135,6 +135,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         decode_fpms: Optional[list[ForwardPassMetrics]] = None,
         agg_fpms: Optional[list[ForwardPassMetrics]] = None,
     ) -> None:
+        if self._is_easy:
+            logger.debug("Skipping benchmark FPM loading in easy mode")
+            return
         if agg_fpms and self._is_agg:
             self._agg_regression.load_benchmark_fpms(agg_fpms)
             logger.info(f"Bootstrapped agg regression with {len(agg_fpms)} FPMs")
@@ -148,6 +151,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             logger.info(f"Bootstrapped decode regression with {len(decode_fpms)} FPMs")
 
     def warm_load_predictors(self, observations: list[TrafficObservation]) -> None:
+        if self._is_easy:
+            logger.debug("Skipping load predictor warmup in easy mode")
+            return
         for obs in observations:
             self._num_req_predictor.add_data_point(obs.num_req)
             self._isl_predictor.add_data_point(obs.isl)
