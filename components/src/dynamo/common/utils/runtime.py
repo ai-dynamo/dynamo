@@ -66,7 +66,10 @@ def create_runtime(
 
     os.environ["DYN_EVENT_PLANE"] = event_plane
 
-    enable_nats = request_plane == "nats" or (event_plane == "nats" and use_kv_events)
+    fpm_enabled = bool(os.environ.get("DYN_FORWARDPASS_METRIC_PORT"))
+    enable_nats = request_plane == "nats" or (
+        event_plane == "nats" and (use_kv_events or fpm_enabled)
+    )
 
     runtime = DistributedRuntime(loop, discovery_backend, request_plane, enable_nats)
 
