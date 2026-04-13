@@ -392,10 +392,11 @@ pub fn create_fc_layout_with_config(
         .with_config(config)
         .fully_contiguous();
 
+    let backend = DeviceBackend::detect_backend().expect("No GPU backend available");
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0).unwrap())).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(DeviceBackend::Cuda, device_id).unwrap())).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(backend, 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(backend, device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }
@@ -419,10 +420,11 @@ pub fn create_lw_layout_with_config(
         .with_config(config)
         .layer_separate(BlockDimension::BlockIsFirstDim);
 
+    let backend = DeviceBackend::detect_backend().expect("No GPU backend available");
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(DeviceBackend::Cuda, 0).unwrap())).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(DeviceBackend::Cuda, device_id).unwrap())).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(backend, 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(backend, device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }
