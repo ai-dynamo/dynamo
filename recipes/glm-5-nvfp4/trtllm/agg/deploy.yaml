@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glm5-nvfp4-config
+data:
+  config.yaml: |
+    tensor_parallel_size: 8
+    moe_expert_parallel_size: 8
+    max_batch_size: 128
+    max_num_tokens: 8192
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 128
+    enable_attention_dp: false
+    enable_chunked_prefill: true
+    kv_cache_config:
+      enable_block_reuse: false
+      free_gpu_memory_fraction: 0.75
+      dtype: fp8
+    stream_interval: 10
+    moe_config:
+      backend: TRTLLM
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: glm5-nvfp4-trtllm-agg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - glm5-nvfp4-trtllm-agg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - python3 -m dynamo.frontend --router-mode kv --http-port 8000 --request-plane tcp
+          env:
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+    TrtllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          gpu: "8"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 179Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${SERVED_MODEL_NAME}" \
+              --trtllm.custom_tokenizer glm_moe_dsa \
+              --trtllm.tokenizer "${MODEL_PATH}" \
+              --served-model-name "${SERVED_MODEL_NAME}" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --publish-events-and-metrics \
+              --request-plane tcp
+          env:
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: MODEL_PATH
+            value: /opt/models/hub/models--nvidia--GLM-5-NVFP4/snapshots/dc54ff55a7e9e71b85db953d8bc22eca894b44c6
+          - name: SERVED_MODEL_NAME
+            value: nvidia/GLM-5-NVFP4
+          - name: ENGINE_ARGS
+            value: /opt/dynamo/configs/config.yaml
+          - name: HF_HOME
+            value: /opt/models
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: UCX_TLS
+            value: cuda_copy,cuda_ipc,sm,self
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: glm5-nvfp4-config
+            readOnly: true
+          workingDir: /workspace/examples/backends/trtllm
+        volumes:
+        - configMap:
+            name: glm5-nvfp4-config
+          name: glm5-nvfp4-config

@@ -17,24 +17,19 @@ spec:
       containers:
         - name: model-download
           image: python:3.10-slim
-          securityContext:
-            capabilities:
-              drop: ["ALL"]
-            seccompProfile:
-              type: RuntimeDefault
           command: ["sh", "-c"]
           envFrom:
             - secretRef:
                 name: hf-token-secret
           env:
             - name: MODEL_NAME
-              value: nvidia/GLM-5-NVFP4
-            - name: MODEL_REVISION
-              value: dc54ff55a7e9e71b85db953d8bc22eca894b44c6
+              value: zai-org/GLM-5-FP8
             - name: HF_HOME
               value: /model-store
             - name: HF_HUB_ENABLE_HF_TRANSFER
               value: "1"
+            - name: MODEL_REVISION
+              value: 7ca2d2f1f1703aa0b189977fe3c126caf18b70e1
           args:
             - |
               set -eux
