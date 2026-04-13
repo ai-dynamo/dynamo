@@ -327,6 +327,7 @@ pub struct RouterRequestMetrics {
     pub input_sequence_tokens: prometheus::Histogram,
     pub output_sequence_tokens: prometheus::Histogram,
     pub kv_hit_rate: prometheus::Histogram,
+    pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -393,6 +394,14 @@ impl RouterRequestMetrics {
                         Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
                     )
                     .expect("failed to create router_kv_hit_rate");
+                let kv_transfer_estimated_latency_seconds = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
+                        "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
+                        extra_labels,
+                        Some(generate_log_buckets(0.001, 10.0, 15)),
+                    )
+                    .expect("failed to create router_kv_transfer_estimated_latency_seconds");
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -400,6 +409,7 @@ impl RouterRequestMetrics {
                     input_sequence_tokens,
                     output_sequence_tokens,
                     kv_hit_rate,
+                    kv_transfer_estimated_latency_seconds,
                 })
             })
             .clone()
@@ -613,5 +623,48 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
             Duration::from_millis(1),
         );
         // Reaching here without panic confirms saturating_sub works
+    }
+
+    #[test]
+    fn test_kv_transfer_estimated_latency_metric_pef() {
+        // Verify the metric name is correctly composed from the constant
+        // and produces valid PEF when observed.
+        let registry = prometheus::Registry::new();
+        let name = format!(
+            "{}{}",
+            router_request::METRIC_PREFIX,
+            frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS,
+        );
+        let buckets = generate_log_buckets(0.001, 10.0, 15);
+        let histogram = prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new(
+                &name,
+                "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
+            )
+            .buckets(buckets),
+        )
+        .unwrap();
+        registry.register(Box::new(histogram.clone())).unwrap();
+
+        // Observe a 5ms latency
+        histogram.observe(0.005);
+
+        let output = gather_pef(&registry);
+        assert!(
+            output.contains("# HELP router_kv_transfer_estimated_latency_seconds"),
+            "PEF missing HELP line. Got:\n{output}"
+        );
+        assert!(
+            output.contains("# TYPE router_kv_transfer_estimated_latency_seconds histogram"),
+            "PEF missing TYPE line. Got:\n{output}"
+        );
+        assert!(
+            output.contains("router_kv_transfer_estimated_latency_seconds_count 1"),
+            "PEF missing observation count. Got:\n{output}"
+        );
+        assert!(
+            output.contains("router_kv_transfer_estimated_latency_seconds_sum 0.005"),
+            "PEF missing observation sum. Got:\n{output}"
+        );
     }
 }

@@ -89,6 +89,12 @@ impl RequestGuard {
         if !self.first_token_recorded && new_tokens > 0 {
             if let Some(ref tracker) = self.tracker {
                 tracker.record_first_token();
+                // Record decode-phase first token for KV transfer latency metric.
+                // In disaggregated serving, first_token_time is locked by the prefill phase,
+                // so we need a separate timestamp for the decode worker's first token.
+                if tracker.phase() == RequestPhase::Decode {
+                    tracker.record_decode_first_token();
+                }
                 if let Some(ttft) = tracker.ttft_ms() {
                     self.request_metrics
                         .time_to_first_token_seconds
@@ -150,6 +156,12 @@ impl RequestGuard {
         if let Some(ref tracker) = self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
+            // Observe KV transfer estimated latency (disaggregated paths)
+            if let Some(latency) = tracker.kv_transfer_estimated_latency_secs() {
+                self.request_metrics
+                    .kv_transfer_estimated_latency_seconds
+                    .observe(latency);
+            }
         }
         self.request_metrics
             .output_sequence_tokens

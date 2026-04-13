@@ -423,19 +423,22 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.skip(
-                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"
-            ),
             pytest.mark.gpu_1,  # agg_multimodal.sh uses single GPU
             pytest.mark.multimodal,
             pytest.mark.nightly,
+            pytest.mark.profiled_vram_gib(
+                19.9
+            ),  # align with multimodal_agg_qwen (7B VLM)
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
         ],
-        model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=[
             "--model",
-            "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
             "--max-model-len",
-            "10000",
+            "8192",
             "--dyn-tool-call-parser",
             "hermes",
         ],
@@ -488,12 +491,11 @@ vllm_configs = {
                 },
                 repeat_count=1,
                 expected_response=[
-                    "green",
                     "purple",
-                    "llm",
-                    "optimize",
-                    "deploy",
-                ],  # OR: pass if any keyword found in tool args
+                    "green",
+                    "lavender",
+                    "violet",
+                ],
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
             )
@@ -629,11 +631,11 @@ def test_serve_deployment(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2605")
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.nightly
+@pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
     request,
@@ -646,6 +648,10 @@ def test_multimodal_b64(
 
     This test is separate because it loads the required image at runtime
     (not collection time), ensuring it only fails when actually executed.
+
+    Uses ``@pytest.mark.model`` so nightly multi-GPU jobs (gpu_2 without the
+    gpu_1 multimodal_agg_qwen param) still predownload Qwen2.5-VL-7B before
+    ``HF_HUB_OFFLINE=1``.
     """
     # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
@@ -703,6 +709,10 @@ def test_multimodal_b64_frontend_decoding(
     This exercises the Rust frontend image decode + NIXL RDMA transfer path
     with inline base64 data: URIs (not HTTP URLs). Verifies that the
     strip_inline_data_urls optimization does not break correctness.
+
+    HF predownload: same model is already listed via ``@pytest.mark.model`` on
+    ``test_serve_deployment[multimodal_video_agg]`` (pre_merge + gpu_1), so no
+    extra ``model`` mark is needed here for PR CI.
     """
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
 
