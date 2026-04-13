@@ -108,3 +108,34 @@ def configure_gms_lock_mode(engine_args) -> None:
         extra["gms_read_only"] = True
 
     engine_args.model_loader_extra_config = extra
+
+
+def configure_mx_ports(engine_args) -> None:
+    """Offset MX metadata and gRPC base ports per engine to avoid bind collisions.
+
+    In failover pods, both engines share a network namespace. MX binds
+    NIXL metadata on ``MX_METADATA_PORT + device_id`` and worker gRPC on
+    ``MX_WORKER_GRPC_PORT + device_id``. Without offsetting, engines with
+    the same device_id collide (EADDRINUSE on the NIXL listener).
+
+    Offsets by ``engine_id * tp_size`` so each engine's port range is
+    non-overlapping:
+        engine 0, TP=2: metadata 5555-5556, gRPC 6555-6556
+        engine 1, TP=2: metadata 5557-5558, gRPC 6557-6558
+    """
+    if os.environ.get("MX_ENABLED", "0") != "1":
+        return
+
+    engine_id = int(os.environ.get("ENGINE_ID", "0"))
+    offset = engine_id * (engine_args.tensor_parallel_size or 1)
+    mx_metadata_base = int(os.environ.get("MX_METADATA_PORT", "5555")) + offset
+    mx_grpc_base = int(os.environ.get("MX_WORKER_GRPC_PORT", "6555")) + offset
+    os.environ["MX_METADATA_PORT"] = str(mx_metadata_base)
+    os.environ["MX_WORKER_GRPC_PORT"] = str(mx_grpc_base)
+
+    logger.info(
+        "[Shadow] MX ports for engine-%d: metadata=%d, grpc=%d",
+        engine_id,
+        mx_metadata_base,
+        mx_grpc_base,
+    )
