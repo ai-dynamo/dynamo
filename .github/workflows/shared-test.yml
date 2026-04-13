@@ -85,7 +85,7 @@ jobs:
         platform: ${{ fromJson(inputs.platform) }}
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
-    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
+    runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'stg-tester-arm-v2' }}
     container:
       image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:d5c0140bf2d5bd8cd57417ad2a4e3862ec7c56f0-sglang-runtime-cuda12-test
     permissions:
