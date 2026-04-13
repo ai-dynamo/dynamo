@@ -174,6 +174,9 @@ Session control is request-driven. The router's `AgentController` (session lifec
 > [!NOTE]
 > Session control is currently supported only on the SGLang backend. vLLM and TensorRT-LLM do not yet expose the streaming session API.
 
+> [!IMPORTANT]
+> Streaming sessions require SGLang changes from [sgl-project/sglang#21875](https://github.com/sgl-project/sglang/pull/21875) (session-aware cache, race condition fixes, session metrics). This is merged to SGLang main but not yet in a release. Until a version after `0.5.10.post1` is published, build SGLang from source (`pip install -e "python"` from the SGLang repo).
+
 **SGLang worker:**
 
 ```bash
