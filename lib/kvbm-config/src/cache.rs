@@ -73,9 +73,9 @@ impl HostCacheConfig {
         if bytes_per_block == 0 {
             return None;
         }
-        let from_gb = self.cache_size_gb.map(|gb| {
-            ((gb * 1_000_000_000.0) / bytes_per_block as f64) as usize
-        });
+        let from_gb = self
+            .cache_size_gb
+            .map(|gb| ((gb * 1_000_000_000.0) / bytes_per_block as f64) as usize);
         match (self.num_blocks, from_gb) {
             (None, None) => None,
             (Some(n), None) => Some(n),
@@ -138,9 +138,9 @@ impl DiskCacheConfig {
         if bytes_per_block == 0 {
             return None;
         }
-        let from_gb = self.cache_size_gb.map(|gb| {
-            ((gb * 1_000_000_000.0) / bytes_per_block as f64) as usize
-        });
+        let from_gb = self
+            .cache_size_gb
+            .map(|gb| ((gb * 1_000_000_000.0) / bytes_per_block as f64) as usize);
         match (self.num_blocks, from_gb) {
             (None, None) => None,
             (Some(n), None) => Some(n),
