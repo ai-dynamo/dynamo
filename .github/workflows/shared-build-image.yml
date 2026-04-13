@@ -171,7 +171,6 @@ jobs:
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           fresh_builder: ${{ inputs.fresh_builder }}
-          cuda_version: ${{ matrix.cuda_version }}
       - name: Calculate extra tags
         id: extra-tags
         shell: bash
