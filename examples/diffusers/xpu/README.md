@@ -65,7 +65,7 @@ python3 -c "import torch; print(f'XPU available: {torch.xpu.is_available()}, dev
 
 Expected output:
 
-```
+```text
 XPU available: True, devices: int (the actual XPU card on your server)
 ```
 
@@ -269,7 +269,7 @@ tail -f examples/diffusers/xpu/.runtime/logs/frontend.log
 
 ## Architecture
 
-```
+```text
 Client (curl / Python)
     │
     │  POST /v1/images/generations
