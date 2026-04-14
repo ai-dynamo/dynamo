@@ -427,12 +427,37 @@ impl ModelWatcher {
             .registering_worker_sets
             .insert(registration_key.clone())
         {
+            // Another task is building the pipeline for this (model, namespace, type).
+            // Wait for it to finish so we can validate the new worker's checksum against
+            // the registered model. Without this, a concurrent worker with a mismatched
+            // checksum could sneak past the early check in `watch` (which sees get_model()
+            // return None while the first registration is in-flight).
+            let mut attempts = 0;
+            while self.registering_worker_sets.contains(&registration_key) && attempts < 300 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                attempts += 1;
+            }
+
+            // Now that registration has completed, validate checksum
+            if let Some(model) = self.manager.get_model(&model_name) {
+                if !model.is_checksum_compatible(&ws_key, card.mdcsum()) {
+                    tracing::error!(
+                        model_name = card.name(),
+                        namespace = namespace,
+                        new_checksum = card.mdcsum(),
+                        "Checksum for new worker does not match existing WorkerSet's checksum. \
+                         Drain all old workers in this namespace before deploying a new version."
+                    );
+                    return Ok(());
+                }
+            }
+
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
             tracing::debug!(
                 model_name = card.name(),
                 namespace = namespace,
-                "WorkerSet registration in progress, skipping"
+                "Worker joined existing WorkerSet, skipping pipeline build"
             );
             return Ok(());
         }
