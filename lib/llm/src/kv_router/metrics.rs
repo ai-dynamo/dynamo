@@ -141,6 +141,7 @@ pub fn register_worker_load_metrics(
 /// disaggregated mode. At most 2 label combinations.
 pub struct RouterQueueMetrics {
     pub pending_requests: IntGaugeVec,
+    pub pending_isl_tokens: IntGaugeVec,
 }
 
 pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
@@ -157,6 +158,14 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
             &[labels::WORKER_TYPE],
         )
         .expect("Failed to create router_queue_pending_requests gauge"),
+        pending_isl_tokens: IntGaugeVec::new(
+            Opts::new(
+                format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
+                "Sum of isl_tokens for requests pending in the router scheduler queue",
+            ),
+            &[labels::WORKER_TYPE],
+        )
+        .expect("Failed to create router_queue_pending_isl_tokens gauge"),
     });
 
 impl RouterQueueMetrics {
@@ -164,6 +173,12 @@ impl RouterQueueMetrics {
         self.pending_requests
             .with_label_values(&[worker_type])
             .set(count as i64);
+    }
+
+    pub fn set_pending_isl_tokens(&self, worker_type: &str, tokens: usize) {
+        self.pending_isl_tokens
+            .with_label_values(&[worker_type])
+            .set(tokens as i64);
     }
 }
 
@@ -174,6 +189,7 @@ pub fn register_router_queue_metrics(
 ) -> Result<(), prometheus::Error> {
     let m = &*ROUTER_QUEUE_METRICS;
     registry.register(Box::new(m.pending_requests.clone()))?;
+    registry.register(Box::new(m.pending_isl_tokens.clone()))?;
     Ok(())
 }
 
@@ -327,6 +343,7 @@ pub struct RouterRequestMetrics {
     pub input_sequence_tokens: prometheus::Histogram,
     pub output_sequence_tokens: prometheus::Histogram,
     pub kv_hit_rate: prometheus::Histogram,
+    pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -393,6 +410,14 @@ impl RouterRequestMetrics {
                         Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
                     )
                     .expect("failed to create router_kv_hit_rate");
+                let kv_transfer_estimated_latency_seconds = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
+                        "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
+                        extra_labels,
+                        Some(generate_log_buckets(0.001, 10.0, 15)),
+                    )
+                    .expect("failed to create router_kv_transfer_estimated_latency_seconds");
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -400,6 +425,7 @@ impl RouterRequestMetrics {
                     input_sequence_tokens,
                     output_sequence_tokens,
                     kv_hit_rate,
+                    kv_transfer_estimated_latency_seconds,
                 })
             })
             .clone()
@@ -535,15 +561,30 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 &[labels::WORKER_TYPE],
             )
             .unwrap(),
+            pending_isl_tokens: IntGaugeVec::new(
+                Opts::new(
+                    format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
+                    "Sum of isl_tokens for requests pending in the router scheduler queue",
+                ),
+                &[labels::WORKER_TYPE],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.pending_requests.clone()))
             .unwrap();
+        registry
+            .register(Box::new(metrics.pending_isl_tokens.clone()))
+            .unwrap();
 
         metrics.set_pending("decode", 5);
+        metrics.set_pending_isl_tokens("decode", 1024);
 
         let output = gather_pef(&registry);
         let expected = "\
+# HELP dynamo_frontend_router_queue_pending_isl_tokens Sum of isl_tokens for requests pending in the router scheduler queue
+# TYPE dynamo_frontend_router_queue_pending_isl_tokens gauge
+dynamo_frontend_router_queue_pending_isl_tokens{worker_type=\"decode\"} 1024
 # HELP dynamo_frontend_router_queue_pending_requests Number of requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_requests gauge
 dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
@@ -613,5 +654,48 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
             Duration::from_millis(1),
         );
         // Reaching here without panic confirms saturating_sub works
+    }
+
+    #[test]
+    fn test_kv_transfer_estimated_latency_metric_pef() {
+        // Verify the metric name is correctly composed from the constant
+        // and produces valid PEF when observed.
+        let registry = prometheus::Registry::new();
+        let name = format!(
+            "{}{}",
+            router_request::METRIC_PREFIX,
+            frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS,
+        );
+        let buckets = generate_log_buckets(0.001, 10.0, 15);
+        let histogram = prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new(
+                &name,
+                "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
+            )
+            .buckets(buckets),
+        )
+        .unwrap();
+        registry.register(Box::new(histogram.clone())).unwrap();
+
+        // Observe a 5ms latency
+        histogram.observe(0.005);
+
+        let output = gather_pef(&registry);
+        assert!(
+            output.contains("# HELP router_kv_transfer_estimated_latency_seconds"),
+            "PEF missing HELP line. Got:\n{output}"
+        );
+        assert!(
+            output.contains("# TYPE router_kv_transfer_estimated_latency_seconds histogram"),
+            "PEF missing TYPE line. Got:\n{output}"
+        );
+        assert!(
+            output.contains("router_kv_transfer_estimated_latency_seconds_count 1"),
+            "PEF missing observation count. Got:\n{output}"
+        );
+        assert!(
+            output.contains("router_kv_transfer_estimated_latency_seconds_sum 0.005"),
+            "PEF missing observation sum. Got:\n{output}"
+        );
     }
 }

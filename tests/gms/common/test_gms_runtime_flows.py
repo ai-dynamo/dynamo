@@ -24,19 +24,16 @@ from gpu_memory_service.client.memory_manager import (
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     GetEventHistoryRequest,
     GetEventHistoryResponse,
     GetRuntimeStateRequest,
     GetRuntimeStateResponse,
 )
-from gpu_memory_service.common.types import (
-    GrantedLockType,
-    RequestedLockType,
-    ServerState,
-)
 from gpu_memory_service.server import allocations as server_allocations
 from gpu_memory_service.server.allocations import GMSAllocationManager
+from gpu_memory_service.server.fsm import ServerState
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 from tests.gms.harness.gms import ServerThread
@@ -44,7 +41,8 @@ from tests.gms.harness.gms import ServerThread
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_0,
+    pytest.mark.none,
+    pytest.mark.gpu_1,
 ]
 
 

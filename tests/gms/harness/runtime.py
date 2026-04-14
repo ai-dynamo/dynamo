@@ -7,7 +7,6 @@ import logging
 import time
 from pathlib import Path
 
-import pynvml
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
@@ -19,6 +18,8 @@ MIN_EXPECTED_MEMORY_RETURN_FRACTION = 0.6
 
 
 def get_gpu_memory_used(device: int = 0) -> int:
+    import pynvml
+
     pynvml.nvmlInit()
     try:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device)

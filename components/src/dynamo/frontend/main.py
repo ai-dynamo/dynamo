@@ -8,7 +8,7 @@
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
 # - Router, defaulting to round-robin. Use --router-mode to switch
-#   (round-robin, random, kv, direct, least-loaded).
+#   (round-robin, random, kv, direct, least-loaded, device-aware-weighted).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -184,9 +184,14 @@ async def async_main():
         os.environ["DYN_TOKENIZER"] = "fastokens"
     else:
         os.environ.pop("DYN_TOKENIZER", None)
+    max_seq_info = (
+        f", max_seq_len: {config.migration_max_seq_len}"
+        if config.migration_max_seq_len is not None
+        else ""
+    )
     logger.info(
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
-        f"(limit: {config.migration_limit})"
+        f"(limit: {config.migration_limit}{max_seq_info})"
     )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
@@ -246,6 +251,9 @@ async def async_main():
     elif config.router_mode == "least-loaded":
         router_mode = RouterMode.LeastLoaded
         kv_router_config = None
+    elif config.router_mode == "device-aware-weighted":
+        router_mode = RouterMode.DeviceAwareWeighted
+        kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
@@ -266,6 +274,8 @@ async def async_main():
         "router_config": router_config,
         "migration_limit": config.migration_limit,
     }
+    if config.migration_max_seq_len is not None:
+        kwargs["migration_max_seq_len"] = config.migration_max_seq_len
 
     if config.model_name:
         kwargs["model_name"] = config.model_name

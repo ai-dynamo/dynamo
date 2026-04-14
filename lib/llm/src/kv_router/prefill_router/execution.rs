@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -10,11 +9,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId};
-use dynamo_runtime::{
-    engine::AsyncEngineContext,
-    pipeline::{AsyncEngineContextProvider, Context, SingleIn},
-    protocols::maybe_error::MaybeError,
-};
+use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
 use crate::protocols::common::{
@@ -123,7 +118,7 @@ impl PrefillRouter {
     ///
     /// If `phase_transition_permit` is provided, it is dropped immediately after routing completes,
     /// allowing subsequent `set_phase` calls to proceed. This preserves the current synchronization:
-    /// the prefill route must finish `record_worker_full` before the phase can change to Decode.
+    /// the prefill route must finish worker recording before the phase can change to Decode.
     ///
     /// Returns (PrefillResult, Option<(worker_id, dp_rank)>).
     pub(super) async fn execute_prefill(
@@ -131,8 +126,11 @@ impl PrefillRouter {
         request: SingleIn<PreprocessedRequest>,
         target_worker: Option<u64>,
         phase_transition_permit: Option<OwnedSemaphorePermit>,
-    ) -> Result<(PrefillResult, Option<(u64, u32)>), PrefillError> {
+    ) -> Result<(PrefillResult, Option<(u64, Option<u32>)>), PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
+        // Clone tracker before request is consumed by generate_to_worker.
+        // Used to record prefill_complete_time for KV transfer latency metric.
+        let tracker = request.tracker.clone();
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
@@ -143,7 +141,7 @@ impl PrefillRouter {
                 )
             })?;
 
-        // Release the phase barrier now that routing completed and record_worker_full already ran.
+        // Release the phase barrier now that routing completed and worker recording already ran.
         // Decode may proceed without waiting for prefill output streaming to finish.
         drop(phase_transition_permit);
 
@@ -153,6 +151,12 @@ impl PrefillRouter {
                 None,
             ));
         };
+
+        // Record when prefill result arrived at the router (for KV transfer latency metric).
+        // This is after drop(phase_transition_permit) and after first_output is received.
+        if let Some(ref tracker) = tracker {
+            tracker.record_prefill_complete();
+        }
 
         if let Some(err) = first_output.err() {
             return Err(PrefillError::PrefillError(
@@ -201,8 +205,7 @@ impl PrefillRouter {
                     let dp_rank = worker_id_json
                         .get("prefill_dp_rank")
                         .and_then(|v| v.as_u64())
-                        .map(|r| r as u32)
-                        .unwrap_or(0);
+                        .map(|r| r as u32);
                     Some((worker_id, dp_rank))
                 });
         Ok((
@@ -284,6 +287,7 @@ impl PrefillRouter {
                         lora_name,
                         priority_jump,
                         None,
+                        None,
                         allowed_worker_ids,
                     )
                     .await?;
@@ -319,12 +323,9 @@ impl PrefillRouter {
     }
 }
 
-pub(super) fn link_child_context<T: Send + Sync + 'static>(
-    engine_ctx: &Arc<dyn AsyncEngineContext>,
-    request: T,
-    request_id: &str,
-) -> Context<T> {
-    let child_context = Context::with_id(request, request_id.to_string());
-    engine_ctx.link_child(child_context.context());
-    child_context
-}
+// NVBugs 5969206: link_child_context removed — linking prefill as a child of
+// engine_context caused kill propagation that tears down the RPC transport,
+// interrupting NIXL KV cache transfers and leaking blocks permanently.
+// Prefill context is now created without linking (Context::with_id only).
+// Abort on the decode side is deferred via kv_transfer_complete_event in
+// handler_base.py until the first generation result confirms KV receipt.

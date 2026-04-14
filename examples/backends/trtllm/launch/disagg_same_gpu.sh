@@ -3,20 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated prefill/decode on a SINGLE GPU.
-# Per-worker VRAM is controlled via env vars (MAX_SEQ_LEN, MAX_CONCURRENT_SEQS).
-# TODO: unify with build_trtllm_override_args_with_mem once trtllm --override-engine-args JSON
-# merging is supported.
+# Per-worker VRAM is controlled via absolute KV token caps (not fractions).
+# Profiler overrides (_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS) are handled via
+# build_trtllm_override_args_with_mem; standalone runs use MAX_TOTAL_TOKENS.
 #
-# NOTE — trtllm fraction semantics differ from vllm/sglang:
-#   vllm/sglang:  fraction of TOTAL VRAM  (weights + KV + activations all inside)
-#   trtllm:       fraction of FREE  VRAM  (KV cache only, after model load)
-# build_vllm_gpu_mem_args / build_sglang_gpu_mem_args handle this — see gpu_utils.sh / gpu_utils.md.
-#
-# Measured reference (Qwen/Qwen3-0.6B, --max-seq-len 4096, RTX 6000 Ada 48 GiB):
-#   estimate (from gpu_utils.sh) : ~8.0 GiB per worker (~16.0 GiB total)
-#   actual (nvidia-smi)          : ~7.4 GiB per worker (~14.8 GiB total)
-#   fraction per worker (free)   : 0.05
-#   Overestimating is intentional -- better to pad than OOM.
+# Measured reference (Qwen/Qwen3-0.6B, RTX 6000 Ada 48 GiB):
+#   peak VRAM (nvidia-smi)     : ~6.6 GiB total (both workers)
+#   default MAX_TOTAL_TOKENS   : 25000 per worker
+#   min tokens (profiled)      : 256 per worker
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -29,10 +23,7 @@ MODEL="Qwen/Qwen3-0.6B"
 # ---- Tunable (override via env vars) ----
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
-
-# TODO: unify with build_trtllm_override_args_with_mem once trtllm --override-engine-args JSON
-# merging is supported.
-GPU_MEM_FRACTION="${GPU_MEM_FRACTION:-}"
+MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-25000}"
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
@@ -67,20 +58,35 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Build --override-engine-args JSON.
-# Always override free_gpu_memory_fraction so the script controls KV cache size,
-# matching how vllm (--gpu-memory-utilization) and sglang (--mem-fraction-static)
-# pass memory parameters from the launch script.
-OVERRIDE_PAIRS=""
-if [[ -n "$GPU_MEM_FRACTION" ]]; then
-    OVERRIDE_PAIRS="\"kv_cache_config\": {\"free_gpu_memory_fraction\": ${GPU_MEM_FRACTION}}"
-fi
+#
+# KV cache control (always absolute caps, never fractions):
+#   1. Profiler env var (_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS or
+#      _PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES) via build_trtllm_override_args_with_mem.
+#   2. MAX_TOTAL_TOKENS env var (default 25000) for standalone runs.
+
+# Collect non-memory override pairs (otel, etc.)
+NON_MEM_PAIRS=""
 if [ "$ENABLE_OTEL" = true ]; then
     export DYN_LOGGING_JSONL=true
     export OTEL_EXPORT_ENABLED=1
     export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
-    OVERRIDE_PAIRS="${OVERRIDE_PAIRS}, \"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\""
+    NON_MEM_PAIRS="\"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\""
 fi
-OVERRIDE_ARGS=(--override-engine-args "{${OVERRIDE_PAIRS}}")
+
+if [[ -n "${_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS:-}" ]] || [[ -n "${_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES:-}" ]]; then
+    # Profiler provides absolute cap
+    BASE_JSON=""
+    [[ -n "$NON_MEM_PAIRS" ]] && BASE_JSON="{${NON_MEM_PAIRS}}"
+    FINAL_JSON=$(build_trtllm_override_args_with_mem ${BASE_JSON:+--merge-with-json "$BASE_JSON"})
+    OVERRIDE_ARGS=(--override-engine-args "$FINAL_JSON")
+else
+    # No profiler — use absolute token cap from MAX_TOTAL_TOKENS
+    OVERRIDE_PAIRS="\"kv_cache_config\": {\"max_tokens\": ${MAX_TOTAL_TOKENS}}"
+    if [[ -n "$NON_MEM_PAIRS" ]]; then
+        OVERRIDE_PAIRS="${OVERRIDE_PAIRS}, $NON_MEM_PAIRS"
+    fi
+    OVERRIDE_ARGS=(--override-engine-args "{${OVERRIDE_PAIRS}}")
+fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTTP_PORT" \
@@ -103,6 +109,13 @@ python3 -m dynamo.trtllm \
   --publish-events-and-metrics \
   --disaggregation-mode prefill \
   "${OVERRIDE_ARGS[@]}" &
+
+# Wait for prefill worker to load model and allocate KV cache before starting
+# decode.  Both workers share one GPU; without this wait they compete for GPU
+# memory during model loading, which can cause OOM.
+# || true: don't let set -e kill the script on timeout (wait_for_ready returns 1).
+PREFILL_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}"
+wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 || true
 
 # run decode worker (shares GPU with prefill)
 OTEL_SERVICE_NAME=dynamo-worker-decode \

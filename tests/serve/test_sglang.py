@@ -32,6 +32,11 @@ from tests.utils.payload_builder import (
 logger = logging.getLogger(__name__)
 
 
+def _is_cuda13() -> bool:
+    v = os.environ.get("CUDA_VERSION", "")
+    return v.startswith("13")
+
+
 @dataclass
 class SGLangConfig(EngineConfig):
     """Configuration for SGLang test scenarios"""
@@ -126,29 +131,37 @@ sglang_configs = {
         script_name="disagg_same_gpu.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(9.9),  # actual profiled peak with kv-tokens
+            pytest.mark.requested_sglang_kv_tokens(
+                37472
+            ),  # KV cache cap (2x safety over min=18736)
+            # Local repro took ~289s wall time with worker readiness reaching
+            # "ready" at ~176s on a warm-cache RTX 6000 Ada.
+            pytest.mark.timeout(420),
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="unstable"),
-            # TODO: profile to get max_vram and timeout (currently skipped)
+            pytest.mark.skipif(
+                _is_cuda13(),
+                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
+            ),
         ],
         model="Qwen/Qwen3-0.6B",
-        delayed_start=30,
+        delayed_start=10,
+        health_check_workers=True,
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            # Validate dynamo_component_* and sglang:* metrics from prefill worker
-            # (DefaultPort.SYSTEM1)
+            # Disagg workers expose fewer sglang:* metrics (~14 vs ~25 for aggregated)
+            # because each only runs half the scheduler pipeline.
             metric_payload_default(
                 min_num_requests=6,
-                backend="sglang",
+                backend="sglang_disagg",
                 port=DefaultPort.SYSTEM1.value,
             ),
-            # Validate dynamo_component_* and sglang:* metrics from decode worker
-            # (DefaultPort.SYSTEM2)
             metric_payload_default(
                 min_num_requests=6,
-                backend="sglang",
+                backend="sglang_disagg",
                 port=DefaultPort.SYSTEM2.value,
             ),
         ],
@@ -291,6 +304,9 @@ sglang_configs = {
         directory=sglang_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.skip(
+                reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2602"
+            ),
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(
                 19.1
