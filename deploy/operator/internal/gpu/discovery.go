@@ -44,20 +44,21 @@ const (
 	LabelGPUProduct = "nvidia.com/gpu.product"
 	LabelGPUMemory  = "nvidia.com/gpu.memory"
 	// DCGM exporter label constants
-	LabelApp                     = "app"
-	LabelAppKubernetesName       = "app.kubernetes.io/name"
-	LabelValueNvidiaDCGMExporter = "nvidia-dcgm-exporter"
-	LabelValueDCGMExporter       = "dcgm-exporter"
-	LabelValueGPUOperator        = "gpu-operator"
-	GPUOperatorNamespace         = "gpu-operator"
-	requestTimeout               = 5 * time.Second
-	dialTimeout                  = 3 * time.Second
-	tlsHandshakeTimeout          = 3 * time.Second
-	CloudProviderGCP             = "gcp"
-	CloudProviderAWS             = "aws"
-	CloudProviderAKS             = "aks"
-	CloudProviderOther           = "other"
-	CloudProviderUnknown         = "unknown"
+	LabelApp                        = "app"
+	LabelAppKubernetesName          = "app.kubernetes.io/name"
+	LabelValueNvidiaDCGMExporter    = "nvidia-dcgm-exporter"
+	LabelValueNvidiaNetworkOperator = "nvidia-network-operator"
+	LabelValueDCGMExporter          = "dcgm-exporter"
+	LabelValueGPUOperator           = "gpu-operator"
+	GPUOperatorNamespace            = "gpu-operator"
+	requestTimeout                  = 5 * time.Second
+	dialTimeout                     = 3 * time.Second
+	tlsHandshakeTimeout             = 3 * time.Second
+	CloudProviderGCP                = "gcp"
+	CloudProviderAWS                = "aws"
+	CloudProviderAKS                = "aks"
+	CloudProviderOther              = "other"
+	CloudProviderUnknown            = "unknown"
 )
 
 // --- Normalization helpers ---
@@ -984,7 +985,7 @@ func detectRDMAFromNode(ctx context.Context, k8sClient client.Reader, nodeName s
 //   - true if any RDMA/IB pods are found, false otherwise.
 func detectIBPods(ctx context.Context, k8sClient client.Reader) bool {
 	podList := &corev1.PodList{}
-	if err := k8sClient.List(ctx, podList, client.InNamespace("nvidia-network-operator")); err != nil {
+	if err := k8sClient.List(ctx, podList, client.InNamespace(LabelValueNvidiaNetworkOperator)); err != nil {
 		return false
 	}
 	for _, p := range podList.Items {

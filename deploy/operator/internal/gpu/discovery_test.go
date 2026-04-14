@@ -1114,3 +1114,117 @@ func TestGetCloudProviderInfo(t *testing.T) {
 		})
 	}
 }
+
+func TestDetectRDMAFromNode(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	tests := []struct {
+		name        string
+		node        *corev1.Node
+		nodeName    string
+		expectedOK  bool
+		expectedTyp string
+	}{
+		{
+			name:        "node not found",
+			node:        nil,
+			nodeName:    "missing-node",
+			expectedOK:  false,
+			expectedTyp: strNone,
+		},
+		{
+			name: "rdma detected",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node-rdma",
+					Labels: map[string]string{
+						"nvidia.com/rdma.present": "true",
+					},
+				},
+			},
+			nodeName:    "node-rdma",
+			expectedOK:  true,
+			expectedTyp: "rdma",
+		},
+		{
+			name: "sriov detected",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node-sriov",
+					Labels: map[string]string{
+						"feature.node.kubernetes.io/network-sriov.capable": "true",
+					},
+				},
+			},
+			nodeName:    "node-sriov",
+			expectedOK:  true,
+			expectedTyp: "sriov",
+		},
+		{
+			name: "both rdma and sriov - rdma takes precedence",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node-both",
+					Labels: map[string]string{
+						"nvidia.com/rdma.present":                          "true",
+						"feature.node.kubernetes.io/network-sriov.capable": "true",
+					},
+				},
+			},
+			nodeName:    "node-both",
+			expectedOK:  true,
+			expectedTyp: "rdma",
+		},
+		{
+			name: "no relevant labels",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "node-none",
+					Labels: map[string]string{},
+				},
+			},
+			nodeName:    "node-none",
+			expectedOK:  false,
+			expectedTyp: strNone,
+		},
+		{
+			name: "labels present but false",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node-false",
+					Labels: map[string]string{
+						"nvidia.com/rdma.present":                          "false",
+						"feature.node.kubernetes.io/network-sriov.capable": "false",
+					},
+				},
+			},
+			nodeName:    "node-false",
+			expectedOK:  false,
+			expectedTyp: strNone,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objs []runtime.Object
+			if tt.node != nil {
+				objs = append(objs, tt.node)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithRuntimeObjects(objs...).
+				Build()
+
+			ok, typ := detectRDMAFromNode(context.TODO(), fakeClient, tt.nodeName)
+
+			if ok != tt.expectedOK {
+				t.Errorf("expected ok=%v, got %v", tt.expectedOK, ok)
+			}
+			if typ != tt.expectedTyp {
+				t.Errorf("expected type=%s, got %s", tt.expectedTyp, typ)
+			}
+		})
+	}
+}
