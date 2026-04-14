@@ -122,7 +122,18 @@ spec:
       echo "=== Starting Ray head ==="
       ray start --head --port=6379 --block &
       RAY_HEAD_PID=$!
-      sleep 8
+      # Wait until Ray head is actually accepting connections before launching vLLM.
+      # A fixed sleep is a race — slow startups can leave vLLM unable to find Ray.
+      RAY_ELAPSED=0
+      until nc -z localhost 6379 2>/dev/null; do
+        if [ "$RAY_ELAPSED" -ge 120 ]; then
+          echo "ERROR: Ray head did not start within 120s (pid=$RAY_HEAD_PID)" >&2
+          exit 1
+        fi
+        echo "  Ray head not ready yet, retrying in 2s... (${RAY_ELAPSED}s elapsed)"
+        sleep 2
+        RAY_ELAPSED=$((RAY_ELAPSED + 2))
+      done
       echo "=== Ray head started (pid=$RAY_HEAD_PID), launching vllm serve ==="
       # --data-parallel-size-local is intentionally omitted. The worker pod delays
       # joining Ray until vLLM is ready, so only this node is in the Ray cluster
@@ -191,7 +202,7 @@ spec:
     args:
     - |
       set -e
-      LEADER_URL="http://vllm-ep-leader.tzulingk-multinode-elastic.svc.cluster.local:8000"
+      LEADER_URL="http://vllm-ep-leader:8000"
       echo "=== Installing Ray ==="
       pip install -q "ray[default]"
       echo "=== Waiting for leader vLLM to be ready before joining Ray ==="
@@ -203,4 +214,4 @@ spec:
         sleep 15
       done
       echo "=== Leader vLLM ready — joining Ray cluster ==="
-      ray start --address=vllm-ep-leader.tzulingk-multinode-elastic.svc.cluster.local:6379 --block
+      ray start --address=vllm-ep-leader:6379 --block

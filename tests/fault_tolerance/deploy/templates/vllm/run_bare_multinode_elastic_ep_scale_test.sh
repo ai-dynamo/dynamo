@@ -4,7 +4,7 @@
 #
 # Bare vLLM Multi-Node Elastic EP Scale Test
 #
-# Companion script for vllm-bare-multinode-elastic-ep.yaml.
+# Companion script for bare_multinode_elastic_ep.yaml.
 # Tests cross-node elastic EP scaling using vLLM's native API — no Dynamo involved.
 #
 # Warm-standby topology at baseline:
@@ -22,14 +22,14 @@
 #   - Inference response parsed as plain OpenAI (no nvext.timing field)
 #
 # Usage:
-#   ./run_elastic_ep_scale_test_bare_multinode.sh [NAMESPACE]
+#   ./run_bare_multinode_elastic_ep_scale_test.sh [NAMESPACE]
 #
 # Defaults:
 #   NAMESPACE = tzulingk-multinode-elastic
 #
 # Prerequisites:
 #   - kubectl configured and pointing at the right cluster
-#   - Deployment already applied: kubectl apply -f vllm-bare-multinode-elastic-ep.yaml -n <NS>
+#   - Deployment already applied: kubectl apply -f bare_multinode_elastic_ep.yaml -n <NS>
 #   - Port 8001 free on localhost
 
 
@@ -143,9 +143,12 @@ infer() {
   local label="$1"
   echo ""
   echo "--- inference ($label) ---"
-  RESP=$(curl -s -m 30 http://localhost:8001/v1/completions \
+  RESP=$(curl -fsS -m 30 http://localhost:8001/v1/completions \
     -H "Content-Type: application/json" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":\"2+2=\",\"max_tokens\":5,\"temperature\":0}")
+    -d "{\"model\":\"$MODEL\",\"prompt\":\"2+2=\",\"max_tokens\":5,\"temperature\":0}") || {
+    echo "ERROR: inference request failed" >&2
+    return 1
+  }
   # Plain OpenAI response — no nvext field in bare vLLM
   echo "$RESP" | python3 -c "
 import sys, json
@@ -153,7 +156,10 @@ d = json.load(sys.stdin)
 text = d['choices'][0]['text'].strip()
 tokens = d.get('usage', {})
 print('text:', repr(text), '  usage:', tokens)
-" 2>/dev/null || echo "response: $RESP"
+" 2>/dev/null || {
+    echo "ERROR: invalid inference response: $RESP" >&2
+    return 1
+  }
 }
 
 # Calls vLLM's native scale endpoint on port 8000 (same port as inference).
@@ -167,10 +173,13 @@ scale() {
   echo "SCALE dp=$from_dp → dp=$to_dp at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "=========================================="
   echo "--- POST /scale_elastic_ep {\"new_data_parallel_size\": $to_dp} ---"
-  RESP=$(curl -s -X POST http://localhost:8001/scale_elastic_ep \
+  RESP=$(curl -fsS -X POST http://localhost:8001/scale_elastic_ep \
     -H "Content-Type: application/json" \
     -d "{\"new_data_parallel_size\": $to_dp}" \
-    --max-time "$timeout")
+    --max-time "$timeout") || {
+    echo "ERROR: scale_elastic_ep request failed" >&2
+    return 1
+  }
   echo "--- response ---"
   echo "$RESP"
   snapshot "after dp=$to_dp"
@@ -184,7 +193,7 @@ echo "=========================================="
 echo "BASELINE dp=2 at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "=========================================="
 snapshot "baseline dp=2"
-infer "dp=2"
+infer "dp=2" || exit 1
 
 # ── Wait for worker in Ray before any scale step ──────────────────────────────
 # Do this after baseline so the baseline snapshot/inference runs while the
@@ -192,12 +201,12 @@ infer "dp=2"
 wait_worker_in_ray 900
 
 # ── 6 scale steps ─────────────────────────────────────────────────────────────
-scale 2 3 700   # step 1: dp=2 → dp=3  (Ray places 1 actor on worker node)
-scale 3 4 700   # step 2: dp=3 → dp=4  (Ray places 1 more actor on worker node)
-scale 4 3 300   # step 3: dp=4 → dp=3  (removes highest rank from worker node)
-scale 3 2 300   # step 4: dp=3 → dp=2  (worker node back to idle)
-scale 2 4 700   # step 5: dp=2 → dp=4  (both worker node GPUs claimed)
-scale 4 2 300   # step 6: dp=4 → dp=2  (worker node back to warm standby)
+scale 2 3 700 || exit 1   # step 1: dp=2 → dp=3  (Ray places 1 actor on worker node)
+scale 3 4 700 || exit 1   # step 2: dp=3 → dp=4  (Ray places 1 more actor on worker node)
+scale 4 3 300 || exit 1   # step 3: dp=4 → dp=3  (removes highest rank from worker node)
+scale 3 2 300 || exit 1   # step 4: dp=3 → dp=2  (worker node back to idle)
+scale 2 4 700 || exit 1   # step 5: dp=2 → dp=4  (both worker node GPUs claimed)
+scale 4 2 300 || exit 1   # step 6: dp=4 → dp=2  (worker node back to warm standby)
 
 echo ""
 echo "=== ALL STEPS COMPLETE at $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
