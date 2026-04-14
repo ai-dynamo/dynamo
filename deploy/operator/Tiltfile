@@ -155,6 +155,27 @@ local_resource(
 )
 
 # ---------------------------------------------------------------------------
+# Helm dependencies — fetch remote subcharts and package the local operator
+# subchart (file://components/operator).
+# ---------------------------------------------------------------------------
+
+# Ensure Helm repos for non-OCI dependencies are registered.
+local(helm_cmd + ' repo add nats https://nats-io.github.io/k8s/helm/charts/ || true', quiet=True)
+local(helm_cmd + ' repo add bitnami https://charts.bitnami.com/bitnami || true', quiet=True)
+local(helm_cmd + ' repo update', quiet=True)
+
+# Initial build at load time so render_helm() can succeed.
+local(helm_cmd + ' dependency build ' + HELM_CHART, quiet=True)
+
+# Re-run when the local operator subchart changes.
+local_resource(
+    'helm-dep-build',
+    helm_cmd + ' dependency build ' + HELM_CHART,
+    deps=[os.path.join(HELM_CHART, 'components', 'operator')],
+    labels=['operator'],
+)
+
+# ---------------------------------------------------------------------------
 # Helm template → k8s_yaml
 #
 # Renders the production Helm chart (deploy/helm/charts/platform) with the
@@ -272,7 +293,7 @@ k8s_resource(
     new_name='operator',
     labels=['operator'],
     port_forwards=['8081:8081'],  # health endpoint
-    resource_deps=['crds', 'manager-build'],
+    resource_deps=['crds', 'manager-build', 'helm-dep-build'],
 )
 
 # Group subchart workloads in the Tilt UI
