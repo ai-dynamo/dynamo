@@ -7474,6 +7474,31 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 		"service-level annotation should take precedence over spec.metadata")
 }
 
+func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationVolcanoQueue: "qa-volcano-e2e",
+			},
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+		},
+	}
+
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pcs.Annotations)
+	assert.Equal(t, "qa-volcano-e2e", pcs.Annotations[commonconsts.KubeAnnotationVolcanoQueue])
+}
+
 func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.T) {
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
