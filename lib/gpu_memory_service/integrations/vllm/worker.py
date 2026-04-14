@@ -64,11 +64,14 @@ logger.info("[GMS] Worker module loaded - model loader registered, all patches a
 # MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency)
 if os.environ.get("MX_ENABLED", "0") == "1":
     try:
+        from modelexpress import configure_vllm_logging
         from modelexpress.load_strategy import (
             publish_metadata,
             register_tensors,
             unpublish_metadata,
         )
+
+        configure_vllm_logging()
     except ImportError as e:
         raise ImportError(
             "MX_ENABLED=1 but modelexpress is not installed. "
