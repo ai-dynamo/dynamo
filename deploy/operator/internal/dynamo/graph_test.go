@@ -1692,9 +1692,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 														},
 													},
-													PeriodSeconds:    10,
+													PeriodSeconds:    1,
 													TimeoutSeconds:   5,
-													FailureThreshold: 720,
+													FailureThreshold: 7200,
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -2218,7 +2218,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														},
 													},
 													TimeoutSeconds:   4,
-													PeriodSeconds:    10,
+													PeriodSeconds:    1,
 													SuccessThreshold: 0,
 													FailureThreshold: 3,
 												},
@@ -2230,9 +2230,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														},
 													},
 													TimeoutSeconds:   5,
-													PeriodSeconds:    10,
+													PeriodSeconds:    1,
 													SuccessThreshold: 0,
-													FailureThreshold: 720,
+													FailureThreshold: 7200,
 												},
 											},
 										},
@@ -2681,9 +2681,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 														},
 													},
-													PeriodSeconds:    10,
+													PeriodSeconds:    1,
 													TimeoutSeconds:   5,
-													FailureThreshold: 720,
+													FailureThreshold: 7200,
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -3679,9 +3679,9 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 															Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 														},
 													},
-													PeriodSeconds:    10,
+													PeriodSeconds:    1,
 													TimeoutSeconds:   5,
-													FailureThreshold: 720,
+													FailureThreshold: 7200,
 												},
 												Env: []corev1.EnvVar{
 													{
@@ -5474,7 +5474,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 									Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 								},
 							},
-							PeriodSeconds:    10,
+							PeriodSeconds:    1,
 							TimeoutSeconds:   4,
 							FailureThreshold: 3,
 						},
@@ -5485,9 +5485,9 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 									Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 								},
 							},
-							PeriodSeconds:    10,
+							PeriodSeconds:    1,
 							TimeoutSeconds:   5,
-							FailureThreshold: 720,
+							FailureThreshold: 7200,
 						},
 						Ports: []corev1.ContainerPort{
 							{

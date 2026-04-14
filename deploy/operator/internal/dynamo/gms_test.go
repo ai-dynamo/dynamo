@@ -111,6 +111,9 @@ func TestApplyGPUMemoryService_GMSSidecarInjected(t *testing.T) {
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.gms_server_sidecar"}, gms.Command)
 	assert.NotNil(t, gms.RestartPolicy)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gms.RestartPolicy)
+	require.NotNil(t, gms.StartupProbe)
+	assert.Equal(t, int32(1), gms.StartupProbe.PeriodSeconds)
+	assert.Equal(t, int32(300), gms.StartupProbe.FailureThreshold)
 
 	// GMS sidecar should have DRA claim copied from main
 	require.Len(t, gms.Resources.Claims, 1)

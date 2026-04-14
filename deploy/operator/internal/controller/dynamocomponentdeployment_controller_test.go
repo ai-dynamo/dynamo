@@ -845,7 +845,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 												},
 											},
 											TimeoutSeconds:   4,
-											PeriodSeconds:    10,
+											PeriodSeconds:    1,
 											SuccessThreshold: 0,
 											FailureThreshold: 3,
 										},
@@ -857,9 +857,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 												},
 											},
 											TimeoutSeconds:   5,
-											PeriodSeconds:    10,
+											PeriodSeconds:    1,
 											SuccessThreshold: 0,
-											FailureThreshold: 720,
+											FailureThreshold: 7200,
 										},
 									},
 								},
@@ -1439,11 +1439,12 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.gms_server_sidecar" {
 			t.Fatalf("expected weights server to run python module, got %#v", got)
 		}
-		if gmsServer.RestartPolicy == nil || *gmsServer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-			t.Fatalf("expected weights server to be a restartable init container, got %#v", gmsServer.RestartPolicy)
+		// Restore: gms-server should be a regular container, not an init container
+		if gmsServer.RestartPolicy != nil {
+			t.Fatalf("expected restore gms-server to have no RestartPolicy (regular container), got %#v", gmsServer.RestartPolicy)
 		}
-		if gmsServer.StartupProbe == nil {
-			t.Fatalf("expected weights server startup probe")
+		if gmsServer.StartupProbe != nil {
+			t.Fatalf("expected restore gms-server to have no StartupProbe")
 		}
 		if got := loader.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.gms_checkpoint_loader" {
 			t.Fatalf("expected loader to run python module, got %#v", got)

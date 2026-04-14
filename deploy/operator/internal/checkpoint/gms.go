@@ -55,9 +55,10 @@ func ResolveGMSCheckpointStorage(
 
 // BuildGMSRestoreSidecars prepares GMS infrastructure for a restore pod and
 // returns the additional containers the caller must append to podSpec.Containers.
-// It adds the GMS server init sidecar and volumes directly to podSpec, but
-// leaves regular containers to the caller to avoid invalidating any existing
-// pointers into the Containers slice.
+//
+// The GMS server runs as a regular container (not init) because the CRIU-restored
+// main process already has GPU memory mapped and does not need sockets at
+// startup. The gms-loader polls for sockets internally via wait_for_weights_socket.
 func BuildGMSRestoreSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
@@ -67,7 +68,7 @@ func BuildGMSRestoreSidecars(
 		return nil
 	}
 
-	gmsruntime.EnsureServerSidecar(podSpec, mainContainer)
+	server := gmsruntime.BuildServerContainer(podSpec, mainContainer)
 
 	loader := gmsCheckpointLoaderContainer(mainContainer.Image)
 	copyGMSDeviceClaims(mainContainer, &loader)
@@ -75,7 +76,7 @@ func BuildGMSRestoreSidecars(
 	ensureVolumeMount(&loader, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
 	setEnv(&loader, "GMS_CHECKPOINT_DIR", resolveGMSArtifactDir(storage))
 
-	return []corev1.Container{loader}
+	return []corev1.Container{server, loader}
 }
 
 // BuildGMSCheckpointJobSidecars prepares GMS infrastructure for a checkpoint

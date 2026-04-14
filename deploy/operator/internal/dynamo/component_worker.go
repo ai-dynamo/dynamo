@@ -61,7 +61,7 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 			},
 		},
-		PeriodSeconds:    10,
+		PeriodSeconds:    1,
 		TimeoutSeconds:   4,
 		FailureThreshold: 3,
 	}
@@ -73,9 +73,9 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 				Port: intstr.FromString(commonconsts.DynamoSystemPortName),
 			},
 		},
-		PeriodSeconds:    10,
+		PeriodSeconds:    1,
 		TimeoutSeconds:   5,
-		FailureThreshold: 720, // 10s * 720 = 7200s = 2h
+		FailureThreshold: 7200, // 1s * 7200 = 7200s = 2h
 	}
 
 	container.Env = append(container.Env, []corev1.EnvVar{

@@ -44,10 +44,54 @@ func TestEnsureServerSidecar(t *testing.T) {
 	require.NotNil(t, server.StartupProbe)
 	assert.Equal(t, []string{"test", "-f", filepath.Join(SharedMountPath, readyFile)},
 		server.StartupProbe.Exec.Command)
+	assert.Equal(t, int32(1), server.StartupProbe.PeriodSeconds)
+	assert.Equal(t, int32(300), server.StartupProbe.FailureThreshold)
 
 	// DRA claim copied from main
 	assert.Len(t, server.Resources.Claims, 1)
 	assert.Equal(t, DRAClaimName, server.Resources.Claims[0].Name)
+}
+
+func TestBuildServerContainer(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "test-image:latest",
+			Resources: corev1.ResourceRequirements{
+				Claims: []corev1.ResourceClaim{{Name: DRAClaimName}},
+			},
+		}},
+	}
+
+	server := BuildServerContainer(podSpec, &podSpec.Containers[0])
+
+	// Should not be added to init containers
+	assert.Empty(t, podSpec.InitContainers)
+
+	assert.Equal(t, ServerContainerName, server.Name)
+	assert.Equal(t, []string{"python3", "-m", serverSidecarModule}, server.Command)
+
+	// No init-specific fields
+	assert.Nil(t, server.RestartPolicy)
+	assert.Nil(t, server.StartupProbe)
+
+	// DRA claim copied from main
+	assert.Len(t, server.Resources.Claims, 1)
+	assert.Equal(t, DRAClaimName, server.Resources.Claims[0].Name)
+
+	// Shared volume and env should be set on main
+	main := &podSpec.Containers[0]
+	assert.Equal(t, SharedMountPath, envValue(t, main, "TMPDIR"))
+	assert.Equal(t, SharedMountPath, envValue(t, main, "GMS_SOCKET_DIR"))
+
+	// Shared volume should exist
+	var hasVolume bool
+	for _, v := range podSpec.Volumes {
+		if v.Name == SharedVolumeName {
+			hasVolume = true
+		}
+	}
+	assert.True(t, hasVolume)
 }
 
 func TestEnsureServerSidecarDoesNotAddCheckpointControl(t *testing.T) {
