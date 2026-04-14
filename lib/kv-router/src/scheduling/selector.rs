@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rand::Rng;
 
 use super::config::KvRouterConfig;
-use super::types::{KvSchedulerError, SchedulingRequest};
+use super::types::{KvSchedulerError, SchedulingRequest, pinned_worker_config};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// A trait that users can implement to define custom selection logic.
@@ -177,14 +177,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let overlaps = &request.overlaps.scores;
 
         if let Some(worker) = pinned_worker {
-            let Some(config) = workers.get(&worker.worker_id) else {
-                return Err(KvSchedulerError::NoEndpoints);
-            };
-            let dp_start_rank = config.data_parallel_start_rank();
-            let dp_end_rank = dp_start_rank + config.data_parallel_size();
-            if !(dp_start_rank..dp_end_rank).contains(&worker.dp_rank) {
-                return Err(KvSchedulerError::NoEndpoints);
-            }
+            pinned_worker_config(workers, worker)?;
 
             let overlap_weight = request
                 .router_config_override

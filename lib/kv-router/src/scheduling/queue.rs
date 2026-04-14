@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
-use super::types::{SchedulingRequest, SchedulingResponse};
+use super::types::{SchedulingRequest, SchedulingResponse, pinned_worker_config};
 use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
@@ -219,11 +219,6 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest, decay_now: Instant) {
-        if let Err(error) = request.validate_worker_constraints() {
-            request.respond(Err(error));
-            return;
-        }
-
         let (decode_blocks, prefill_tokens) = self
             .slots
             .potential_blocks_and_tokens_with_prefill_tracking(
@@ -347,14 +342,9 @@ impl<
         let configs = self.workers_with_configs.borrow();
 
         if let Some(worker) = pinned_worker {
-            let Some(config) = configs.get(&worker.worker_id) else {
+            let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
                 return false;
             };
-            let dp_start_rank = config.data_parallel_start_rank();
-            let dp_end_rank = dp_start_rank + config.data_parallel_size();
-            if !(dp_start_rank..dp_end_rank).contains(&worker.dp_rank) {
-                return false;
-            }
 
             let max_batched = config
                 .max_num_batched_tokens()

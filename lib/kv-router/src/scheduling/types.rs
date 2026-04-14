@@ -7,7 +7,7 @@ use dynamo_tokens::SequenceHash;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
-use crate::protocols::{DpRank, OverlapScores, WorkerId, WorkerWithDpRank};
+use crate::protocols::{DpRank, OverlapScores, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
@@ -101,4 +101,20 @@ impl SchedulingRequest {
             tracing::error!("failed to send response to requestor");
         }
     }
+}
+
+pub fn pinned_worker_config<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    worker: WorkerWithDpRank,
+) -> Result<&C, KvSchedulerError> {
+    let Some(config) = workers.get(&worker.worker_id) else {
+        return Err(KvSchedulerError::NoEndpoints);
+    };
+    let dp_start_rank = config.data_parallel_start_rank();
+    let dp_end_rank = dp_start_rank + config.data_parallel_size();
+    if !(dp_start_rank..dp_end_rank).contains(&worker.dp_rank) {
+        return Err(KvSchedulerError::NoEndpoints);
+    }
+
+    Ok(config)
 }
