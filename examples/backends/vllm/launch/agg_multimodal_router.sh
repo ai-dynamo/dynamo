@@ -35,6 +35,7 @@ NUM_WORKERS="${NUM_WORKERS:-2}"          # Number of backend workers
 # GPU memory between workers.
 SINGLE_GPU="${SINGLE_GPU:-false}"
 PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-0}"  # Frontend preprocess worker pool size (0=disabled)
+NUM_FRONTENDS="${NUM_FRONTENDS:-1}"           # Number of frontend replicas (>1 for parallel HF processing)
 
 # KV cache override for parallel-safe GPU memory control
 KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
@@ -65,6 +66,7 @@ echo "BLOCK_SIZE=${BLOCK_SIZE}"
 echo "NUM_WORKERS=${NUM_WORKERS}"
 echo "SINGLE_GPU=${SINGLE_GPU}"
 echo "PREPROCESS_WORKERS=${PREPROCESS_WORKERS}"
+echo "NUM_FRONTENDS=${NUM_FRONTENDS}"
 echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE}"
@@ -180,26 +182,47 @@ if [[ "${PREPROCESS_WORKERS}" -gt 0 ]]; then
     FRONTEND_POOL_ARGS="--dyn-preprocess-workers ${PREPROCESS_WORKERS}"
 fi
 
-env "${COMMON_ENV[@]}" \
-    "DYN_LOG=debug" \
-    python -m dynamo.frontend \
-        --http-port "${HTTP_PORT}" \
-        --dyn-chat-processor vllm \
-        --router-mode kv \
-        --kv-cache-block-size "${BLOCK_SIZE}" \
-        ${FRONTEND_POOL_ARGS} \
-        --model-name "${MODEL}" \
-        ${FRONTEND_EXTRA_ARGS} &
-PIDS+=($!)
+FRONTEND_SYSTEM_PORT_BASE="${FRONTEND_SYSTEM_PORT_BASE:-9080}"
 
-wait_frontend_models "http://127.0.0.1:${HTTP_PORT}/v1/models" 300
+for f in $(seq 1 "${NUM_FRONTENDS}"); do
+    FE_HTTP_PORT=$((HTTP_PORT + f - 1))
+    FE_SYSTEM_PORT=$((FRONTEND_SYSTEM_PORT_BASE + f - 1))
 
-# Wait until the frontend can actually serve a text request (processor loaded).
+    # Only reset states on the first replica to avoid wiping shared state.
+    RESET_ARGS=""
+    if [[ "$f" -eq 1 ]]; then
+        RESET_ARGS="--router-reset-states"
+    fi
+
+    # Enable replica sync when running multiple frontends.
+    SYNC_ARGS=""
+    if [[ "${NUM_FRONTENDS}" -gt 1 ]]; then
+        SYNC_ARGS="--router-replica-sync"
+    fi
+
+    echo
+    echo "=== Starting frontend replica ${f} (HTTP ${FE_HTTP_PORT}, system ${FE_SYSTEM_PORT}) ==="
+    env "${COMMON_ENV[@]}" \
+        "DYN_LOG=debug" \
+        "DYN_SYSTEM_PORT=${FE_SYSTEM_PORT}" \
+        python -m dynamo.frontend \
+            --http-port "${FE_HTTP_PORT}" \
+            --dyn-chat-processor vllm \
+            --router-mode kv \
+            --kv-cache-block-size "${BLOCK_SIZE}" \
+            ${FRONTEND_POOL_ARGS} \
+            ${RESET_ARGS} \
+            ${SYNC_ARGS} \
+            --model-name "${MODEL}" \
+            ${FRONTEND_EXTRA_ARGS} &
+    PIDS+=($!)
+    wait_frontend_models "http://127.0.0.1:${FE_HTTP_PORT}/v1/models" 300
+done
+
+# Wait until the first frontend can serve a real request (processor loaded).
 echo "Waiting for frontend processor to initialize (this may take a while for custom models)..."
 DEADLINE=$((SECONDS + 300))
 while (( SECONDS < DEADLINE )); do
-    # Send a minimal text-only request. A 200 means the processor is ready.
-    # Errors like 500/503 mean it's still loading.
     HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
         -X POST "http://127.0.0.1:${HTTP_PORT}/v1/chat/completions" \
         -H "Content-Type: application/json" \
@@ -217,12 +240,14 @@ fi
 
 echo
 echo "=== All services are ready ==="
-echo "Frontend: http://127.0.0.1:${HTTP_PORT}"
+for f in $(seq 1 "${NUM_FRONTENDS}"); do
+    echo "Frontend ${f}: http://127.0.0.1:$((HTTP_PORT + f - 1))"
+done
 for i in $(seq 0 $((NUM_WORKERS - 1))); do
     echo "Worker $i: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + i))/health"
 done
 echo
-echo "Architecture: Frontend (vLLM processor + KvRouter) -> ${NUM_WORKERS}x vLLM backend"
+echo "Architecture: ${NUM_FRONTENDS}x Frontend (vLLM processor + KvRouter) -> ${NUM_WORKERS}x vLLM backend"
 echo "  - No separate MM Router Worker needed"
 echo "  - ImageLoader LRU cache size: ${DYN_MM_IMAGE_CACHE_SIZE}"
 echo
