@@ -117,6 +117,20 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
     }
 }
 
+/// RAII guard that removes a key from a `DashSet` on drop.
+/// Ensures `registering_worker_sets` is cleaned up even if the registration
+/// task panics, preventing permanent poisoning of the registration key.
+struct RegistrationGuard<'a> {
+    set: &'a DashSet<String>,
+    key: String,
+}
+
+impl Drop for RegistrationGuard<'_> {
+    fn drop(&mut self) {
+        self.set.remove(&self.key);
+    }
+}
+
 impl ModelWatcher {
     pub fn new(
         runtime: DistributedRuntime,
@@ -278,6 +292,12 @@ impl ModelWatcher {
                         // Remove ourselves from pending_puts once complete
                         watcher.pending_puts.remove(&key_for_cleanup);
                     });
+                    // If a duplicate Added event arrives while the first task is still
+                    // in-flight, abort the old task to prevent its cleanup from
+                    // removing the new task's handle from pending_puts.
+                    if let Some((_, old_handle)) = self.pending_puts.remove(&instance_key) {
+                        old_handle.abort();
+                    }
                     self.pending_puts.insert(instance_key, handle);
                 }
                 DiscoveryEvent::Removed(id) => {
@@ -452,22 +472,43 @@ impl ModelWatcher {
                 }
             }
 
-            self.manager
-                .save_model_card(&mcid.to_path(), card.clone())?;
-            tracing::debug!(
-                model_name = card.name(),
-                namespace = namespace,
-                "Worker joined existing WorkerSet, skipping pipeline build"
-            );
-            return Ok(());
+            // If the first registration failed or timed out, no WorkerSet exists.
+            // Fall through to do_worker_set_registration instead of becoming a ghost
+            // worker (registered in cards but with no serving pipeline).
+            if self
+                .manager
+                .get_model(&model_name)
+                .map_or(true, |m| !m.has_worker_set(&ws_key))
+            {
+                tracing::warn!(
+                    model_name = card.name(),
+                    namespace = namespace,
+                    "Concurrent registration produced no WorkerSet, retrying"
+                );
+                // Re-insert so our own build is guarded
+                self.registering_worker_sets
+                    .insert(registration_key.clone());
+                // Fall through to do_worker_set_registration below
+            } else {
+                self.manager
+                    .save_model_card(&mcid.to_path(), card.clone())?;
+                tracing::debug!(
+                    model_name = card.name(),
+                    namespace = namespace,
+                    "Worker joined existing WorkerSet, skipping pipeline build"
+                );
+                return Ok(());
+            }
         }
 
-        let result = self.do_worker_set_registration(mcid, card).await;
+        // RAII guard ensures the registration key is removed even if
+        // do_worker_set_registration panics, preventing permanent poisoning.
+        let _guard = RegistrationGuard {
+            set: &self.registering_worker_sets,
+            key: registration_key,
+        };
 
-        // Always remove from registering set
-        self.registering_worker_sets.remove(&registration_key);
-
-        result
+        self.do_worker_set_registration(mcid, card).await
     }
 
     /// Build a complete WorkerSet with all engines for this (model, namespace)
