@@ -35,7 +35,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
     - name: Sync Mirror Repository
       run: ./.github/workflows/mirror_repo.sh ${{ secrets.PROJECT_ACCESS_TOKEN }} ${{ secrets.MIRROR_URL }}
 
@@ -48,7 +47,6 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
     - name: Detect source code changes
       id: src_changes
       uses: dorny/paths-filter@v3

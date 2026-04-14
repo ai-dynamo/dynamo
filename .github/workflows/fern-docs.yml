@@ -69,7 +69,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
+        # Do not use fetch-depth: 0 — changed-files now works with shallow clone
       - name: Check for changes
         id: changes
         uses: ./.github/actions/changed-files
@@ -91,7 +91,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -115,7 +114,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -154,14 +152,12 @@ jobs:
 
       - name: Checkout source branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
         with:
           path: source-checkout
           fetch-depth: 1
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
         with:
           ref: docs-website
           path: docs-checkout
@@ -391,7 +387,6 @@ jobs:
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
         with:
           ref: docs-website
           token: ${{ secrets.GITHUB_TOKEN }}

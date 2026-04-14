@@ -16,7 +16,6 @@ jobs:
 
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
 
       - name: Restore lychee cache
         id: restore-cache
@@ -80,7 +79,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
 
       - name: Set up Python
         uses: actions/setup-python@v5

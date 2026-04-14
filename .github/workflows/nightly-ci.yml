@@ -30,7 +30,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Export builder name
         id: export-builder-name
         run: |
@@ -131,7 +130,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Register K8s builder context (skip bootstrap)
         uses: ./.github/actions/bootstrap-buildkit
         continue-on-error: true

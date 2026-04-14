@@ -34,7 +34,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
+        # Do not use fetch-depth: 0 — changed-files now works with shallow clone
       - name: Check for changes
         id: changes
         uses: ./.github/actions/changed-files
@@ -498,7 +498,6 @@ jobs:
       operator_tag: ${{ steps.setup.outputs.operator_tag }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Setup vCluster and operator
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
@@ -564,7 +563,6 @@ jobs:
     runs-on: prod-default-small-v2
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Teardown vCluster
         if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
         uses: ./.github/actions/teardown-dynamo-operator
@@ -590,7 +588,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Create K8s builders (skip bootstrap)
         uses: ./.github/actions/bootstrap-buildkit
         continue-on-error: true
