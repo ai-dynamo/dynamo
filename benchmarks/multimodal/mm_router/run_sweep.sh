@@ -210,8 +210,15 @@ run_aiperf() {
     mkdir -p "${metrics_dir}"
     scrape_metrics "${metrics_dir}/before.txt" || true
 
+    # Build --url flags (supports multiple URLs for load balancing)
+    local url_flags=""
+    for u in ${URL}; do
+        url_flags="${url_flags} --url ${u}"
+    done
+
     aiperf profile \
         --model "${MODEL}" \
+        ${url_flags} \
         --input-file "${input_file}" \
         --custom-dataset-type single_turn \
         --osl 1 \

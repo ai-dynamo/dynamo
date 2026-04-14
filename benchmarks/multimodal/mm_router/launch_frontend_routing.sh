@@ -42,6 +42,7 @@ ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
 
 export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-500}"
 PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-0}"
+NUM_FRONTENDS="${NUM_FRONTENDS:-1}"
 
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 FRONTEND_EXTRA_ARGS="${FRONTEND_EXTRA_ARGS:-}"
@@ -55,6 +56,7 @@ echo "SINGLE_GPU=${SINGLE_GPU}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE}"
 echo "PREPROCESS_WORKERS=${PREPROCESS_WORKERS}"
+echo "NUM_FRONTENDS=${NUM_FRONTENDS}"
 echo
 
 PIDS=()
@@ -138,29 +140,48 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 done
 
 # ---------------------------------------------------------------------------
-# Start frontend with vLLM processor + KV router
+# Start frontend(s) with vLLM processor + KV router
 # ---------------------------------------------------------------------------
 FRONTEND_POOL_ARGS=""
 if [[ "${PREPROCESS_WORKERS}" -gt 0 ]]; then
     FRONTEND_POOL_ARGS="--dyn-preprocess-workers ${PREPROCESS_WORKERS}"
 fi
 
-echo "=== Starting frontend (vLLM processor + KV router) ==="
-env "${COMMON_ENV[@]}" \
-    "DYN_LOG=info" \
-    "${PYTHON_BIN}" -m dynamo.frontend \
-        --http-port "${HTTP_PORT}" \
-        --dyn-chat-processor vllm \
-        --router-mode kv \
-        --kv-cache-block-size "${BLOCK_SIZE}" \
-        --model-name "${MODEL}" \
-        ${FRONTEND_POOL_ARGS} \
-        ${FRONTEND_EXTRA_ARGS} &
-PIDS+=($!)
+FRONTEND_SYSTEM_PORT_BASE="${FRONTEND_SYSTEM_PORT_BASE:-9080}"
 
-wait_frontend_models "http://127.0.0.1:${HTTP_PORT}/v1/models" 300
+for f in $(seq 1 "${NUM_FRONTENDS}"); do
+    FE_HTTP_PORT=$((HTTP_PORT + f - 1))
+    FE_SYSTEM_PORT=$((FRONTEND_SYSTEM_PORT_BASE + f - 1))
 
-# Wait for processor to warm up
+    RESET_ARGS=""
+    if [[ "$f" -eq 1 ]]; then
+        RESET_ARGS="--router-reset-states"
+    fi
+
+    SYNC_ARGS=""
+    if [[ "${NUM_FRONTENDS}" -gt 1 ]]; then
+        SYNC_ARGS="--router-replica-sync"
+    fi
+
+    echo "=== Starting frontend replica ${f} (HTTP ${FE_HTTP_PORT}, system ${FE_SYSTEM_PORT}) ==="
+    env "${COMMON_ENV[@]}" \
+        "DYN_LOG=info" \
+        "DYN_SYSTEM_PORT=${FE_SYSTEM_PORT}" \
+        "${PYTHON_BIN}" -m dynamo.frontend \
+            --http-port "${FE_HTTP_PORT}" \
+            --dyn-chat-processor vllm \
+            --router-mode kv \
+            --kv-cache-block-size "${BLOCK_SIZE}" \
+            --model-name "${MODEL}" \
+            ${FRONTEND_POOL_ARGS} \
+            ${RESET_ARGS} \
+            ${SYNC_ARGS} \
+            ${FRONTEND_EXTRA_ARGS} &
+    PIDS+=($!)
+    wait_frontend_models "http://127.0.0.1:${FE_HTTP_PORT}/v1/models" 300
+done
+
+# Wait for first frontend processor to warm up
 echo "Warming up frontend processor..."
 DEADLINE=$((SECONDS + 300))
 while (( SECONDS < DEADLINE )); do
@@ -176,14 +197,27 @@ while (( SECONDS < DEADLINE )); do
     sleep 2
 done
 
+# Build URL list for aiperf (space-separated for multiple --url flags)
+FRONTEND_URLS=""
+for f in $(seq 1 "${NUM_FRONTENDS}"); do
+    FE_HTTP_PORT=$((HTTP_PORT + f - 1))
+    FRONTEND_URLS="${FRONTEND_URLS} http://127.0.0.1:${FE_HTTP_PORT}"
+done
+FRONTEND_URLS="${FRONTEND_URLS# }"  # trim leading space
+# Export so run_sweep.sh can pick it up
+export AIPERF_URL="${FRONTEND_URLS}"
+
 echo
 echo "=== All services are ready ==="
-echo "Frontend: http://127.0.0.1:${HTTP_PORT}"
+for f in $(seq 1 "${NUM_FRONTENDS}"); do
+    echo "Frontend ${f}: http://127.0.0.1:$((HTTP_PORT + f - 1))"
+done
 for i in $(seq 1 "${NUM_WORKERS}"); do
     echo "Worker ${i}: http://127.0.0.1:$((18079 + i * 2))/health"
 done
 echo
-echo "Architecture: Frontend (vLLM processor + KvRouter + NIXL) -> ${NUM_WORKERS}x vLLM backend"
+echo "Architecture: ${NUM_FRONTENDS}x Frontend (vLLM processor + KvRouter + NIXL) -> ${NUM_WORKERS}x vLLM backend"
+echo "AIPERF_URL=${AIPERF_URL}"
 echo
 echo "Press Ctrl+C to stop all services"
 
