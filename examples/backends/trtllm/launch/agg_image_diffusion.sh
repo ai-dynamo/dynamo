@@ -16,7 +16,6 @@ source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_trtllm_override_args
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
 export MODEL_PATH=${MODEL_PATH:-"black-forest-labs/FLUX.1-dev"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"black-forest-labs/FLUX.1-dev"}
-# [gluo WIP] check media output via file or direct response for image diffusion
 export MEDIA_OUTPUT_FS_URL=${MEDIA_OUTPUT_FS_URL:-"file:///tmp/dynamo_media"}
 
 # Parse command line arguments
@@ -51,7 +50,6 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --no-curl "Launching Image Diffusion Serving (1 GPU)" "$MODEL_PATH" "$HTTP_PORT" \
     "Media URL:   $MEDIA_OUTPUT_FS_URL"
 
-# [gluo WIP] different curl command for image diffusion (endpoint different)
 print_curl_footer <<CURL
   curl http://localhost:${HTTP_PORT}/v1/images/generations \\
     -H 'Content-Type: application/json' \\
