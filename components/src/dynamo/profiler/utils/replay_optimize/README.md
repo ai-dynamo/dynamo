@@ -288,7 +288,3 @@ Important notes for the public toolagent trace:
   [Prefix Data Generator](../../../../../../benchmarks/prefix_data_generator/README.md)
   are useful if you want to inspect the trace first or synthesize a larger derivative trace before
   running this search
-
-So this path is a good fit for the standard public Mooncake/toolagent trace as-is. If you need a
-different dataset block size, extend the replay-optimize workload/evaluation path rather than
-assuming a non-`512` trace will be interpreted correctly.
