@@ -352,6 +352,14 @@ jobs:
           dind_as_sidecar: 'true'
           device: ${{ inputs.device }}
 
+      - name: Cleanup Docker images (XPU only)
+        if: inputs.device == 'xpu'
+        shell: bash
+        run: |
+          docker rmi ${{ steps.calculate-target-tag.outputs.test_image }} 2>/dev/null || true
+          docker rmi ${{ steps.calculate-target-tag.outputs.runtime_image }} 2>/dev/null || true
+          docker image prune -f
+
   # ============================================================================
   # MULTI-GPU TESTS
   # ============================================================================

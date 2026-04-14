@@ -144,7 +144,7 @@ runs:
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID})
+            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID} -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
           elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
@@ -233,7 +233,7 @@ runs:
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID})
+            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID} -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
           elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
