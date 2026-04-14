@@ -205,8 +205,6 @@ jobs:
   # ============================================================================
 
   operator:
-    needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
     name: Operator
     runs-on: prod-default-v2
     outputs:
@@ -234,8 +232,6 @@ jobs:
 # ============================================================================
 
   snapshot-agent:
-    needs: changed-files
-    if: needs.changed-files.outputs.deploy == 'true'
     name: Snapshot Agent
     runs-on: prod-default-v2
     steps:

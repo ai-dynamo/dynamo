@@ -51,6 +51,7 @@ jobs:
     needs:
       - changed-files
       - operator
+      - snapshot-agent
       - vllm-build
       - vllm-dev-build
       - vllm-test
