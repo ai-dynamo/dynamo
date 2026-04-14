@@ -28,12 +28,22 @@ export GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 export MAX_MODEL_LEN="${MAX_MODEL_LEN:-100426}"
 export SINGLE_GPU="${SINGLE_GPU:-0}"
 export PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-0}"
+export NUM_FRONTENDS="${NUM_FRONTENDS:-1}"
 export PYTHONHASHSEED=0
 
 # frontend_pool scenario: enable preprocess worker pool
 if [[ "${ROUTER}" == "frontend_pool" ]]; then
     export PREPROCESS_WORKERS="${PREPROCESS_WORKERS_COUNT:-4}"
 fi
+
+# Build AIPERF_URL from NUM_FRONTENDS
+HTTP_PORT="${HTTP_PORT:-8000}"
+AIPERF_URLS=""
+for f in $(seq 1 "${NUM_FRONTENDS}"); do
+    FE_PORT=$((HTTP_PORT + f - 1))
+    AIPERF_URLS="${AIPERF_URLS} http://127.0.0.1:${FE_PORT}"
+done
+export AIPERF_URL="${AIPERF_URLS# }"  # trim leading space
 
 DATASET_DIR="${SCRIPT_DIR}/datasets"
 LOG_DIR="${LOG_DIR:-${SCRIPT_DIR}/logs}"
