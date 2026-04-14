@@ -120,24 +120,34 @@ jobs:
   # ============================================================================
   # FASTVIDEO PIPELINE
   # ============================================================================
-  fastvideo-pipeline:
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+  fastvideo-build:
+    name: fastvideo-runtime # This name overlaps with other fastvideo jobs to group them in the UI
+    uses: ./.github/workflows/shared-build-image.yml
     needs: [create-fresh-builder]
     with:
       framework: fastvideo
       target: runtime
-      fresh_builder: true
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["13.1"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-fastvideo' || '' }}
-        ${{ github.ref_name == 'main' && format('main-fastvideo-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      build_timeout_minutes: 180
-      cpu_only_test_markers: 'fastvideo and gpu_0'
-      single_gpu_test_markers: 'fastvideo and gpu_1'
-      single_gpu_test_timeout_minutes: 180
-      run_multi_gpu_tests: false
+      cuda_version: '["13.1"]'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  fastvideo-test:
+    name: fastvideo-runtime # This name overlaps with other fastvideo jobs to group them in the UI
+    uses: ./.github/workflows/shared-test.yml
+    needs: [fastvideo-build]
+    with:
+      test_suite_name: fastvideo
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1
+      target_tag_plain: ${{ needs.fastvideo-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64", "arm64"]'
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and fastvideo and gpu_0
+      gpu_test_markers: pre_merge and fastvideo and gpu_1
+      gpu_test_timeout_minutes: 180
     secrets: inherit
 
   # ============================================================================
@@ -147,7 +157,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-pipeline, create-fresh-builder]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-build, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -170,7 +180,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-pipeline ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, fastvideo-test ]
     permissions:
       contents: read
     steps:

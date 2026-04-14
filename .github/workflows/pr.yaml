@@ -512,7 +512,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.fastvideo-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   planner-compliance:
