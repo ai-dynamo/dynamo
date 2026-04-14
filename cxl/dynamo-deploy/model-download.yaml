@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: model-downloader
+  namespace: model-downloader
+spec:
+  restartPolicy: Never
+  containers:
+    - name: downloader
+      image:  harbor.weizhipin.com/rook/minio/mc:edge
+
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: S3_ENDPOINT
+          value: "http://bzl-oss-store01.weizhipin.com"  # 例如: http://minio.example.com:9000 或 https://oss-cn-hangzhou.aliyuncs.com
+        - name: S3_ACCESS_KEY
+          value: "ULA2GX74LMBA8GTHOJ2S"           # 替换为你的 Access Key
+        - name: S3_SECRET_KEY
+          value: "yFhs0k3Oab32kkRmRP8Sx9x1UmRLHe9rCxfQwtBi"           # 替换为你的 Secret Key
+        - name: SOURCE_PATH
+          value: "common-crawl-data/model-repo/Qwen/Qwen3.5-2B/15852e8c16360a2fea060d615a32b45270f8a8fc/" # S3 上的存储桶和路径 (不带 s3:// 前缀)
+
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          echo "1. Configuring MinIO Client..."
+          # 设置别名为 'ccd'
+          # --insecure 用于跳过 SSL 证书验证 (如果3 使用自签名证书)
+          mc alias set ccd $S3_ENDPOINT $S3_ACCESS_KEY $S3_SECRET_KEY --insecure
+
+          # 定义目标路径 (在 PVC 里的路径)
+          TARGET_DIR="/data/Qwen/Qwen3-8B"
+
+          echo "2. Cleaning up old data in PVC..."
+          # ⚠️ 注意：清空 PVC 下的内容，确保没有重要数据
+          rm -rf /data/*
+
+          echo "3. Creating target directory: $TARGET_DIR"
+          mkdir -p "$TARGET_DIR"
+
+
+          echo "4. Starting download from ccd/$SOURCE_PATH to /data/ ..."
+          # 使用递归拷贝 (-r)
+          # 下载到 PVC 的 /data 目录下
+          mc cp -r "ccd/$SOURCE_PATH" "$TARGET_DIR"
+          # mc mirror "ccd/$SOURCE_PATH" "$TARGET_DIR"
+
+          echo "5. Download complete! Listing files in PVC:"
+          ls -R /data
+
+          echo "6. Sleeping for 1 hour to allow inspection..."
+          sleep 10
+      volumeMounts:
+        - name: model-storage
+          mountPath: /data
+  volumes:
+    - name: model-storage
+      persistentVolumeClaim:
+        # 确保这里引用的 PVC 名字和你之前创建的一致
+        claimName: model-qwen3-8b-data-pvc-shared

@@ -1,0 +1,113 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-2b-sglang-agg
+  namespace: dynamo-test
+  annotations:
+    scheduling.grove.io/volcano-queue: qa-volcano-e2e
+spec:
+  backendFramework: sglang
+  pvcs:
+    - name: model-cache
+      create: true
+      size: 50Gi
+      storageClass: ceph01-csi-cephfs-d
+      volumeAccessMode: ReadWriteMany
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      envs:
+        - name: DYN_ROUTER_MODE
+          value: kv
+      extraPodSpec:
+        schedulerName: volcano
+        mainContainer:
+          image: harbor.weizhipin.com/arsenal-ai/sglang-runtime:1.0.1
+          imagePullPolicy: IfNotPresent
+
+    decode:
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "2"
+        requests:
+          gpu: "2"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      extraPodSpec:
+        schedulerName: volcano
+        tolerations:
+          - key: dedicated
+            operator: Equal
+            value: gpu
+            effect: NoSchedule
+        initContainers:
+          - name: model-downloader
+            image: harbor.weizhipin.com/rook/minio/mc:edge
+            imagePullPolicy: IfNotPresent
+            env:
+              - name: S3_ENDPOINT
+                value: "http://bzl-oss-store01.weizhipin.com"
+              - name: S3_ACCESS_KEY
+                value: "ULA2GX74LMBA8GTHOJ2S"
+              - name: S3_SECRET_KEY
+                value: "yFhs0k3Oab32kkRmRP8Sx9x1UmRLHe9rCxfQwtBi"
+              - name: SOURCE_PATH
+                value: "common-crawl-data/model-repo/Qwen/Qwen3.5-2B/15852e8c16360a2fea060d615a32b45270f8a8fc/"
+            command:
+              - /bin/sh
+              - -c
+            args:
+              - |
+                set -eu
+                TARGET_DIR="/opt/models/Qwen/Qwen3.5-2B"
+                SENTINEL_FILE="${TARGET_DIR}/.download-complete"
+
+                if [ -f "${SENTINEL_FILE}" ]; then
+                  echo "Model already exists in ${TARGET_DIR}, skipping download."
+                  ls -lah "${TARGET_DIR}"
+                  exit 0
+                fi
+
+                echo "Configuring MinIO client..."
+                mc alias set ccd "${S3_ENDPOINT}" "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}" --insecure
+
+                echo "Creating target directory ${TARGET_DIR} ..."
+                mkdir -p "${TARGET_DIR}"
+
+                echo "Downloading model from ccd/${SOURCE_PATH} to ${TARGET_DIR} ..."
+                mc mirror --overwrite "ccd/${SOURCE_PATH}" "${TARGET_DIR}"
+
+                touch "${SENTINEL_FILE}"
+                echo "Model download completed."
+                ls -lah "${TARGET_DIR}"
+            volumeMounts:
+              - name: model-cache
+                mountPath: /opt/models
+        mainContainer:
+          image: harbor.weizhipin.com/arsenal-ai/sglang-runtime:1.0.1
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace/examples/backends/sglang
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - /opt/models/Qwen/Qwen3.5-2B
+            - --served-model-name
+            - Qwen/Qwen3.5-2B
+            - --page-size
+            - "16"
+            - --tp
+            - "2"
+            - --trust-remote-code
+            - --skip-tokenizer-init
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'

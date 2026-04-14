@@ -7,6 +7,7 @@ Why this form:
 - pins Volcano to the requested `v1.13.2` version
 - keeps the official upstream installer as the base
 - applies local scheduling constraints so Volcano control-plane pods prefer CPU nodes
+- rewrites Volcano images from `docker.io/volcanosh/*` to `harbor.weizhipin.com/cloud-native/volcanosh/*`
 
 ## Files
 
@@ -60,6 +61,14 @@ kubectl get crd | grep volcano
 
 ## Important note for air-gapped or internal-registry environments
 
-This overlay pins the upstream manifest version, but it does not rewrite Volcano image registries.
+This overlay already rewrites these images to your Harbor registry:
 
-If your cluster cannot pull the upstream Volcano images, the next step is to add image rewrite patches after we confirm the exact image names used by the official `v1.13.2` manifest or your internal Harbor mirror paths.
+- `docker.io/volcanosh/vc-webhook-manager:v1.13.2`
+- `docker.io/volcanosh/vc-controller-manager:v1.13.2`
+- `docker.io/volcanosh/vc-scheduler:v1.13.2`
+
+They become:
+
+- `harbor.weizhipin.com/cloud-native/volcanosh/vc-webhook-manager:v1.13.2`
+- `harbor.weizhipin.com/cloud-native/volcanosh/vc-controller-manager:v1.13.2`
+- `harbor.weizhipin.com/cloud-native/volcanosh/vc-scheduler:v1.13.2`

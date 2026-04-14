@@ -4,6 +4,17 @@ kind: Kustomization
 resources:
   - https://raw.githubusercontent.com/volcano-sh/volcano/v1.13.2/installer/volcano-development.yaml
 
+images:
+  - name: docker.io/volcanosh/vc-webhook-manager
+    newName: harbor.weizhipin.com/cloud-native/volcanosh/vc-webhook-manager
+    newTag: v1.13.2
+  - name: docker.io/volcanosh/vc-controller-manager
+    newName: harbor.weizhipin.com/cloud-native/volcanosh/vc-controller-manager
+    newTag: v1.13.2
+  - name: docker.io/volcanosh/vc-scheduler
+    newName: harbor.weizhipin.com/cloud-native/volcanosh/vc-scheduler
+    newTag: v1.13.2
+
 patches:
   - target:
       group: apps
