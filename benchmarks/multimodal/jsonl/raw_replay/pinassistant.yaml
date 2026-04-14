@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Multi-turn pinassistant benchmark config
+# Source: esoba/vllm-benchmarking (dynamo_benchmark_fixes branch)
+
+defaults:
+  model: "Qwen/Qwen3-VL-30B-A3B-Instruct"
+
+extra_inputs:
+  ignore_eos: true
+  stream: true
+
+phases:
+  - name: "planning"
+    system_tokens: 5500
+    user_tokens: 3000
+    max_output_tokens: 300
+    extra_inputs:
+      min_tokens: 300
+    images:
+      count: 3
+      width: 512
+      height: 512
+
+  - name: "summarization"
+    system_tokens: 2600
+    user_tokens: 300
+    max_output_tokens: 100
+    extra_inputs:
+      min_tokens: 100
+
+  - name: "product_brand_mapping"
+    system_tokens: 500
+    user_tokens: 1000
+    max_output_tokens: 70
+    extra_inputs:
+      min_tokens: 70

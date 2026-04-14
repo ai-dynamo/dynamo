@@ -31,17 +31,49 @@ This creates a deadlock-like starvation: requests can't be dispatched because wo
 
 ## Reproduce
 
+### Prerequisites
+
+1. **Dataset generation** — uses multi-turn generation from [ai-dynamo/dynamo#7883](https://github.com/ai-dynamo/dynamo/pull/7883):
+
+```bash
+# Get the dataset generation script
+git fetch origin esoba/aiperf-multi-turn-gen
+git checkout esoba/aiperf-multi-turn-gen -- benchmarks/multimodal/jsonl/raw_replay/
+
+# Generate 2000 multi-turn conversations using the pinassistant config
+# (included in this PR at benchmarks/multimodal/jsonl/raw_replay/pinassistant.yaml)
+cd benchmarks/multimodal/jsonl/raw_replay
+python generate_raw_replay.py \
+  --config pinassistant.yaml \
+  --num-conversations 2000 \
+  --output-dir ../multiturn/2000conv
+```
+
+The `pinassistant.yaml` config produces 3-turn conversations with 5500 system + 3000 user tokens + 3 images in turn 1 (~8500 prefill tokens). Any workload with >4000 prefill tokens per request will trigger the issue — adjust the YAML to match your use case.
+
+2. **aiperf with raw_payload support** — from [ai-dynamo/aiperf#796](https://github.com/ai-dynamo/aiperf/pull/796):
+
+```bash
+pip install git+https://github.com/ai-dynamo/aiperf.git@ajc/raw-payload-support
+```
+
 ### Environment
 
 - **Hardware**: 8x B200 GPUs (tested on computelab `umbriel-b200-074`)
 - **Model**: `Qwen/Qwen3-VL-30B-A3B-Instruct` (MoE, multimodal), TP=1, 8 workers
-- **Workload**: Multi-turn multimodal conversations (pinassistant: 5500 system tokens + 3000 user tokens + 3 images in turn 1)
-- **Container**: `nvcr.io/nvstaging/ai-dynamo/vllm-runtime:qiwa-vllm-x86-04-07`
-- **Benchmark**: aiperf with `raw_payload` dataset type, 32 QPS constant rate, 120s duration
 
 ### Steps
 
-1. Launch Dynamo with KV router (1 frontend + 8 workers):
+1. Start infrastructure (etcd + nats):
+
+```bash
+etcd --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls http://0.0.0.0:2379 \
+  --data-dir /tmp/etcd &
+nats-server -js -m 8222 -p 4222 -sd /tmp/nats &
+```
+
+2. Launch Dynamo with KV router (1 frontend + 8 workers):
 
 ```bash
 # Frontend
@@ -62,7 +94,31 @@ for i in $(seq 0 7); do
 done
 ```
 
-2. Send multi-turn traffic at 32 QPS. Any workload with >4000 prefill tokens per request will trigger the issue.
+3. Wait for all workers to register (`curl http://localhost:8000/v1/models` returns the model).
+
+4. Run the benchmark:
+
+```bash
+aiperf profile \
+  --model "Qwen/Qwen3-VL-30B-A3B-Instruct" \
+  --url "http://localhost:8000/v1/chat/completions" \
+  --endpoint-type raw \
+  --streaming \
+  --request-rate 32 \
+  --request-rate-mode constant \
+  --benchmark-duration 120 \
+  --benchmark-grace-period 30 \
+  --warmup-request-count 32 \
+  --warmup-concurrency 4 \
+  --input-file /path/to/multiturn/2000conv \
+  --custom-dataset-type raw_payload \
+  --tokenizer "Qwen/Qwen3-VL-30B-A3B-Instruct" \
+  --tokenizer-trust-remote-code \
+  --random-seed 42 \
+  --artifact-dir /path/to/results
+```
+
+5. To verify the fix, re-run step 2 with `DYN_ROUTER_QUEUE_THRESHOLD=999` set on the frontend.
 
 ### Expected vs Actual
 
