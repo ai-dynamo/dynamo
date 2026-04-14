@@ -8,6 +8,7 @@ from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
+from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
@@ -261,6 +262,24 @@ class OmniHandler(BaseOmniHandler):
         if val is not None:
             setattr(object, key, val)
 
+    def _build_sampling_params_list(
+        self, diffusion_sp: OmniDiffusionSamplingParams
+    ) -> list:
+        # This is in sync with how vllm-omni builds sampling params currently.
+        defaults = list(self.engine_client.default_sampling_params_list or [])
+        result = []
+        for i, default in enumerate(defaults):
+            stage_type = self.engine_client.engine.get_stage_metadata(i).get(
+                "stage_type", "llm"
+            )
+            if stage_type == "diffusion":
+                result.append(diffusion_sp)
+            else:
+                result.append(
+                    default.clone() if hasattr(default, "clone") else SamplingParams()
+                )
+        return result if result else [diffusion_sp]
+
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
         width, height = parse_size(req.size, default_w=1024, default_h=1024)
@@ -274,10 +293,6 @@ class OmniHandler(BaseOmniHandler):
             height=height,
             width=width,
         )
-
-        # NOTE: --tensor-parallel-size does not work for direct image generation models. Initial exploration revealed: parallel_world_size = pipeline_parallel_size * data_parallel_size * tensor_parallel_size * ulysses_degree * ring_degree * cfg_parallel_size
-        # Further more exploration is required to determine how does multi-gpu works within the framework for just diffusion models.
-        # Setting --cfg-parallel-size to 2 get me to use 2 GPUs.
 
         # TODO: Apply LoRA Request params here and move to shared utilities for disaggregated stages to use as well.
 
@@ -295,11 +310,9 @@ class OmniHandler(BaseOmniHandler):
             nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1),
         )
 
-        # TODO: It's a bug here that it just constructs a single stage sampling params. We need to check engine client's stage info and construct sampling params accordingly.
-        # This will work for direct image generation models, but will fail for layered models.
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=[sp],
+            sampling_params_list=self._build_sampling_params_list(sp),
             request_type=RequestType.IMAGE_GENERATION,
             response_format=req.response_format,
         )
@@ -361,10 +374,9 @@ class OmniHandler(BaseOmniHandler):
             f"size={width}x{height}, frames={num_frames}, fps={fps}"
         )
 
-        # TODO: To fix sampling params list creation for layered models
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=[sp],
+            sampling_params_list=self._build_sampling_params_list(sp),
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
         )

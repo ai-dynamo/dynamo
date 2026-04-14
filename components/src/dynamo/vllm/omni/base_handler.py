@@ -96,9 +96,16 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         # Build DiffusionParallelConfig if available
         if DiffusionParallelConfig is not None:
             parallel_config = DiffusionParallelConfig(
+                tensor_parallel_size=getattr(
+                    config.engine_args, "tensor_parallel_size", 1
+                ),
                 ulysses_degree=getattr(config, "ulysses_degree", 1),
                 ring_degree=getattr(config, "ring_degree", 1),
                 cfg_parallel_size=getattr(config, "cfg_parallel_size", 1),
+                vae_patch_parallel_size=getattr(config, "vae_patch_parallel_size", 1),
+                use_hsdp=getattr(config, "use_hsdp", False),
+                hsdp_shard_size=getattr(config, "hsdp_shard_size", 2),
+                hsdp_replicate_size=getattr(config, "hsdp_replicate_size", 1),
             )
             omni_kwargs["parallel_config"] = parallel_config
         else:

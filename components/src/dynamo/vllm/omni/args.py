@@ -227,8 +227,43 @@ class OmniArgGroup(ArgGroup):
             env_var="DYN_OMNI_CFG_PARALLEL_SIZE",
             default=1,
             arg_type=int,
-            choices=[1, 2],
+            choices=[1, 2, 3],
             help="Number of GPUs used for classifier free guidance parallelism.",
+        )
+        add_argument(
+            g,
+            flag_name="--vae-patch-parallel-size",
+            env_var="DYN_OMNI_VAE_PATCH_PARALLEL_SIZE",
+            default=1,
+            arg_type=int,
+            help="Number of ranks used for VAE patch/tile parallelism during decode/encode.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--use-hsdp",
+            env_var="DYN_OMNI_USE_HSDP",
+            default=False,
+            help=(
+                "Enable Hybrid Sharded Data Parallel (HSDP) for diffusion models. "
+                "Shards model weights across GPUs to reduce per-GPU memory usage. "
+                "Use --hsdp-shard-size to set the number of GPUs to shard across."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--hsdp-shard-size",
+            env_var="DYN_OMNI_HSDP_SHARD_SIZE",
+            default=2,
+            arg_type=int,
+            help="Number of GPUs to shard model weights across when using HSDP (default: 2).",
+        )
+        add_argument(
+            g,
+            flag_name="--hsdp-replicate-size",
+            env_var="DYN_OMNI_HSDP_REPLICATE_SIZE",
+            default=1,
+            arg_type=int,
+            help="Number of HSDP replica groups (default: 1).",
         )
 
         # Disaggregated stage worker flags
@@ -287,6 +322,10 @@ class OmniConfig(DynamoRuntimeConfig):
     ulysses_degree: int = 1
     ring_degree: int = 1
     cfg_parallel_size: int = 1
+    vae_patch_parallel_size: int = 1
+    use_hsdp: bool = False
+    hsdp_shard_size: int = -1
+    hsdp_replicate_size: int = 1
 
     # TTS parameters
     tts_max_instructions_length: int = 500
