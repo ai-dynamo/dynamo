@@ -1,4 +1,4 @@
-name: 'Pytest'
+﻿name: 'Pytest'
 description: 'Run pytest on pre-built container images'
 inputs:
   pytest_marks:
@@ -9,7 +9,7 @@ inputs:
     description: 'Image Tag to run tests on'
     required: true
   test_suite_name:
-    description: 'Test suite name for test metrics'
+    description: 'Framework name for test metrics'
     required: false
     default: 'unknown'
   test_type:
@@ -72,8 +72,8 @@ runs:
         MINIO_ACCESS_KEY: minioadmin
         MINIO_SECRET_KEY: minioadmin
       run: |
-        # Reuse an existing MinIO service when available; only start one if needed.
-        echo "🗄️  Checking MinIO service..."
+        # Start MinIO for S3-compatible object storage (used by LoRA tests)
+        echo "🗄️  Starting MinIO service..."
 
         # Check container state
         CONTAINER_STATE=$(docker inspect --format '{{.State.Status}}' "${MINIO_CONTAINER_NAME}" 2>/dev/null || echo "absent")
@@ -134,7 +134,8 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 -m \"${{ inputs.pytest_marks }}\""
+          # --durations=0: show ALL test/setup/teardown durations (0 = no limit)
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=0 -m \"${{ inputs.pytest_marks }}\""
 
           # Set device-specific docker flags
           GPU_FLAGS=""
@@ -142,7 +143,10 @@ runs:
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID})
+            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
+            DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri")
+            # Model predownload on XPU can exceed default pytest-timeout in CI.
+            PYTEST_CMD="${PYTEST_CMD} --timeout=600"
           elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
@@ -160,11 +164,15 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-
-        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
+        DOCKER_ENV_FLAGS+=(--env "VLLM_LOGGING_LEVEL=DEBUG")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.test_suite_name }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+
+        echo "🐳 Docker run command (runner v1):"
+        echo "docker run ${GPU_FLAGS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --cpus=${NUM_CPUS} --network host ${DOCKER_ENV_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         # Pre-cleanup: remove any leftover containers with the same name
         echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
@@ -231,12 +239,16 @@ runs:
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID})
+            GPU_FLAGS="--device /dev/dri:/dev/dri --group-add ${RENDER_GID}"
+            DOCKER_EXTRA_FLAGS=(--privileged  -v "/dev/dri:/dev/dri" -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
+            PYTEST_TIMEOUT_OPT="--timeout=600"
           elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
+            PYTEST_TIMEOUT_OPT=""
           else
             echo "⚠️  No GPU detected, running in CPU-only mode"
+            PYTEST_TIMEOUT_OPT=""
           fi
 
           # Determine parallelization based on parallel_mode input
@@ -257,7 +269,8 @@ runs:
 
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 -m \"${{ inputs.pytest_marks }}\""
+          # --durations=0: show ALL test/setup/teardown durations (0 = no limit)
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=long -s --log-cli-level=DEBUG --log-level=DEBUG --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=0 ${PYTEST_TIMEOUT_OPT} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
@@ -270,16 +283,23 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
-
-        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
+        DOCKER_ENV_FLAGS+=(--env "VLLM_LOGGING_LEVEL=DEBUG")
+        DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.test_suite_name }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
+        echo "** Available local docker images (dynamo/vllm related):"
+        docker images --format '{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}' | grep -E 'dynamo|vllm|non_cuda|xpu' || echo '(none matching dynamo/vllm/xpu)'
+        echo "** Image to be used: ${{ inputs.image_tag }}"
+        docker inspect --format 'ID={{.Id}} Created={{.Created}} Size={{.Size}}' '${{ inputs.image_tag }}' 2>/dev/null || echo 'WARNING: Image not found locally: ${{ inputs.image_tag }}'
+        echo "** Docker run command (dind sidecar):"
+        echo "docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${DOCKER_EXTRA_FLAGS[@]} --rm -w /workspace --network host ${DOCKER_ENV_FLAGS[@]} --name ${{ env.CONTAINER_ID }}_pytest -v ${TEST_RESULTS_DIR}:/workspace/test-results ${{ inputs.image_tag }} bash -c \"${PYTEST_CMD}\""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
         # Pre-cleanup: remove any leftover containers with the same name
         echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
         docker rm -f "${{ env.CONTAINER_ID }}_pytest" 2>/dev/null || true
-
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} \
           "${DOCKER_EXTRA_FLAGS[@]}" \
           --rm -w /workspace \
@@ -338,12 +358,12 @@ runs:
 
         exit ${TEST_EXIT_CODE}
 
-    - name: Cleanup MinIO Service
-      if: always() && inputs.start_minio == 'true'
-      shell: bash
-      run: |
-        echo "🧹 Cleaning up MinIO container..."
-        docker rm -f dynamo-minio-test 2>/dev/null || true
+    #- name: Cleanup MinIO Service
+    #  if: always() && inputs.start_minio == 'true' && env.MINIO_STARTED_BY_ACTION == 'true'
+    #  shell: bash
+    #  run: |
+    #    echo "🧹 Cleaning up MinIO container..."
+    #    docker rm -f dynamo-minio-test 2>/dev/null || true
 
     - name: Cleanup Pytest Containers
       if: always() && inputs.device == 'xpu'
@@ -375,7 +395,7 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()
       with:
-        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: allure-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore

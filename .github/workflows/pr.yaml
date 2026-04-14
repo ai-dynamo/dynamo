@@ -4,9 +4,9 @@
 name: PR
 
 on:
-  push:
+  pull_request:
     branches:
-      - "pull-request/[0-9]+"
+      - main
 
 concurrency:
   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
@@ -188,7 +188,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0", "cpu", "xpu"]'
+      version_selector: '["12.9", "13.0", "xpu"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -202,7 +202,7 @@ jobs:
     with:
       framework: vllm
       target: dev
-      cuda_version: '["12.9", "13.0"]'
+      version_selector: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
@@ -217,7 +217,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      version_selector: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -231,7 +231,7 @@ jobs:
     with:
       framework: sglang
       target: dev
-      cuda_version: '["12.9", "13.0"]'
+      version_selector: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
@@ -246,7 +246,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      cuda_version: '["13.1"]'
+      version_selector: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -260,7 +260,7 @@ jobs:
     with:
       framework: trtllm
       target: dev
-      cuda_version: '["13.1"]'
+      version_selector: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
@@ -275,7 +275,7 @@ jobs:
     with:
       framework: dynamo
       target: planner
-      cuda_version: '[""]'
+      version_selector: '["cpu"]'
       platform: 'linux/amd64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
@@ -295,7 +295,7 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0", "non-cuda"]'
+      version_selector: '["12.9", "13.0", "xpu"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0
@@ -316,7 +316,7 @@ jobs:
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      version_selector: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
@@ -333,7 +333,7 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      version_selector: '["12.9", "13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
@@ -350,7 +350,7 @@ jobs:
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      version_selector: '["12.9", "13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
@@ -367,7 +367,7 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      version_selector: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and trtllm and gpu_0
@@ -384,7 +384,7 @@ jobs:
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v1
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      version_selector: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
@@ -401,7 +401,7 @@ jobs:
       test_type: CPU Test
       amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
+      version_selector: '["cpu"]'
       platform: '["amd64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
@@ -423,7 +423,7 @@ jobs:
       framework: vllm
       target: runtime
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0", "cpu", "xpu"]'
+      version_selector: '["12.9", "13.0", "cpu", "xpu"]'
       platform: '["amd64"]'
     secrets: inherit
 
@@ -436,7 +436,7 @@ jobs:
       framework: sglang
       target: runtime
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      version_selector: '["12.9", "13.0"]'
       platform: '["amd64"]'
     secrets: inherit
 
@@ -449,7 +449,7 @@ jobs:
       framework: trtllm
       target: runtime
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      version_selector: '["13.1"]'
       platform: '["amd64"]'
     secrets: inherit
 
@@ -462,7 +462,7 @@ jobs:
       framework: dynamo
       target: planner
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
+      version_selector: '["cpu"]'
       platform: '["amd64"]'
     secrets: inherit
 
@@ -481,7 +481,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0", "cpu", "xpu"]'
+      version_selector: '["12.9", "13.0", "cpu", "xpu"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -497,7 +497,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      version_selector: '["12.9", "13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -513,7 +513,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
+      version_selector: '["13.1"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
