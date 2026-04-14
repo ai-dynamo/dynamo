@@ -88,13 +88,16 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int):
 
     logger.info(f"KVBM: Rank {rank} bootstrap world_size={bootstrap.world_size()}")
 
-    # Trust the framework (TRT-LLM / MPI launcher) to have already
-    # set the correct CUDA device for this rank, either via
-    # CUDA_VISIBLE_DEVICES or its own initialization.
-    current_device = torch.cuda.current_device()
+    # TRT-LLM MPI launch exposes all GPUs to each rank but manages device
+    # assignment internally. torch.cuda.current_device() defaults to 0 for
+    # all ranks, which causes ncclCommInitRank to fail (all ranks on same
+    # device). Explicitly set the device to match the MPI rank.
+    device_count = torch.cuda.device_count()
+    device_id = rank % device_count
+    torch.cuda.set_device(device_id)
     logger.info(
-        f"KVBM: Rank {rank} on CUDA device {current_device} "
-        f"(device_count={torch.cuda.device_count()})"
+        f"KVBM: Rank {rank} set to CUDA device {device_id} "
+        f"(device_count={device_count})"
     )
 
     logger.info(f"KVBM: Rank {rank} waiting at MPI barrier " "before ncclCommInitRank")
