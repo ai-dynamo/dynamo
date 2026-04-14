@@ -26,7 +26,10 @@ from gpu_memory_service.client.torch.allocator import (
     gms_use_mem_pool,
     retarget_gms_client_memory_manager,
 )
-from gpu_memory_service.common.cuda_utils import cuda_forget_primary_contexts
+from gpu_memory_service.common.cuda_utils import (
+    cuda_forget_primary_contexts,
+    cuda_set_current_device,
+)
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common import patch_empty_cache
@@ -278,7 +281,9 @@ class GMSWorker(Worker):
             assert weights_manager.is_unmapped, "GMS weights are not unmapped"
             # Cross-node restore preserves Python process memory, so any cached
             # primary-context handles from the source node must be reacquired.
+            torch.cuda.set_device(self.local_rank)
             cuda_forget_primary_contexts()
+            cuda_set_current_device(self.local_rank)
             retarget_gms_client_memory_manager(
                 "weights",
                 get_socket_path(self.local_rank, "weights"),
@@ -331,7 +336,9 @@ class GMSWorker(Worker):
                     kv_cache_manager is not None
                 ), "GMS KV cache client is not initialized"
                 assert kv_cache_manager.is_unmapped, "GMS KV cache is not unmapped"
+                torch.cuda.set_device(self.local_rank)
                 cuda_forget_primary_contexts()
+                cuda_set_current_device(self.local_rank)
                 retarget_gms_client_memory_manager(
                     "kv_cache",
                     get_socket_path(self.local_rank, "kv_cache"),

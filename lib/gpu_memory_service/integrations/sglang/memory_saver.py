@@ -27,6 +27,7 @@ from gpu_memory_service.client.torch.allocator import (
     retarget_gms_client_memory_manager,
 )
 from gpu_memory_service.common.cuda_utils import cuda_forget_primary_contexts
+from gpu_memory_service.common.cuda_utils import cuda_set_current_device
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_write
@@ -169,7 +170,9 @@ class GMSMemorySaverImpl:
                 continue
 
             logger.info("[GMS] Remapping %s", target_tag)
+            torch.cuda.set_device(self._device.index)
             cuda_forget_primary_contexts()
+            cuda_set_current_device(self._device.index)
             retarget_gms_client_memory_manager(
                 target_tag,
                 get_socket_path(self._device.index, target_tag),
