@@ -9,6 +9,7 @@ import logging
 import os
 
 # MM kwargs NIXL transfer (frontend → backend pre-rendered path)
+import pickle
 import tempfile
 import threading
 import time
@@ -21,7 +22,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -1227,16 +1228,39 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             if self._mm_kwargs_receiver is None:
                 self._mm_kwargs_receiver = MmKwargsReceiver()
             receiver = self._mm_kwargs_receiver
+            mm_kwargs_tensors = await receiver.receive(metadata)
 
-            # Receive tensors via NIXL RDMA and reconstruct
-            # MultiModalKwargsItems directly (zero-pickle).
-            kwargs_items = await receiver.receive(metadata)
-            if not kwargs_items:
+            # Reconstruct a pre-rendered MultiModalInput dict.
+            # The vLLM engine detects "type": "multimodal" and skips the HF
+            # processor entirely (InputProcessor.process_inputs line 222).
+
+            # Deserialize the MultiModalKwargsItem that was pickled by the
+            # frontend sender.  This preserves the full structure including
+            # MultiModalFieldElem wrappers and field metadata, which vLLM's
+            # internal serializer requires.
+            # NOTE: pickle is used here because MultiModalKwargsItem contains
+            # MultiModalFieldElem wrappers with field metadata that vLLM's
+            # internal serializer requires. This is safe because the frontend
+            # is a trusted component within the same Dynamo deployment.
+            pickled_items = mm_kwargs_tensors.get("__pickled_kwargs_item__")
+            if not pickled_items:
                 logger.warning(
-                    "[mm-routing] NIXL receiver returned no kwargs items; "
+                    "[mm-routing] NIXL tensors received but no pickled kwargs items; "
                     "falling back to normal path"
                 )
                 return None
+            # pickled_items is a list (one per image/feature).
+            kwargs_items = []
+            for pi in pickled_items:
+                item = pickle.loads(pi)
+                if not isinstance(item, MultiModalKwargsItem):
+                    logger.warning(
+                        "[mm-routing] Deserialized object is %s, expected "
+                        "MultiModalKwargsItem; falling back to normal path",
+                        type(item).__name__,
+                    )
+                    return None
+                kwargs_items.append(item)
 
             # Use the expanded token IDs (with image placeholders) from the
             # frontend, not the unexpanded request["token_ids"].
