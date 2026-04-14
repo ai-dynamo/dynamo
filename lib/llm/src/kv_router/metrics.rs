@@ -572,12 +572,12 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
 
         let output = gather_pef(&registry);
         let expected = "\
-# HELP dynamo_frontend_router_queue_pending_requests Number of requests pending in the router scheduler queue
-# TYPE dynamo_frontend_router_queue_pending_requests gauge
-dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
 # HELP dynamo_frontend_router_queue_pending_isl_tokens Sum of isl_tokens for requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_isl_tokens gauge
 dynamo_frontend_router_queue_pending_isl_tokens{worker_type=\"decode\"} 1024
+# HELP dynamo_frontend_router_queue_pending_requests Number of requests pending in the router scheduler queue
+# TYPE dynamo_frontend_router_queue_pending_requests gauge
+dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
 ";
         assert_eq!(
             output, expected,
