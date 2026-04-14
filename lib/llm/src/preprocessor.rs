@@ -1460,6 +1460,8 @@ impl
             dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let _stage_guard = StageGuard::new("preprocess", "");
+
         // unpack the request
         let (mut request, context) = request.into_parts();
 
