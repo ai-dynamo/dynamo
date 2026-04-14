@@ -16,6 +16,7 @@ new auto-detection behaviour.
 import asyncio
 import inspect
 import warnings
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -172,87 +173,80 @@ def test_create_runtime_accepts_use_kv_events_kwarg():
     assert param.default is None
 
 
-@pytest.mark.forked
-def test_create_runtime_use_kv_events_true_emits_warning(
-    discovery_backend, request_plane
-):
+@patch("dynamo.common.utils.runtime.DistributedRuntime")
+def test_create_runtime_use_kv_events_true_emits_warning(mock_runtime_cls):
     """create_runtime(use_kv_events=True) should emit a DeprecationWarning.
 
-    Uses asyncio.run() — see test_enable_nats_emits_deprecation_warning docstring.
+    Mocks DistributedRuntime to avoid spawning a real Tokio runtime. The
+    use_kv_events warning is emitted in pure Python before the constructor
+    runs, so this is safe and avoids @pytest.mark.forked which leaves stale
+    pytest SetupState entries that break the next test module.
     """
+    mock_runtime_cls.return_value = MagicMock()
 
     async def _run():
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             runtime, loop = create_runtime(
-                discovery_backend=discovery_backend,
-                request_plane=request_plane,
+                discovery_backend="file",
+                request_plane="tcp",
                 event_plane="nats",
                 use_kv_events=True,
             )
-        try:
-            deprecation_warnings = [
-                w for w in caught if issubclass(w.category, DeprecationWarning)
-            ]
-            assert len(deprecation_warnings) == 1
-            assert "use_kv_events" in str(deprecation_warnings[0].message)
-        finally:
-            runtime.shutdown()
+        deprecation_warnings = [
+            w for w in caught if issubclass(w.category, DeprecationWarning)
+        ]
+        assert len(deprecation_warnings) == 1
+        assert "use_kv_events" in str(deprecation_warnings[0].message)
 
     asyncio.run(_run())
 
 
-@pytest.mark.forked
-def test_create_runtime_use_kv_events_false_emits_warning(
-    discovery_backend, request_plane
-):
+@patch("dynamo.common.utils.runtime.DistributedRuntime")
+def test_create_runtime_use_kv_events_false_emits_warning(mock_runtime_cls):
     """create_runtime(use_kv_events=False) should also emit a DeprecationWarning.
 
-    Uses asyncio.run() — see test_enable_nats_emits_deprecation_warning docstring.
+    See test_create_runtime_use_kv_events_true_emits_warning docstring.
     """
+    mock_runtime_cls.return_value = MagicMock()
 
     async def _run():
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             runtime, loop = create_runtime(
-                discovery_backend=discovery_backend,
-                request_plane=request_plane,
+                discovery_backend="file",
+                request_plane="tcp",
                 event_plane="nats",
                 use_kv_events=False,
             )
-        try:
-            deprecation_warnings = [
-                w for w in caught if issubclass(w.category, DeprecationWarning)
-            ]
-            assert len(deprecation_warnings) == 1
-            assert "use_kv_events" in str(deprecation_warnings[0].message)
-        finally:
-            runtime.shutdown()
+        deprecation_warnings = [
+            w for w in caught if issubclass(w.category, DeprecationWarning)
+        ]
+        assert len(deprecation_warnings) == 1
+        assert "use_kv_events" in str(deprecation_warnings[0].message)
 
     asyncio.run(_run())
 
 
-@pytest.mark.forked
-def test_create_runtime_no_use_kv_events_no_warning(discovery_backend, request_plane):
+@patch("dynamo.common.utils.runtime.DistributedRuntime")
+def test_create_runtime_no_use_kv_events_no_warning(mock_runtime_cls):
     """Omitting use_kv_events should not emit a DeprecationWarning.
 
-    Uses asyncio.run() — see test_enable_nats_emits_deprecation_warning docstring.
+    See test_create_runtime_use_kv_events_true_emits_warning docstring.
     """
+    mock_runtime_cls.return_value = MagicMock()
 
     async def _run():
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             runtime, loop = create_runtime(
-                discovery_backend=discovery_backend,
-                request_plane=request_plane,
+                discovery_backend="file",
+                request_plane="tcp",
                 event_plane="nats",
             )
-        try:
-            deprecation_warnings = [
-                w for w in caught if issubclass(w.category, DeprecationWarning)
-            ]
-            assert len(deprecation_warnings) == 0
-        finally:
-            runtime.shutdown()
+        deprecation_warnings = [
+            w for w in caught if issubclass(w.category, DeprecationWarning)
+        ]
+        assert len(deprecation_warnings) == 0
 
     asyncio.run(_run())
