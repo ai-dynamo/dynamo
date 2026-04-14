@@ -454,7 +454,7 @@ class LoraMixin:
                 "lora_id": lora_id,
             }
         except Exception as e:
-            logger.error(f"Failed to load LoRA adapter: {e}")
+            logger.exception("Failed to load LoRA adapter")
             yield {"status": "error", "message": str(e)}
 
     async def unload_lora(self, request: Optional[Dict[str, Any]] = None):
@@ -571,7 +571,7 @@ class LoraMixin:
                 "lora_id": lora_id,
             }
         except Exception as e:
-            logger.error(f"Failed to unload LoRA adapter: {e}")
+            logger.exception("Failed to unload LoRA adapter")
             yield {"status": "error", "message": str(e)}
 
     async def list_loras(self, _request: Optional[Dict[str, Any]] = None):
@@ -587,7 +587,7 @@ class LoraMixin:
                 "count": len(loras),
             }
         except Exception as e:
-            logger.error(f"Failed to list LoRA adapters: {e}")
+            logger.exception("Failed to list LoRA adapters")
             yield {"status": "error", "message": str(e)}
 
 
