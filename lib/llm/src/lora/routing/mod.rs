@@ -1,16 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! LoRA Allocation Algorithms - HRW and Random
+//! LoRA Allocation Algorithms - HRW, Random, and Min-Cost Flow
 
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use std::collections::HashMap;
 use std::str::FromStr;
 
 pub mod hrw;
+pub mod mcf_allocator;
+pub mod min_cost_flow;
 pub mod table;
 
 pub use hrw::RendezvousHasher;
+pub use mcf_allocator::{McfPlacementResult, McfPlacementSolver, McfSolveParams};
 pub use table::{LoraReplicaConfig, LoraRoutingTable};
 
 /// Trait for LoRA allocation algorithms
@@ -46,6 +49,8 @@ pub enum AllocationAlgorithmType {
     Hrw,
     /// Random selection (for testing)
     Random,
+    /// Min-Cost Flow global placement (churn-aware bipartite assignment)
+    MinCostFlow,
 }
 
 impl FromStr for AllocationAlgorithmType {
@@ -55,16 +60,23 @@ impl FromStr for AllocationAlgorithmType {
         match s.to_lowercase().as_str() {
             "hrw" => Ok(Self::Hrw),
             "random" => Ok(Self::Random),
+            "mcf" | "min_cost_flow" | "mincostflow" => Ok(Self::MinCostFlow),
             _ => Err(format!("Unknown allocation algorithm type: {}", s)),
         }
     }
 }
 
-/// Create a LoRA allocation algorithm instance
+/// Create a LoRA allocation algorithm instance.
+///
+/// For `MinCostFlow`, returns the HRW allocator as a fallback (the MCF path
+/// is handled separately in the controller via `McfPlacementSolver`).
 pub fn create_lora_allocator(algo_type: AllocationAlgorithmType) -> Box<dyn LoraAllocator> {
     match algo_type {
         AllocationAlgorithmType::Hrw => Box::new(RendezvousHasher),
         AllocationAlgorithmType::Random => Box::new(RandomAllocation),
+        // MCF uses its own global solver; the per-LoRA allocator is only used
+        // as a fallback for cold-start pinning if needed.
+        AllocationAlgorithmType::MinCostFlow => Box::new(RendezvousHasher),
     }
 }
 
