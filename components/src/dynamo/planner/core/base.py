@@ -617,32 +617,37 @@ class NativePlannerBase:
         next_tick = self.state_machine.initial_tick(time.time())
         poll_interval = self.config.load_adjustment_interval / 10
 
-        while True:
-            now = time.time()
-            if now < next_tick.at_s:
-                await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
-                continue
+        try:
+            while True:
+                now = time.time()
+                if now < next_tick.at_s:
+                    await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
+                    continue
 
-            tick_input = await self._gather_tick_input(next_tick)
-            effects = self.state_machine.on_tick(next_tick, tick_input)
-            await self._apply_effects(effects)
-            self._report_diagnostics(effects.diagnostics)
+                tick_input = await self._gather_tick_input(next_tick)
+                effects = self.state_machine.on_tick(next_tick, tick_input)
+                await self._apply_effects(effects)
+                self._report_diagnostics(effects.diagnostics)
 
-            if self._recorder.enabled:
-                try:
-                    self._recorder.record(
-                        tick_input,
-                        effects,
-                        self._last_metrics,
-                        self._cumulative_gpu_hours,
-                    )
-                    if self._recorder.should_generate_report(tick_input.now_s):
-                        self._recorder.generate_report()
-                except Exception as e:
-                    logger.error(f"Diagnostics report failed: {e}")
+                if self._recorder.enabled:
+                    try:
+                        self._recorder.record(
+                            tick_input,
+                            effects,
+                            self._last_metrics,
+                            self._cumulative_gpu_hours,
+                        )
+                        if self._recorder.should_generate_report(tick_input.now_s):
+                            self._recorder.generate_report()
+                    except Exception as e:
+                        logger.error(f"Diagnostics report failed: {e}")
 
-            assert effects.next_tick is not None
-            next_tick = effects.next_tick
+                assert effects.next_tick is not None
+                next_tick = effects.next_tick
+        finally:
+            self._recorder.finalize()
+            if self._dashboard_runner is not None:
+                await self._dashboard_runner.cleanup()
 
 
 # ------------------------------------------------------------------

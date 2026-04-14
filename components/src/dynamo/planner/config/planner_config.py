@@ -128,7 +128,7 @@ class PlannerConfig(BaseModel):
 
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
-        default=None,
+        default=24.0,
         description=(
             "Generate an HTML diagnostics report every N hours (simulated time). "
             "Set to None to disable periodic report generation."

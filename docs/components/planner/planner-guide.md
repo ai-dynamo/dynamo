@@ -104,7 +104,7 @@ When throughput-based scaling is enabled, the planner needs engine performance d
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `report_interval_hours` | float or `null` | `null` | Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable periodic report generation. |
+| `report_interval_hours` | float or `null` | `24.0` | Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable periodic report generation. |
 | `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
 | `live_dashboard_port` | int | `0` | Port for the live diagnostics dashboard HTTP server. Set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
 

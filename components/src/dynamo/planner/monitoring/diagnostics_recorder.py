@@ -97,7 +97,7 @@ class DiagnosticsRecorder:
 
     @property
     def enabled(self) -> bool:
-        return self._interval_s > 0
+        return self._interval_s > 0 or self.config.live_dashboard_port != 0
 
     def record(
         self,
@@ -596,11 +596,12 @@ class DiagnosticsRecorder:
         if not self._snapshots:
             return None
 
-        html = self._build_report_html(list(self._snapshots))
+        snaps = list(self._snapshots)
+        html = self._build_report_html(snaps)
         if html is None:
             return None
 
-        ts = [s.timestamp_s for s in self._snapshots]
+        ts = [s.timestamp_s for s in snaps]
 
         output_dir = self.config.report_output_dir
         os.makedirs(output_dir, exist_ok=True)

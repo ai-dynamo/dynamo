@@ -5,7 +5,9 @@
 
 aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@1fe8084c817194827706947cc175107ee9e6ea25
 aiofiles<=25.1.0
+aiohttp>=3.9.0,<4.0
 filterpy==1.4.5
+plotly>=5.0.0,<6.0
 kubernetes==32.0.1
 kubernetes_asyncio==32.0.0
 pmdarima==2.1.1
