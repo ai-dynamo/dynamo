@@ -20,6 +20,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Optional, Union
 
+import aiohttp.web
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
@@ -178,7 +179,7 @@ class NativePlannerBase:
         self._recorder = DiagnosticsRecorder(config=config)
 
         # Live dashboard runner (started in _async_init)
-        self._dashboard_runner = None
+        self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
 
         # State machine (created after WorkerInfo is resolved)
         self._state_machine: Optional[PlannerStateMachine] = None
