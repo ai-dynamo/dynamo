@@ -57,13 +57,15 @@ from_args(argv)  ->  start()  ->  generate() / abort()  ->  cleanup()
   entry points remain untouched. The `unified_main.py` files are a separate
   path. Do not break or modify existing backends when changing this module.
 
-## Response Contract
+## Request / Response Contract
 
-Every `LLMEngine.generate()` must yield dicts with:
-
-- `token_ids: list[int]` -- present on every chunk
-- `finish_reason: str` -- present only on the final chunk
-- `completion_usage: dict` -- present only on the final chunk
+`GenerateRequest` and `GenerateChunk` (`engine.py`) are `TypedDict`s that
+type the `generate()` signature.  `GenerateRequest` has `token_ids`
+(required) plus optional `sampling_options`, `stop_conditions`, and
+`output_options`.  `GenerateChunk` has `token_ids` (required) plus
+optional `finish_reason` and `completion_usage` (both required on the
+final chunk).  Engines may read/write additional keys — `TypedDict` does
+not reject extras at runtime.
 
 Build the `completion_usage` dict inline. Finish reason normalization
 (e.g. `"abort"` → `"cancelled"`) is handled by the Rust layer.

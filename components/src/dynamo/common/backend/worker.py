@@ -20,7 +20,7 @@ from dynamo.llm.exceptions import (
 )
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .engine import LLMEngine
+from .engine import GenerateChunk, GenerateRequest, LLMEngine
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +84,8 @@ class Worker:
         self.engine = engine
 
     async def generate(
-        self, request: dict, context: Context
-    ) -> AsyncGenerator[dict, None]:
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
         async def _monitor_cancel():
             await context.async_killed_or_stopped()
             try:

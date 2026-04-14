@@ -125,26 +125,27 @@ def main():
 
 See `sample_engine.py` for a complete, runnable reference implementation.
 
-## Response Format
+## Request / Response Types
 
-All engines yield dicts conforming to this contract:
+`GenerateRequest` and `GenerateChunk` (defined in `engine.py`) are
+`TypedDict`s that document the shared fields across all engines.
 
 ```python
-# Intermediate streaming chunks:
-{"token_ids": [int, ...]}
+class GenerateRequest(TypedDict, total=False):
+    token_ids: Required[list[int]]
+    sampling_options: dict[str, Any]
+    stop_conditions: dict[str, Any]
+    output_options: dict[str, Any]
 
-# Final chunk (must include finish_reason):
-{
-    "token_ids": [int, ...],
-    "finish_reason": "stop" | "length" | "cancelled" | "error",
-    "completion_usage": {
-        "prompt_tokens": int,
-        "completion_tokens": int,
-        "total_tokens": int,
-        "prompt_tokens_details": {"cached_tokens": int} | None,  # optional
-    },
-}
+class GenerateChunk(TypedDict, total=False):
+    token_ids: Required[list[int]]
+    finish_reason: str             # final chunk only
+    completion_usage: dict[str, int]  # final chunk only
 ```
+
+Engines may read additional backend-specific keys from the request dict
+and write additional keys into response chunks — `TypedDict` does not
+reject extra keys at runtime.
 
 Build the `completion_usage` dict inline. Finish reason normalization
 (e.g. `"abort"` → `"cancelled"`) is handled by the Rust layer.

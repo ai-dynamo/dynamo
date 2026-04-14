@@ -6,12 +6,48 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional, Required, TypedDict
 
 from dynamo._core import Context
 
 if TYPE_CHECKING:
     from .worker import WorkerConfig
+
+
+# ---------------------------------------------------------------------------
+# Request / response contracts for generate()
+#
+# These TypedDicts document the shared fields that all engines read/write.
+# Engine-specific keys (output_options, guided_decoding internals, etc.)
+# flow through naturally — TypedDict doesn't reject extra keys at runtime.
+# ---------------------------------------------------------------------------
+
+
+class GenerateRequest(TypedDict, total=False):
+    """Inbound request dict passed to ``LLMEngine.generate()``.
+
+    ``token_ids`` is always present (set by the Rust preprocessor).
+    The remaining groups are optional — engines should access them
+    defensively with ``.get(key, {})``.
+    """
+
+    token_ids: Required[list[int]]
+    sampling_options: dict[str, Any]
+    stop_conditions: dict[str, Any]
+    output_options: dict[str, Any]
+
+
+class GenerateChunk(TypedDict, total=False):
+    """Single chunk yielded by ``LLMEngine.generate()``.
+
+    Every chunk must include ``token_ids``.
+    The final chunk must additionally include ``finish_reason`` and
+    ``completion_usage``.
+    """
+
+    token_ids: Required[list[int]]
+    finish_reason: str
+    completion_usage: dict[str, int]
 
 
 @dataclass
@@ -66,8 +102,8 @@ class LLMEngine(ABC):
 
     @abstractmethod
     async def generate(
-        self, request: dict, context: Context
-    ) -> AsyncGenerator[dict, None]:
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
         """Yield streaming response chunks for a single request.
 
         Called concurrently for multiple in-flight requests.

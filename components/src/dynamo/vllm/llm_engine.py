@@ -19,7 +19,12 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo._core import Context
-from dynamo.common.backend.engine import EngineConfig, LLMEngine
+from dynamo.common.backend.engine import (
+    EngineConfig,
+    GenerateChunk,
+    GenerateRequest,
+    LLMEngine,
+)
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.llm import ModelInput
 from dynamo.vllm.args import parse_args
@@ -100,8 +105,8 @@ class VllmLLMEngine(LLMEngine):
         )
 
     async def generate(
-        self, request: dict, context: Context
-    ) -> AsyncGenerator[dict, None]:
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
         assert self.engine_client is not None, "Engine not initialized"
         assert self._default_sampling_params is not None, "Engine not initialized"
 

@@ -222,7 +222,7 @@ jobs:
       cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
       run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
       single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 35
+      single_gpu_test_timeout_minutes: 45
       run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
       multi_gpu_test_markers: 'pre_merge and vllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 60

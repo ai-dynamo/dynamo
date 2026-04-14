@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator
 
 from dynamo._core import Context
 
-from .engine import EngineConfig, LLMEngine
+from .engine import EngineConfig, GenerateChunk, GenerateRequest, LLMEngine
 from .worker import WorkerConfig
 
 
@@ -78,8 +78,8 @@ class SampleLLMEngine(LLMEngine):
         )
 
     async def generate(
-        self, request: dict, context: Context
-    ) -> AsyncGenerator[dict, None]:
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
         token_ids = request.get("token_ids", [])
         prompt_len = len(token_ids)
         stop_conditions = request.get("stop_conditions", {})

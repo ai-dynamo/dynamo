@@ -17,7 +17,12 @@ from typing import Any, Dict
 import sglang as sgl
 
 from dynamo._core import Context
-from dynamo.common.backend.engine import EngineConfig, LLMEngine
+from dynamo.common.backend.engine import (
+    EngineConfig,
+    GenerateChunk,
+    GenerateRequest,
+    LLMEngine,
+)
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import ModelInput
@@ -88,8 +93,8 @@ class SglangLLMEngine(LLMEngine):
         )
 
     async def generate(
-        self, request: dict, context: Context
-    ) -> AsyncGenerator[dict, None]:
+        self, request: GenerateRequest, context: Context
+    ) -> AsyncGenerator[GenerateChunk, None]:
         assert self.engine is not None, "Engine not initialized"
 
         sampling_params = self._build_sampling_params(request)
