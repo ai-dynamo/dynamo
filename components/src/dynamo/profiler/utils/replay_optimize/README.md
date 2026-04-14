@@ -16,9 +16,9 @@ For the search logic itself, start with [search.py](search.py). For unit-tested 
 
 For adjacent trace tooling, see:
 
-- [../../../../../benchmarks/prefix_data_generator/README.md](../../../../../benchmarks/prefix_data_generator/README.md)
+- [../../../../../../benchmarks/prefix_data_generator/README.md](../../../../../../benchmarks/prefix_data_generator/README.md)
   for Mooncake trace format details plus `datagen analyze` and `datagen synthesize`
-- [../../../../../docs/benchmarks/kv-router-ab-testing.md](../../../../../docs/benchmarks/kv-router-ab-testing.md)
+- [../../../../../../docs/benchmarks/kv-router-ab-testing.md](../../../../../../docs/benchmarks/kv-router-ab-testing.md)
   for the public toolagent trace URL and benchmark context
 
 ## Experiment Goal
@@ -366,7 +366,7 @@ Important notes for the public toolagent trace:
 - the underlying `run_trace_replay(...)` API defaults `trace_block_size` to `512`
 - the current `TraceReplayWorkload` wrapper does not expose a separate `trace_block_size` field
 - the prefix-data-generator tools in
-  [../../../../../benchmarks/prefix_data_generator/README.md](../../../../../benchmarks/prefix_data_generator/README.md)
+  [../../../../../../benchmarks/prefix_data_generator/README.md](../../../../../../benchmarks/prefix_data_generator/README.md)
   are useful if you want to inspect the trace first or synthesize a larger derivative trace before
   running this search
 
