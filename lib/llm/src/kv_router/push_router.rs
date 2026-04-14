@@ -101,9 +101,9 @@ struct PendingDispatchGuard {
 }
 
 fn spawn_cleanup_task(
-    chooser: Arc<KvRouter>,
+    chooser: &Arc<KvRouter>,
     scheduler_tracked: bool,
-    context_id: String,
+    context_id: &str,
     deferred_close: Option<SessionCloseAction>,
     log_context: &'static str,
 ) {
@@ -118,6 +118,9 @@ fn spawn_cleanup_task(
         );
         return;
     };
+
+    let chooser = chooser.clone();
+    let context_id = context_id.to_owned();
 
     handle.spawn(async move {
         if scheduler_tracked && let Err(e) = chooser.free(&context_id).await {
@@ -246,9 +249,9 @@ impl Drop for RequestGuard {
         self.record_metrics();
 
         spawn_cleanup_task(
-            self.chooser.clone(),
+            &self.chooser,
             !self.freed && self.scheduler_tracked,
-            self.context_id.clone(),
+            &self.context_id,
             self.deferred_close.take(),
             "drop guard",
         );
@@ -284,9 +287,9 @@ impl Drop for PendingDispatchGuard {
         }
 
         spawn_cleanup_task(
-            self.chooser.clone(),
+            &self.chooser,
             self.scheduler_tracked,
-            self.context_id.clone(),
+            &self.context_id,
             self.deferred_close.take(),
             "dispatch guard",
         );
