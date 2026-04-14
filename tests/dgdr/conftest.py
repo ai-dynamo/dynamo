@@ -107,6 +107,34 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Skip DGDR tests gracefully when required CLI args are not provided
+# (e.g. when the whole test suite is run by CI without --dgdr-* flags)
+# ---------------------------------------------------------------------------
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Skip all DGDR tests when --dgdr-namespace or --dgdr-image are not supplied.
+
+    This prevents a session-aborting failure when the global CI runner collects
+    and executes ``tests/`` without passing the DGDR-specific CLI options.
+    """
+    missing = []
+    if not config.getoption("--dgdr-namespace", default=None):
+        missing.append("--dgdr-namespace")
+    if not config.getoption("--dgdr-image", default=None):
+        missing.append("--dgdr-image")
+    if not missing:
+        return
+    reason = f"DGDR tests require: {', '.join(missing)}"
+    skip = pytest.mark.skip(reason=reason)
+    for item in items:
+        if "dgdr" in str(item.fspath):
+            item.add_marker(skip)
+
+
+# ---------------------------------------------------------------------------
 # Session-scoped fixtures
 # ---------------------------------------------------------------------------
 
@@ -115,7 +143,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def dgdr_namespace(request: pytest.FixtureRequest) -> str:
     value = request.config.getoption("--dgdr-namespace")
     if not value:
-        pytest.exit("--dgdr-namespace is required to run DGDR tests", returncode=4)
+        pytest.skip("--dgdr-namespace is required to run DGDR tests")
     return value
 
 
@@ -123,7 +151,7 @@ def dgdr_namespace(request: pytest.FixtureRequest) -> str:
 def dgdr_image(request: pytest.FixtureRequest) -> str:
     value = request.config.getoption("--dgdr-image")
     if not value:
-        pytest.exit("--dgdr-image is required to run DGDR tests", returncode=4)
+        pytest.skip("--dgdr-image is required to run DGDR tests")
     return value
 
 
