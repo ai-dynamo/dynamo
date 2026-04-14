@@ -872,9 +872,10 @@ class HandlerBase(BaseGenerativeHandler):
         # Build trace headers for distributed tracing
         trace_headers = build_trace_headers(context)
 
-        # Extract dp_rank from request's routing hints for attention DP routing
+        # Extract dp_rank and cache_salt from request's routing hints
         routing = request.get("routing", {})
         dp_rank = routing.get("dp_rank") if routing else None
+        cache_salt = routing.get("cache_salt") if routing else None
         scheduling_params = None
         if dp_rank is not None:
             scheduling_params = SchedulingParams(
@@ -894,6 +895,7 @@ class HandlerBase(BaseGenerativeHandler):
                 streaming=streaming,
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
+                cache_salt=cache_salt,
             )
 
             # In disagg decode mode, wrap abort() to defer until first token

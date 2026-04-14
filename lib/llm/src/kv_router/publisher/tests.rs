@@ -29,7 +29,7 @@ mod test_event_processing {
         let blk_hash = 0xdead_beef;
 
         let stored =
-            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None);
+            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash =
@@ -58,6 +58,7 @@ mod test_event_processing {
             &Arc::new(AtomicU32::new(0)),
             None,
             None,
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -82,6 +83,7 @@ mod test_event_processing {
             &warning_count,
             None,
             None,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -104,6 +106,7 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            cache_salt: None,
         };
 
         let out = convert_event(
@@ -130,6 +133,7 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            cache_salt: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -140,6 +144,7 @@ mod test_event_processing {
             lora_name: Some("my-lora".to_string()),
             block_mm_infos: None,
             is_eagle: None,
+            cache_salt: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -187,6 +192,7 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            cache_salt: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -197,6 +203,7 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            cache_salt: None,
         };
 
         let out1 = convert_event(
@@ -941,6 +948,7 @@ mod tests_startup_helpers {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
+            cache_salt: None,
         }];
 
         let batch = KvEventBatch {
@@ -1018,6 +1026,7 @@ mod tests_startup_helpers {
                 lora_name: None,
                 block_mm_infos: None,
                 is_eagle: None,
+                cache_salt: None,
             }],
             data_parallel_rank: Some(0),
         };

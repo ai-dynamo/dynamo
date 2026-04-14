@@ -333,6 +333,7 @@ impl OpenAIPreprocessor {
                 lora_name,
                 allowed_worker_ids: None,
                 session_control: nvext.session_control.clone(),
+                cache_salt: nvext.cache_salt.clone(),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {

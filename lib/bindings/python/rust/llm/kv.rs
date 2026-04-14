@@ -144,6 +144,7 @@ pub fn compute_block_hash_for_seq_py(
             block_mm_infos: mm_infos.as_deref(),
             lora_name: lora_name.as_deref(),
             is_eagle,
+            cache_salt: None,
         },
     );
 
@@ -276,7 +277,7 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None, cache_salt=None))]
     fn publish_stored(
         &self,
         py: Python,
@@ -287,6 +288,7 @@ impl KvEventPublisher {
         block_mm_infos: Option<Bound<PyAny>>,
         lora_name: Option<String>,
         is_eagle: Option<bool>,
+        cache_salt: Option<String>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
@@ -315,6 +317,7 @@ impl KvEventPublisher {
                         &warning_count,
                         mm_infos.as_deref(),
                         is_eagle,
+                        cache_salt.as_deref(),
                     ),
                 }),
                 dp_rank,
@@ -1075,6 +1078,7 @@ impl KvRouter {
                     router_config_override.as_ref(),
                     update_states,
                     lora_name.clone(),
+                    None,
                     0.0,
                     None,
                     None,

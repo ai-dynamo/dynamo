@@ -224,12 +224,14 @@ fn kv_event_create_stored_block_from_parts(
     num_tokens: usize,
     kv_block_size: u32,
     lora_name: Option<&str>,
+    cache_salt: Option<&str>,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(
         unsafe { std::slice::from_raw_parts(token_ids, num_tokens) },
         kv_block_size,
         BlockHashOptions {
             lora_name,
+            cache_salt,
             ..Default::default()
         },
     )[0];
@@ -279,6 +281,7 @@ fn kv_event_create_stored_from_parts(
             num_toks,
             kv_block_size,
             kv_params.lora_name.as_deref(),
+            None,
         ));
     }
 
@@ -453,6 +456,7 @@ impl RouterHandles {
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
+        cache_salt: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(u64, Option<u32>), QueryRouterResult> {
@@ -466,6 +470,7 @@ impl RouterHandles {
                 block_mm_infos,
                 update_states,
                 lora_name,
+                cache_salt,
                 priority_jump,
                 allowed_worker_ids,
             )
@@ -517,6 +522,7 @@ impl RouterHandles {
                 None,
                 config_override.as_ref(),
                 false,
+                None,
                 None,
                 0.0,
                 None,
@@ -892,6 +898,7 @@ pub unsafe extern "C" fn add_request(
                     None,
                     worker,
                     None, // lora_name
+                    None, // cache_salt
                     Some(&router_config_override),
                 )
                 .await;
@@ -1212,7 +1219,7 @@ pub unsafe extern "C" fn route_prefill_request(
 
     let result = handles.runtime.secondary().block_on(async {
         let (prefill_worker_id, prefill_dp_rank) = handles
-            .query_prefill_worker(&tokens, None, false, None, 0.0, allowed_worker_ids)
+            .query_prefill_worker(&tokens, None, false, None, None, 0.0, allowed_worker_ids)
             .await?;
 
         let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);

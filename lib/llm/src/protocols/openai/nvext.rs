@@ -210,6 +210,14 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<SessionControl>,
+
+    /// Cache salt for multi-tenant KV cache isolation.
+    /// When set, blocks hashed with different salts produce distinct hashes,
+    /// preventing cross-tenant cache reuse. Forwarded to the engine so it
+    /// appears in KV cache events.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_salt: Option<String>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -324,6 +332,7 @@ mod tests {
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
         assert_eq!(nv_ext.session_control, None);
+        assert_eq!(nv_ext.cache_salt, None);
     }
 
     // Test valid builder configurations

@@ -92,6 +92,9 @@ pub enum RawKvEvent {
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_eagle: Option<bool>,
+        /// Cache salt for multi-tenant KV cache isolation
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_salt: Option<String>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -224,6 +227,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut lora_name: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
+        let mut cache_salt: Option<Option<String>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -253,6 +257,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 }
                 "block_mm_infos" => {
                     block_mm_infos = Some(map.next_value()?);
+                }
+                "cache_salt" => {
+                    cache_salt = Some(map.next_value()?);
                 }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
@@ -290,6 +297,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     lora_name: lora_name.unwrap_or(None),
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
+                    cache_salt: cache_salt.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -341,6 +349,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     seq.next_element()?.unwrap_or(None);
                 let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
                     seq.next_element()?.unwrap_or(None);
+                let cache_salt: Option<String> = seq.next_element()?.unwrap_or(None);
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
@@ -368,6 +377,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     lora_name,
                     block_mm_infos,
                     is_eagle: Some(is_eagle),
+                    cache_salt,
                 })
             }
             "BlockRemoved" => {
@@ -424,6 +434,7 @@ pub fn convert_event(
             block_mm_infos,
             medium: _,
             is_eagle,
+            cache_salt,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -473,6 +484,7 @@ pub fn convert_event(
                         warning_count,
                         block_mm_infos.as_deref(),
                         is_eagle,
+                        cache_salt.as_deref(),
                     ),
                 }),
                 dp_rank,
@@ -512,6 +524,7 @@ pub fn create_stored_block_from_parts(
     lora_name: Option<&str>,
     mm_extra_info: Option<BlockExtraInfo>,
     is_eagle: Option<bool>,
+    cache_salt: Option<&str>,
 ) -> KvCacheStoredBlockData {
     let block_mm_infos = mm_extra_info.as_ref().map(|info| vec![Some(info.clone())]);
     let tokens_hash = compute_block_hash_for_seq(
@@ -521,6 +534,7 @@ pub fn create_stored_block_from_parts(
             block_mm_infos: block_mm_infos.as_deref(),
             lora_name,
             is_eagle,
+            cache_salt,
         },
     )[0];
 
@@ -549,6 +563,7 @@ pub fn create_stored_blocks(
     warning_count: &Arc<AtomicU32>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     is_eagle: Option<bool>,
+    cache_salt: Option<&str>,
 ) -> Vec<KvCacheStoredBlockData> {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
@@ -593,6 +608,7 @@ pub fn create_stored_blocks(
             lora_name,
             mm_extra_info,
             is_eagle,
+            cache_salt,
         ));
         token_offset += *num_tokens_it as usize;
     }
@@ -650,6 +666,7 @@ mod tests {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: Some(true),
+            cache_salt: None,
         };
         let warning_count = Arc::new(AtomicU32::new(0));
         let placement_event =
@@ -689,5 +706,77 @@ mod tests {
             }
             other => panic!("expected Stored event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_deserialize_block_stored_with_cache_salt_map() {
+        let json = serde_json::json!({
+            "type": "BlockStored",
+            "block_hashes": [100i64],
+            "parent_block_hash": null,
+            "token_ids": [1u32, 2, 3, 4],
+            "block_size": 4,
+            "cache_salt": "tenant-A"
+        });
+        let encoded = serde_json::to_vec(&json).unwrap();
+        let event: RawKvEvent = serde_json::from_slice(&encoded).unwrap();
+
+        match event {
+            RawKvEvent::BlockStored { cache_salt, .. } => {
+                assert_eq!(cache_salt.as_deref(), Some("tenant-A"));
+            }
+            other => panic!("expected BlockStored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_block_stored_without_cache_salt_map() {
+        let json = serde_json::json!({
+            "type": "BlockStored",
+            "block_hashes": [100i64],
+            "parent_block_hash": null,
+            "token_ids": [1u32, 2, 3, 4],
+            "block_size": 4
+        });
+        let encoded = serde_json::to_vec(&json).unwrap();
+        let event: RawKvEvent = serde_json::from_slice(&encoded).unwrap();
+
+        match event {
+            RawKvEvent::BlockStored { cache_salt, .. } => {
+                assert_eq!(cache_salt, None);
+            }
+            other => panic!("expected BlockStored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_convert_event_cache_salt_affects_tokens_hash() {
+        let token_ids = vec![1u32, 2, 3, 4];
+        let block_hash = 42u64;
+        let kv_block_size = 4u32;
+
+        let unsalted = create_stored_block_from_parts(
+            kv_block_size,
+            block_hash,
+            &token_ids,
+            None,
+            None,
+            None,
+            None,
+        );
+        let salted = create_stored_block_from_parts(
+            kv_block_size,
+            block_hash,
+            &token_ids,
+            None,
+            None,
+            None,
+            Some("tenant-A"),
+        );
+
+        assert_ne!(
+            unsalted.tokens_hash, salted.tokens_hash,
+            "cache_salt should produce different tokens_hash"
+        );
     }
 }

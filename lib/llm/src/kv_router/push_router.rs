@@ -289,6 +289,7 @@ impl KvPushRouter {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
         let routing = request.routing.as_ref();
         let lora_name = routing.and_then(|r| r.lora_name.clone());
+        let cache_salt = routing.and_then(|r| r.cache_salt.clone());
         let priority_jump = routing.and_then(|r| r.priority_jump).unwrap_or(0.0);
         let expected_output_tokens = routing.and_then(|r| r.expected_output_tokens);
         let allowed_worker_ids = routing.and_then(|r| r.allowed_worker_ids.clone());
@@ -304,6 +305,7 @@ impl KvPushRouter {
                     request.router_config_override.as_ref(),
                     !is_query_only,
                     lora_name,
+                    cache_salt.clone(),
                     priority_jump,
                     expected_output_tokens,
                     None,
@@ -354,6 +356,7 @@ impl KvPushRouter {
                     request.router_config_override.as_ref(),
                     true,
                     lora_name.clone(),
+                    cache_salt.clone(),
                     priority_jump,
                     expected_output_tokens,
                     Some(pinned_worker),
@@ -400,6 +403,7 @@ impl KvPushRouter {
                         expected_output_tokens,
                         worker,
                         lora_name,
+                        cache_salt,
                         request.router_config_override.as_ref(),
                     )
                     .await;
@@ -509,6 +513,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
             if let Some(dp_rank) = bookkeeping_dp_rank {
                 let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+                let cache_salt = request.routing.as_ref().and_then(|r| r.cache_salt.clone());
                 let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
                 let worker = WorkerWithDpRank::new(instance_id, dp_rank);
                 let mut tokens_with_hashes =
@@ -519,6 +524,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
                 if let Some(lora_name) = lora_name {
                     tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
+                }
+                if let Some(cache_salt) = cache_salt {
+                    tokens_with_hashes = tokens_with_hashes.with_cache_salt(cache_salt);
                 }
                 if let Err(e) = self
                     .chooser

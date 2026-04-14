@@ -71,6 +71,11 @@ pub struct RoutingHints {
     /// Contains session_id (for affinity) and optional action (open/close).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
+
+    /// Cache salt for multi-tenant KV cache isolation.
+    /// Mixed into block hash seed to prevent cross-tenant cache reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_salt: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

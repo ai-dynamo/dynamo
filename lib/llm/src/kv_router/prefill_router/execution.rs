@@ -49,6 +49,7 @@ impl PrefillRouter {
             // Use shared worker selection logic (update_states=false for peek behavior)
             // Extract LORA name and priority jump from routing hints
             let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
+            let cache_salt = req.routing.as_ref().and_then(|r| r.cache_salt.clone());
             let priority_jump = req
                 .routing
                 .as_ref()
@@ -65,6 +66,7 @@ impl PrefillRouter {
                     block_mm_infos,
                     false,
                     lora_name,
+                    cache_salt,
                     priority_jump,
                     allowed_worker_ids,
                 )
@@ -266,6 +268,7 @@ impl PrefillRouter {
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
+        cache_salt: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(u64, Option<u32>)> {
@@ -285,6 +288,7 @@ impl PrefillRouter {
                         None,
                         update_states,
                         lora_name,
+                        cache_salt,
                         priority_jump,
                         None,
                         None,
