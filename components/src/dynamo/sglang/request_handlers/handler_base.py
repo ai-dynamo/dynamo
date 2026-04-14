@@ -285,300 +285,6 @@ class LoraMixin:
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
 
-    def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
-        if priority is not None and self._engine_supports_priority:
-            normalized = int(priority)
-            if getattr(
-                self.config.server_args, "schedule_low_priority_values_first", False
-            ):
-                normalized = -normalized
-            return {"priority": normalized}
-        return {}
-
-    async def release_memory_occupation(self, body: dict) -> dict:
-        """Release GPU memory occupation and unregister from discovery.
-
-        Args:
-            body: Optional dict with "tags" to target specific memory regions.
-
-        Order of operations:
-        1. Unregister from discovery - stop accepting new requests
-        2. Pause generation - drain in-flight requests
-        3. Release memory - safe now that no requests are active
-        """
-        if self._quiesce_controller is None:
-            return {
-                "status": "error",
-                "message": "memory control not supported on this worker",
-            }
-
-        body = body or {}
-        tags = body.get("tags")
-        async with self._quiesce_lock:
-            if self._quiesce_controller.is_quiesced:
-                return {
-                    "status": "ok",
-                    "message": "Memory already released",
-                }
-
-            try:
-                # Stop new requests and drain in-flight work before releasing memory.
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.unregister_endpoint_instance()
-
-                await self._quiesce_controller.quiesce(tags)
-
-                return {
-                    "status": "ok",
-                    "message": (
-                        f"Memory released for tags: {tags}"
-                        if tags is not None
-                        else "Memory released"
-                    ),
-                }
-            except Exception as e:
-                logging.error(f"Failed to release memory occupation: {e}")
-                return {"status": "error", "message": str(e)}
-
-    async def resume_memory_occupation(self, body: dict) -> dict:
-        """Resume GPU memory occupation and re-register to discovery.
-
-        Args:
-            body: Optional dict with "tags" to target specific memory regions.
-
-        Order of operations:
-        1. Resume memory - restore GPU allocations
-        2. Continue generation - ready to serve requests
-        3. Re-register to discovery - allow frontend to route here
-        """
-        if self._quiesce_controller is None:
-            return {
-                "status": "error",
-                "message": "memory control not supported on this worker",
-            }
-
-        body = body or {}
-        tags = body.get("tags")
-        async with self._quiesce_lock:
-            if not self._quiesce_controller.is_quiesced:
-                return {
-                    "status": "ok",
-                    "message": "Memory already resumed",
-                }
-
-            try:
-                await self._quiesce_controller.resume(tags)
-
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.register_endpoint_instance()
-                self._quiesce_controller.mark_resumed()
-
-                return {
-                    "status": "ok",
-                    "message": (
-                        f"Memory resumed for tags: {tags}"
-                        if tags is not None
-                        else "Memory resumed"
-                    ),
-                }
-            except Exception as e:
-                logging.error(f"Failed to resume memory occupation: {e}")
-                return {"status": "error", "message": str(e)}
-
-    async def start_profile(self, body: dict) -> dict:
-        """Start profiling on the engine.
-
-        Args:
-            body: Dict with profiling parameters passed to start_profile.
-        """
-        await self.engine.tokenizer_manager.start_profile(**body)
-        return {"status": "ok", "message": "Profiling started"}
-
-    async def stop_profile(self, body: dict) -> dict:
-        """Stop profiling on the engine.
-
-        Args:
-            body: Unused, but required for handler signature.
-        """
-        await self.engine.tokenizer_manager.stop_profile()
-        return {"status": "ok", "message": "Profiling stopped"}
-
-    async def update_weights_from_disk(self, body: dict) -> dict:
-        """Update model weights from disk without restarting the server."""
-        from sglang.srt.managers.io_struct import UpdateWeightFromDiskReqInput
-
-        req = UpdateWeightFromDiskReqInput(**body)
-        (
-            success,
-            message,
-            num_paused_requests,
-        ) = await self.engine.tokenizer_manager.update_weights_from_disk(req, None)
-        return {
-            "success": success,
-            "message": message,
-            "num_paused_requests": num_paused_requests,
-        }
-
-    async def update_weights_from_tensor(self, body: dict) -> dict:
-        """Update model weights from tensors without restarting the server."""
-        from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
-
-        req = UpdateWeightsFromTensorReqInput(**body)
-        (
-            success,
-            message,
-        ) = await self.engine.tokenizer_manager.update_weights_from_tensor(req, None)
-        return {"success": success, "message": message}
-
-    async def update_weights_from_distributed(self, body: dict) -> dict:
-        """Update model weights using distributed online synchronization."""
-        from sglang.srt.managers.io_struct import UpdateWeightsFromDistributedReqInput
-
-        req = UpdateWeightsFromDistributedReqInput(**body)
-        (
-            success,
-            message,
-        ) = await self.engine.tokenizer_manager.update_weights_from_distributed(
-            req, None
-        )
-        return {"success": success, "message": message}
-
-    async def update_weights_from_ipc(self, body: dict) -> dict:
-        """Update model weights from IPC for checkpoint-engine integration."""
-        from sglang.srt.managers.io_struct import UpdateWeightsFromIPCReqInput
-
-        req = UpdateWeightsFromIPCReqInput(**body)
-        success, message = await self.engine.tokenizer_manager.update_weights_from_ipc(
-            req, None
-        )
-        if success and not self.engine.tokenizer_manager.initial_weights_loaded:
-            self.engine.tokenizer_manager.initial_weights_loaded = True
-        return {"success": success, "message": message}
-
-    async def update_weight_version(self, body: dict) -> dict:
-        """Update the active weight version without changing model weights."""
-        from sglang.srt.managers.io_struct import UpdateWeightVersionReqInput
-
-        req = UpdateWeightVersionReqInput(**body)
-        if req.abort_all_requests:
-            self.engine.tokenizer_manager.abort_request(abort_all=True)
-
-        self.engine.tokenizer_manager.server_args.weight_version = req.new_version
-        return {
-            "success": True,
-            "message": f"Weight version updated to {req.new_version}",
-            "new_version": req.new_version,
-        }
-
-    async def open_session(self, body: dict) -> dict:
-        """Open a streaming session for subagent KV isolation.
-
-        Args:
-            body: Dict with "session_id", optional "timeout" (default 120),
-                  and optional "capacity_of_str_len" (default 65536).
-        """
-        from sglang.srt.managers.io_struct import OpenSessionReqInput
-
-        session_id = body.get("session_id")
-        if not session_id:
-            return {"status": "error", "message": "session_id required"}
-        timeout = body.get("timeout", 120)
-        capacity = body.get("capacity_of_str_len", 65536)
-        try:
-            obj = OpenSessionReqInput(
-                capacity_of_str_len=capacity,
-                session_id=session_id,
-                streaming=True,
-                timeout=float(timeout),
-            )
-            result = await self.engine.tokenizer_manager.open_session(obj, None)
-            if result is None:
-                return {
-                    "status": "ok",
-                    "session_id": session_id,
-                    "message": "Session already exists",
-                }
-            return {"status": "ok", "session_id": result}
-        except Exception as e:
-            logging.error(f"Failed to open session {session_id}: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def close_session(self, body: dict) -> dict:
-        """Close a streaming session and release its KV resources.
-
-        Args:
-            body: Dict with "session_id".
-        """
-        from sglang.srt.managers.io_struct import CloseSessionReqInput
-
-        session_id = body.get("session_id")
-        if not session_id:
-            return {"status": "error", "message": "session_id required"}
-        try:
-            obj = CloseSessionReqInput(session_id=session_id)
-            await self.engine.tokenizer_manager.close_session(obj, None)
-            return {"status": "ok", "session_id": session_id}
-        except Exception as e:
-            logging.error(f"Failed to close session {session_id}: {e}")
-            return {"status": "error", "message": str(e)}
-
-    async def session_control(self, request, context=None):
-        """Service mesh endpoint for session lifecycle operations.
-
-        Args:
-            request: Dict with "action" key ("open_session" or "close_session")
-                     and action-specific parameters.
-            context: Optional Dynamo context (unused but required by protocol).
-
-        Yields:
-            Single dict with operation result.
-        """
-        action = request.get("action")
-        if action == "open_session":
-            result = await self.open_session(request)
-        elif action == "close_session":
-            result = await self.close_session(request)
-        else:
-            result = {"status": "error", "message": f"Unknown action: {action}"}
-        yield result
-
-    def register_engine_routes(self, runtime: DistributedRuntime) -> None:
-        """Register all engine routes for this handler.
-
-        Args:
-            runtime: The DistributedRuntime instance to register routes on.
-        """
-        runtime.register_engine_route("start_profile", self.start_profile)
-        runtime.register_engine_route("stop_profile", self.stop_profile)
-        runtime.register_engine_route(
-            "release_memory_occupation", self.release_memory_occupation
-        )
-        runtime.register_engine_route(
-            "resume_memory_occupation", self.resume_memory_occupation
-        )
-        runtime.register_engine_route(
-            "update_weights_from_disk", self.update_weights_from_disk
-        )
-        runtime.register_engine_route(
-            "update_weights_from_tensor", self.update_weights_from_tensor
-        )
-        runtime.register_engine_route(
-            "update_weights_from_distributed", self.update_weights_from_distributed
-        )
-        runtime.register_engine_route(
-            "update_weights_from_ipc", self.update_weights_from_ipc
-        )
-        runtime.register_engine_route(
-            "update_weight_version", self.update_weight_version
-        )
-        if getattr(self.config, "dynamo_args", None) and getattr(
-            self.config.dynamo_args, "enable_rl", False
-        ):
-            self.register_rl_engine_routes(runtime)
-        # session_control is served as a discoverable service endpoint
-        # (not an engine route) so the router can find it via
-        # component.endpoint("session_control"). See init_llm.py.
-
     async def load_lora(self, request: Optional[Dict[str, Any]] = None):
         """
         Load a LoRA adapter dynamically into the SGLang engine.
@@ -1122,6 +828,78 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             "message": f"Weight version updated to {req.new_version}",
             "new_version": req.new_version,
         }
+
+    async def open_session(self, body: dict) -> dict:
+        """Open a streaming session for subagent KV isolation.
+
+        Args:
+            body: Dict with "session_id", optional "timeout" (default 120),
+                  and optional "capacity_of_str_len" (default 65536).
+        """
+        from sglang.srt.managers.io_struct import OpenSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        timeout = body.get("timeout", 120)
+        capacity = body.get("capacity_of_str_len", 65536)
+        try:
+            obj = OpenSessionReqInput(
+                capacity_of_str_len=capacity,
+                session_id=session_id,
+                streaming=True,
+                timeout=float(timeout),
+            )
+            result = await self.engine.tokenizer_manager.open_session(obj, None)
+            if result is None:
+                return {
+                    "status": "ok",
+                    "session_id": session_id,
+                    "message": "Session already exists",
+                }
+            return {"status": "ok", "session_id": result}
+        except Exception as e:
+            logging.error(f"Failed to open session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def close_session(self, body: dict) -> dict:
+        """Close a streaming session and release its KV resources.
+
+        Args:
+            body: Dict with "session_id".
+        """
+        from sglang.srt.managers.io_struct import CloseSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        try:
+            obj = CloseSessionReqInput(session_id=session_id)
+            await self.engine.tokenizer_manager.close_session(obj, None)
+            return {"status": "ok", "session_id": session_id}
+        except Exception as e:
+            logging.error(f"Failed to close session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def session_control(self, request, context=None):
+        """Service mesh endpoint for session lifecycle operations.
+
+        Args:
+            request: Dict with "action" key ("open_session" or "close_session")
+                     and action-specific parameters.
+            context: Optional Dynamo context (unused but required by protocol).
+
+        Yields:
+            Single dict with operation result.
+        """
+        action = request.get("action")
+        if action == "open_session":
+            result = await self.open_session(request)
+        elif action == "close_session":
+            result = await self.close_session(request)
+        else:
+            result = {"status": "error", "message": f"Unknown action: {action}"}
+        yield result
 
     def register_engine_routes(self, runtime: DistributedRuntime) -> None:
         """Register all engine routes for this handler.
