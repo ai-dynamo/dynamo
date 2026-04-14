@@ -67,6 +67,18 @@ spec:
             spec:
               description: DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
               properties:
+                gpuMemoryService:
+                  description: |-
+                    GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
+                    It is intentionally outside spec.identity, so it does not affect the
+                    checkpoint identity hash or deduplication.
+                  properties:
+                    enabled:
+                      description: Enabled activates GPU Memory Service for this workload or checkpoint.
+                      type: boolean
+                  required:
+                    - enabled
+                  type: object
                 identity:
                   description: Identity defines the inputs that determine checkpoint equivalence
                   properties:

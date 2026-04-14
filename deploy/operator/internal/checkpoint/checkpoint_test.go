@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,6 +46,10 @@ func testIdentity() nvidiacomv1alpha1.DynamoCheckpointIdentity {
 		Model:            "meta-llama/Llama-2-7b-hf",
 		BackendFramework: "vllm",
 	}
+}
+
+func testGPUMemoryService() *nvidiacomv1alpha1.GPUMemoryServiceSpec {
+	return &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true}
 }
 
 func testPodSpec() *corev1.PodSpec {
@@ -182,6 +187,50 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 
 // --- InjectCheckpointIntoPodSpec tests ---
 
+func TestEnsurePodInfoVolumeMergesExistingDownwardAPIItems(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Volumes: []corev1.Volume{{
+			Name: consts.PodInfoVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
+					Items: []corev1.DownwardAPIVolumeFile{
+						{
+							Path:     "pod_name",
+							FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+						},
+						{
+							Path:     "custom",
+							FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.labels['custom']"},
+						},
+					},
+				},
+			},
+		}},
+	}
+
+	EnsurePodInfoVolume(podSpec)
+
+	require.Len(t, podSpec.Volumes, 1)
+	require.NotNil(t, podSpec.Volumes[0].DownwardAPI)
+
+	fields := map[string]string{}
+	for _, item := range podSpec.Volumes[0].DownwardAPI.Items {
+		if item.FieldRef != nil {
+			fields[item.Path] = item.FieldRef.FieldPath
+		}
+	}
+
+	assert.Equal(t, consts.PodInfoFieldPodName, fields["pod_name"])
+	assert.Equal(t, consts.PodInfoFieldPodUID, fields["pod_uid"])
+	assert.Equal(t, consts.PodInfoFieldPodNamespace, fields["pod_namespace"])
+	assert.Equal(t, "metadata.labels['custom']", fields["custom"])
+	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fields[consts.PodInfoFileDynNamespace])
+	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fields[consts.PodInfoFileDynNamespaceWorkerSuffix])
+	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fields[consts.PodInfoFileDynComponent])
+	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fields[consts.PodInfoFileDynParentDGDName])
+	assert.Equal(t, consts.PodInfoFieldPodNamespace, fields[consts.PodInfoFileDynParentDGDNamespace])
+}
+
 func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	t.Run("ready checkpoint injects podinfo and overrides command", func(t *testing.T) {
 		podSpec := testPodSpec()
@@ -218,6 +267,50 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	})
 
+	t.Run("ready checkpoint augments existing podinfo volume", func(t *testing.T) {
+		podSpec := testPodSpec()
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: consts.PodInfoVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
+					Items: []corev1.DownwardAPIVolumeFile{
+						{Path: "pod_name", FieldRef: &corev1.ObjectFieldSelector{FieldPath: consts.PodInfoFieldPodName}},
+						{Path: "pod_uid", FieldRef: &corev1.ObjectFieldSelector{FieldPath: consts.PodInfoFieldPodUID}},
+						{Path: "pod_namespace", FieldRef: &corev1.ObjectFieldSelector{FieldPath: consts.PodInfoFieldPodNamespace}},
+					},
+				},
+			},
+		})
+		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+
+		var podInfoVolume *corev1.Volume
+		for i := range podSpec.Volumes {
+			if podSpec.Volumes[i].Name == consts.PodInfoVolumeName {
+				podInfoVolume = &podSpec.Volumes[i]
+				break
+			}
+		}
+		require.NotNil(t, podInfoVolume)
+		require.NotNil(t, podInfoVolume.DownwardAPI)
+
+		fields := map[string]string{}
+		for _, item := range podInfoVolume.DownwardAPI.Items {
+			if item.FieldRef != nil {
+				fields[item.Path] = item.FieldRef.FieldPath
+			}
+		}
+		assert.Equal(t, consts.PodInfoFieldPodName, fields["pod_name"])
+		assert.Equal(t, consts.PodInfoFieldPodUID, fields["pod_uid"])
+		assert.Equal(t, consts.PodInfoFieldPodNamespace, fields["pod_namespace"])
+		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fields[consts.PodInfoFileDynNamespace])
+		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fields[consts.PodInfoFileDynNamespaceWorkerSuffix])
+		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fields[consts.PodInfoFileDynComponent])
+		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fields[consts.PodInfoFileDynParentDGDName])
+		assert.Equal(t, consts.PodInfoFieldPodNamespace, fields[consts.PodInfoFileDynParentDGDNamespace])
+	})
+
 	t.Run("ready checkpoint targets the container named main", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -233,6 +326,34 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, []string{"run"}, podSpec.Containers[0].Args)
 		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[1].Command)
 		assert.Nil(t, podSpec.Containers[1].Args)
+	})
+
+	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
+		podSpec := testPodSpec()
+		podSpec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GPUMemoryService: testGPUMemoryService()}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		gmsServer := findContainer(podSpec, gmsruntime.ServerContainerName)
+		require.NotNil(t, gmsServer)
+		loader := findContainer(podSpec, GMSLoaderContainer)
+		require.NotNil(t, loader)
+
+		mounts := map[string]string{}
+		for _, mount := range loader.VolumeMounts {
+			mounts[mount.Name] = mount.MountPath
+		}
+		assert.Equal(t, "/checkpoints", mounts[snapshotprotocol.CheckpointVolumeName])
+		assert.Equal(t, gmsruntime.SharedMountPath, mounts[gmsruntime.SharedVolumeName])
+
+		env := map[string]string{}
+		for _, item := range loader.Env {
+			env[item.Name] = item.Value
+		}
+		assert.Equal(t, "/checkpoints/"+testHash+"/gms/versions/1", env["GMS_CHECKPOINT_DIR"])
+		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.gms_server_sidecar"}, gmsServer.Command)
+		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.gms_checkpoint_loader"}, loader.Command)
 	})
 
 	t.Run("error cases", func(t *testing.T) {
@@ -277,7 +398,10 @@ func TestResolveCheckpointForService(t *testing.T) {
 		require.NoError(t, err)
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{Name: hash, Namespace: testNamespace},
-			Spec:       nvidiacomv1alpha1.DynamoCheckpointSpec{Identity: testIdentity()},
+			Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
+				Identity:         testIdentity(),
+				GPUMemoryService: testGPUMemoryService(),
+			},
 			Status: nvidiacomv1alpha1.DynamoCheckpointStatus{
 				Phase:        nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 				IdentityHash: hash,
@@ -294,6 +418,8 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.True(t, info.Ready)
 		assert.Equal(t, hash, info.Hash)
 		assert.Equal(t, hash, info.CheckpointName)
+		require.NotNil(t, info.GPUMemoryService)
+		assert.True(t, info.GPUMemoryService.Enabled)
 	})
 
 	t.Run("checkpointRef resolves not-ready CR", func(t *testing.T) {

@@ -1380,18 +1380,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		return nil, fmt.Errorf("checkpoint identity is required for Auto mode")
 	}
 
-	identity := component.Checkpoint.Identity
-
-	checkpointIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
-		Model:                identity.Model,
-		BackendFramework:     identity.BackendFramework,
-		DynamoVersion:        identity.DynamoVersion,
-		TensorParallelSize:   identity.TensorParallelSize,
-		PipelineParallelSize: identity.PipelineParallelSize,
-		Dtype:                identity.Dtype,
-		MaxModelLen:          identity.MaxModelLen,
-		ExtraParameters:      identity.ExtraParameters,
-	}
+	checkpointIdentity := *component.Checkpoint.Identity.DeepCopy()
 
 	// Capture config is not part of the checkpoint identity. Once a checkpoint object exists for a
 	// hash, later reconcilers must reuse it instead of racing to overwrite the capture pod template.
@@ -1399,7 +1388,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		dynamoDeployment,
 		component,
 		serviceName,
-		identity.BackendFramework,
+		checkpointIdentity.BackendFramework,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)

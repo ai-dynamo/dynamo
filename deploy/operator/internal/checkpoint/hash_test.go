@@ -24,7 +24,7 @@ func TestComputeIdentityHash(t *testing.T) {
 				BackendFramework: "vllm",
 			},
 			expectError:  false,
-			expectedHash: "96429b2725761a09", // Known hash for this specific identity
+			expectedHash: "96429b2725761a09",
 		},
 		{
 			name: "identity with all fields produces deterministic hash",
@@ -41,7 +41,7 @@ func TestComputeIdentityHash(t *testing.T) {
 				},
 			},
 			expectError:  false,
-			expectedHash: "f4ba65bccbb8e4fb", // Known hash for this specific identity
+			expectedHash: "f4ba65bccbb8e4fb",
 		},
 		{
 			name: "same identity produces same hash",

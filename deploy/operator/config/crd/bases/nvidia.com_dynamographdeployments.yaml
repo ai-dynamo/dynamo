@@ -910,7 +910,7 @@ spec:
                             type: boolean
                           identity:
                             description: |-
-                              Identity defines the checkpoint identity for hash computation
+                              Identity defines the checkpoint identity for hash computation.
                               Used when Mode is Auto or when looking up existing checkpoints
                               Required when checkpointRef is not specified
                             properties:
@@ -10956,9 +10956,7 @@ spec:
                           When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
                         properties:
                           enabled:
-                            description: |-
-                              Enabled activates the GMS sidecar. GPU resources on the main container
-                              are replaced with a DRA ResourceClaim for shared GPU access.
+                            description: Enabled activates GPU Memory Service for this workload or checkpoint.
                             type: boolean
                         required:
                           - enabled

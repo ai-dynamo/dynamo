@@ -39,10 +39,26 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
 		pod.Annotations = map[string]string{}
 	}
 	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
-	PrepareRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], opts.Storage, opts.SeccompProfile, true)
+	container := resolveWorkerContainer(&pod.Spec)
+	PrepareRestorePodSpec(&pod.Spec, container, opts.Storage, opts.SeccompProfile, true)
 	pod.Namespace = opts.Namespace
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
 	return pod
+}
+
+func resolveWorkerContainer(podSpec *corev1.PodSpec) *corev1.Container {
+	if podSpec == nil {
+		return nil
+	}
+	if len(podSpec.Containers) == 1 {
+		return &podSpec.Containers[0]
+	}
+	for index := range podSpec.Containers {
+		if podSpec.Containers[index].Name == "main" {
+			return &podSpec.Containers[index]
+		}
+	}
+	return nil
 }
 
 func PrepareRestorePodSpec(
@@ -92,10 +108,10 @@ func ValidateRestorePodSpec(
 	if podSpec == nil {
 		return fmt.Errorf("pod spec is nil")
 	}
-	if len(podSpec.Containers) != 1 {
-		return fmt.Errorf("restore target must have exactly one container, got %d", len(podSpec.Containers))
+	container := resolveWorkerContainer(podSpec)
+	if container == nil {
+		return fmt.Errorf("restore target must include a worker container named main")
 	}
-	container := &podSpec.Containers[0]
 	if storage.PVCName != "" {
 		hasVolume := false
 		for _, volume := range podSpec.Volumes {

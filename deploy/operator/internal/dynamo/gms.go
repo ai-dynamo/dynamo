@@ -13,18 +13,15 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
-	gmsSharedVolumeName    = "gms-shared"
-	gmsSharedMountPath     = "/shared"
-	gmsDRAClaimName        = "shared-gpu"
 	defaultDeviceClassName = "gpu.nvidia.com"
 )
 
@@ -64,47 +61,52 @@ func getDeviceClassName(component *v1alpha1.DynamoComponentDeploymentSharedSpec)
 	return defaultDeviceClassName
 }
 
-// applyGPUMemoryService transforms a pod spec to include a GMS sidecar with
-// DRA shared GPU access. The main container's GPU resources are replaced with
-// a DRA ResourceClaim, and a GMS init container is added.
+// resolveMainContainer finds the container named "main" in the pod spec.
+// Falls back to Containers[0] if there is exactly one container.
+func resolveMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
+	if len(podSpec.Containers) == 0 {
+		return nil, fmt.Errorf("pod spec must have at least one container for GPU memory service")
+	}
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
+			return &podSpec.Containers[i], nil
+		}
+	}
+	if len(podSpec.Containers) == 1 {
+		return &podSpec.Containers[0], nil
+	}
+	return nil, fmt.Errorf("pod spec has %d containers but none named %q", len(podSpec.Containers), commonconsts.MainContainerName)
+}
+
+// applyGPUMemoryService transforms a pod spec to include GMS server sidecars
+// with DRA shared GPU access. The main container's GPU resources are replaced
+// with a DRA ResourceClaim.
 func applyGPUMemoryService(
 	podSpec *corev1.PodSpec,
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	parentName string,
 	serviceName string,
 ) error {
-	if len(podSpec.Containers) == 0 {
-		return fmt.Errorf("pod spec must have at least one container for GPU memory service")
-	}
-
 	gpuCount, err := getGPUCount(component)
 	if err != nil {
 		return err
 	}
+	_ = gpuCount // GPU count is used for DRA claim template; sidecar discovers devices via pynvml
 
-	mainContainer := &podSpec.Containers[0]
+	mainContainer, err := resolveMainContainer(podSpec)
+	if err != nil {
+		return err
+	}
 
 	// Replace GPU resources with DRA claim on main container
 	removeGPUResources(mainContainer)
 	mainContainer.Resources.Claims = append(mainContainer.Resources.Claims, corev1.ResourceClaim{
-		Name: gmsDRAClaimName,
+		Name: gmsruntime.DRAClaimName,
 	})
 
-	// Add shared volume mount and TMPDIR to main container
-	mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
-		Name:      gmsSharedVolumeName,
-		MountPath: gmsSharedMountPath,
-	})
-	mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
-		Name: "TMPDIR", Value: gmsSharedMountPath,
-	})
-
-	// Add GMS sidecar
-	gmsSidecar := buildGMSSidecar(mainContainer.Image, gpuCount)
-	podSpec.InitContainers = append(podSpec.InitContainers, gmsSidecar)
-
-	// Add shared volume
-	podSpec.Volumes = append(podSpec.Volumes, gmsSharedVolume())
+	// Add GMS server sidecar, shared volume, and socket env vars.
+	// The sidecar gets DRA claims copied from main automatically.
+	gmsruntime.EnsureServerSidecar(podSpec, mainContainer)
 
 	// DRA replaces normal GPU scheduling, so the default GPU toleration that
 	// kubelet/device-plugin would add is lost. Re-add it explicitly.
@@ -117,7 +119,7 @@ func applyGPUMemoryService(
 	// Add pod-level DRA resource claim referencing the ResourceClaimTemplate
 	claimTemplateName := GMSResourceClaimTemplateName(parentName, serviceName)
 	podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
-		Name:                      gmsDRAClaimName,
+		Name:                      gmsruntime.DRAClaimName,
 		ResourceClaimTemplateName: &claimTemplateName,
 	})
 
@@ -130,87 +132,6 @@ func removeGPUResources(container *corev1.Container) {
 	gpuResource := corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)
 	delete(container.Resources.Limits, gpuResource)
 	delete(container.Resources.Requests, gpuResource)
-}
-
-// buildGMSSidecar creates the GMS weight server as a sidecar init container
-// (restartPolicy: Always). kubelet starts it before regular containers and
-// keeps it running for the pod's lifetime.
-//
-// Each GPU gets two GMS subprocesses (weights + kv_cache) via a bash wrapper
-// that forwards signals and exits if any child dies. TMPDIR is set so
-// UUID-based sockets land in the shared volume.
-func buildGMSSidecar(image string, gpuCount int) corev1.Container {
-	return corev1.Container{
-		Name:          "gms-weights",
-		Image:         image,
-		Command:       []string{"bash", "-c"},
-		Args:          []string{gmsWrapperScript(gpuCount)},
-		RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
-		Env: []corev1.EnvVar{
-			{Name: "TMPDIR", Value: gmsSharedMountPath},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      gmsSharedVolumeName,
-				MountPath: gmsSharedMountPath,
-			},
-		},
-		StartupProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: gmsReadyCheckCommand(gpuCount),
-				},
-			},
-			PeriodSeconds:    2,
-			FailureThreshold: 150, // 2s * 150 = 5 min
-		},
-		Resources: corev1.ResourceRequirements{
-			Claims: []corev1.ResourceClaim{
-				{Name: gmsDRAClaimName},
-			},
-		},
-	}
-}
-
-// gmsWrapperScript generates a bash script that launches two GMS subprocesses
-// per GPU device (one for weights, one for kv_cache), waits for any to exit,
-// then tears down the process group.
-func gmsWrapperScript(gpuCount int) string {
-	devList := make([]string, gpuCount)
-	for i := range gpuCount {
-		devList[i] = strconv.Itoa(i)
-	}
-	return fmt.Sprintf(
-		`cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
-trap cleanup SIGTERM SIGINT
-for dev in %s; do
-  python3 -m gpu_memory_service --device "$dev" --tag weights &
-  echo "Started GMS device=$dev tag=weights pid=$!"
-  python3 -m gpu_memory_service --device "$dev" --tag kv_cache &
-  echo "Started GMS device=$dev tag=kv_cache pid=$!"
-done
-wait -n
-echo "A GMS subprocess exited, shutting down"
-cleanup`, strings.Join(devList, " "))
-}
-
-// gmsReadyCheckCommand returns the exec probe command that verifies the
-// expected number of GMS UDS sockets exist on the shared volume.
-// With 2-tag GMS (weights + kv_cache), there are 2 sockets per GPU.
-func gmsReadyCheckCommand(gpuCount int) []string {
-	return []string{
-		"sh", "-c",
-		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsSharedMountPath, gpuCount*2),
-	}
-}
-
-func gmsSharedVolume() corev1.Volume {
-	return corev1.Volume{
-		Name: gmsSharedVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
-		},
-	}
 }
 
 // GMSResourceClaimTemplateName returns the deterministic name for the

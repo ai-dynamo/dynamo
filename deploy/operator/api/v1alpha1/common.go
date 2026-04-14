@@ -155,13 +155,9 @@ func (e ExtraPodSpec) MarshalJSON() ([]byte, error) {
 	return json.Marshal(aux)
 }
 
-// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
-// When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
-// via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
-// (weights + kv_cache) and communicates with the main container over UDS sockets.
+// GPUMemoryServiceSpec configures GPU Memory Service sidecars.
 type GPUMemoryServiceSpec struct {
-	// Enabled activates the GMS sidecar. GPU resources on the main container
-	// are replaced with a DRA ResourceClaim for shared GPU access.
+	// Enabled activates GPU Memory Service for this workload or checkpoint.
 	Enabled bool `json:"enabled"`
 }
 
@@ -208,7 +204,7 @@ type ServiceCheckpointConfig struct {
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Identity defines the checkpoint identity for hash computation
+	// Identity defines the checkpoint identity for hash computation.
 	// Used when Mode is Auto or when looking up existing checkpoints
 	// Required when checkpointRef is not specified
 	// +optional

@@ -37,6 +37,7 @@ from typing import Dict, List, Optional
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.cuda_utils import (
     align_to_granularity,
+    cuda_ensure_initialized,
     cuda_set_current_device,
     cuda_synchronize,
     cuda_validate_pointer,
@@ -149,6 +150,7 @@ class GMSClientMemoryManager:
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
 
+        cuda_ensure_initialized()
         cuda_set_current_device(self.device)
         self.granularity = cumem_get_allocation_granularity(device)
 

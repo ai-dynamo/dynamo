@@ -92,6 +92,24 @@ func InjectCheckpointIntoPodSpec(
 		return err
 	}
 
+	if info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
+		if len(mainContainer.Resources.Claims) == 0 {
+			return fmt.Errorf("gms sidecars require main container resource claims")
+		}
+		storage, err := ResolveGMSCheckpointStorage(
+			ctx,
+			reader,
+			namespace,
+			info.Hash,
+			info.ArtifactVersion,
+		)
+		if err != nil {
+			return err
+		}
+		EnsureGMSRestoreSidecars(podSpec, mainContainer)
+		EnsureGMSRestoreHelperMounts(podSpec, storage)
+	}
+
 	EnsurePodInfoVolume(podSpec)
 	EnsurePodInfoMount(mainContainer)
 	return nil

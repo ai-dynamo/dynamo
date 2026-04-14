@@ -26,6 +26,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -33,6 +34,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
+	"github.com/stretchr/testify/require"
 	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -1373,6 +1375,128 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
 			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
+		}
+	})
+
+	t.Run("ready gms checkpoint injects gms restore sidecars", func(t *testing.T) {
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		dcd.Spec.ExtraPodSpec.MainContainer.Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{
+				Identity:         identity,
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
+			},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		podTemplateSpec, err := r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		if err != nil {
+			t.Fatalf("generatePodTemplateSpec failed: %v", err)
+		}
+
+		find := func(name string) *corev1.Container {
+			for i := range podTemplateSpec.Spec.Containers {
+				if podTemplateSpec.Spec.Containers[i].Name == name {
+					return &podTemplateSpec.Spec.Containers[i]
+				}
+			}
+			for i := range podTemplateSpec.Spec.InitContainers {
+				if podTemplateSpec.Spec.InitContainers[i].Name == name {
+					return &podTemplateSpec.Spec.InitContainers[i]
+				}
+			}
+			return nil
+		}
+
+		gmsServer := find(gmsruntime.ServerContainerName)
+		require.NotNil(t, gmsServer)
+		loader := find(checkpoint.GMSLoaderContainer)
+		require.NotNil(t, loader)
+
+		mounts := map[string]string{}
+		for _, mount := range loader.VolumeMounts {
+			mounts[mount.Name] = mount.MountPath
+		}
+		if got := mounts[snapshotprotocol.CheckpointVolumeName]; got != "/checkpoints" {
+			t.Fatalf("expected gms loader checkpoint mount at /checkpoints, got %q", got)
+		}
+		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.gms_server_sidecar" {
+			t.Fatalf("expected weights server to run python module, got %#v", got)
+		}
+		if gmsServer.RestartPolicy == nil || *gmsServer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+			t.Fatalf("expected weights server to be a restartable init container, got %#v", gmsServer.RestartPolicy)
+		}
+		if gmsServer.StartupProbe == nil {
+			t.Fatalf("expected weights server startup probe")
+		}
+		if got := loader.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.gms_checkpoint_loader" {
+			t.Fatalf("expected loader to run python module, got %#v", got)
+		}
+	})
+
+	t.Run("ready checkpoint rewrites only main when extra sidecars are present", func(t *testing.T) {
+		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
+		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
+		if err != nil {
+			t.Fatalf("ComputeIdentityHash failed: %v", err)
+		}
+		dcd := makeDCD(checkpointName)
+		dcd.Spec.ExtraPodSpec.PodSpec = &corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "gms-loader",
+				Image:   "sidecar:latest",
+				Command: []string{"python3"},
+				Args:    []string{"-m", "sidecar"},
+			}},
+		}
+		ckpt := &v1alpha1.DynamoCheckpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      checkpointName,
+				Namespace: "default",
+			},
+			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
+			Status: v1alpha1.DynamoCheckpointStatus{
+				Phase: v1alpha1.DynamoCheckpointPhaseReady,
+			},
+		}
+
+		r := makeReconciler(dcd, ckpt)
+		podTemplateSpec, err := r.generatePodTemplateSpec(
+			context.Background(),
+			generateResourceOption{dynamoComponentDeployment: dcd},
+			dynamo.RoleMain,
+		)
+		if err != nil {
+			t.Fatalf("generatePodTemplateSpec failed: %v", err)
+		}
+
+		if got := podTemplateSpec.Spec.Containers[0]; got.Name != "gms-loader" || len(got.Command) != 1 || got.Command[0] != "python3" {
+			t.Fatalf("expected sidecar container to remain unchanged, got %#v", got)
+		}
+		if got := podTemplateSpec.Spec.Containers[1]; got.Name != commonconsts.MainContainerName || len(got.Command) != 2 || got.Command[0] != "sleep" || got.Command[1] != "infinity" {
+			t.Fatalf("expected main container to be rewritten for restore, got %#v", got)
+		}
+		if podTemplateSpec.Spec.Containers[1].Args != nil {
+			t.Fatalf("expected main container args to be cleared, got %#v", podTemplateSpec.Spec.Containers[1].Args)
+		}
+		if got := podTemplateSpec.Labels[snapshotprotocol.RestoreTargetLabel]; got != commonconsts.KubeLabelValueTrue {
+			t.Fatalf("expected %s label to be true, got %q", snapshotprotocol.RestoreTargetLabel, got)
 		}
 	})
 
