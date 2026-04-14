@@ -562,14 +562,16 @@ impl AggRuntime {
     }
 
     /// Apply a scaling decision: set the target number of workers.
-    /// Scale-up is immediate; scale-down marks excess workers for drain-based removal.
+    /// Scale-up is immediate; scale-down removes the worker from the router
+    /// immediately (so no new requests land on it) and lets it drain in-flight
+    /// work in the engine.
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
-        let (added, removed) = self.engine.apply_target_count(target_workers);
+        let (added, newly_marked) = self.engine.apply_target_count(target_workers);
         if let Some(router) = self.router.as_mut() {
             for id in added {
                 router.add_worker(id)?;
             }
-            for id in removed {
+            for id in newly_marked {
                 router.remove_worker(id)?;
             }
         }

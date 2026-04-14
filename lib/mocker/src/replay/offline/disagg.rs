@@ -775,26 +775,28 @@ impl DisaggRuntime {
     }
 
     /// Apply a scaling decision with separate prefill and decode targets.
+    /// Newly marked workers are removed from the router immediately so no
+    /// new requests land on them while they drain in-flight work.
     pub(in crate::replay) fn apply_scaling(
         &mut self,
         target_prefill: usize,
         target_decode: usize,
     ) -> Result<()> {
-        let (added, removed) = self.prefill_engine.apply_target_count(target_prefill);
+        let (added, newly_marked) = self.prefill_engine.apply_target_count(target_prefill);
         if let Some(router) = self.prefill_router.as_mut() {
             for id in added {
                 router.add_worker(id)?;
             }
-            for id in removed {
+            for id in newly_marked {
                 router.remove_worker(id)?;
             }
         }
-        let (added, removed) = self.decode_engine.apply_target_count(target_decode);
+        let (added, newly_marked) = self.decode_engine.apply_target_count(target_decode);
         if let Some(router) = self.decode_router.as_mut() {
             for id in added {
                 router.add_worker(id)?;
             }
-            for id in removed {
+            for id in newly_marked {
                 router.remove_worker(id)?;
             }
         }

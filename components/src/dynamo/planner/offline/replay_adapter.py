@@ -263,28 +263,50 @@ class ReplayPlannerAdapter:
                 )
             )
 
-    def _feed_all_fpm_to_regression(
+    def _feed_extra_fpm_to_regression(
         self,
         decode_snaps: list[dict[str, Any]],
         prefill_snaps: list[dict[str, Any]],
     ) -> None:
-        """Feed every accumulated FPM snapshot to the regression models."""
+        """Feed accumulated FPM snapshots to regression, excluding the last
+        per worker (which will be added by _observe_fpm via fpm_observations).
+        This avoids double-counting the cached snapshot."""
         if not hasattr(self._sm, "_is_easy") or self._sm._is_easy:
             return  # easy mode has no regression models
 
         if self._sm._is_agg:
-            for snap in decode_snaps:
+            # Exclude the last snapshot per worker (it's in the cache and
+            # will be added by _observe_fpm)
+            last_idx_per_worker: dict[int, int] = {}
+            for i, snap in enumerate(decode_snaps):
+                last_idx_per_worker[snap["worker_id"]] = i
+            exclude = set(last_idx_per_worker.values())
+            for i, snap in enumerate(decode_snaps):
+                if i in exclude:
+                    continue
                 fpm = _build_fpm_from_dict(snap)
                 if fpm.wall_time > 0.0:
                     self._sm._agg_regression.add_observation(fpm)
         else:
             if self._sm._has_prefill:
-                for snap in prefill_snaps:
+                last_idx: dict[int, int] = {}
+                for i, snap in enumerate(prefill_snaps):
+                    last_idx[snap["worker_id"]] = i
+                exclude = set(last_idx.values())
+                for i, snap in enumerate(prefill_snaps):
+                    if i in exclude:
+                        continue
                     fpm = _build_fpm_from_dict(snap)
                     if fpm.wall_time > 0.0:
                         self._sm._prefill_regression.add_observation(fpm)
             if self._sm._has_decode:
-                for snap in decode_snaps:
+                last_idx = {}
+                for i, snap in enumerate(decode_snaps):
+                    last_idx[snap["worker_id"]] = i
+                exclude = set(last_idx.values())
+                for i, snap in enumerate(decode_snaps):
+                    if i in exclude:
+                        continue
                     fpm = _build_fpm_from_dict(snap)
                     if fpm.wall_time > 0.0:
                         self._sm._decode_regression.add_observation(fpm)
@@ -339,7 +361,7 @@ class ReplayPlannerAdapter:
             decode_dict = (
                 dict(self._decode_fpm_cache) if self._decode_fpm_cache else None
             )
-            self._feed_all_fpm_to_regression(decode_snaps, prefill_snaps)
+            self._feed_extra_fpm_to_regression(decode_snaps, prefill_snaps)
             fpm_observations = FpmObservations(
                 prefill=prefill_dict,
                 decode=decode_dict,
@@ -349,11 +371,10 @@ class ReplayPlannerAdapter:
         if tick.need_traffic_metrics:
             t = result.get("traffic", {})
             duration_s = t.get("duration_s", 0.0)
-            num_req = t.get("num_req", 0)
-            if duration_s > 0 and num_req > 0:
+            if duration_s > 0:
                 traffic = TrafficObservation(
                     duration_s=duration_s,
-                    num_req=float(num_req),
+                    num_req=float(t.get("num_req", 0)),
                     isl=t.get("avg_isl", 0.0),
                     osl=t.get("avg_osl", 0.0),
                 )
