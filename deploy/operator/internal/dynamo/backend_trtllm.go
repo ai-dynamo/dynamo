@@ -6,11 +6,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 type TRTLLMBackend struct {
@@ -118,7 +119,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct Python command: combine command + args
 		// Shell-quote each part to handle args with spaces (e.g., JSON in --override-engine-args)
-		var quotedParts []string
+		var quotedParts []string //nolint:prealloc
 		for _, part := range container.Command {
 			quotedParts = append(quotedParts, shellQuoteForBashC(part))
 		}

@@ -10,9 +10,10 @@ package gms
 import (
 	"path/filepath"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 )
 
 const (

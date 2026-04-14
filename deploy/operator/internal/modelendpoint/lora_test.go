@@ -100,7 +100,7 @@ func TestLoadLoRA_RequestBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a test server that captures the request body
-			var capturedBody map[string]interface{}
+			var capturedBody map[string]any
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
 				_ = json.Unmarshal(body, &capturedBody)
@@ -127,7 +127,7 @@ func TestLoadLoRA_RequestBody(t *testing.T) {
 				t.Errorf("expected lora_name %s, got %v", tt.expectedLoraName, capturedBody["lora_name"])
 			}
 
-			source, ok := capturedBody["source"].(map[string]interface{})
+			source, ok := capturedBody["source"].(map[string]any)
 			if !ok {
 				t.Fatal("expected source to be a map")
 			}

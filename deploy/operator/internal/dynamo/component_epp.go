@@ -8,10 +8,11 @@ package dynamo
 import (
 	"fmt"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
+
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 )
 
 // EPPDefaults implements ComponentDefaults for EPP (Endpoint Picker Plugin) components

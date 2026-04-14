@@ -22,8 +22,9 @@ import (
 	"errors"
 	"fmt"
 
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 // DynamoGraphDeploymentRequestValidator validates DynamoGraphDeploymentRequest resources.

@@ -10,11 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 var failoverLockFile = filepath.Join(gmsruntime.SharedMountPath, "failover.lock")
@@ -45,9 +46,9 @@ func buildFailoverPod(
 	mainContainer := podSpec.Containers[0]
 	sidecars := podSpec.Containers[1:]
 
-	engines := make([]corev1.Container, failoverEngineCount)
+	engines := make([]corev1.Container, 0, failoverEngineCount+len(sidecars))
 	for i := range failoverEngineCount {
-		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
+		engines = append(engines, buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i))
 	}
 
 	podSpec.Containers = append(engines, sidecars...)

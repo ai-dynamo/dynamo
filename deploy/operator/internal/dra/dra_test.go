@@ -10,13 +10,14 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 func basePodSpec() corev1.PodSpec {
@@ -125,14 +126,14 @@ func TestResourceClaimTemplateName(t *testing.T) {
 func TestExtractGPUParams(t *testing.T) {
 	count, dc := ExtractGPUParams(nil, nil)
 	assert.Equal(t, 0, count)
-	assert.Equal(t, "", dc)
+	assert.Empty(t, dc)
 
 	count, dc = ExtractGPUParams(
 		&v1alpha1.GPUMemoryServiceSpec{Enabled: true},
 		&v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: strconv.Itoa(4)}},
 	)
 	assert.Equal(t, 4, count)
-	assert.Equal(t, "", dc)
+	assert.Empty(t, dc)
 
 	count, dc = ExtractGPUParams(
 		&v1alpha1.GPUMemoryServiceSpec{Enabled: true, DeviceClassName: "gpu.intel.com/xe"},

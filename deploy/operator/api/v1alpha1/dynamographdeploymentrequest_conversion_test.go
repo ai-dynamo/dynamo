@@ -23,30 +23,30 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 // newV1alpha1DGDR builds a fully-populated v1alpha1 DGDR for use in tests.
 func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
-	profilingBlob := map[string]interface{}{
-		"sla": map[string]interface{}{
+	profilingBlob := map[string]any{
+		"sla": map[string]any{
 			"ttft": float64(500),
 			"itl":  float64(20),
 			"isl":  float64(2048),
 			"osl":  float64(512),
 		},
-		"deployment": map[string]interface{}{
-			"modelCache": map[string]interface{}{
+		"deployment": map[string]any{
+			"modelCache": map[string]any{
 				"pvcName":        "model-pvc",
 				"modelPathInPvc": "llama-3",
 				"pvcMountPath":   "/data/model",
 			},
 		},
-		"planner": map[string]interface{}{
+		"planner": map[string]any{
 			"enable_load_scaling": false,
 		},
 		"extra_key": "preserved",
@@ -99,8 +99,8 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 	isl := int32(1024)
 	osl := int32(256)
 
-	rawDGD, _ := json.Marshal(map[string]interface{}{"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"})
-	rawPlanner, _ := json.Marshal(map[string]interface{}{"enable_load_scaling": false})
+	rawDGD, _ := json.Marshal(map[string]any{"apiVersion": "nvidia.com/v1alpha1", "kind": "DynamoGraphDeployment"})
+	rawPlanner, _ := json.Marshal(map[string]any{"enable_load_scaling": false})
 	autoApplyFalse := false
 
 	return &v1beta1.DynamoGraphDeploymentRequest{
@@ -287,11 +287,11 @@ func TestAlpha1RoundTrip(t *testing.T) {
 	if restored.Spec.ProfilingConfig.Config == nil {
 		t.Fatal("ProfilingConfig.Config is nil after round-trip")
 	}
-	var blob map[string]interface{}
+	var blob map[string]any
 	if err := json.Unmarshal(restored.Spec.ProfilingConfig.Config.Raw, &blob); err != nil {
 		t.Fatalf("failed to unmarshal restored ProfilingConfig.Config: %v", err)
 	}
-	slaMap, _ := blob["sla"].(map[string]interface{})
+	slaMap, _ := blob["sla"].(map[string]any)
 	if slaMap == nil {
 		t.Fatal("sla key missing in restored JSON blob")
 	}
@@ -306,7 +306,7 @@ func TestAlpha1RoundTrip(t *testing.T) {
 		t.Errorf("extra_key: got %v, want %q", blob["extra_key"], "preserved")
 	}
 	// Planner round-trip via applyPlannerFromBlob / mergePlannerIntoBlob
-	plannerMap, _ := blob["planner"].(map[string]interface{})
+	plannerMap, _ := blob["planner"].(map[string]any)
 	if plannerMap == nil {
 		t.Fatal("planner key missing in restored JSON blob")
 	}

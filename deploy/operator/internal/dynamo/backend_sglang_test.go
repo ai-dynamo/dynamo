@@ -4,8 +4,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 )
 
 // Mock MultinodeDeployer for testing with no shell interpretation needed

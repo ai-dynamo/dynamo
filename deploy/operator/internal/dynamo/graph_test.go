@@ -26,12 +26,6 @@ import (
 	"testing"
 	"time"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
@@ -41,6 +35,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ptr "k8s.io/utils/ptr"
+
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 func TestGenerateDynamoComponentsDeployments(t *testing.T) {
@@ -761,13 +762,8 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 	}
 
 	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, nil, RollingUpdateContext{})
-	if !assert.NoError(t, err) {
-		return
-	}
-
-	if !assert.Len(t, got, 2) {
-		return
-	}
+	require.NoError(t, err)
+	require.Len(t, got, 2)
 
 	for _, d := range got {
 		switch d.Spec.ComponentType {
@@ -3850,13 +3846,8 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 	}
 
 	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
-	if !assert.NoError(t, err) {
-		return
-	}
-
-	if !assert.Len(t, got.Spec.Template.Cliques, 2) {
-		return
-	}
+	require.NoError(t, err)
+	require.Len(t, got.Spec.Template.Cliques, 2)
 
 	for _, clique := range got.Spec.Template.Cliques {
 		switch clique.Name {
@@ -3883,7 +3874,7 @@ func assertDYNNamespace(t *testing.T, podSpec corev1.PodSpec, expectedNamespace 
 				break
 			}
 		}
-		assert.True(t, foundDYNNamespace, fmt.Sprintf("%s not found in container environment variables", commonconsts.DynamoNamespaceEnvVar))
+		assert.True(t, foundDYNNamespace, "%s not found in container environment variables", commonconsts.DynamoNamespaceEnvVar)
 	}
 }
 
@@ -5370,9 +5361,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				"test-service",
 				nil, // No checkpoint info in tests
 			)
-			if !assert.NoError(t, err) {
-				return
-			}
+			require.NoError(t, err)
 			if tt.wantEnvVar != "" {
 				assert.Contains(t, podSpec.Containers[0].Env, corev1.EnvVar{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: tt.wantEnvVar})
 			} else {
@@ -7016,7 +7005,7 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 	}
 
 	dcds, err := GenerateDynamoComponentsDeployments(ctx, dgd, nil, &RestartState{}, nil, ruCtx)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Worker DCD: hash suffix in name, hash label, replica override
 	prefillDCD := dcds["prefill"]
@@ -7042,7 +7031,7 @@ func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 	}
 
 	dcds, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, &RestartState{}, nil, RollingUpdateContext{})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	dcd := dcds["worker"]
 	assert.Equal(t, "my-dgd-worker", dcd.Name)
@@ -7084,7 +7073,7 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 		ComponentType:    commonconsts.ComponentTypeWorker,
 		WorkerHashSuffix: "abc123",
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	found := false
 	for _, env := range container.Env {
 		if env.Name == commonconsts.DynamoNamespaceWorkerSuffixEnvVar {
@@ -7099,7 +7088,7 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 		DynamoNamespace: "ns-dgd",
 		ComponentType:   commonconsts.ComponentTypeWorker,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	for _, env := range container2.Env {
 		assert.NotEqual(t, commonconsts.DynamoNamespaceWorkerSuffixEnvVar, env.Name,
 			"DYN_NAMESPACE_WORKER_SUFFIX should not be set when suffix is empty")
@@ -7112,7 +7101,7 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 		DynamoNamespace: "myns-mydgd",
 		ComponentType:   commonconsts.ComponentTypeFrontend,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	found := false
 	for _, env := range container.Env {
 		if env.Name == commonconsts.DynamoNamespacePrefixEnvVar {
@@ -7246,7 +7235,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				return
 			}
 
-			assert.Equal(t, tt.wantSidecarCount, len(podSpec.Containers),
+			assert.Len(t, podSpec.Containers, tt.wantSidecarCount,
 				"expected %d containers, got %d", tt.wantSidecarCount, len(podSpec.Containers))
 
 			if tt.wantSidecarCount <= 1 {
@@ -7276,7 +7265,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			}
 
 			if tt.wantSidecarEnvFrom > 0 {
-				assert.Equal(t, tt.wantSidecarEnvFrom, len(sidecar.EnvFrom), "sidecar envFrom count")
+				assert.Len(t, sidecar.EnvFrom, tt.wantSidecarEnvFrom, "sidecar envFrom count")
 				assert.Equal(t, envFromSecret, sidecar.EnvFrom[0].SecretRef.Name, "sidecar envFromSecret name")
 			}
 
@@ -7636,7 +7625,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				nil,
 				nil,
 			)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 			assert.NotNil(t, pcs)
 
 			// Verify PCS template-level TopologyConstraint
@@ -7648,7 +7637,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			}
 
 			// Verify clique-level TopologyConstraints (exhaustive)
-			assert.Equal(t, len(tt.wantCliqueTC), len(pcs.Spec.Template.Cliques), "clique count mismatch")
+			assert.Len(t, pcs.Spec.Template.Cliques, len(tt.wantCliqueTC), "clique count mismatch")
 			actualCliqueNames := make(map[string]struct{}, len(pcs.Spec.Template.Cliques))
 			for _, clique := range pcs.Spec.Template.Cliques {
 				actualCliqueNames[clique.Name] = struct{}{}
@@ -7671,7 +7660,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			}
 
 			// Verify PCSG-level TopologyConstraints (exhaustive)
-			assert.Equal(t, tt.wantPCSGCount, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs), "PCSG count mismatch")
+			assert.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, tt.wantPCSGCount, "PCSG count mismatch")
 			actualPCSGNames := make(map[string]struct{}, len(pcs.Spec.Template.PodCliqueScalingGroupConfigs))
 			for _, pcsg := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
 				actualPCSGNames[pcsg.Name] = struct{}{}

@@ -926,7 +926,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx c
 	for {
 		obj := &unstructured.Unstructured{}
 		if err := decoder.Decode(obj); err != nil {
-			if err == io.EOF {
+			if err == io.EOF { //nolint:errorlint
 				break
 			}
 			logger.Error(err, "Failed to decode resource, skipping")
@@ -1779,7 +1779,7 @@ func extractParetoFromWebUIData(data []byte) ([]nvidiacomv1beta1.ParetoConfig, e
 			continue
 		}
 
-		var configObj map[string]interface{}
+		var configObj map[string]any
 		if err := sigsyaml.Unmarshal([]byte(stripYAMLComments(actionYAML)), &configObj); err != nil {
 			continue
 		}
@@ -1860,7 +1860,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlCo
 	for {
 		obj := &unstructured.Unstructured{}
 		if err := decoder.Decode(obj); err != nil {
-			if err == io.EOF {
+			if err == io.EOF { //nolint:errorlint
 				break
 			}
 			// Skip invalid documents and continue

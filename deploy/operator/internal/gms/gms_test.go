@@ -9,10 +9,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 )
 
 func TestEnsureServerSidecar(t *testing.T) {

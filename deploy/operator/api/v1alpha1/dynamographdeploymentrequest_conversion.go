@@ -148,12 +148,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
+
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 // Annotation keys used to round-trip v1alpha1 fields that have no v1beta1 equivalent.
@@ -240,7 +241,7 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 	}
 
 	if src.ProfilingConfig.Config != nil && src.ProfilingConfig.Config.Raw != nil {
-		var blob map[string]interface{}
+		var blob map[string]any
 		if err := json.Unmarshal(src.ProfilingConfig.Config.Raw, &blob); err != nil {
 			return fmt.Errorf("failed to parse ProfilingConfig.Config: %w", err)
 		}
@@ -272,12 +273,12 @@ func convertDGDRSpecTo(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.Dynam
 
 // applySLAAndWorkloadFromBlob extracts SLA and Workload fields from the v1alpha1 JSON blob.
 // Both are nested under blob["sla"] in the v1alpha1 schema.
-func applySLAAndWorkloadFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
+func applySLAAndWorkloadFromBlob(blob map[string]any, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
 	slaRaw, ok := blob["sla"]
 	if !ok {
 		return
 	}
-	slaMap, ok := slaRaw.(map[string]interface{})
+	slaMap, ok := slaRaw.(map[string]any)
 	if !ok {
 		return
 	}
@@ -309,12 +310,12 @@ func applySLAAndWorkloadFromBlob(blob map[string]interface{}, dst *v1beta1.Dynam
 }
 
 // applyModelCacheFromBlob extracts ModelCache from blob["deployment"]["modelCache"].
-func applyModelCacheFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
+func applyModelCacheFromBlob(blob map[string]any, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
 	deployRaw, ok := blob["deployment"]
 	if !ok {
 		return
 	}
-	deployMap, ok := deployRaw.(map[string]interface{})
+	deployMap, ok := deployRaw.(map[string]any)
 	if !ok {
 		return
 	}
@@ -322,7 +323,7 @@ func applyModelCacheFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGra
 	if !ok {
 		return
 	}
-	mcMap, ok := mcRaw.(map[string]interface{})
+	mcMap, ok := mcRaw.(map[string]any)
 	if !ok {
 		return
 	}
@@ -420,7 +421,7 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 
 	// Reconstruct the JSON blob: start from the round-trip annotation (preserves unknown
 	// keys), then overwrite with structured v1beta1 fields (structured fields win).
-	var blob map[string]interface{}
+	var blob map[string]any
 	if srcObj.Annotations != nil {
 		if rawBlob, ok := srcObj.Annotations[annDGDRProfilingConfig]; ok && rawBlob != "" {
 			_ = json.Unmarshal([]byte(rawBlob), &blob) // best-effort
@@ -428,19 +429,19 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 	}
 	if src.SLA != nil || src.Workload != nil {
 		if blob == nil {
-			blob = make(map[string]interface{})
+			blob = make(map[string]any)
 		}
 		mergeSLAWorkloadIntoBlob(src, blob)
 	}
 	if src.ModelCache != nil {
 		if blob == nil {
-			blob = make(map[string]interface{})
+			blob = make(map[string]any)
 		}
 		mergeModelCacheIntoBlob(src.ModelCache, blob)
 	}
 	if src.Features != nil && src.Features.Planner != nil {
 		if blob == nil {
-			blob = make(map[string]interface{})
+			blob = make(map[string]any)
 		}
 		mergePlannerIntoBlob(src.Features.Planner, blob)
 	}
@@ -463,10 +464,10 @@ func convertDGDRSpecFrom(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *Dyn
 
 // mergeSLAWorkloadIntoBlob writes SLA and Workload structured fields back into the JSON blob,
 // overwriting any existing values for those keys.
-func mergeSLAWorkloadIntoBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]interface{}) {
-	slaMap, _ := blob["sla"].(map[string]interface{})
+func mergeSLAWorkloadIntoBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blob map[string]any) {
+	slaMap, _ := blob["sla"].(map[string]any)
 	if slaMap == nil {
-		slaMap = make(map[string]interface{})
+		slaMap = make(map[string]any)
 	}
 	if src.SLA != nil {
 		if src.SLA.TTFT != nil {
@@ -488,12 +489,12 @@ func mergeSLAWorkloadIntoBlob(src *v1beta1.DynamoGraphDeploymentRequestSpec, blo
 }
 
 // mergeModelCacheIntoBlob writes ModelCache structured fields back into blob["deployment"]["modelCache"].
-func mergeModelCacheIntoBlob(mc *v1beta1.ModelCacheSpec, blob map[string]interface{}) {
-	deployMap, _ := blob["deployment"].(map[string]interface{})
+func mergeModelCacheIntoBlob(mc *v1beta1.ModelCacheSpec, blob map[string]any) {
+	deployMap, _ := blob["deployment"].(map[string]any)
 	if deployMap == nil {
-		deployMap = make(map[string]interface{})
+		deployMap = make(map[string]any)
 	}
-	mcMap := make(map[string]interface{})
+	mcMap := make(map[string]any)
 	if mc.PVCName != "" {
 		mcMap["pvcName"] = mc.PVCName
 	}
@@ -511,11 +512,11 @@ func mergeModelCacheIntoBlob(mc *v1beta1.ModelCacheSpec, blob map[string]interfa
 
 // mergePlannerIntoBlob writes the planner RawExtension into blob["planner"].
 // The RawExtension is the full PlannerConfig JSON blob (opaque to Go).
-func mergePlannerIntoBlob(planner *runtime.RawExtension, blob map[string]interface{}) {
+func mergePlannerIntoBlob(planner *runtime.RawExtension, blob map[string]any) {
 	if planner == nil || planner.Raw == nil {
 		return
 	}
-	var plannerMap map[string]interface{}
+	var plannerMap map[string]any
 	if err := json.Unmarshal(planner.Raw, &plannerMap); err != nil || len(plannerMap) == 0 {
 		return
 	}
@@ -523,12 +524,12 @@ func mergePlannerIntoBlob(planner *runtime.RawExtension, blob map[string]interfa
 }
 
 // applyPlannerFromBlob extracts blob["planner"] and populates v1beta1 Features.Planner.
-func applyPlannerFromBlob(blob map[string]interface{}, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
+func applyPlannerFromBlob(blob map[string]any, dst *v1beta1.DynamoGraphDeploymentRequestSpec) {
 	plannerRaw, ok := blob["planner"]
 	if !ok {
 		return
 	}
-	plannerMap, ok := plannerRaw.(map[string]interface{})
+	plannerMap, ok := plannerRaw.(map[string]any)
 	if !ok || len(plannerMap) == 0 {
 		return
 	}

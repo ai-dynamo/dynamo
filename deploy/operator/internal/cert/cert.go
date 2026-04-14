@@ -11,7 +11,6 @@ import (
 	"os"
 	"strings"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/go-logr/logr"
 	certrotator "github.com/open-policy-agent/cert-controller/pkg/rotator"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -22,6 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 )
 
 const (

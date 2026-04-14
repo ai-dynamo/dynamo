@@ -26,8 +26,6 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +38,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 const (
@@ -228,8 +229,8 @@ var kubeEnvelopeFields = map[string]bool{
 
 // nonEnvelopeFields returns all top-level fields from an unstructured map
 // except the Kubernetes envelope (apiVersion, kind, metadata, status).
-func nonEnvelopeFields(obj map[string]interface{}) map[string]interface{} {
-	content := make(map[string]interface{}, len(obj))
+func nonEnvelopeFields(obj map[string]any) map[string]any {
+	content := make(map[string]any, len(obj))
 	for k, v := range obj {
 		if kubeEnvelopeFields[k] {
 			continue
@@ -443,7 +444,7 @@ func GetResourceHash(obj any) (string, error) {
 		return "", err
 	}
 
-	var objData map[string]interface{}
+	var objData map[string]any
 	if err := json.Unmarshal(objMap, &objData); err != nil {
 		return "", err
 	}
@@ -464,10 +465,10 @@ func GetResourceHash(obj any) (string, error) {
 }
 
 // SortKeys recursively sorts the keys of a map to ensure consistent serialization
-func SortKeys(obj interface{}) interface{} {
+func SortKeys(obj any) any {
 	switch obj := obj.(type) {
-	case map[string]interface{}:
-		sortedMap := make(map[string]interface{})
+	case map[string]any:
+		sortedMap := make(map[string]any)
 		keys := make([]string, 0, len(obj))
 		for k := range obj {
 			keys = append(keys, k)
@@ -477,14 +478,14 @@ func SortKeys(obj interface{}) interface{} {
 			sortedMap[k] = SortKeys(obj[k])
 		}
 		return sortedMap
-	case []interface{}:
+	case []any:
 		// Check if the slice contains maps and sort them by the "name" field or the first available field
 		if len(obj) > 0 {
 
-			if _, ok := obj[0].(map[string]interface{}); ok {
+			if _, ok := obj[0].(map[string]any); ok {
 				sort.SliceStable(obj, func(i, j int) bool {
-					iMap, iOk := obj[i].(map[string]interface{})
-					jMap, jOk := obj[j].(map[string]interface{})
+					iMap, iOk := obj[i].(map[string]any)
+					jMap, jOk := obj[j].(map[string]any)
 					if iOk && jOk {
 						// Try to sort by "name" if present
 						iName, iNameOk := iMap["name"].(string)
@@ -513,7 +514,7 @@ func SortKeys(obj interface{}) interface{} {
 }
 
 // Helper function to get the first key of a map (alphabetically sorted)
-func firstKey(m map[string]interface{}) string {
+func firstKey(m map[string]any) string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

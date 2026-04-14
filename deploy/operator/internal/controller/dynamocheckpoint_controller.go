@@ -356,7 +356,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			lastRenewal = lease.Spec.AcquireTime
 		}
 		if lastRenewal != nil {
-			checkpointWorkerActive = !now.After(lastRenewal.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second))
+			checkpointWorkerActive = !now.After(lastRenewal.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second))
 		}
 	}
 

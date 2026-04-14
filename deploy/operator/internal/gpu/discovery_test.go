@@ -23,10 +23,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,6 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 // newFakeClient creates a fake Kubernetes client with the given objects
@@ -226,7 +226,7 @@ func TestDiscoverGPUs_NoNodes(t *testing.T) {
 	k8sClient := newFakeClient() // Empty cluster
 
 	gpuInfo, err := DiscoverGPUs(ctx, k8sClient)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Nil(t, gpuInfo)
 	assert.Contains(t, err.Error(), "no nodes found")
 }
@@ -253,7 +253,7 @@ func TestDiscoverGPUs_NoGPUNodes(t *testing.T) {
 	k8sClient := newFakeClient(cpuNode1, cpuNode2)
 
 	gpuInfo, err := DiscoverGPUs(ctx, k8sClient)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Nil(t, gpuInfo)
 	assert.Contains(t, err.Error(), "no nodes with NVIDIA GPU Feature Discovery labels found")
 }
@@ -308,13 +308,13 @@ func TestExtractGPUInfoFromNode_MissingLabels(t *testing.T) {
 
 			gpuInfo, err := extractGPUInfoFromNode(node)
 			if tt.expectError {
-				assert.Error(t, err)
+				require.Error(t, err)
 				assert.Nil(t, gpuInfo)
 				if tt.errorMsg != "" {
 					assert.Contains(t, err.Error(), tt.errorMsg)
 				}
 			} else {
-				assert.NoError(t, err)
+				require.NoError(t, err)
 				assert.NotNil(t, gpuInfo)
 			}
 		})
@@ -683,33 +683,24 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 
 	// Prepare a fake HTTP server to simulate Prometheus metrics
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, `# HELP DCGM_FI_DEV_GPU_TEMP GPU temperature`)
-		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_GPU_TEMP gauge`)
-		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="NVIDIA A100",Hostname="test-node"} 50`)
-		require.NoError(t, err)
-
-		_, err = fmt.Fprintln(w, `# HELP DCGM_FI_DEV_FB_FREE Framebuffer free`)
-		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_FB_FREE gauge`)
-		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `DCGM_FI_DEV_FB_FREE{gpu="0",Hostname="test-node"} 10000`)
-		require.NoError(t, err)
-
-		_, err = fmt.Fprintln(w, `# HELP DCGM_FI_DEV_FB_USED Framebuffer used`)
-		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_FB_USED gauge`)
-		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `DCGM_FI_DEV_FB_USED{gpu="0",Hostname="test-node"} 2000`)
-		require.NoError(t, err)
-
-		_, err = fmt.Fprintln(w, `# HELP DCGM_FI_DEV_FB_RESERVED Framebuffer reserved`)
-		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `# TYPE DCGM_FI_DEV_FB_RESERVED gauge`)
-		require.NoError(t, err)
-		_, err = fmt.Fprintln(w, `DCGM_FI_DEV_FB_RESERVED{gpu="0",Hostname="test-node"} 500`)
-		require.NoError(t, err)
+		_, err := fmt.Fprintln(w, `
+# HELP DCGM_FI_DEV_GPU_TEMP GPU temperature
+# TYPE DCGM_FI_DEV_GPU_TEMP gauge
+DCGM_FI_DEV_GPU_TEMP{gpu="0",modelName="NVIDIA A100",Hostname="test-node"} 50
+# HELP DCGM_FI_DEV_FB_FREE Framebuffer free
+# TYPE DCGM_FI_DEV_FB_FREE gauge
+DCGM_FI_DEV_FB_FREE{gpu="0",Hostname="test-node"} 10000
+# HELP DCGM_FI_DEV_FB_USED Framebuffer used
+# TYPE DCGM_FI_DEV_FB_USED gauge
+DCGM_FI_DEV_FB_USED{gpu="0",Hostname="test-node"} 2000
+# HELP DCGM_FI_DEV_FB_RESERVED Framebuffer reserved
+# TYPE DCGM_FI_DEV_FB_RESERVED gauge
+DCGM_FI_DEV_FB_RESERVED{gpu="0",Hostname="test-node"} 500
+		`)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			t.Error(err)
+		}
 	}))
 	defer server.Close()
 
@@ -737,7 +728,10 @@ func TestScrapeMetricsEndpoint(t *testing.T) {
 	t.Run("invalid metrics", func(t *testing.T) {
 		invalidServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, err := fmt.Fprintln(w, `not a prometheus format`)
-			require.NoError(t, err)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				t.Error(err)
+			}
 		}))
 		defer invalidServer.Close()
 
@@ -871,9 +865,9 @@ func TestDiscoverGPUsFromDCGM_NoGPUOperator_NoDCGM(t *testing.T) {
 	require.Nil(t, info)
 	require.Error(t, err)
 
-	require.True(
+	require.Contains(
 		t,
-		strings.Contains(err.Error(), "gpu operator is not installed"),
+		err.Error(), "gpu operator is not installed",
 	)
 }
 

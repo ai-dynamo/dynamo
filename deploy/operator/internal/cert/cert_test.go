@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/go-logr/logr"
 	certrotator "github.com/open-policy-agent/cert-controller/pkg/rotator"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -24,6 +23,8 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 )
 
 // fakeCertProvisioner captures the rotator config passed to AddRotator and

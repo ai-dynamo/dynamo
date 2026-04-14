@@ -34,9 +34,9 @@ func (c *Client) loadLoRA(ctx context.Context, address, modelName, sourceURI str
 	logs := log.FromContext(ctx)
 
 	// Build request body with source object
-	loadReq := map[string]interface{}{
+	loadReq := map[string]any{
 		"lora_name": modelName,
-		"source": map[string]interface{}{
+		"source": map[string]any{
 			"uri": sourceURI,
 		},
 	}

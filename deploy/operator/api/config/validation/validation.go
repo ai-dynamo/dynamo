@@ -20,8 +20,9 @@ package validation
 import (
 	"net/url"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 )
 
 // ValidateOperatorConfiguration validates an OperatorConfiguration object.
@@ -30,7 +31,7 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 		return field.ErrorList{field.Required(field.NewPath(""), "operator configuration is required")}
 	}
 
-	allErrs := field.ErrorList{}
+	allErrs := field.ErrorList{} //nolint:prealloc
 	allErrs = append(allErrs, validateServer(&config.Server, field.NewPath("server"))...)
 	allErrs = append(allErrs, validateLeaderElection(&config.LeaderElection, field.NewPath("leaderElection"))...)
 	allErrs = append(allErrs, validateNamespace(&config.Namespace, field.NewPath("namespace"))...)

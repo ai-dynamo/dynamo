@@ -4,8 +4,9 @@
 package checkpoint
 
 import (
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 func EnsurePodInfoVolume(podSpec *corev1.PodSpec) {

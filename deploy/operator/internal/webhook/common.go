@@ -21,12 +21,13 @@ import (
 	"context"
 	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 var webhookCommonLog = logf.Log.WithName("webhook-common")
