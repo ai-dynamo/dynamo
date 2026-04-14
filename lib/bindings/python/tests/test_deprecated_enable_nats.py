@@ -45,36 +45,55 @@ def test_enable_nats_parameter_in_signature():
 
 
 @pytest.mark.forked
-@pytest.mark.asyncio
-async def test_enable_nats_emits_deprecation_warning(discovery_backend, request_plane):
-    """Passing enable_nats should emit a DeprecationWarning but otherwise work."""
-    loop = asyncio.get_running_loop()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        runtime = DistributedRuntime(
-            loop, discovery_backend, request_plane, enable_nats=True
-        )
-    deprecation_warnings = [
-        w for w in caught if issubclass(w.category, DeprecationWarning)
-    ]
-    assert len(deprecation_warnings) == 1
-    assert "enable_nats" in str(deprecation_warnings[0].message)
-    runtime.shutdown()
+def test_enable_nats_emits_deprecation_warning(discovery_backend, request_plane):
+    """Passing enable_nats should emit a DeprecationWarning but otherwise work.
+
+    Uses asyncio.run() instead of @pytest.mark.asyncio to avoid the
+    pytest-asyncio event-loop fixture being set up in the parent process before
+    the fork. That combination leaves dangling finalizers that break the next
+    test module's setup (pytest "previous item was not torn down properly").
+    """
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            runtime = DistributedRuntime(
+                loop, discovery_backend, request_plane, enable_nats=True
+            )
+        try:
+            deprecation_warnings = [
+                w for w in caught if issubclass(w.category, DeprecationWarning)
+            ]
+            assert len(deprecation_warnings) == 1
+            assert "enable_nats" in str(deprecation_warnings[0].message)
+        finally:
+            runtime.shutdown()
+
+    asyncio.run(_run())
 
 
 @pytest.mark.forked
-@pytest.mark.asyncio
-async def test_no_warning_without_enable_nats(discovery_backend, request_plane):
-    """Omitting enable_nats should not emit a DeprecationWarning."""
-    loop = asyncio.get_running_loop()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        runtime = DistributedRuntime(loop, discovery_backend, request_plane)
-    deprecation_warnings = [
-        w for w in caught if issubclass(w.category, DeprecationWarning)
-    ]
-    assert len(deprecation_warnings) == 0
-    runtime.shutdown()
+def test_no_warning_without_enable_nats(discovery_backend, request_plane):
+    """Omitting enable_nats should not emit a DeprecationWarning.
+
+    Uses asyncio.run() — see test_enable_nats_emits_deprecation_warning docstring.
+    """
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            runtime = DistributedRuntime(loop, discovery_backend, request_plane)
+        try:
+            deprecation_warnings = [
+                w for w in caught if issubclass(w.category, DeprecationWarning)
+            ]
+            assert len(deprecation_warnings) == 0
+        finally:
+            runtime.shutdown()
+
+    asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -154,64 +173,88 @@ def test_create_runtime_accepts_use_kv_events_kwarg():
 
 
 @pytest.mark.forked
-@pytest.mark.asyncio
-async def test_create_runtime_use_kv_events_true_emits_warning(
+def test_create_runtime_use_kv_events_true_emits_warning(
     discovery_backend, request_plane
 ):
-    """create_runtime(use_kv_events=True) should emit a DeprecationWarning."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        runtime, loop = create_runtime(
-            discovery_backend=discovery_backend,
-            request_plane=request_plane,
-            event_plane="nats",
-            use_kv_events=True,
-        )
-    deprecation_warnings = [
-        w for w in caught if issubclass(w.category, DeprecationWarning)
-    ]
-    assert len(deprecation_warnings) == 1
-    assert "use_kv_events" in str(deprecation_warnings[0].message)
-    runtime.shutdown()
+    """create_runtime(use_kv_events=True) should emit a DeprecationWarning.
+
+    Uses asyncio.run() — see test_enable_nats_emits_deprecation_warning docstring.
+    """
+
+    async def _run():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            runtime, loop = create_runtime(
+                discovery_backend=discovery_backend,
+                request_plane=request_plane,
+                event_plane="nats",
+                use_kv_events=True,
+            )
+        try:
+            deprecation_warnings = [
+                w for w in caught if issubclass(w.category, DeprecationWarning)
+            ]
+            assert len(deprecation_warnings) == 1
+            assert "use_kv_events" in str(deprecation_warnings[0].message)
+        finally:
+            runtime.shutdown()
+
+    asyncio.run(_run())
 
 
 @pytest.mark.forked
-@pytest.mark.asyncio
-async def test_create_runtime_use_kv_events_false_emits_warning(
+def test_create_runtime_use_kv_events_false_emits_warning(
     discovery_backend, request_plane
 ):
-    """create_runtime(use_kv_events=False) should also emit a DeprecationWarning."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        runtime, loop = create_runtime(
-            discovery_backend=discovery_backend,
-            request_plane=request_plane,
-            event_plane="nats",
-            use_kv_events=False,
-        )
-    deprecation_warnings = [
-        w for w in caught if issubclass(w.category, DeprecationWarning)
-    ]
-    assert len(deprecation_warnings) == 1
-    assert "use_kv_events" in str(deprecation_warnings[0].message)
-    runtime.shutdown()
+    """create_runtime(use_kv_events=False) should also emit a DeprecationWarning.
+
+    Uses asyncio.run() — see test_enable_nats_emits_deprecation_warning docstring.
+    """
+
+    async def _run():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            runtime, loop = create_runtime(
+                discovery_backend=discovery_backend,
+                request_plane=request_plane,
+                event_plane="nats",
+                use_kv_events=False,
+            )
+        try:
+            deprecation_warnings = [
+                w for w in caught if issubclass(w.category, DeprecationWarning)
+            ]
+            assert len(deprecation_warnings) == 1
+            assert "use_kv_events" in str(deprecation_warnings[0].message)
+        finally:
+            runtime.shutdown()
+
+    asyncio.run(_run())
 
 
 @pytest.mark.forked
-@pytest.mark.asyncio
-async def test_create_runtime_no_use_kv_events_no_warning(
+def test_create_runtime_no_use_kv_events_no_warning(
     discovery_backend, request_plane
 ):
-    """Omitting use_kv_events should not emit a DeprecationWarning."""
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        runtime, loop = create_runtime(
-            discovery_backend=discovery_backend,
-            request_plane=request_plane,
-            event_plane="nats",
-        )
-    deprecation_warnings = [
-        w for w in caught if issubclass(w.category, DeprecationWarning)
-    ]
-    assert len(deprecation_warnings) == 0
-    runtime.shutdown()
+    """Omitting use_kv_events should not emit a DeprecationWarning.
+
+    Uses asyncio.run() — see test_enable_nats_emits_deprecation_warning docstring.
+    """
+
+    async def _run():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            runtime, loop = create_runtime(
+                discovery_backend=discovery_backend,
+                request_plane=request_plane,
+                event_plane="nats",
+            )
+        try:
+            deprecation_warnings = [
+                w for w in caught if issubclass(w.category, DeprecationWarning)
+            ]
+            assert len(deprecation_warnings) == 0
+        finally:
+            runtime.shutdown()
+
+    asyncio.run(_run())
