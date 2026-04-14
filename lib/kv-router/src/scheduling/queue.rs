@@ -192,9 +192,24 @@ impl<
 
         loop {
             let decay_now = Instant::now();
-            let Some(entry) = self.pop_schedulable_entry(threshold, decay_now).await else {
+            let mut heap = self.pending.lock().await;
+            let Some(front) = heap.peek() else {
                 break;
             };
+            // TODO: This preserves head-of-line blocking for now to keep queue
+            // drain overhead bounded to the heap front. A blocked pinned or
+            // otherwise constrained request can temporarily stall later
+            // schedulable entries until we adopt a cheaper non-HOL strategy.
+            if self.all_workers_busy(
+                threshold,
+                front.request.allowed_worker_ids.as_ref(),
+                front.request.pinned_worker,
+                decay_now,
+            ) {
+                break;
+            }
+            let entry = heap.pop().expect("heap front vanished before pop");
+            drop(heap);
             self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
             self.schedule(entry.request, decay_now).await;
@@ -313,36 +328,6 @@ impl<
     /// Number of requests currently parked in the pending queue (lock-free).
     pub fn pending_count(&self) -> usize {
         self.pending_count.load(AtomicOrdering::Relaxed)
-    }
-
-    async fn pop_schedulable_entry(
-        &self,
-        threshold: f64,
-        decay_now: Instant,
-    ) -> Option<QueueEntry<S::Key>> {
-        let mut heap = self.pending.lock().await;
-        let mut blocked = Vec::new();
-        let mut schedulable = None;
-
-        while let Some(entry) = heap.pop() {
-            if self.all_workers_busy(
-                threshold,
-                entry.request.allowed_worker_ids.as_ref(),
-                entry.request.pinned_worker,
-                decay_now,
-            ) {
-                blocked.push(entry);
-                continue;
-            }
-            schedulable = Some(entry);
-            break;
-        }
-
-        for entry in blocked {
-            heap.push(entry);
-        }
-
-        schedulable
     }
 
     /// Check if all eligible workers are busy based on threshold.
@@ -909,7 +894,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_pinned_request_queues_on_busy_target_even_when_other_worker_is_idle() {
+    async fn test_pinned_request_head_of_line_blocks_other_worker_capacity() {
         let (queue, slots) = make_queue(2, 16, 256, Some(0.0));
 
         let (mut first, first_rx) = make_request("pinned-1", 256);
@@ -942,12 +927,11 @@ mod tests {
         slots.free(&"worker-0".to_string(), decay_now()).unwrap();
         queue.update().await;
 
-        let unpinned_resp = unpinned_rx
-            .try_recv()
-            .expect("unpinned request should have been scheduled");
-        let unpinned_resp = unpinned_resp.expect("scheduling returned error");
-        assert_eq!(unpinned_resp.best_worker, WorkerWithDpRank::new(0, 0));
-        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_count(), 2);
+        assert!(
+            unpinned_rx.try_recv().is_err(),
+            "unpinned request should remain queued behind the pinned head"
+        );
         assert!(
             second_rx.try_recv().is_err(),
             "pinned request should still be queued"
@@ -964,6 +948,12 @@ mod tests {
             .expect("pinned request should have been scheduled");
         let second_resp = second_resp.expect("scheduling returned error");
         assert_eq!(second_resp.best_worker, WorkerWithDpRank::new(1, 0));
+
+        let unpinned_resp = unpinned_rx
+            .try_recv()
+            .expect("unpinned request should have been scheduled");
+        let unpinned_resp = unpinned_resp.expect("scheduling returned error");
+        assert_eq!(unpinned_resp.best_worker, WorkerWithDpRank::new(0, 0));
         assert_eq!(queue.pending_count(), 0);
     }
 
