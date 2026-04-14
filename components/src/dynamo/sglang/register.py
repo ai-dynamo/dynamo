@@ -108,7 +108,6 @@ def _get_bootstrap_info_for_config(
                 f"Using auto-detected local IP: {local_ip} "
                 f"({'IPv6' if local_addr.is_ipv6 else 'IPv4'})"
             )
-
         return bootstrap_host, bootstrap_port
     except Exception as e:
         logging.warning(f"Failed to get bootstrap info: {e}")

@@ -11,7 +11,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{DirectRequest, FpmPublisher, MockEngineArgs, OutputSignal};
 use crate::loadgen::WorkloadDriver;
 use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport};
 use crate::scheduler::{AdmissionEvent, EngineScheduler, SchedulerHandle};
@@ -68,6 +68,7 @@ impl LiveRuntime {
                 router.sink(worker_idx as _),
                 Some(cancel_token.clone()),
                 Some(admission_tx.clone()),
+                FpmPublisher::default(),
             );
             senders.push(scheduler.request_sender());
             schedulers.push(scheduler);

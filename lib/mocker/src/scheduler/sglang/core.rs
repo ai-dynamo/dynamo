@@ -17,7 +17,8 @@ use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
 use super::request::{SglangRequest, direct_to_sglang};
 use crate::scheduler::{
-    CapturedRouterEventBuffer, EnginePassResult, RouterEventVisibility, capture_router_event_sink,
+    CapturedRouterEventBuffer, EnginePassResult, RouterEventVisibility, build_fpm_snapshot,
+    capture_router_event_sink,
 };
 
 pub(crate) struct SglangCore {
@@ -130,6 +131,9 @@ impl SglangCore {
             }
         }
 
+        // Capture per-request prefill FPM data before dispersing can_run.
+        let prefill_fpm = admit.prefill_fpm;
+
         let batch_size = admit.can_run.len();
         let mean_isl = if batch_size > 0 {
             admit.total_isl / batch_size
@@ -152,6 +156,13 @@ impl SglangCore {
                 self.running.push(req);
             }
         }
+
+        // Capture scheduled decode data before the decode step modifies running.
+        let scheduled_decode_lens: Vec<u64> = self
+            .running
+            .iter()
+            .map(|req| req.current_sequence_len() as u64)
+            .collect();
 
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
         let mut decode = simulate_decode_step(
@@ -178,6 +189,27 @@ impl SglangCore {
         self.new_token_ratio = (self.new_token_ratio - self.config.new_token_ratio_decay_step)
             .max(self.config.min_new_token_ratio);
 
+        // Build FPM snapshot now that all state has settled.
+        let fpm = build_fpm_snapshot(
+            prefill_fpm.iter().map(|p| {
+                (
+                    p.prompt_len as u64,
+                    p.prefix_tokens as u64,
+                    p.tokens_computed as u64,
+                )
+            }),
+            scheduled_decode_lens.into_iter(),
+            self.waiting
+                .iter()
+                .filter(|req| req.output_len() == 0)
+                .map(|req| req.prompt_len() as u64),
+            self.waiting
+                .iter()
+                .filter(|req| req.output_len() > 0)
+                .map(|req| req.current_sequence_len() as u64),
+            (decode.end_ms - now_ms) / 1000.0,
+        );
+
         debug_assert_sglang_scheduler_state(&self.waiting, &self.running, self.config.block_size);
         EnginePassResult {
             end_ms: decode.end_ms,
@@ -195,6 +227,7 @@ impl SglangCore {
                 .as_ref()
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
+            fpm: Some(fpm),
         }
     }
 
