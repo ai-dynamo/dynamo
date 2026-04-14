@@ -478,7 +478,7 @@ jobs:
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
     name: copy-to-acr ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) || inputs.device }}
-    runs-on: prod-default-small-v2
+    runs-on:  prod-skopeo-v1
     outputs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
     steps:
