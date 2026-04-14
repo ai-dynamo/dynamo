@@ -174,6 +174,11 @@ def cuda_synchronize() -> None:
 def cuda_set_current_device(device: int) -> None:
     global _primary_context_release_registered
 
+    # Fresh helper processes (for example gms-storage-client save/load) may be
+    # the first CUDA users in the container. cuDevicePrimaryCtxRetain requires
+    # the driver to be initialized first.
+    cuda_ensure_initialized()
+
     ctx = _primary_contexts.get(device)
     if ctx is None:
         result, ctx = cuda.cuDevicePrimaryCtxRetain(device)
