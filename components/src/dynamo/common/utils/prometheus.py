@@ -11,8 +11,10 @@ Note: Engine metrics take time to appear after engine initialization,
 while Dynamo runtime metrics are available immediately after component creation.
 """
 
+import enum
 import logging
 import re
+import threading
 from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
@@ -25,11 +27,25 @@ from dynamo.prometheus_names import kvstats, labels, model_info, name_prefix
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
 
+    from dynamo.common.memory import MultimodalEmbeddingCacheManager
+
 # Auto-label injection: always injects dynamo_namespace, dynamo_component, dynamo_endpoint labels
 # into engine metrics based on the endpoint hierarchy.
 #
 # Rust counterpart: lib/runtime/src/metrics.rs create_metric() function
 # Label constants defined in: lib/runtime/src/metrics/prometheus_names.rs labels module
+
+
+# Single source of truth for embedding cache metric names.
+class EmbeddingCacheMetrics(str, enum.Enum):
+    """Prometheus metric names for the multimodal embedding cache."""
+
+    HITS_TOTAL = f"{name_prefix.COMPONENT}_embedding_cache_hits_total"
+    MISSES_TOTAL = f"{name_prefix.COMPONENT}_embedding_cache_misses_total"
+    EVICTIONS_TOTAL = f"{name_prefix.COMPONENT}_embedding_cache_evictions_total"
+    UTILIZATION = f"{name_prefix.COMPONENT}_embedding_cache_utilization"
+    CURRENT_BYTES = f"{name_prefix.COMPONENT}_embedding_cache_current_bytes"
+    ENTRIES = f"{name_prefix.COMPONENT}_embedding_cache_entries"
 
 
 def register_engine_metrics_callback(
@@ -365,3 +381,130 @@ class LLMBackendMetrics:
         self.model_load_time.labels(
             **{labels.MODEL: self.model_name, labels.COMPONENT: self.component_name}
         ).set(value)
+
+
+def register_embedding_cache_metrics(
+    endpoint: "Endpoint",
+    cache: "MultimodalEmbeddingCacheManager",
+    model_name: str = "",
+    component_name: str = "",
+) -> None:
+    """Register Prometheus metrics for a MultimodalEmbeddingCacheManager instance.
+
+    Creates a dedicated CollectorRegistry to avoid prometheus_client import-ordering
+    issues with SGLang's multiprocess mode. Counters use delta-based increments
+    derived from the cache's monotonic stats. A threading.Lock protects against
+    concurrent scrape races (axum may serve /metrics from multiple threads).
+
+    Must be called AFTER engine initialization to ensure prometheus_client is safe
+    to import.
+
+    Thread safety note:
+        The callback reads cache.stats from the axum HTTP thread while the asyncio
+        event loop thread mutates the cache. Under CPython, individual attribute reads
+        (ints, len()) are GIL-protected, so the worst case is a slightly inconsistent
+        snapshot within a single scrape (e.g., hits incremented but misses not yet).
+        This is acceptable for monitoring metrics — values are eventually consistent.
+        The threading.Lock only serializes concurrent scrapes against each other.
+
+    Args:
+        endpoint: Dynamo Endpoint with metrics.register_prometheus_expfmt_callback().
+        cache: The MultimodalEmbeddingCacheManager instance to observe.
+        model_name: Model name for the 'model' label.
+        component_name: Component name for the 'dynamo_component' label.
+    """
+    # Lazy import: prometheus_client must be imported AFTER set_prometheus_multiproc_dir()
+    # in SGLang's multiprocess mode. This matches the existing pattern used by
+    # get_prometheus_expfmt() and LLMBackendMetrics.__init__() in this file.
+    from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
+
+    registry = CollectorRegistry()
+    label_names = [labels.MODEL, labels.COMPONENT]
+    label_values = {labels.MODEL: model_name, labels.COMPONENT: component_name}
+
+    ECM = EmbeddingCacheMetrics
+
+    # Counters (delta-incremented from cache's monotonic stats on each scrape)
+    hits_counter = Counter(
+        ECM.HITS_TOTAL,
+        "Total embedding cache hits.",
+        labelnames=label_names,
+        registry=registry,
+    )
+    misses_counter = Counter(
+        ECM.MISSES_TOTAL,
+        "Total embedding cache misses.",
+        labelnames=label_names,
+        registry=registry,
+    )
+    evictions_counter = Counter(
+        ECM.EVICTIONS_TOTAL,
+        "Total embedding cache evictions.",
+        labelnames=label_names,
+        registry=registry,
+    )
+
+    # Gauges (snapshot values set on each scrape)
+    utilization_gauge = Gauge(
+        ECM.UTILIZATION,
+        "Cache memory utilization ratio (0.0-1.0).",
+        labelnames=label_names,
+        registry=registry,
+    )
+    current_bytes_gauge = Gauge(
+        ECM.CURRENT_BYTES,
+        "Current cache memory usage in bytes.",
+        labelnames=label_names,
+        registry=registry,
+    )
+    entries_gauge = Gauge(
+        ECM.ENTRIES,
+        "Number of entries in the cache.",
+        labelnames=label_names,
+        registry=registry,
+    )
+    # Initialize all labeled metrics so they appear in output from the first scrape,
+    # even before any cache activity (Prometheus best practice: export zeros, not absent).
+    hits_counter.labels(**label_values)
+    misses_counter.labels(**label_values)
+    evictions_counter.labels(**label_values)
+
+    lock = threading.Lock()
+    prev_state = {"hits": 0, "misses": 0, "evictions": 0}
+
+    def _collect_embedding_cache_metrics() -> str:
+        """Callback invoked on each /metrics scrape."""
+        with lock:
+            stats = cache.stats
+
+            # Delta-based counter increments from monotonic source values
+            delta_hits = stats["hits"] - prev_state["hits"]
+            delta_misses = stats["misses"] - prev_state["misses"]
+            delta_evictions = stats["evictions"] - prev_state["evictions"]
+
+            if delta_hits > 0:
+                hits_counter.labels(**label_values).inc(delta_hits)
+            if delta_misses > 0:
+                misses_counter.labels(**label_values).inc(delta_misses)
+            if delta_evictions > 0:
+                evictions_counter.labels(**label_values).inc(delta_evictions)
+
+            prev_state["hits"] = stats["hits"]
+            prev_state["misses"] = stats["misses"]
+            prev_state["evictions"] = stats["evictions"]
+
+            # Set gauge snapshots
+            utilization_gauge.labels(**label_values).set(stats["utilization"])
+            current_bytes_gauge.labels(**label_values).set(stats["current_bytes"])
+            entries_gauge.labels(**label_values).set(stats["entries"])
+
+            return generate_latest(registry).decode("utf-8")
+
+    endpoint.metrics.register_prometheus_expfmt_callback(
+        _collect_embedding_cache_metrics
+    )
+    logging.info(
+        "Registered embedding cache metrics (model=%s, component=%s)",
+        model_name,
+        component_name,
+    )
