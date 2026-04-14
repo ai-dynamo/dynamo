@@ -218,6 +218,50 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	})
 
+	t.Run("ready checkpoint augments existing podinfo volume", func(t *testing.T) {
+		podSpec := testPodSpec()
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: consts.PodInfoVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
+					Items: []corev1.DownwardAPIVolumeFile{
+						{Path: "pod_name", FieldRef: &corev1.ObjectFieldSelector{FieldPath: consts.PodInfoFieldPodName}},
+						{Path: "pod_uid", FieldRef: &corev1.ObjectFieldSelector{FieldPath: consts.PodInfoFieldPodUID}},
+						{Path: "pod_namespace", FieldRef: &corev1.ObjectFieldSelector{FieldPath: consts.PodInfoFieldPodNamespace}},
+					},
+				},
+			},
+		})
+		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+
+		var podInfoVolume *corev1.Volume
+		for i := range podSpec.Volumes {
+			if podSpec.Volumes[i].Name == consts.PodInfoVolumeName {
+				podInfoVolume = &podSpec.Volumes[i]
+				break
+			}
+		}
+		require.NotNil(t, podInfoVolume)
+		require.NotNil(t, podInfoVolume.DownwardAPI)
+
+		fields := map[string]string{}
+		for _, item := range podInfoVolume.DownwardAPI.Items {
+			if item.FieldRef != nil {
+				fields[item.Path] = item.FieldRef.FieldPath
+			}
+		}
+		assert.Equal(t, consts.PodInfoFieldPodName, fields["pod_name"])
+		assert.Equal(t, consts.PodInfoFieldPodUID, fields["pod_uid"])
+		assert.Equal(t, consts.PodInfoFieldPodNamespace, fields["pod_namespace"])
+		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fields[consts.PodInfoFileDynNamespace])
+		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fields[consts.PodInfoFileDynNamespaceWorkerSuffix])
+		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fields[consts.PodInfoFileDynComponent])
+		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fields[consts.PodInfoFileDynParentDGDName])
+		assert.Equal(t, consts.PodInfoFieldPodNamespace, fields[consts.PodInfoFileDynParentDGDNamespace])
+	})
+
 	t.Run("ready checkpoint targets the container named main", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{
 			Containers: []corev1.Container{
