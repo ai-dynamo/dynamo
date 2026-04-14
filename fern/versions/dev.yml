@@ -215,6 +215,8 @@ navigation:
         contents:
           - page: Frontend Guide
             path: ../pages-dev/components/frontend/frontend-guide.md
+          - page: Tokenizer
+            path: ../pages-dev/components/frontend/Tokenizer.md
       - section: Router
         path: ../pages-dev/components/router/README.md
         contents:
