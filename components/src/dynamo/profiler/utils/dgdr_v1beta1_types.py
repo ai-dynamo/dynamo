@@ -52,6 +52,11 @@ class ProfilingPhase(str, Enum):
     Done = "Done"
 
 
+class OptimizationType(str, Enum):
+    Latency = "latency"
+    Throughput = "throughput"
+
+
 class SearchStrategy(str, Enum):
     Rapid = "rapid"
     Thorough = "thorough"

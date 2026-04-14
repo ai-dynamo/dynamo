@@ -1176,9 +1176,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	// so users still see their original (possibly empty) SLA in the API.
 	applySLADefaults(&dgdr.Spec)
 	logger.Info("SLA targets for profiling",
-		"ttft", *dgdr.Spec.SLA.TTFT,
-		"itl", *dgdr.Spec.SLA.ITL,
-		"defaultsApplied", dgdr.Spec.SLA != nil)
+		"optimizationType", dgdr.Spec.SLA.OptimizationType,
+		"ttft", dgdr.Spec.SLA.TTFT,
+		"itl", dgdr.Spec.SLA.ITL,
+		"e2eLatency", dgdr.Spec.SLA.E2ELatency)
 
 	// Use SyncResource to create/update the job
 	modified, job, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*batchv1.Job, bool, error) {

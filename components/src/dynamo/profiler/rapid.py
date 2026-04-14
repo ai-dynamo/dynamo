@@ -414,7 +414,20 @@ def _run_optimization_type_sim(
     )
 
     # Restrict parallelization to the resolved mapping
+    # Convert from ParallelizationMapping (tp/tep/dep) to AIC worker config lists
     mapping = opt_config.prefill_mapping
+    if mapping.tp is not None:
+        aic_tp = mapping.tp
+        aic_dp, aic_moe_tp, aic_moe_ep = 1, 1, 1
+    elif mapping.tep is not None:
+        aic_tp, aic_dp = 1, 1
+        aic_moe_tp, aic_moe_ep = mapping.tep, 1
+    elif mapping.dep is not None:
+        aic_tp, aic_moe_tp = 1, 1
+        aic_dp, aic_moe_ep = mapping.dep, mapping.dep
+    else:
+        aic_tp, aic_dp, aic_moe_tp, aic_moe_ep = 1, 1, 1, 1
+
     for _key, tc in task_configs.items():
         if not hasattr(tc, "config") or tc.config is None:
             continue
@@ -427,14 +440,14 @@ def _run_optimization_type_sim(
             if worker_cfg is None:
                 continue
             worker_cfg.num_gpu_per_worker = [opt_config.num_gpus]
-            worker_cfg.tp_list = [mapping.tp]
-            worker_cfg.dp_list = [mapping.dp]
+            worker_cfg.tp_list = [aic_tp]
+            worker_cfg.dp_list = [aic_dp]
             if hasattr(worker_cfg, "moe_tp_list"):
-                worker_cfg.moe_tp_list = [mapping.moe_tp]
+                worker_cfg.moe_tp_list = [aic_moe_tp]
             if hasattr(worker_cfg, "moe_ep_list"):
-                worker_cfg.moe_ep_list = [mapping.moe_ep]
+                worker_cfg.moe_ep_list = [aic_moe_ep]
             if hasattr(worker_cfg, "pp_list"):
-                worker_cfg.pp_list = [mapping.pp]
+                worker_cfg.pp_list = [1]
 
     logger.info(
         "Running optimization-type simulation: type=%s, parallelization=%s, "
