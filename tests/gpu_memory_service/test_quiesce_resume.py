@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import pytest
+from gpu_memory_service.server.fsm import ServerState
 
 from tests.gpu_memory_service.common.runtime import (
     GMSProcessManager,
     SGLangWithGMSProcess,
+    TRTLLMWithGMSProcess,
     VLLMWithGMSProcess,
     get_gpu_memory_used,
 )
@@ -137,3 +140,144 @@ def test_gms_basic_quiesce_resume_sglang(
     predownload_models,
 ):
     _run_quiesce_resume_test(request, SGLangWithGMSProcess)
+
+
+# ---------------------------------------------------------------------------
+# TRT-LLM standalone tests (weights-only GMS topology, no KV cache GMS)
+# ---------------------------------------------------------------------------
+
+
+def _wait_for_weights_state(
+    weights_gms,
+    expected_state,
+    *,
+    min_ro_sessions: int = 0,
+    expected_hash: str | None = None,
+    timeout: float = 30.0,
+):
+    """Poll until the weights GMS daemon reaches *expected_state*."""
+    deadline = time.monotonic() + timeout
+    while True:
+        ws = weights_gms.get_runtime_state()
+        if (
+            ws.state == expected_state
+            and ws.allocation_count > 0
+            and ws.memory_layout_hash
+            and ws.ro_session_count >= min_ro_sessions
+            and (expected_hash is None or ws.memory_layout_hash == expected_hash)
+        ):
+            return ws
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"Weights: state={ws.state} (want {expected_state}), "
+                f"allocs={ws.allocation_count}, hash={ws.memory_layout_hash}"
+            )
+        time.sleep(0.1)
+
+
+@pytest.mark.trtllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
+def test_gms_basic_quiesce_resume_trtllm(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+):
+    """Weights-only quiesce/resume for TRT-LLM (no KV cache GMS)."""
+    with GMSProcessManager(
+        request, TRTLLMWithGMSProcess, tags=("weights",)
+    ) as manager:
+        frontend_port = manager.frontend_port
+        weights_gms = manager.weights_gms
+        engine = manager.start_engine("engine")
+
+        assert_completion_ok(
+            frontend_port,
+            "Hello",
+            failure_message="Initial inference failed",
+            success_message="Initial inference OK",
+        )
+
+        ws = _wait_for_weights_state(weights_gms, ServerState.RO, timeout=60.0)
+        weights_hash = ws.memory_layout_hash
+
+        mem_before = get_gpu_memory_used()
+        assert engine.quiesce()["status"] == "ok"
+        mem_after = get_gpu_memory_used()
+        released = mem_before - mem_after
+        logger.info(
+            "TRT-LLM quiesce: %.2f -> %.2f GiB (freed %.0f MB)",
+            mem_before / (1 << 30),
+            mem_after / (1 << 30),
+            released / (1 << 20),
+        )
+        assert released > 0
+
+        _wait_for_weights_state(
+            weights_gms, ServerState.COMMITTED, expected_hash=weights_hash
+        )
+        assert_weights_published_once(weights_gms.get_event_history().events)
+
+        assert engine.resume()["status"] == "ok"
+        mem_resumed = get_gpu_memory_used()
+        assert_memory_restored_after_quiesce(
+            "TRT-LLM resume",
+            mem_after,
+            mem_resumed,
+            released,
+            min_fraction=0.6,
+        )
+
+        _wait_for_weights_state(
+            weights_gms, ServerState.RO, expected_hash=weights_hash
+        )
+        assert_weights_published_once(weights_gms.get_event_history().events)
+
+        assert_completion_ok(
+            frontend_port,
+            "Goodbye",
+            failure_message="Post-resume inference failed",
+            success_message="Post-resume inference OK",
+        )
+        logger.info("Memory freed: %.0f MB", released / (1 << 20))
+
+
+@pytest.mark.trtllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
+def test_gms_read_only_import_trtllm(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+):
+    """A second TRT-LLM process with read_only_weights=True imports weights
+    from the committed layout published by the first, sharing GPU memory."""
+    with GMSProcessManager(
+        request, TRTLLMWithGMSProcess, tags=("weights",)
+    ) as manager:
+        frontend_port = manager.frontend_port
+        weights_gms = manager.weights_gms
+
+        manager.start_engine("rw-engine")
+        ws = _wait_for_weights_state(weights_gms, ServerState.RO, timeout=60.0)
+        weights_hash = ws.memory_layout_hash
+
+        manager.start_engine("ro-engine", read_only_weights=True)
+        _wait_for_weights_state(
+            weights_gms,
+            ServerState.RO,
+            min_ro_sessions=1,
+            expected_hash=weights_hash,
+            timeout=60.0,
+        )
+
+        assert_completion_ok(
+            frontend_port,
+            "Hello",
+            failure_message="RW+RO inference failed",
+            success_message="RW+RO inference OK",
+        )

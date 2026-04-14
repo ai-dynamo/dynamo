@@ -58,6 +58,90 @@ if TYPE_CHECKING:
 
 configure_dynamo_logging()
 
+logger = logging.getLogger(__name__)
+
+
+class TRTLLMEngineQuiesceController:
+    """Adapts TRT-LLM sleep/wake to the standard quiesce controller interface.
+
+    Two memory domains: KV cache via TRT-LLM collective_rpc, weights via GMS.
+    """
+
+    def __init__(self, engine: TensorRTLLMEngine):
+        self._engine = engine
+        self._is_quiesced = False
+
+    @property
+    def is_quiesced(self) -> bool:
+        return self._is_quiesced
+
+    async def quiesce(self, tags: list[str] | None = None) -> bool:
+        if self._is_quiesced:
+            return False
+        tags = tags or ["kv_cache", "weights"]
+        if "kv_cache" in tags:
+            self._collective_rpc("sleep", ["kv_cache"])
+        if "weights" in tags:
+            self._release_gms_weights()
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: list[str] | None = None) -> bool:
+        if not self._is_quiesced:
+            return False
+        tags = tags or ["kv_cache", "weights"]
+        if "weights" in tags:
+            self._restore_gms_weights()
+        if "kv_cache" in tags:
+            self._collective_rpc("wakeup", ["kv_cache"])
+        return True
+
+    def mark_resumed(self) -> None:
+        self._is_quiesced = False
+
+    def _collective_rpc(self, method: str, rpc_tags: list[str]) -> None:
+        """Call TRT-LLM collective_rpc for KV cache sleep/wake."""
+        rpc = getattr(self._engine.llm, "_collective_rpc", None)
+        if rpc is None:
+            logger.warning("TRT-LLM does not expose _collective_rpc; skipping %s", method)
+            return
+        try:
+            rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
+        except Exception:
+            if method != "wakeup":
+                raise
+            # Some TRT-LLM versions use "wake_up" instead of "wakeup"
+            rpc("wake_up", args=(rpc_tags,), kwargs={}, non_block=False)
+
+    @staticmethod
+    def _release_gms_weights() -> None:
+        """Release GMS-managed weight memory."""
+        try:
+            from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
+        except ImportError:
+            return
+        manager = get_gms_client_memory_manager("weights")
+        if manager is None:
+            return
+        manager.unmap_all_vas()
+        manager.abort()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    @staticmethod
+    def _restore_gms_weights() -> None:
+        """Restore GMS-managed weight memory."""
+        try:
+            from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
+            from gpu_memory_service.integrations.trtllm.model_loader import get_gms_lock_mode
+        except ImportError:
+            return
+        manager = get_gms_client_memory_manager("weights")
+        if manager is None or not manager.is_unmapped:
+            return
+        manager.connect(get_gms_lock_mode())
+        manager.remap_all_vas()
+
 
 class _Abortable(Protocol):
     """Structural type for objects that support abort(). Satisfied by both
@@ -127,6 +211,7 @@ class RequestHandlerConfig:
     metrics_collector: Optional["MetricsCollector"] = None
     kv_block_size: int = 32
     shutdown_event: Optional[asyncio.Event] = None
+    generate_endpoint: Optional[Any] = None
     encoder_cache_capacity_gb: float = 0  # Encoder cache capacity in GB
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
@@ -160,10 +245,19 @@ class HandlerBase(BaseGenerativeHandler):
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
         self.shutdown_event = config.shutdown_event
+        self.generate_endpoint = config.generate_endpoint
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
+        # Sleep/wake state
+        self._sleep_wake_lock = asyncio.Lock()
+        self._inflight_lock = asyncio.Lock()
+        self._inflight_requests = 0
+        self._no_inflight_requests = asyncio.Event()
+        self._no_inflight_requests.set()
+        self._quiesce_controller = TRTLLMEngineQuiesceController(config.engine)
+        self._reject_new_requests = False
 
     def check_error(self, result: dict) -> bool:
         """
@@ -175,6 +269,99 @@ class HandlerBase(BaseGenerativeHandler):
             return (
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
+
+    # ------------------------------------------------------------------
+    # In-flight request tracking (used by sleep/wake)
+    # ------------------------------------------------------------------
+
+    async def _set_reject_new_requests(self, reject: bool) -> None:
+        async with self._inflight_lock:
+            self._reject_new_requests = reject
+
+    async def _mark_request_started(self) -> bool:
+        async with self._inflight_lock:
+            if self._reject_new_requests:
+                return False
+            self._inflight_requests += 1
+            self._no_inflight_requests.clear()
+            return True
+
+    async def _mark_request_finished(self) -> None:
+        async with self._inflight_lock:
+            if self._inflight_requests == 0:
+                return
+            self._inflight_requests -= 1
+            if self._inflight_requests == 0:
+                self._no_inflight_requests.set()
+
+    async def _wait_for_inflight_requests(self, timeout_s: float) -> None:
+        try:
+            await asyncio.wait_for(self._no_inflight_requests.wait(), timeout_s)
+        except asyncio.TimeoutError as exc:
+            async with self._inflight_lock:
+                inflight = self._inflight_requests
+            raise RuntimeError(
+                f"Timed out waiting for {inflight} in-flight request(s) to finish"
+            ) from exc
+
+    # ------------------------------------------------------------------
+    # Sleep / wake public API (delegates to TRTLLMEngineQuiesceController)
+    # ------------------------------------------------------------------
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        """Release GPU memory: unregister endpoint, drain requests, quiesce engine."""
+        body = body or {}
+        tags = body.get("tags")
+
+        async with self._sleep_wake_lock:
+            if self._quiesce_controller.is_quiesced:
+                return {"status": "ok", "message": "Memory already released"}
+
+            await self._set_reject_new_requests(True)
+            endpoint_unregistered = False
+            try:
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.unregister_endpoint_instance()
+                    endpoint_unregistered = True
+
+                timeout_s = float(body.get("timeout_s", 30.0))
+                await self._wait_for_inflight_requests(timeout_s)
+                await self._quiesce_controller.quiesce(tags)
+
+                return {"status": "ok", "message": "Memory released"}
+            except Exception as exc:
+                logger.error("release_memory_occupation failed: %s", exc)
+                if endpoint_unregistered and self.generate_endpoint is not None:
+                    try:
+                        await self.generate_endpoint.register_endpoint_instance()
+                    except Exception:
+                        logger.exception(
+                            "Failed to restore endpoint after release failure"
+                        )
+                await self._set_reject_new_requests(False)
+                return {"status": "error", "message": str(exc)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        """Restore GPU memory: resume engine, re-register endpoint."""
+        body = body or {}
+        tags = body.get("tags")
+
+        async with self._sleep_wake_lock:
+            if not self._quiesce_controller.is_quiesced:
+                return {"status": "ok", "message": "Memory already resumed"}
+
+            try:
+                await self._quiesce_controller.resume(tags)
+
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+
+                await self._set_reject_new_requests(False)
+                self._quiesce_controller.mark_resumed()
+                return {"status": "ok", "message": "Memory resumed"}
+            except Exception as exc:
+                logger.error("resume_memory_occupation failed: %s", exc)
+                return {"status": "error", "message": str(exc)}
 
     @staticmethod
     def _extract_logprobs(
@@ -714,6 +901,31 @@ class HandlerBase(BaseGenerativeHandler):
             os._exit(1)
 
     async def generate_locally(
+        self,
+        request: dict,
+        context: Context,
+        embeddings: Optional[Union[torch.Tensor, dict]] = None,
+        ep_disaggregated_params: Optional[DisaggregatedParams] = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Track in-flight count, reject during sleep, then delegate to implementation."""
+        started = await self._mark_request_started()
+        if not started:
+            yield {
+                "finish_reason": {
+                    "error": "Worker is temporarily rejecting new requests"
+                },
+                "token_ids": [],
+            }
+            return
+        try:
+            async for chunk in self._generate_locally_impl(
+                request, context, embeddings, ep_disaggregated_params
+            ):
+                yield chunk
+        finally:
+            await self._mark_request_finished()
+
+    async def _generate_locally_impl(
         self,
         request: dict,
         context: Context,
