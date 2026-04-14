@@ -33,13 +33,14 @@ from typing import Any
 
 import numpy as np
 
-from dynamo.thompson_router.learners import BetaLearner, LatencyTracker
+from dynamo.thompson_router.learners import BetaLearner, LatencyTracker, LinTSLearner
 
 logger = logging.getLogger(__name__)
 
 TUNABLE_ROUTER_PARAMS = [
     "lambda_ranking",
     "lambda_stickiness",
+    "lambda_lints",
     "w_prefill",
     "w_decode",
     "w_mem",
@@ -48,6 +49,7 @@ TUNABLE_ROUTER_PARAMS = [
     "stickiness_overlap_cap",
     "epsilon",
     "temperature",
+    "reward_ttft_weight",
 ]
 
 
@@ -168,6 +170,7 @@ class RoutingDecision:
     last_worker: int | None = None
     ranking_score: float = 0.0
     stickiness_score: float = 0.0
+    lints_features: Any = None  # np.ndarray stored at decision time for residual update
 
 
 class KvThompsonRouter:
@@ -214,10 +217,21 @@ class KvThompsonRouter:
         # --- Bandit residual (disabled by default) ---
         self.epsilon = float(kt.get("epsilon", 0.05))
         self.temperature = float(kt.get("temperature", 0.0))
+        # Reward blend: 0.0 = pure per-token (optimize TPS),
+        # 1.0 = pure total latency (optimize TTFT)
+        self.reward_ttft_weight = float(kt.get("reward_ttft_weight", 0.0))
         beta_decay = float(kt.get("beta_decay", 0.995))
         latency_ema_alpha = float(kt.get("latency_ema_alpha", 0.2))
 
+        # --- LinTS contextual bandit (disabled when lambda_lints=0) ---
+        self.lambda_lints = float(kt.get("lambda_lints", 0.0))
+        lints_v = float(kt.get("lints_v", 0.25))
+        lints_forget_rate = float(kt.get("lints_forget_rate", 0.995))
+
         self.beta_learner = BetaLearner(decay=beta_decay)
+        self.lints_learner = LinTSLearner(
+            feature_dim=7, v=lints_v, forget_rate=lints_forget_rate,
+        )
         self.latency_tracker = LatencyTracker(ema_alpha=latency_ema_alpha)
 
         self._prefix_workers: dict[str, int] = {}
@@ -257,7 +271,12 @@ class KvThompsonRouter:
         tokens_in: int,
         latency_sensitivity: float = 2.0,
     ) -> RoutingDecision:
-        """Score workers and pick the best one."""
+        """Score workers and pick the best one.
+
+        Latency at concurrency 10, 8 workers:
+          get_potential_loads ~2.3ms, best_worker ~2.9ms,
+          Thompson scoring ~0.7ms, total ~5.6ms
+        """
         loads = await self.kv_router.get_potential_loads(token_ids)
         native_pick, _, _ = await self.kv_router.best_worker(token_ids)
 
@@ -344,9 +363,10 @@ class KvThompsonRouter:
                 "memory_pressure": memory_pressure,
             })
 
-        # --- Normalize kv_native_score to [0, 1] across workers ---
-        # This makes additive terms (epsilon, stickiness) meaningful:
-        # epsilon=0.1 means "explore up to 10% of best-vs-worst gap."
+        # --- Normalize scores to [0, 1] across workers ---
+        # This makes additive terms (epsilon, stickiness, lints) meaningful.
+        decode_min = 0.0
+        decode_range = 0.0
         if per_worker:
             raw_scores_list = [pw["kv_native_score"] for pw in per_worker]
             score_min = min(raw_scores_list)
@@ -358,6 +378,10 @@ class KvThompsonRouter:
                     if score_range > 0
                     else 0.0
                 )
+            # Also normalize decode_blocks for LinTS features
+            decode_list = [pw["potential_decode_blocks"] for pw in per_worker]
+            decode_min = min(decode_list)
+            decode_range = max(decode_list) - decode_min
 
         # --- Pass 2: Score workers with normalized signals ---
         for pw in per_worker:
@@ -376,6 +400,31 @@ class KvThompsonRouter:
                 reuse_total=reuse_budget,
             )
             cost = self.lambda_ranking * ranking_cost - self.lambda_stickiness * stickiness_benefit
+
+            # --- LinTS contextual bandit (when lambda_lints > 0) ---
+            if self.lambda_lints > 0:
+                # Normalize decode_blocks to [0,1] for this decision
+                decode_load_norm = (
+                    (pw["potential_decode_blocks"] - decode_min) / decode_range
+                    if decode_range > 0 else 0.0
+                )
+                features = self._build_lints_features(
+                    prefill_cost=1.0 - pw["overlap"],
+                    decode_load=decode_load_norm,
+                    is_sticky=is_sticky,
+                    osl=osl,
+                    remaining_fraction=remaining_fraction,
+                    iat=iat,
+                )
+                self.lints_learner.add_worker(wid)
+                lints_sample = self.lints_learner.sample(wid, features)
+                # Subtracted from cost: positive sample = worker is better than
+                # physics predicts = lower cost. Bounded by tanh.
+                cost -= self.lambda_lints * math.tanh(lints_sample)
+                pw["lints_features"] = features
+            else:
+                pw["lints_features"] = None
+
             raw_scores.append(cost)
 
             worker_details.append(
@@ -435,6 +484,7 @@ class KvThompsonRouter:
         )
 
         chosen_detail = next((wd for wd in worker_details if wd["id"] == chosen), {})
+        chosen_pw = next((pw for pw in per_worker if pw["wid"] == chosen), {})
 
         return RoutingDecision(
             chosen=chosen,
@@ -450,9 +500,41 @@ class KvThompsonRouter:
             last_worker=last_worker,
             ranking_score=chosen_detail.get("ranking_score", 0.0),
             stickiness_score=chosen_detail.get("stickiness_score", 0.0),
+            lints_features=chosen_pw.get("lints_features"),
         )
 
     # -------------------- Scoring -------------------- #
+
+    @staticmethod
+    def _build_lints_features(
+        prefill_cost: float,
+        decode_load: float,
+        is_sticky: bool,
+        osl: int,
+        remaining_fraction: float,
+        iat: int,
+    ) -> np.ndarray:
+        """Build 7-dim feature vector for LinTS contextual bandit.
+
+        All features in [0, 1] for hardware-agnostic posterior learning.
+        Features:
+            [0] bias             = 1.0 (per-worker intercept)
+            [1] prefill_cost     = 1 - overlap, in [0, 1]
+            [2] decode_load      = normalized decode blocks, in [0, 1]
+            [3] affinity         = 1 if is_sticky else 0
+            [4] osl_norm         = min(osl, 1024) / 1024
+            [5] remaining_frac   = effective_reuse_budget / reuse_total, in [0, 1]
+            [6] iat_norm         = clamp((iat - 50) / 950, 0, 1)
+        """
+        return np.array([
+            1.0,
+            max(0.0, min(1.0, prefill_cost)),
+            max(0.0, min(1.0, decode_load)),
+            1.0 if is_sticky else 0.0,
+            min(osl, 1024) / 1024.0,
+            max(0.0, min(1.0, remaining_fraction)),
+            max(0.0, min(1.0, (iat - 50) / 950.0)),
+        ], dtype=np.float64)
 
     def _score_worker(
         self,
@@ -590,10 +672,32 @@ class KvThompsonRouter:
         used_bucket = (osl_bin, prefill_bin, per_tok) in self.latency_tracker._global_bucket
         self.stats.record_baseline_lookup(used_bucket)
 
-        reward = LatencyTracker.compute_reward(metric, baseline, True)
+        reward_tps = LatencyTracker.compute_reward(metric, baseline, True)
+
+        # Blend per-token reward (TPS) with total-latency reward (TTFT)
+        if self.reward_ttft_weight > 0 and tokens_out > 0:
+            raw_baseline = self.latency_tracker.get_global_bucket_baseline(
+                osl_bin, prefill_bin, False, fallback=latency_ms,
+            )
+            reward_ttft = LatencyTracker.compute_reward(latency_ms, raw_baseline, True)
+            reward = (1.0 - self.reward_ttft_weight) * reward_tps + self.reward_ttft_weight * reward_ttft
+        else:
+            reward = reward_tps
 
         # Beta learner: raw reward (used when epsilon > 0)
         self.beta_learner.update(decision.chosen, reward)
+
+        # LinTS learner: residual reward (used when lambda_lints > 0)
+        # The residual subtracts the physics tower's prediction so the learner
+        # only fits what the physics model gets wrong.
+        if self.lambda_lints > 0 and decision.lints_features is not None:
+            # ranking_score is the normalized physics cost (lower = better).
+            # Convert to [0,1] "physics predicted quality": 1 - ranking_score.
+            physics_pred = max(0.0, min(1.0, 1.0 - decision.ranking_score))
+            residual_reward = max(0.0, min(1.0, reward - physics_pred + 0.5))
+            self.lints_learner.update(
+                decision.chosen, decision.lints_features, residual_reward,
+            )
 
         # Record stats
         self.stats.record_feedback(reward)

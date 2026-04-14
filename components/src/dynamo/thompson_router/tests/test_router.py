@@ -122,13 +122,13 @@ class TestInit:
     def test_tunable_params_list_matches_new_design(self):
         """TUNABLE_ROUTER_PARAMS contains exactly the expected cost-based config keys."""
         expected = {
-            "lambda_ranking", "lambda_stickiness",
+            "lambda_ranking", "lambda_stickiness", "lambda_lints",
             "w_prefill", "w_decode", "w_mem",
             "alpha_reuse", "sticky_bonus", "stickiness_overlap_cap", "epsilon",
-            "temperature",
+            "temperature", "reward_ttft_weight",
         }
         assert set(TUNABLE_ROUTER_PARAMS) == expected
-        assert len(TUNABLE_ROUTER_PARAMS) == 10
+        assert len(TUNABLE_ROUTER_PARAMS) == 12
 
     def test_no_removed_params_on_router(self, router):
         """Removed architecture concepts are absent from the router object."""
