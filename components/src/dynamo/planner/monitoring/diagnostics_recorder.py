@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+import plotly.graph_objects as go  # type: ignore[import-untyped]
+from plotly.subplots import make_subplots  # type: ignore[import-untyped]
+
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import PlannerEffects, TickDiagnostics, TickInput
 from dynamo.planner.monitoring.traffic_metrics import Metrics
@@ -193,22 +196,11 @@ class DiagnosticsRecorder:
             self._last_report_s = self._snapshots[0].timestamp_s
         return now_s - self._last_report_s >= self._interval_s
 
-    def _build_report_html(self, snaps: list[TickSnapshot]) -> Optional[str]:
+    def _build_report_html(self, snaps: list[TickSnapshot]) -> str:
         """Build the HTML report string from the given snapshots.
 
-        Returns the HTML string, or None if plotly is not available.
         This method has no side effects (no file I/O, no snapshot clearing).
         """
-        try:
-            import plotly.graph_objects as go  # type: ignore[import-untyped]
-            from plotly.subplots import make_subplots  # type: ignore[import-untyped]
-        except ImportError:
-            logger.warning(
-                "plotly is not installed -- cannot generate HTML report. "
-                "Install with: pip install plotly"
-            )
-            return None
-
         ts = [s.timestamp_s for s in snaps]
         labels = [
             datetime.fromtimestamp(t, tz=timezone.utc).strftime("%H:%M:%S") for t in ts
@@ -598,9 +590,6 @@ class DiagnosticsRecorder:
 
         snaps = list(self._snapshots)
         html = self._build_report_html(snaps)
-        if html is None:
-            return None
-
         ts = [s.timestamp_s for s in snaps]
 
         output_dir = self.config.report_output_dir
