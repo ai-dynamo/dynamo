@@ -18,9 +18,9 @@ use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
+use rs::error::{DynamoError, ErrorType as DynamoErrorType};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
-use rs::error::{DynamoError, ErrorType as DynamoErrorType};
 use tracing;
 
 use llm_rs::kv_router::KvPushRouter as RsKvPushRouter;
