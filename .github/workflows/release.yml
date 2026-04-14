@@ -297,6 +297,12 @@ jobs:
           SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
           copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
+          # ---- Snapshot image ----
+          echo ""
+          echo "=== Snapshot Image ==="
+          SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
+          SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
+          copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
 
           # ---- Summary ----
           echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT

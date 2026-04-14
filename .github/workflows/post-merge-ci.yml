@@ -61,8 +61,8 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
+      single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -86,8 +86,8 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
+      single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -111,8 +111,8 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
+      single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -232,100 +232,49 @@ jobs:
   operator:
     name: Operator
     runs-on: prod-default-v2
-    env:
-      IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     outputs:
-      operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
+      operator_default_tag: ${{ steps.build.outputs.image_tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
+      - name: Build and push operator
+        id: build
+        uses: ./.github/actions/build-deploy-component
         with:
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-          flavor: general
-          arch: 'linux/amd64,linux/arm64'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
+          component: operator
+          image_tag: ${{ github.sha }}-operator
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Linter
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
-      - name: Tester
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
-      - name: Set up Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
+
+# ============================================================================
+# Snapshot Agent
+# ============================================================================
+
+  snapshot-agent:
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
         with:
-          go-version: '1.25'
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install Python dependencies for operator codegen
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
-      - name: Check for uncommitted changes
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          make check
-      - name: Build and push Container
-        id: build-and-push-image
-        shell: bash
-        working-directory: ./deploy/operator
-        env:
-          NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
-        run: |
-          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          IMAGE_URIS=(
-            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-          )
-
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            IMAGE_URIS+=(
-              "${ECR_DEFAULT_IMAGE_BASE}:main-operator"
-              "${ACR_IMAGE_BASE}:main-operator"
-            )
-          fi
-
-          echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          echo "flags for docker buildx: ${TAGGING_FLAGS}"
-
-          if [[ "$NO_CACHE_FLAG" == "true" ]]; then
-            NO_CACHE_FLAG="--no-cache"
-          fi
-          docker buildx build --push ${NO_CACHE_FLAG} \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              --build-context snapshot=../snapshot \
-              ${TAGGING_FLAGS} -f Dockerfile .
-
-          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
 
   # ============================================================================
   # DEPLOYMENT JOBS
