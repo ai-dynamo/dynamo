@@ -155,6 +155,16 @@ func (e ExtraPodSpec) MarshalJSON() ([]byte, error) {
 	return json.Marshal(aux)
 }
 
+// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
+// When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
+// via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
+// (weights + kv_cache) and communicates with the main container over UDS sockets.
+type GPUMemoryServiceSpec struct {
+	// Enabled activates the GMS sidecar. GPU resources on the main container
+	// are replaced with a DRA ResourceClaim for shared GPU access.
+	Enabled bool `json:"enabled"`
+}
+
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
 // for replica management. When enabled, the DGDSA owns the replicas field and
 // external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.

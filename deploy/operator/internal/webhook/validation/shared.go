@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -125,6 +126,11 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 
 	// Validate EPP-specific constraints
 	if err := v.validateEPPConfig(ctx); err != nil {
+		return nil, err
+	}
+
+	// Validate GPU memory service configuration
+	if err := v.validateGPUMemoryService(); err != nil {
 		return nil, err
 	}
 
@@ -252,6 +258,37 @@ func (v *SharedSpecValidator) validateFrontendSidecar() error {
 				v.fieldPath, consts.FrontendSidecarContainerName)
 		}
 	}
+	return nil
+}
+
+// validateGPUMemoryService validates the GPU memory service configuration.
+func (v *SharedSpecValidator) validateGPUMemoryService() error {
+	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+		return nil
+	}
+
+	isWorker := v.spec.ComponentType == consts.ComponentTypeWorker ||
+		v.spec.ComponentType == consts.ComponentTypePrefill ||
+		v.spec.ComponentType == consts.ComponentTypeDecode
+	if !isWorker {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service is only supported for worker components (componentType must be worker, prefill, or decode)",
+			v.fieldPath)
+	}
+
+	if v.spec.Resources == nil || v.spec.Resources.Limits == nil || v.spec.Resources.Limits.GPU == "" {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
+			v.fieldPath)
+	}
+
+	gpuCount, err := strconv.Atoi(v.spec.Resources.Limits.GPU)
+	if err != nil || gpuCount < 1 {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
+			v.fieldPath)
+	}
+
 	return nil
 }
 
