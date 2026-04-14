@@ -10,13 +10,14 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 func gmsComponent(gpuCount int) *v1alpha1.DynamoComponentDeploymentSharedSpec {

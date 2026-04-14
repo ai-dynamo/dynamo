@@ -23,11 +23,12 @@ import (
 	"reflect"
 	"testing"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 func TestDynamoComponentDeployment_IsFrontendComponent(t *testing.T) {
@@ -204,8 +205,8 @@ func TestDynamoComponentDeployment_SetDynamoDeploymentConfig(t *testing.T) {
 				Status:     tt.fields.Status,
 			}
 			s.SetDynamoDeploymentConfig(tt.args.config)
-			if !reflect.DeepEqual(s.Spec.DynamoComponentDeploymentSharedSpec.Envs, tt.want) {
-				t.Errorf("DynamoComponentDeployment.SetDynamoDeploymentConfig() = %v, want %v", s.Spec.DynamoComponentDeploymentSharedSpec.Envs, tt.want)
+			if !reflect.DeepEqual(s.Spec.Envs, tt.want) {
+				t.Errorf("DynamoComponentDeployment.SetDynamoDeploymentConfig() = %v, want %v", s.Spec.Envs, tt.want)
 			}
 		})
 	}

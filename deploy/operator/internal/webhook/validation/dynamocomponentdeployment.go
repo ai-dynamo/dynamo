@@ -21,8 +21,9 @@ import (
 	"context"
 	"fmt"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 )
 
 // DynamoComponentDeploymentValidator validates DynamoComponentDeployment resources.

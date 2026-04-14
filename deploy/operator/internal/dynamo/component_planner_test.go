@@ -9,10 +9,11 @@ import (
 	"fmt"
 	"testing"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 func TestPlannerDefaults_GetBaseContainer(t *testing.T) {

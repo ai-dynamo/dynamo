@@ -23,12 +23,13 @@ import (
 	"strconv"
 	"strings"
 
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // SharedSpecValidator validates DynamoComponentDeploymentSharedSpec fields.
@@ -251,7 +252,7 @@ func (v *SharedSpecValidator) validateFrontendSidecar() error {
 	if v.spec.ExtraPodSpec == nil || v.spec.ExtraPodSpec.PodSpec == nil {
 		return nil
 	}
-	for _, c := range v.spec.ExtraPodSpec.PodSpec.Containers {
+	for _, c := range v.spec.ExtraPodSpec.Containers {
 		if c.Name == consts.FrontendSidecarContainerName {
 			return fmt.Errorf(
 				"%s: cannot inject frontend sidecar: a container named %q already exists in extraPodSpec.containers",

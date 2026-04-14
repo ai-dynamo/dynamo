@@ -18,9 +18,10 @@
 package controller
 
 import (
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 )
 
 func constructPVC(crd metav1.Object, pvcConfig v1alpha1.PVC) *corev1.PersistentVolumeClaim {

@@ -20,8 +20,9 @@ package validation
 import (
 	"net/url"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 )
 
 // ValidateOperatorConfiguration validates an OperatorConfiguration object.

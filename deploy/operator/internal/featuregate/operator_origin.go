@@ -19,8 +19,9 @@ package featuregate
 
 import (
 	semver "github.com/Masterminds/semver/v3"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // OperatorOriginFeatureGate represents a feature gated on the operator version

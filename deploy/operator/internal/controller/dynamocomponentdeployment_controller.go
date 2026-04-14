@@ -26,26 +26,17 @@ import (
 	"slices"
 	"time"
 
+	"emperror.dev/errors"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1 "k8s.io/api/resource/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"emperror.dev/errors"
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
-	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
@@ -55,9 +46,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
+
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
 const (
@@ -572,15 +571,15 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
 	}
 
-	maps.Copy(leaderPodTemplateSpec.ObjectMeta.Labels, labels)
-	leaderPodTemplateSpec.ObjectMeta.Labels["role"] = "leader"
-	leaderPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
-	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
+	maps.Copy(leaderPodTemplateSpec.Labels, labels)
+	leaderPodTemplateSpec.Labels["role"] = "leader"
+	leaderPodTemplateSpec.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+	delete(leaderPodTemplateSpec.Labels, commonconsts.KubeLabelDynamoSelector)
 
-	if leaderPodTemplateSpec.ObjectMeta.Annotations == nil {
-		leaderPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
+	if leaderPodTemplateSpec.Annotations == nil {
+		leaderPodTemplateSpec.Annotations = make(map[string]string)
 	}
-	leaderPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
+	leaderPodTemplateSpec.Annotations["scheduling.k8s.io/group-name"] = kubeName
 
 	leaderPodTemplateSpec.Spec.SchedulerName = SchedulerNameVolcano
 
@@ -630,17 +629,17 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
 	}
 
-	maps.Copy(workerPodTemplateSpec.ObjectMeta.Labels, labels)
-	workerPodTemplateSpec.ObjectMeta.Labels["role"] = "worker"
-	workerPodTemplateSpec.ObjectMeta.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
-	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
+	maps.Copy(workerPodTemplateSpec.Labels, labels)
+	workerPodTemplateSpec.Labels["role"] = "worker"
+	workerPodTemplateSpec.Labels["instance-id"] = fmt.Sprintf("%d", instanceID)
+	delete(workerPodTemplateSpec.Labels, commonconsts.KubeLabelDynamoSelector)
 
 	workerPodTemplateSpec.Spec.SchedulerName = SchedulerNameVolcano
 
-	if workerPodTemplateSpec.ObjectMeta.Annotations == nil {
-		workerPodTemplateSpec.ObjectMeta.Annotations = make(map[string]string)
+	if workerPodTemplateSpec.Annotations == nil {
+		workerPodTemplateSpec.Annotations = make(map[string]string)
 	}
-	workerPodTemplateSpec.ObjectMeta.Annotations["scheduling.k8s.io/group-name"] = kubeName
+	workerPodTemplateSpec.Annotations["scheduling.k8s.io/group-name"] = kubeName
 
 	err = checkMainContainer(&workerPodTemplateSpec.Spec)
 
@@ -939,7 +938,6 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		},
 	}
 
-	// nolint: gosimple
 	podTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleMain)
 	if err != nil {
 		return
@@ -1166,7 +1164,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 
 	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, dcd.Spec.Annotations)
 
-	if !(isK8sDiscovery || dcd.IsFrontendComponent()) {
+	if !isK8sDiscovery && !dcd.IsFrontendComponent() {
 		return deleteStub, true, nil
 	}
 

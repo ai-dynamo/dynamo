@@ -57,7 +57,7 @@ func ScaleResource(ctx context.Context, scaleClient scale.ScalesGetter, gvr sche
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
 			Namespace:       namespace,
-			ResourceVersion: currentScale.ObjectMeta.ResourceVersion,
+			ResourceVersion: currentScale.ResourceVersion,
 		},
 		Spec: autoscalingv1.ScaleSpec{
 			Replicas: replicas,
