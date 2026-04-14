@@ -55,6 +55,15 @@ class PlannerConfig(BaseModel):
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
+    optimization_target: Literal["throughput", "latency", "sla"] = Field(
+        default="throughput",
+        description=(
+            "Scaling optimization target. "
+            "'throughput' (default) and 'latency' use static thresholds on queue "
+            "depth and KV cache utilization — no SLA targets or profiling needed. "
+            "'sla' uses regression-based scaling that targets specific ttft/itl values."
+        ),
+    )
 
     no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
@@ -162,6 +171,20 @@ class PlannerConfig(BaseModel):
                 "global_planner_namespace is required when environment='global-planner'. "
                 "Please specify the namespace where GlobalPlanner is running."
             )
+
+        # Easy mode: force load scaling on, throughput scaling off
+        if self.optimization_target != "sla":
+            self.enable_load_scaling = True
+            self.enable_throughput_scaling = False
+            if (
+                self.ttft != SLAPlannerDefaults.ttft
+                or self.itl != SLAPlannerDefaults.itl
+            ):
+                logger.warning(
+                    "optimization_target=%s ignores ttft/itl values; "
+                    "set optimization_target='sla' to use SLA-based scaling",
+                    self.optimization_target,
+                )
 
         # At least one scaling mode must be enabled
         if not self.enable_throughput_scaling and not self.enable_load_scaling:

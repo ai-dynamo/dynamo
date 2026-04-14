@@ -1234,6 +1234,29 @@ class SGLangMetricsPayload(MetricsPayload):
 
 
 @dataclass
+class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
+    """Metrics validation for SGLang disaggregated workers.
+
+    Disagg workers (prefill/decode) expose fewer sglang:* metrics than
+    aggregated workers because each only runs half the scheduler pipeline.
+    Observed: ~14 unique sglang:* metrics vs ~25 for aggregated.
+    """
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        checks = super()._get_backend_specific_checks()
+        for check in checks:
+            if check.name == "sglang:*":
+                check.validator = lambda value: len(set(value)) >= 10
+                check.error_msg = lambda name, value: (
+                    f"Expected at least 10 unique sglang:* metrics, but found only {len(set(value))}"
+                )
+                check.success_msg = lambda name, value: (
+                    f"SUCCESS: Found {len(set(value))} unique sglang:* metrics (minimum required: 10)"
+                )
+        return checks
+
+
+@dataclass
 class TRTLLMMetricsPayload(MetricsPayload):
     """Metrics validation for TensorRT-LLM backend"""
 

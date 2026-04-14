@@ -62,7 +62,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.9",
+    "sglang[diffusion]==0.5.10.post1",
     "nixl[cu12]<=0.10.1",
     "cupy-cuda12x>=13.0.0",
 ]
@@ -188,6 +188,11 @@ filterwarnings = [
     "error",
     # CUDA deprecation warnings from tensorrt_llm
     "ignore:.*cuda*:DeprecationWarning",
+    # cuda.cudart/cuda.nvrtc deprecated in favor of cuda.bindings.* (cuda-python >=13)
+    # Triggered by flashinfer 0.6.7+ during import of comm/mnnvl.py
+    "ignore:The cuda\\..*module is deprecated:FutureWarning",
+    # SGLang GGUF quantization emits UserWarning on non-CUDA platforms (arm64 CPU-only CI)
+    "ignore:Only CUDA.*support GGUF quantization:UserWarning",
     # protobuf C extension warning
     "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning",
     # unclosed socket/event loop warnings
