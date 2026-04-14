@@ -30,6 +30,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"emperror.dev/errors"
@@ -181,6 +182,19 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		if err != nil {
 			return
 		}
+	}
+
+	// Sync failover ResourceClaimTemplate before creating workload resources
+	parentName := dynamoComponentDeployment.GetParentGraphDeploymentName()
+	serviceName := dynamoComponentDeployment.Spec.ServiceName
+	if serviceName == "" {
+		serviceName = dynamoComponentDeployment.Name
+	}
+	_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+		return dynamo.GenerateFailoverResourceClaimTemplate(parentName, dynamoComponentDeployment.Namespace, serviceName, &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec)
+	})
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to sync failover ResourceClaimTemplate: %w", err)
 	}
 
 	// Create the appropriate workload resource based on deployment type
@@ -1076,6 +1090,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
+
+	// Add discovery labels to pod template for Pod-based daemon filtering
+	if commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, opt.dynamoComponentDeployment.Spec.Annotations) {
+		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	}
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 

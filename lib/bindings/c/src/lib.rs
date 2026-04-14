@@ -18,7 +18,7 @@ use dynamo_kv_router::{
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
+use dynamo_runtime::discovery::{DiscoveryQuery, instance_id as compute_instance_id};
 use dynamo_runtime::{DistributedRuntime, Worker};
 
 use dynamo_runtime::Runtime;
@@ -1136,9 +1136,17 @@ unsafe fn parse_pods_filter(pods_json: *const c_char) -> Option<HashSet<WorkerId
                         .or_else(|| pod.get("podName"))
                         .and_then(|v| v.as_str());
                     if let Some(name) = pod_name {
-                        let worker_id = hash_pod_name(name);
+                        // Extract container name if available, default to "main"
+                        let container_name = pod
+                            .get("pod")
+                            .and_then(|p| p.get("containerName"))
+                            .or_else(|| pod.get("containerName"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("main");
+                        let worker_id = compute_instance_id(name, container_name);
                         tracing::debug!(
                             pod_name = name,
+                            container_name = container_name,
                             worker_id = format!("{:x}", worker_id),
                             "Mapped EPP pod to worker_id"
                         );

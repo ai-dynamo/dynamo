@@ -79,6 +79,10 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	}
 	container.Env = []corev1.EnvVar{
 		{
+			Name:  "CONTAINER_NAME",
+			Value: commonconsts.MainContainerName,
+		},
+		{
 			Name:  commonconsts.DynamoNamespaceEnvVar,
 			Value: context.DynamoNamespace,
 		},

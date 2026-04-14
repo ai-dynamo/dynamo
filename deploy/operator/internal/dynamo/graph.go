@@ -1182,6 +1182,20 @@ func GenerateBasePodSpec(
 		}
 	}
 
+	if isFailoverEnabled(component) {
+		// Resolve coordination endpoint for multinode failover harness
+		coordinationEndpoint := ""
+		if component.Failover != nil && component.Failover.CoordinationEndpoint != "" {
+			coordinationEndpoint = component.Failover.CoordinationEndpoint
+		} else if operatorConfig.Infrastructure.ETCDAddress != "" {
+			coordinationEndpoint = operatorConfig.Infrastructure.ETCDAddress
+		}
+
+		if err := buildFailoverPod(&podSpec, component, parentGraphDeploymentName, serviceName, numberOfNodes, role, coordinationEndpoint); err != nil {
+			return nil, fmt.Errorf("failed to build failover pod: %w", err)
+		}
+	}
+
 	return &podSpec, nil
 }
 
@@ -1460,6 +1474,11 @@ func GenerateGrovePodCliqueSet(
 			labels, err := generateLabels(component, dynamoDeployment, serviceName)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
+			}
+			// Add discovery labels to pod template so the daemon can filter by them
+			if controller_common.IsK8sDiscoveryEnabled(operatorConfig.Discovery.Backend, component.Annotations) {
+				labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+				labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 			}
 			clique.Labels = labels
 			annotations, err := generateAnnotations(component)

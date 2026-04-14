@@ -1,0 +1,41 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-multinode-failover
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: registry.example.com/dynamo:latest-vllm-runtime
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+      multinode:
+        nodeCount: 2
+      failover:
+        enabled: true
+      extraPodSpec:
+        mainContainer:
+          image: registry.example.com/dynamo:latest-vllm-runtime
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - deepseek-ai/DeepSeek-V3-0324
+            - --tensor-parallel-size
+            - "4"
+            - --pipeline-parallel-size
+            - "1"
+            - --load-format
+            - gms
