@@ -1258,9 +1258,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
 
         # Extract audio from video URLs when use_audio_in_video is set.
-        # Models (nemotron-omni, Qwen2.5-Omni, Qwen3-Omni) expect 1:1
-        # audio/video pairing in the same order.  We load per-video so a
-        # silent video only logs a warning instead of aborting the batch.
+        # Models expect 1:1 audio/video pairing in the same order.
+        # We load per-video sequentially to preserve ordering; a video
+        # without an audio track raises immediately to avoid corrupting
+        # the alignment.
         if (
             video_mm_items
             and mm_processor_kwargs
