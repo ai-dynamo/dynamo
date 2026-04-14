@@ -41,8 +41,11 @@ func buildCheckpointWorkerDefaultEnv(
 		DynamoNamespace:                dynamoNamespace,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: ckpt.Namespace,
-		DiscoveryBackend:               discoveryBackend,
-		WorkerHashSuffix:               workerHashSuffix,
+		Discovery: dynamo.DiscoveryContext{
+			Backend: discoveryBackend,
+			Mode:    configv1alpha1.KubeDiscoveryModePod,
+		},
+		WorkerHashSuffix: workerHashSuffix,
 	})
 	return defaultContainer.Env
 }
