@@ -413,7 +413,63 @@ trtllm_configs = {
             ),
         ],
     ),
-    # [gluo WIP] add image diffusion test
+    # TensorRT-LLM image diffusion test using Flux.1-dev model.
+    # Validates the end-to-end image generation pipeline (frontend → worker → /v1/images/generations).
+    # Uses --skip-warmup (warmup at default resolution OOMs on 22 GB L4 GPU),
+    # --disable-torch-compile, and small default resolution (256x256)
+    # to fit within CI GPU memory constraints.
+    "image_diffusion": TRTLLMConfig(
+        name="image_diffusion",
+        directory=trtllm_dir,
+        script_name="agg_image_diffusion.sh",
+        script_args=[
+            "--skip-warmup",
+            "--disable-torch-compile",
+            "--default-height",
+            "256",
+            "--default-width",
+            "256",
+            "--default-num-images-per-prompt",
+            "1",
+        ],
+        marks=[
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 33.0 GiB
+            pytest.mark.trtllm,
+            pytest.mark.pre_merge,
+            # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens
+            # doesn't apply.  requested_trtllm_vram_gib maps to
+            # KvCacheConfig.max_gpu_total_bytes which has no effect on the
+            # diffusion engine itself, but the parallel scheduler requires one
+            # of the KV/VRAM markers to accept the test.  We set it to the
+            # profiled peak so the scheduler's VRAM budget is accurate.
+            pytest.mark.profiled_vram_gib(33.0),  # actual nvidia-smi peak 33.0 GiB
+            pytest.mark.requested_trtllm_vram_gib(33.0),
+            pytest.mark.timeout(
+                600
+            ),  # Image generation is slow even at small resolution
+        ],
+        model="black-forest-labs/FLUX.1-dev",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=300,
+        delayed_start=5,
+        request_payloads=[
+            VideoGenerationPayload(
+                body={
+                    "prompt": "A golden retriever running on a beach",
+                    "size": "256x256",
+                    "response_format": "url",
+                    "nvext": {
+                        "num_inference_steps": 10,
+                        "guidance_scale": 5.0,
+                        "seed": 42,
+                    },
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
         directory=trtllm_dir,
