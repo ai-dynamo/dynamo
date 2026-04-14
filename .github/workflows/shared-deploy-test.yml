@@ -32,7 +32,39 @@ on:
         required: true
 
 jobs:
+  # Ensure the vCluster and operator exist before any matrix job runs.
+  # This prevents a race where multiple matrix jobs try to bootstrap the
+  # same vCluster simultaneously on re-runs of failed jobs.
+  setup-vcluster:
+    runs-on: prod-default-small-v2
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+      - name: Bootstrap vCluster
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ inputs.vcluster_name }}
+          vcluster_namespace: ${{ inputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
   deploy-test:
+    needs: setup-vcluster
     runs-on: prod-default-small-v2
     timeout-minutes: 25
     permissions:
@@ -46,25 +78,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Check if vCluster exists
-        id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          vcluster_name: ${{ inputs.vcluster_name }}
-          vcluster_namespace: ${{ inputs.namespace }}
-      - name: Self-bootstrap vCluster (rerun)
-        if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          vcluster_name: ${{ inputs.vcluster_name }}
-          vcluster_namespace: ${{ inputs.namespace }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ inputs.operator_tag }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
