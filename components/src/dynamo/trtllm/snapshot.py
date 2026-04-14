@@ -8,10 +8,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
-from dynamo.common.utils.snapshot import (
-    CheckpointConfig,
-    EngineSnapshotController,
-)
+from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
 from dynamo.trtllm.engine import TensorRTLLMEngine
 
 from .request_handlers.handler_base import TRTLLMEngineQuiesceController

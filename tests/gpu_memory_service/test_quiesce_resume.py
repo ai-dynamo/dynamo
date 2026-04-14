@@ -186,9 +186,7 @@ def test_gms_basic_quiesce_resume_trtllm(
     predownload_models,
 ):
     """Weights-only quiesce/resume for TRT-LLM (no KV cache GMS)."""
-    with GMSProcessManager(
-        request, TRTLLMWithGMSProcess, tags=("weights",)
-    ) as manager:
+    with GMSProcessManager(request, TRTLLMWithGMSProcess, tags=("weights",)) as manager:
         frontend_port = manager.frontend_port
         weights_gms = manager.weights_gms
         engine = manager.start_engine("engine")
@@ -230,9 +228,7 @@ def test_gms_basic_quiesce_resume_trtllm(
             min_fraction=0.6,
         )
 
-        _wait_for_weights_state(
-            weights_gms, ServerState.RO, expected_hash=weights_hash
-        )
+        _wait_for_weights_state(weights_gms, ServerState.RO, expected_hash=weights_hash)
         assert_weights_published_once(weights_gms.get_event_history().events)
 
         assert_completion_ok(
@@ -256,9 +252,7 @@ def test_gms_read_only_import_trtllm(
 ):
     """A second TRT-LLM process with read_only_weights=True imports weights
     from the committed layout published by the first, sharing GPU memory."""
-    with GMSProcessManager(
-        request, TRTLLMWithGMSProcess, tags=("weights",)
-    ) as manager:
+    with GMSProcessManager(request, TRTLLMWithGMSProcess, tags=("weights",)) as manager:
         frontend_port = manager.frontend_port
         weights_gms = manager.weights_gms
 

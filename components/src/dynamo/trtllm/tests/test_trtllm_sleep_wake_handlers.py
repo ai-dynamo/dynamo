@@ -3,13 +3,13 @@
 
 """Unit tests for TRT-LLM sleep/wake handler logic.
 
-These tests cover the in-flight tracking, reject-flag, and sleep/wake round-trips
-defined in HandlerBase without requiring a real GPU or TRT-LLM engine.
+Tests cover in-flight tracking, reject-flag, and sleep/wake delegation to
+TRTLLMEngineQuiesceController without requiring a real GPU or TRT-LLM engine.
 """
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import torch
@@ -40,8 +40,8 @@ class _ConcreteHandler(HandlerBase):
         yield {}
 
 
-def _make_handler(*, split_tags_return=None) -> _ConcreteHandler:
-    """Create a HandlerBase subclass with all external deps mocked out."""
+def _make_handler() -> _ConcreteHandler:
+    """Create a HandlerBase subclass with mocked quiesce controller and endpoint."""
     handler = _ConcreteHandler.__new__(_ConcreteHandler)
     handler.generate_endpoint = SimpleNamespace(
         unregister_endpoint_instance=AsyncMock(),
@@ -52,13 +52,13 @@ def _make_handler(*, split_tags_return=None) -> _ConcreteHandler:
     handler._inflight_requests = 0
     handler._no_inflight_requests = asyncio.Event()
     handler._no_inflight_requests.set()
-    handler._memory_released = False
     handler._reject_new_requests = False
-    handler._wait_for_inflight_requests = AsyncMock()
-    handler._call_collective_rpc = AsyncMock()
-    if split_tags_return is None:
-        split_tags_return = (["kv_cache"], False)
-    handler._split_memory_tags = MagicMock(return_value=split_tags_return)
+    # Mock the quiesce controller that release/resume delegate to
+    handler._quiesce_controller = MagicMock()
+    handler._quiesce_controller.is_quiesced = False
+    handler._quiesce_controller.quiesce = AsyncMock(return_value=True)
+    handler._quiesce_controller.resume = AsyncMock(return_value=True)
+    handler._quiesce_controller.mark_resumed = MagicMock()
     return handler
 
 
@@ -100,21 +100,13 @@ async def test_mark_request_finished_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_release_is_noop_when_already_released():
+async def test_release_is_noop_when_already_quiesced():
     handler = _make_handler()
-    handler._memory_released = True
+    handler._quiesce_controller.is_quiesced = True
     result = await handler.release_memory_occupation({})
     assert result["status"] == "ok"
     assert "already released" in result["message"]
-    handler.generate_endpoint.unregister_endpoint_instance.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_release_returns_error_for_invalid_timeout():
-    handler = _make_handler()
-    result = await handler.release_memory_occupation({"timeout_s": -1})
-    assert result["status"] == "error"
-    assert "timeout_s" in result["message"]
+    handler._quiesce_controller.quiesce.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -125,59 +117,31 @@ async def test_release_returns_error_for_non_numeric_timeout():
 
 
 @pytest.mark.asyncio
-async def test_release_calls_collective_rpc_for_kv_cache():
-    handler = _make_handler(split_tags_return=(["kv_cache"], False))
+async def test_release_delegates_to_quiesce_controller():
+    handler = _make_handler()
     result = await handler.release_memory_occupation({})
     assert result["status"] == "ok"
-    handler._call_collective_rpc.assert_awaited_once_with("sleep", ["kv_cache"])
-    assert handler._memory_released
+    handler._quiesce_controller.quiesce.assert_awaited_once_with(None)
 
 
 @pytest.mark.asyncio
-async def test_release_uses_local_fallback_when_collective_rpc_unsupported():
-    """Single-rank executor: falls back to local VMM ops when collective RPC raises."""
-    handler = _make_handler(split_tags_return=(["kv_cache"], False))
-    handler._call_collective_rpc = AsyncMock(
-        side_effect=RuntimeError("does not support collective rpc")
-    )
-    handler._can_use_local_kv_sleep_fallback = MagicMock(return_value=True)
-    handler._call_local_virtual_memory_method = MagicMock()
-
-    result = await handler.release_memory_occupation({})
-
+async def test_release_passes_tags_to_controller():
+    handler = _make_handler()
+    result = await handler.release_memory_occupation({"tags": ["weights"]})
     assert result["status"] == "ok"
-    handler._call_local_virtual_memory_method.assert_called_once_with(
-        "sleep", ["kv_cache"]
-    )
-    assert "skipped_tags" not in result
-
-
-@pytest.mark.asyncio
-async def test_release_skips_kv_cache_when_collective_rpc_unsupported_multi_rank():
-    """Multi-rank executor: kv_cache sleep is skipped and reported."""
-    handler = _make_handler(split_tags_return=(["kv_cache"], False))
-    handler._call_collective_rpc = AsyncMock(
-        side_effect=RuntimeError("does not support collective rpc")
-    )
-    handler._can_use_local_kv_sleep_fallback = MagicMock(return_value=False)
-
-    result = await handler.release_memory_occupation({})
-
-    assert result["status"] == "ok"
-    assert "kv_cache" in result.get("skipped_tags", [])
+    handler._quiesce_controller.quiesce.assert_awaited_once_with(["weights"])
 
 
 @pytest.mark.asyncio
 async def test_release_unregisters_endpoint_and_restores_on_error():
-    handler = _make_handler(split_tags_return=(["kv_cache"], False))
-    handler._call_collective_rpc = AsyncMock(side_effect=RuntimeError("engine error"))
-
+    handler = _make_handler()
+    handler._quiesce_controller.quiesce = AsyncMock(
+        side_effect=RuntimeError("engine error")
+    )
     result = await handler.release_memory_occupation({})
-
     assert result["status"] == "error"
     handler.generate_endpoint.unregister_endpoint_instance.assert_called_once()
     handler.generate_endpoint.register_endpoint_instance.assert_called_once()
-    assert not handler._memory_released
     assert not handler._reject_new_requests
 
 
@@ -187,70 +151,38 @@ async def test_release_unregisters_endpoint_and_restores_on_error():
 
 
 @pytest.mark.asyncio
-async def test_resume_is_noop_when_not_released():
+async def test_resume_is_noop_when_not_quiesced():
     handler = _make_handler()
     result = await handler.resume_memory_occupation({})
     assert result["status"] == "ok"
     assert "already resumed" in result["message"]
-    handler.generate_endpoint.register_endpoint_instance.assert_not_called()
+    handler._quiesce_controller.resume.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_release_and_resume_round_trip():
-    handler = _make_handler(split_tags_return=(["kv_cache"], False))
+    handler = _make_handler()
     release = await handler.release_memory_occupation({})
     assert release["status"] == "ok"
-    assert handler._memory_released
+
+    # After release, controller reports quiesced
+    handler._quiesce_controller.is_quiesced = True
 
     resume = await handler.resume_memory_occupation({})
     assert resume["status"] == "ok"
-    assert not handler._memory_released
+    handler._quiesce_controller.resume.assert_awaited_once()
+    handler._quiesce_controller.mark_resumed.assert_called_once()
     assert not handler._reject_new_requests
     handler.generate_endpoint.register_endpoint_instance.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_resume_uses_local_fallback_when_collective_rpc_unsupported():
-    handler = _make_handler(split_tags_return=(["kv_cache"], False))
-    handler._memory_released = True
-    handler._call_collective_rpc = AsyncMock(
-        side_effect=RuntimeError("does not support collective rpc")
-    )
-    handler._can_use_local_kv_sleep_fallback = MagicMock(return_value=True)
-    handler._call_local_virtual_memory_method = MagicMock()
-
-    result = await handler.resume_memory_occupation({})
-
+async def test_resume_passes_tags_to_controller():
+    handler = _make_handler()
+    handler._quiesce_controller.is_quiesced = True
+    result = await handler.resume_memory_occupation({"tags": ["kv_cache"]})
     assert result["status"] == "ok"
-    handler._call_local_virtual_memory_method.assert_called_once_with(
-        "wakeup", ["kv_cache"]
-    )
-
-
-@pytest.mark.asyncio
-async def test_resume_weights_via_gms_manager():
-    """When GMS is initialised, resume reconnects and remaps the weights manager."""
-    handler = _make_handler(split_tags_return=([], True))  # weights only
-    handler._memory_released = True
-
-    mock_manager = MagicMock()
-    mock_manager.is_unmapped = True
-
-    with (
-        patch(
-            "dynamo.trtllm.request_handlers.handler_base.HandlerBase._get_gms_manager",
-            return_value=mock_manager,
-        ),
-        patch(
-            "dynamo.trtllm.request_handlers.handler_base.HandlerBase._get_trtllm_gms_lock_mode",
-            return_value=MagicMock(),
-        ),
-    ):
-        result = await handler.resume_memory_occupation({})
-
-    assert result["status"] == "ok"
-    mock_manager.connect.assert_called_once()
-    mock_manager.remap_all_vas.assert_called_once()
+    handler._quiesce_controller.resume.assert_awaited_once_with(["kv_cache"])
 
 
 # ---------------------------------------------------------------------------

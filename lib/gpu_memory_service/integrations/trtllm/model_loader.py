@@ -116,12 +116,21 @@ def _gms_load(self, checkpoint_dir: str, checkpoint_loader, original_load):
     )
 
     try:
-        return _gms_load_inner(self, gms_client, device_index, checkpoint_dir, checkpoint_loader, original_load)
+        return _gms_load_inner(
+            self,
+            gms_client,
+            device_index,
+            checkpoint_dir,
+            checkpoint_loader,
+            original_load,
+        )
     finally:
         self.model_weights_memory_tag = saved_tag
 
 
-def _gms_load_inner(self, gms_client, device_index, checkpoint_dir, checkpoint_loader, original_load):
+def _gms_load_inner(
+    self, gms_client, device_index, checkpoint_dir, checkpoint_loader, original_load
+):
     if gms_client.granted_lock_type == GrantedLockType.RO:
         return _load_ro(
             self=self,
@@ -178,9 +187,10 @@ def _load_ro(self, checkpoint_dir, checkpoint_loader, gms_client, device_index):
 
     config = self._load_and_validate_config(checkpoint_dir, checkpoint_loader)
 
-    with timing("Model init total"), maybe_create_moe_load_balancer(
-        config, self.mapping
-    ) as moe_load_balancer:
+    with (
+        timing("Model init total"),
+        maybe_create_moe_load_balancer(config, self.mapping) as moe_load_balancer,
+    ):
         try:
             with MetaInitMode():
                 model = AutoModelForCausalLM.from_config(copy.deepcopy(config))

@@ -103,7 +103,9 @@ class TRTLLMEngineQuiesceController:
         """Call TRT-LLM collective_rpc for KV cache sleep/wake."""
         rpc = getattr(self._engine.llm, "_collective_rpc", None)
         if rpc is None:
-            logger.warning("TRT-LLM does not expose _collective_rpc; skipping %s", method)
+            logger.warning(
+                "TRT-LLM does not expose _collective_rpc; skipping %s", method
+            )
             return
         try:
             rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
@@ -117,7 +119,9 @@ class TRTLLMEngineQuiesceController:
     def _release_gms_weights() -> None:
         """Release GMS-managed weight memory."""
         try:
-            from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
+            from gpu_memory_service.client.torch.allocator import (
+                get_gms_client_memory_manager,
+            )
         except ImportError:
             return
         manager = get_gms_client_memory_manager("weights")
@@ -132,8 +136,12 @@ class TRTLLMEngineQuiesceController:
     def _restore_gms_weights() -> None:
         """Restore GMS-managed weight memory."""
         try:
-            from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
-            from gpu_memory_service.integrations.trtllm.model_loader import get_gms_lock_mode
+            from gpu_memory_service.client.torch.allocator import (
+                get_gms_client_memory_manager,
+            )
+            from gpu_memory_service.integrations.trtllm.model_loader import (
+                get_gms_lock_mode,
+            )
         except ImportError:
             return
         manager = get_gms_client_memory_manager("weights")

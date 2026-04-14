@@ -396,9 +396,7 @@ def test_gms_shadow_engine_failover_trtllm(
     request, runtime_services_dynamic_ports, predownload_models
 ):
     """Weights-only shadow failover for TRT-LLM (no KV cache GMS)."""
-    with GMSProcessManager(
-        request, TRTLLMWithGMSProcess, tags=("weights",)
-    ) as manager:
+    with GMSProcessManager(request, TRTLLMWithGMSProcess, tags=("weights",)) as manager:
         frontend_port = manager.frontend_port
         weights_gms = manager.weights_gms
 

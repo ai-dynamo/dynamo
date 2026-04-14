@@ -386,9 +386,7 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
         if venv:
             venv_lib = os.path.join(venv, "lib")
             existing = os.environ.get("LD_LIBRARY_PATH", "")
-            env["LD_LIBRARY_PATH"] = (
-                f"{venv_lib}:{existing}" if existing else venv_lib
-            )
+            env["LD_LIBRARY_PATH"] = f"{venv_lib}:{existing}" if existing else venv_lib
         return env
 
     def command(self) -> list[str]:
