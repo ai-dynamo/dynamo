@@ -16,6 +16,7 @@ Run:
 
 Test markers:
   gpu_0       No GPU required
+  nightly     Requires live K8s cluster (not run in general pre-merge CI)
   integration Integration-level (uses live webhook)
 """
 
@@ -46,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 
 @pytest.mark.gpu_0
+@pytest.mark.nightly
 @pytest.mark.integration
 @pytest.mark.k8s
 class TestDGDRValidation:
@@ -247,6 +249,7 @@ class TestDGDRValidation:
 
 
 @pytest.mark.gpu_0
+@pytest.mark.nightly
 @pytest.mark.integration
 @pytest.mark.k8s
 class TestDGDRVersionConversion:
