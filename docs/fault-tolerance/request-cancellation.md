@@ -24,7 +24,7 @@ On the worker side, the runtime monitors the TCP connection from the frontend fo
 1. **Control message received** — The frontend explicitly sent a cancellation control message.
 2. **TCP connection dropped** — The frontend disconnected without sending a control message (e.g., frontend crash or network failure).
 
-When the worker receives a cancellation signal, it sets the corresponding state on the request's `AsyncEngineContext`. It is then up to the worker's engine implementation to observe the cancellation (e.g., by checking `is_stopped()`) and terminate processing accordingly. For details on implementing cancellation handling in an engine, see the [AsyncEngineContext Trait](#asyncenginecontext-trait) section below.
+When the worker receives a cancellation signal, it sets the corresponding state on the request's `AsyncEngineContext`. It is then up to the worker's engine implementation to observe the cancellation (e.g., by checking `is_stopped()`) and terminate processing accordingly. For details on implementing cancellation handling in a backend worker, see the [Backend Development Guide](../development/backend-guide.md#request-cancellation).
 
 ### Cancellation Propagation
 
