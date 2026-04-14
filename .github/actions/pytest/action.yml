@@ -72,24 +72,35 @@ runs:
         MINIO_ACCESS_KEY: minioadmin
         MINIO_SECRET_KEY: minioadmin
       run: |
-        # Start MinIO for S3-compatible object storage (used by LoRA tests)
-        echo "🗄️  Starting MinIO service..."
+        # Reuse an existing MinIO service when available; only start one if needed.
+        echo "🗄️  Checking MinIO service..."
 
-        # Remove any existing container
-        docker rm -f "${MINIO_CONTAINER_NAME}" 2>/dev/null || true
-
-        docker run -d \
-          --name "${MINIO_CONTAINER_NAME}" \
-          -p 9000:9000 \
-          -p 9001:9001 \
-          -e "MINIO_ROOT_USER=${MINIO_ACCESS_KEY}" \
-          -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}" \
-          quay.io/minio/minio server /data --console-address ':9001'
-
-        # Wait for MinIO to be ready
-        echo "⏳ Waiting for MinIO to be ready..."
         MAX_ATTEMPTS=30
         ATTEMPT=0
+
+        if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+          echo "✅ Reusing existing MinIO service on localhost:9000"
+          exit 0
+        fi
+
+        if docker ps --filter "name=^/${MINIO_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${MINIO_CONTAINER_NAME}"; then
+          echo "♻️  Found running MinIO container ${MINIO_CONTAINER_NAME}, waiting for readiness..."
+        elif docker ps -a --filter "name=^/${MINIO_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${MINIO_CONTAINER_NAME}"; then
+          echo "♻️  Found existing stopped MinIO container ${MINIO_CONTAINER_NAME}, starting it..."
+          docker start "${MINIO_CONTAINER_NAME}" > /dev/null
+        else
+          echo "🚀 No existing MinIO container found, starting a new container..."
+          docker run -d \
+            --name "${MINIO_CONTAINER_NAME}" \
+            -p 9000:9000 \
+            -p 9001:9001 \
+            -e "MINIO_ROOT_USER=${MINIO_ACCESS_KEY}" \
+            -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}" \
+            quay.io/minio/minio server /data --console-address ':9001'
+          echo "MINIO_STARTED_BY_ACTION=true" >> $GITHUB_ENV
+        fi
+
+        echo "⏳ Waiting for MinIO to be ready..."
         while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
           if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
             echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"

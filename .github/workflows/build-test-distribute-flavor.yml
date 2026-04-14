@@ -361,6 +361,7 @@ jobs:
     if: |
         inputs.run_multi_gpu_tests &&
         inputs.build_image &&
+        ( inputs.device != 'xpu' ) &&
         ( inputs.platform != 'linux/arm64' )
     needs: [build]
     name: Multi-gpu test ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) || inputs.device }}
