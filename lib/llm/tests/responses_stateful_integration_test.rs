@@ -16,11 +16,18 @@ use std::time::Duration;
 #[tokio::test]
 async fn test_storage_basic_crud() {
     let storage = InMemoryResponseStorage::new(0);
-    let response_data = json!({"id": "resp_123", "output": [{"type": "message", "content": [{"text": "Hello"}]}]});
+    let response_data =
+        json!({"id": "resp_123", "output": [{"type": "message", "content": [{"text": "Hello"}]}]});
 
     // Store
     let id = storage
-        .store_response("tenant_a", "session_1", Some("resp_123"), response_data.clone(), None)
+        .store_response(
+            "tenant_a",
+            "session_1",
+            Some("resp_123"),
+            response_data.clone(),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(id, "resp_123");
@@ -73,7 +80,13 @@ async fn test_cross_session_access_within_tenant() {
     let data = json!({"data": "from_session_1"});
 
     storage
-        .store_response("tenant_a", "session_1", Some("resp_cross"), data.clone(), None)
+        .store_response(
+            "tenant_a",
+            "session_1",
+            Some("resp_cross"),
+            data.clone(),
+            None,
+        )
         .await
         .unwrap();
 
@@ -120,8 +133,14 @@ async fn test_multi_turn_conversation_storage() {
         .unwrap();
 
     // Can retrieve both turns
-    let t1 = storage.get_response("tenant_a", "session_1", "resp_turn1").await.unwrap();
-    let t2 = storage.get_response("tenant_a", "session_1", "resp_turn2").await.unwrap();
+    let t1 = storage
+        .get_response("tenant_a", "session_1", "resp_turn1")
+        .await
+        .unwrap();
+    let t2 = storage
+        .get_response("tenant_a", "session_1", "resp_turn2")
+        .await
+        .unwrap();
     assert_eq!(t1.response["id"], "resp_turn1");
     assert_eq!(t2.response["id"], "resp_turn2");
     assert_eq!(t2.response["previous_response_id"], "resp_turn1");
@@ -142,7 +161,10 @@ async fn test_ttl_sets_expiration() {
         .await
         .unwrap();
 
-    let stored = storage.get_response("tenant_a", "session_1", &id).await.unwrap();
+    let stored = storage
+        .get_response("tenant_a", "session_1", &id)
+        .await
+        .unwrap();
     assert!(stored.expires_at.is_some());
 }
 
@@ -223,9 +245,7 @@ async fn test_session_middleware_header_validation() {
     use dynamo_llm::http::middleware::session::{RequestSession, extract_session_middleware};
     use tower::ServiceExt;
 
-    async fn handler(
-        axum::Extension(ctx): axum::Extension<RequestSession>,
-    ) -> impl IntoResponse {
+    async fn handler(axum::Extension(ctx): axum::Extension<RequestSession>) -> impl IntoResponse {
         format!("tenant={}, session={}", ctx.tenant_id, ctx.session_id)
     }
 
@@ -244,10 +264,7 @@ async fn test_session_middleware_header_validation() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     // Missing tenant
-    let req = Request::builder()
-        .uri("/test")
-        .body(Body::empty())
-        .unwrap();
+    let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 

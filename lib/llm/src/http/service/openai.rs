@@ -1609,16 +1609,15 @@ async fn handler_responses_inner(
     )
     .await;
 
-    let response = tokio::spawn(
-        responses(state, template, session, request, stream_handle).in_current_span(),
-    )
-    .await
-    .map_err(|e| {
-        ErrorMessage::internal_server_error(&format!(
-            "Failed to await responses task: {:?}",
-            e,
-        ))
-    })?;
+    let response =
+        tokio::spawn(responses(state, template, session, request, stream_handle).in_current_span())
+            .await
+            .map_err(|e| {
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to await responses task: {:?}",
+                    e,
+                ))
+            })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -2322,15 +2321,12 @@ async fn handler_get_response(
     session_ext: Option<Extension<RequestSession>>,
     Path(response_id): Path<String>,
 ) -> Result<Response, ErrorResponse> {
-    let session = session_ext
-        .map(|Extension(s)| s)
-        .ok_or_else(|| {
-            ErrorMessage::from_http_error(HttpError {
-                code: 400,
-                message: "x-tenant-id header is required for stateful response operations"
-                    .to_string(),
-            })
-        })?;
+    let session = session_ext.map(|Extension(s)| s).ok_or_else(|| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "x-tenant-id header is required for stateful response operations".to_string(),
+        })
+    })?;
     let storage = state.response_storage();
 
     match storage
@@ -2383,15 +2379,12 @@ async fn handler_delete_response(
     session_ext: Option<Extension<RequestSession>>,
     Path(response_id): Path<String>,
 ) -> Result<Response, ErrorResponse> {
-    let session = session_ext
-        .map(|Extension(s)| s)
-        .ok_or_else(|| {
-            ErrorMessage::from_http_error(HttpError {
-                code: 400,
-                message: "x-tenant-id header is required for stateful response operations"
-                    .to_string(),
-            })
-        })?;
+    let session = session_ext.map(|Extension(s)| s).ok_or_else(|| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "x-tenant-id header is required for stateful response operations".to_string(),
+        })
+    })?;
     let storage = state.response_storage();
 
     match storage
