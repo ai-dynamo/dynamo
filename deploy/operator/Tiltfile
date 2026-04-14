@@ -160,8 +160,8 @@ local_resource(
 # ---------------------------------------------------------------------------
 
 # Ensure Helm repos for non-OCI dependencies are registered.
-local(helm_cmd + ' repo add nats https://nats-io.github.io/k8s/helm/charts/ || true', quiet=True)
-local(helm_cmd + ' repo add bitnami https://charts.bitnami.com/bitnami || true', quiet=True)
+local(helm_cmd + ' repo add --force-update nats https://nats-io.github.io/k8s/helm/charts/', quiet=True)
+local(helm_cmd + ' repo add --force-update bitnami https://charts.bitnami.com/bitnami', quiet=True)
 local(helm_cmd + ' repo update', quiet=True)
 
 # Initial build at load time so render_helm() can succeed.
@@ -171,7 +171,7 @@ local(helm_cmd + ' dependency build ' + HELM_CHART, quiet=True)
 local_resource(
     'helm-dep-build',
     helm_cmd + ' dependency build ' + HELM_CHART,
-    deps=[os.path.join(HELM_CHART, 'components', 'operator')],
+    deps=[os.path.join(HELM_CHART, 'components', 'operator'), os.path.join(HELM_CHART, 'Chart.yaml')],
     labels=['operator'],
 )
 
