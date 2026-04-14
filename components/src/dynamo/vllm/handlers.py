@@ -1224,24 +1224,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return None
 
         try:
+            import time as _time
+
+            _t0 = _time.monotonic()
             metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
             if self._mm_kwargs_receiver is None:
                 self._mm_kwargs_receiver = MmKwargsReceiver()
             receiver = self._mm_kwargs_receiver
+            _t1 = _time.monotonic()
             mm_kwargs_tensors = await receiver.receive(metadata)
+            _t2 = _time.monotonic()
 
-            # Reconstruct a pre-rendered MultiModalInput dict.
-            # The vLLM engine detects "type": "multimodal" and skips the HF
-            # processor entirely (InputProcessor.process_inputs line 222).
-
-            # Deserialize the MultiModalKwargsItem that was pickled by the
-            # frontend sender.  This preserves the full structure including
-            # MultiModalFieldElem wrappers and field metadata, which vLLM's
-            # internal serializer requires.
-            # NOTE: pickle is used here because MultiModalKwargsItem contains
-            # MultiModalFieldElem wrappers with field metadata that vLLM's
-            # internal serializer requires. This is safe because the frontend
-            # is a trusted component within the same Dynamo deployment.
             pickled_items = mm_kwargs_tensors.get("__pickled_kwargs_item__")
             if not pickled_items:
                 logger.warning(
@@ -1251,6 +1244,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 return None
             # pickled_items is a list (one per image/feature).
             kwargs_items = []
+            _t3 = _time.monotonic()
             for pi in pickled_items:
                 item = pickle.loads(pi)
                 if not isinstance(item, MultiModalKwargsItem):
@@ -1261,6 +1255,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     )
                     return None
                 kwargs_items.append(item)
+            _t4 = _time.monotonic()
+            logger.info(
+                "[TIMING-BACKEND] nixl_setup=%.1fms rdma_read=%.1fms "
+                "pickle_loads=%.1fms total_nixl=%.1fms",
+                (_t1 - _t0) * 1000,
+                (_t2 - _t1) * 1000,
+                (_t4 - _t3) * 1000,
+                (_t4 - _t0) * 1000,
+            )
 
             # Use the expanded token IDs (with image placeholders) from the
             # frontend, not the unexpanded request["token_ids"].
