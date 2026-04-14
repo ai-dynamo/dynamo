@@ -330,8 +330,9 @@ func generateSingleDCD(
 	deployment.Spec.Labels = labels
 	deployment.Labels = labels
 
-	// only label worker DCDs with their hash for cleanup during rolling updates
-	if IsWorkerComponent(component.ComponentType) {
+	// Label worker DCDs and local router DCDs with current worker hash.
+	// Routers use this to resolve worker endpoints across rolling updates.
+	if IsWorkerComponent(component.ComponentType) || IsRouterComponent(component) {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
 	}
 
@@ -930,6 +931,15 @@ func IsWorkerComponent(componentType string) bool {
 		componentType == commonconsts.ComponentTypeDecode
 }
 
+func IsRouterComponent(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	if component == nil || component.ExtraPodSpec == nil || component.ExtraPodSpec.MainContainer == nil {
+		return false
+	}
+	main := component.ExtraPodSpec.MainContainer
+	joined := strings.Join(append(main.Command, main.Args...), " ")
+	return strings.Contains(joined, "dynamo.router")
+}
+
 // AddStandardEnvVars adds the standard environment variables that are common to
 // both checkpoint jobs and generated worker pods.
 func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
@@ -1199,7 +1209,8 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend configv1alpha1.DiscoveryBackend) ComponentContext {
 	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
-	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
+	if (IsWorkerComponent(component.ComponentType) || IsRouterComponent(component)) &&
+		component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
 		workerHashSuffix = component.Labels[commonconsts.KubeLabelDynamoWorkerHash]
 	}
 

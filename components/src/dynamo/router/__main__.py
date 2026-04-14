@@ -25,6 +25,7 @@ from dynamo.router.args import (
     build_kv_router_config,
 )
 from dynamo.router.args import parse_args as parse_router_args
+from dynamo.router.endpoint_suffix import apply_worker_suffix_to_endpoint
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -187,13 +188,17 @@ async def worker(runtime: DistributedRuntime):
     kv_router_config = build_kv_router_config(config)
     aic_perf_config = build_aic_perf_config(config)
 
+    worker_endpoint = apply_worker_suffix_to_endpoint(config.endpoint)
+    if worker_endpoint != config.endpoint:
+        logger.info(
+            "Resolved worker endpoint with namespace suffix: %s -> %s",
+            config.endpoint,
+            worker_endpoint,
+        )
+
     # Create handler
     handler = StandaloneRouterHandler(
-        runtime,
-        config.endpoint,
-        config.router_block_size,
-        kv_router_config,
-        aic_perf_config,
+        runtime, worker_endpoint, config.router_block_size, kv_router_config, aic_perf_config
     )
     await handler.initialize()
 

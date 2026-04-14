@@ -7071,6 +7071,19 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 	}
 	compCtx3 := generateComponentContext(component3, "dgd", "ns", 1, "kubernetes")
 	assert.Empty(t, compCtx3.WorkerHashSuffix)
+
+	// LocalRouter (componentType=default) gets WorkerHashSuffix if labeled
+	component4 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeDefault,
+		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "routerhash"},
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo.router"},
+			},
+		},
+	}
+	compCtx4 := generateComponentContext(component4, "dgd", "ns", 1, "kubernetes")
+	assert.Equal(t, "routerhash", compCtx4.WorkerHashSuffix)
 }
 
 func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
@@ -7102,6 +7115,46 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 		assert.NotEqual(t, commonconsts.DynamoNamespaceWorkerSuffixEnvVar, env.Name,
 			"DYN_NAMESPACE_WORKER_SUFFIX should not be set when suffix is empty")
 	}
+}
+
+func TestWorkerDefaults_EnvVarAppearsOnlyOnce(t *testing.T) {
+	w := NewWorkerDefaults()
+
+	container, err := w.GetBaseContainer(ComponentContext{
+		DynamoNamespace:  "ns-dgd",
+		ComponentType:    commonconsts.ComponentTypeWorker,
+		WorkerHashSuffix: "abc123",
+	})
+	assert.NoError(t, err)
+
+	count := 0
+	for _, env := range container.Env {
+		if env.Name == commonconsts.DynamoNamespaceWorkerSuffixEnvVar {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count,
+		"DYN_NAMESPACE_WORKER_SUFFIX should appear exactly once (set by BaseComponentDefaults, not duplicated in WorkerDefaults)")
+}
+
+func TestBaseComponentDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
+	b := &BaseComponentDefaults{}
+
+	container, err := b.GetBaseContainer(ComponentContext{
+		DynamoNamespace:  "ns-dgd",
+		ComponentType:    commonconsts.ComponentTypeDefault,
+		WorkerHashSuffix: "routerhash",
+	})
+	assert.NoError(t, err)
+
+	found := false
+	for _, env := range container.Env {
+		if env.Name == commonconsts.DynamoNamespaceWorkerSuffixEnvVar {
+			assert.Equal(t, "routerhash", env.Value)
+			found = true
+		}
+	}
+	assert.True(t, found, "DYN_NAMESPACE_WORKER_SUFFIX should be set on default components when suffix exists")
 }
 
 func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
