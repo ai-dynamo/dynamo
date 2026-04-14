@@ -36,22 +36,20 @@ for path in (os.environ["GMS_SOCKET_DIR"], os.environ["GMS_CONTROL_DIR"]):
 `
 
 const gmsServerCommand = `
-import os
-import re
 import signal
 import subprocess
 import sys
 import time
 
+import pynvml
+
 
 def devices():
-    result = []
-    for name in os.listdir("/dev"):
-        match = re.fullmatch(r"nvidia(\d+)", name)
-        if match is None:
-            continue
-        result.append(int(match.group(1)))
-    return sorted(result)
+    pynvml.nvmlInit()
+    try:
+        return list(range(pynvml.nvmlDeviceGetCount()))
+    finally:
+        pynvml.nvmlShutdown()
 
 
 processes = [
@@ -94,21 +92,19 @@ while True:
 
 const gmsSaveCommand = `
 import os
-import re
 import subprocess
 import time
 
+import pynvml
 from gpu_memory_service.common.utils import get_socket_path
 
 
 def devices():
-    result = []
-    for name in os.listdir("/dev"):
-        match = re.fullmatch(r"nvidia(\d+)", name)
-        if match is None:
-            continue
-        result.append(int(match.group(1)))
-    return sorted(result)
+    pynvml.nvmlInit()
+    try:
+        return list(range(pynvml.nvmlDeviceGetCount()))
+    finally:
+        pynvml.nvmlShutdown()
 
 
 for device in devices():
@@ -130,21 +126,19 @@ for device in devices():
 
 const gmsLoadCommand = `
 import os
-import re
 import subprocess
 import time
 
+import pynvml
 from gpu_memory_service.common.utils import get_socket_path
 
 
 def devices():
-    result = []
-    for name in os.listdir("/dev"):
-        match = re.fullmatch(r"nvidia(\d+)", name)
-        if match is None:
-            continue
-        result.append(int(match.group(1)))
-    return sorted(result)
+    pynvml.nvmlInit()
+    try:
+        return list(range(pynvml.nvmlDeviceGetCount()))
+    finally:
+        pynvml.nvmlShutdown()
 
 
 for device in devices():
