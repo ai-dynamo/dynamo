@@ -397,7 +397,7 @@ class GMSStorageClient:
         for entry in manifest.allocations:
             old_id = entry.allocation_id
             va = mm.create_mapping(size=entry.size, tag=entry.tag)
-            id_map[old_id] = mm.get_allocation_id(va)
+            id_map[old_id] = mm.mappings[va].allocation_id
             ctx.vas[old_id] = va
             ctx.va_events[old_id].set()
         logger.info(

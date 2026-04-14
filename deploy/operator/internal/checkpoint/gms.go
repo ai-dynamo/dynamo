@@ -53,47 +53,47 @@ func ResolveGMSCheckpointStorage(
 	return snapshotprotocol.ResolveCheckpointStorage(checkpointID, artifactVersion, storage)
 }
 
-// EnsureGMSRestoreSidecars adds the GMS server sidecar and loader container
-// for a restore pod. Uses the shared runtime helper for server/volume setup.
-func EnsureGMSRestoreSidecars(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
+// BuildGMSRestoreSidecars prepares GMS infrastructure for a restore pod and
+// returns the additional containers the caller must append to podSpec.Containers.
+// It adds the GMS server init sidecar and volumes directly to podSpec, but
+// leaves regular containers to the caller to avoid invalidating any existing
+// pointers into the Containers slice.
+func BuildGMSRestoreSidecars(
+	podSpec *corev1.PodSpec,
+	mainContainer *corev1.Container,
+	storage snapshotprotocol.Storage,
+) []corev1.Container {
 	if podSpec == nil || mainContainer == nil {
-		return
+		return nil
 	}
 
 	gmsruntime.EnsureServerSidecar(podSpec, mainContainer)
 
 	loader := gmsCheckpointLoaderContainer(mainContainer.Image)
 	copyGMSDeviceClaims(mainContainer, &loader)
-	ensureGMSContainer(podSpec, loader)
-}
-
-// EnsureGMSRestoreHelperMounts adds the checkpoint storage volume and mount
-// to the GMS loader container and sets GMS_CHECKPOINT_DIR.
-func EnsureGMSRestoreHelperMounts(podSpec *corev1.PodSpec, storage snapshotprotocol.Storage) {
-	loader := findContainer(podSpec, GMSLoaderContainer)
-	if loader == nil {
-		return
-	}
 	ensureCheckpointVolume(podSpec, storage.PVCName)
-	ensureVolumeMount(loader, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
-	setEnv(loader, "GMS_CHECKPOINT_DIR", resolveGMSArtifactDir(storage))
+	ensureVolumeMount(&loader, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
+	setEnv(&loader, "GMS_CHECKPOINT_DIR", resolveGMSArtifactDir(storage))
+
+	return []corev1.Container{loader}
 }
 
-// EnsureGMSCheckpointJobSidecars adds the GMS server sidecar, saver container,
-// and checkpoint control volume for a checkpoint job pod.
-func EnsureGMSCheckpointJobSidecars(
+// BuildGMSCheckpointJobSidecars prepares GMS infrastructure for a checkpoint
+// job and returns the additional containers the caller must append to
+// podSpec.Containers.
+func BuildGMSCheckpointJobSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,
 	storage snapshotprotocol.Storage,
-) error {
+) ([]corev1.Container, error) {
 	if podSpec == nil || mainContainer == nil {
-		return nil
+		return nil, nil
 	}
 	if len(mainContainer.Resources.Claims) == 0 {
-		return fmt.Errorf("gms sidecars require main container resource claims")
+		return nil, fmt.Errorf("gms sidecars require main container resource claims")
 	}
 	if storage.PVCName == "" || storage.BasePath == "" || storage.Location == "" {
-		return fmt.Errorf("gms checkpoint jobs require resolved checkpoint storage")
+		return nil, fmt.Errorf("gms checkpoint jobs require resolved checkpoint storage")
 	}
 
 	gmsruntime.EnsureServerSidecar(podSpec, mainContainer)
@@ -104,8 +104,8 @@ func EnsureGMSCheckpointJobSidecars(
 	ensureCheckpointVolume(podSpec, storage.PVCName)
 	ensureVolumeMount(&saver, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
 	setEnv(&saver, "GMS_CHECKPOINT_DIR", resolveGMSArtifactDir(storage))
-	ensureGMSContainer(podSpec, saver)
-	return nil
+
+	return []corev1.Container{saver}, nil
 }
 
 func resolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
@@ -216,13 +216,6 @@ func setEnv(container *corev1.Container, name string, value string) {
 		return
 	}
 	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
-}
-
-func ensureGMSContainer(podSpec *corev1.PodSpec, container corev1.Container) {
-	if findContainer(podSpec, container.Name) != nil {
-		return
-	}
-	podSpec.Containers = append(podSpec.Containers, container)
 }
 
 func findContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {

@@ -105,6 +105,7 @@ func buildCheckpointJob(
 	checkpoint.EnsurePodInfoMount(mainContainer)
 	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
 
+	var gmsSidecars []corev1.Container
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
 		storage, err := checkpoint.ResolveGMSCheckpointStorage(
 			ctx,
@@ -116,10 +117,12 @@ func buildCheckpointJob(
 		if err != nil {
 			return nil, err
 		}
-		if err := checkpoint.EnsureGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage); err != nil {
+		gmsSidecars, err = checkpoint.BuildGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage)
+		if err != nil {
 			return nil, err
 		}
 	}
+	podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, gmsSidecars...)
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {
