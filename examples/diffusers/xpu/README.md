@@ -30,12 +30,7 @@ sudo apt install -y intel-fw-gpu intel-i915-dkms xpu-smi \
     intel-level-zero-gpu level-zero intel-opencl-icd
 ```
 
-Ensure your user is in the `render` group (required to access GPU devices):
-
-```bash
-sudo usermod -aG render $USER
-# Log out and back in, or use: sg render -c "your_command"
-```
+Ensure your user has access to GPU devices.
 
 Verify the GPU is visible:
 
@@ -71,7 +66,7 @@ python3 -c "import torch; print(f'XPU available: {torch.xpu.is_available()}, dev
 Expected output:
 
 ```
-XPU available: True, devices: 1
+XPU available: True, devices: int (the actual XPU card on your server)
 ```
 
 ### 3. Install Diffusers and Dependencies
@@ -181,6 +176,10 @@ print(f'Saved output.png ({len(img_data)} bytes)')
 "
 ```
 
+Example output (`seed=42`, 30 steps, 1024x1024, BF16 on Intel Arc Pro B60):
+
+![A photo of a cat sitting on a windowsill at sunset](output.png)
+
 ### Generate Multiple Images
 
 ```bash
@@ -224,11 +223,7 @@ for i, img in enumerate(resp['data']):
 
 ### "Intel XPU is not available"
 
-1. Check that your user is in the `render` group:
-   ```bash
-   groups  # should include "render"
-   sudo usermod -aG render $USER  # if not, add yourself and re-login
-   ```
+1. Check that your user has access to GPU devices.
 2. Check that GPU drivers are installed:
    ```bash
    xpu-smi discovery
