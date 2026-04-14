@@ -151,28 +151,32 @@ pub(crate) struct OfflineWorkerSnapshot {
 
 impl OfflineWorkerState {
     pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
-        let core = match args.engine_type {
+        #[allow(unused_mut)]
+        let mut core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm => {
                 if capture_kv_events {
                     EngineCore::Vllm(crate::scheduler::VllmCore::new_with_kv_capture(
-                        args,
+                        args.clone(),
                         worker_idx as u64,
                     ))
                 } else {
-                    EngineCore::Vllm(crate::scheduler::VllmCore::new(args))
+                    EngineCore::Vllm(crate::scheduler::VllmCore::new(args.clone()))
                 }
             }
             crate::common::protocols::EngineType::Sglang => {
                 if capture_kv_events {
                     EngineCore::Sglang(crate::scheduler::SglangCore::new_with_kv_capture(
-                        args,
+                        args.clone(),
                         worker_idx as u64,
                     ))
                 } else {
-                    EngineCore::Sglang(crate::scheduler::SglangCore::new(args))
+                    EngineCore::Sglang(crate::scheduler::SglangCore::new(args.clone()))
                 }
             }
         };
+
+        #[cfg(feature = "kvbm")]
+        core.init_kvbm_offline(&args);
 
         Self {
             core,

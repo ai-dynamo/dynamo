@@ -12,24 +12,36 @@ pub(crate) struct ReplayWorkerCore {
 
 impl ReplayWorkerCore {
     pub(crate) fn new(args: MockEngineArgs) -> Self {
-        let core = match args.engine_type {
-            crate::common::protocols::EngineType::Vllm => EngineCore::Vllm(VllmCore::new(args)),
+        #[allow(unused_mut)]
+        let mut core = match args.engine_type {
+            crate::common::protocols::EngineType::Vllm => {
+                EngineCore::Vllm(VllmCore::new(args.clone()))
+            }
             crate::common::protocols::EngineType::Sglang => {
-                EngineCore::Sglang(SglangCore::new(args))
+                EngineCore::Sglang(SglangCore::new(args.clone()))
             }
         };
+
+        #[cfg(feature = "kvbm")]
+        core.init_kvbm_offline(&args);
+
         Self { core }
     }
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        let core = match args.engine_type {
+        #[allow(unused_mut)]
+        let mut core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm => {
-                EngineCore::Vllm(VllmCore::new_with_kv_capture(args, worker_id))
+                EngineCore::Vllm(VllmCore::new_with_kv_capture(args.clone(), worker_id))
             }
             crate::common::protocols::EngineType::Sglang => {
-                EngineCore::Sglang(SglangCore::new_with_kv_capture(args, worker_id))
+                EngineCore::Sglang(SglangCore::new_with_kv_capture(args.clone(), worker_id))
             }
         };
+
+        #[cfg(feature = "kvbm")]
+        core.init_kvbm_offline(&args);
+
         Self { core }
     }
 

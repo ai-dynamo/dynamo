@@ -150,7 +150,7 @@ impl Scheduler {
                             block_size_bytes = ?config.block_size_bytes,
                             "KVBM offload engine initialized"
                         );
-                        core.kv_manager.set_offload_engine(Arc::new(engine));
+                        core.set_offload_engine(Arc::new(engine));
                     }
                     Err(e) => {
                         tracing::error!("Failed to initialize KVBM offload engine: {e}");

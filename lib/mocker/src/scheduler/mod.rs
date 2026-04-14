@@ -150,6 +150,44 @@ pub(crate) enum EngineCore {
 }
 
 impl EngineCore {
+    /// Initialize KVBM offload engine for offline replay (sync mode, no tokio).
+    /// Only applies to vLLM engine; no-op for SGLang.
+    #[cfg(feature = "kvbm")]
+    pub(crate) fn init_kvbm_offline(&mut self, args: &crate::common::protocols::MockEngineArgs) {
+        if args.num_g2_blocks == 0 {
+            return;
+        }
+        if let Self::Sglang(_) = self {
+            tracing::warn!(
+                "KVBM offload is not yet supported for SGLang engine; num_g2_blocks={} ignored",
+                args.num_g2_blocks
+            );
+            return;
+        }
+        if let Self::Vllm(vllm_core) = self {
+            use crate::kv_manager::kvbm_offload::{KvbmOffloadConfig, MockOffloadEngine};
+            let config = KvbmOffloadConfig {
+                num_g2_blocks: args.num_g2_blocks,
+                offload_batch_size: args.kvbm_offload_batch_size,
+                block_size_bytes: args.kv_bytes_per_token.map(|bpt| args.block_size * bpt),
+                bandwidth_g1_g2_gbps: args.kvbm_bandwidth_g1_g2,
+            };
+            match MockOffloadEngine::build_sync(&config) {
+                Ok(engine) => {
+                    vllm_core.set_offload_engine(std::sync::Arc::new(engine));
+                    vllm_core.set_virtual_time(true);
+                    tracing::info!(
+                        "KVBM offload engine initialized (offline replay, sync): num_g2={}",
+                        config.num_g2_blocks
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to init KVBM for offline replay: {e}");
+                }
+            }
+        }
+    }
+
     pub(crate) fn receive(&mut self, request: DirectRequest) -> Uuid {
         match self {
             Self::Vllm(core) => core.receive(request),

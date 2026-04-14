@@ -201,6 +201,9 @@ impl SchedulerState {
 struct PendingSwapIn {
     uuid: Uuid,
     handle: crate::kv_manager::kvbm_offload::SwapInHandle,
+    /// Prefix tokens already reused from G1 cache before the G2 defer.
+    /// Reported via `on_admit` when the swap-in completes.
+    reused_input_tokens: usize,
 }
 
 pub(crate) struct VllmCore {
@@ -283,6 +286,21 @@ impl VllmCore {
         uuid
     }
 
+    /// Attach a KVBM offload engine.
+    #[cfg(feature = "kvbm")]
+    pub(crate) fn set_offload_engine(
+        &mut self,
+        engine: std::sync::Arc<crate::kv_manager::kvbm_offload::MockOffloadEngine>,
+    ) {
+        self.kv_manager.set_offload_engine(engine);
+    }
+
+    /// Enable virtual-time mode (offline replay).
+    #[allow(dead_code)]
+    pub(crate) fn set_virtual_time(&mut self, enabled: bool) {
+        self.kv_manager.set_virtual_time(enabled);
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.state.is_empty()
     }
@@ -313,15 +331,45 @@ impl VllmCore {
         // back to the front of the waiting queue (like vLLM's
         // _try_promote_blocked_waiting_request).
         #[cfg(feature = "kvbm")]
-        self.pending_swap_ins.retain_mut(|pending| {
-            if pending.handle.is_complete() {
-                tracing::debug!(uuid = %pending.uuid, "KVBM: swap-in complete, request re-queued");
-                self.state.prepend_waiting(pending.uuid);
-                false // remove from pending
-            } else {
-                true // keep waiting
+        {
+            let virtual_time = self.kv_manager.virtual_time;
+            // Collect completed swap-ins, then process them outside the retain closure.
+            let mut completed_swap_ins = Vec::new();
+            self.pending_swap_ins.retain_mut(|pending| {
+                let done = if virtual_time {
+                    pending.handle.is_complete_at(now_ms)
+                } else {
+                    pending.handle.is_complete()
+                };
+                if done {
+                    completed_swap_ins.push((pending.uuid, pending.reused_input_tokens));
+                    false // remove from pending
+                } else {
+                    true // keep waiting
+                }
+            });
+            for (uuid, reused_input_tokens) in completed_swap_ins {
+                tracing::debug!(%uuid, "KVBM: swap-in complete, request re-queued");
+                self.state.prepend_waiting(uuid);
+                // Report the prefix cache reuse that was deferred during the G2 hit.
+                if reused_input_tokens > 0 {
+                    if let Some(collector) = collector.as_deref_mut() {
+                        collector.on_admit(uuid, now_ms, reused_input_tokens);
+                    }
+                    if let Some(admission_tx) = admission_tx {
+                        let _ = admission_tx.send(AdmissionEvent {
+                            uuid,
+                            reused_input_tokens,
+                        });
+                    }
+                }
             }
-        });
+
+            // Complete any virtual-time offloads whose deadline has arrived.
+            if virtual_time {
+                self.kv_manager.complete_ready_offloads(now_ms);
+            }
+        }
 
         let requests_before = self.state.requests.len();
         self.state.compact_running();
@@ -339,6 +387,7 @@ impl VllmCore {
             match self.schedule_request(
                 uuid,
                 false,
+                now_ms,
                 &mut token_budget,
                 &mut scheduled,
                 &mut batch_count,
@@ -375,6 +424,7 @@ impl VllmCore {
             match self.schedule_request(
                 uuid,
                 true,
+                now_ms,
                 &mut token_budget,
                 &mut scheduled,
                 &mut batch_count,
@@ -411,7 +461,23 @@ impl VllmCore {
             predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args);
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
         let (decode_time, output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
-        let end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
+        #[allow(unused_mut)]
+        let mut end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
+
+        // In virtual-time mode, if the pass made no progress but there are
+        // pending swap-ins, advance time to the earliest swap-in deadline.
+        // Without this, the replay loop would spin forever at the same now_ms.
+        #[cfg(feature = "kvbm")]
+        if self.kv_manager.virtual_time && end_ms <= now_ms {
+            let swap_in_min = self
+                .pending_swap_ins
+                .iter()
+                .filter_map(|p| p.handle.complete_at_ms());
+            let offload_min = self.kv_manager.pending_offload_deadlines().into_iter();
+            if let Some(earliest) = swap_in_min.chain(offload_min).reduce(f64::min) {
+                end_ms = earliest;
+            }
+        }
 
         let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);
 
@@ -437,7 +503,7 @@ impl VllmCore {
             return;
         };
         for signal in request.sequence.free_signal() {
-            self.kv_manager.process(&signal);
+            self.kv_manager.process(&signal, 0.0);
         }
         self.state.complete(&uuid);
     }
@@ -493,6 +559,7 @@ impl VllmCore {
         &mut self,
         uuid: Uuid,
         from_waiting: bool,
+        now_ms: f64,
         token_budget: &mut usize,
         scheduled: &mut FxHashMap<Uuid, ScheduledWork>,
         batch_count: &mut usize,
@@ -564,29 +631,47 @@ impl VllmCore {
                 MoveBlock::Use(blocks, ..) => blocks.len(),
                 _ => unreachable!(),
             };
-            let allocated = self.kv_manager.process(&signal);
+            let allocated = self.kv_manager.process(&signal, now_ms);
 
             // If process() started an async swap-in (G2 hit), defer the
             // request — it won't join this forward pass. Mirrors vLLM's
             // `request.status = WAITING_FOR_REMOTE_KVS`.
             #[cfg(feature = "kvbm")]
-            if let Some(handle) = self.kv_manager.swap_in_pending.take() {
-                // Commit what we allocated so far.
-                if let Some(request) = self.state.requests.get_mut(&uuid) {
-                    let prev_blocks = prev_allocated_tokens
-                        .div_ceil(request.sequence.block_size())
-                        .min(request.sequence.unique_blocks().len());
-                    let committed = (prev_blocks + allocated) * request.sequence.block_size();
-                    request
-                        .sequence
-                        .commit_allocation(committed.min(allocation_target));
-                    request.num_computed_tokens = actual_computed_after.min(committed);
+            if let Some(mut handle) = self.kv_manager.swap_in_pending.take() {
+                // If swap-in is already complete (instant transfer), skip the defer
+                // and continue allocating. Deferring for completed transfers causes a
+                // snowball: extra passes let concurrent requests evict G1 blocks,
+                // creating more G2 hits and more defers.
+                let already_done = if self.kv_manager.virtual_time {
+                    handle.is_complete_at(now_ms)
+                } else {
+                    handle.is_complete()
+                };
+                if already_done {
+                    // Swap-in already done — treat as normal allocation, continue loop.
+                } else {
+                    // Commit what we allocated so far.
+                    if let Some(request) = self.state.requests.get_mut(&uuid) {
+                        let prev_blocks = prev_allocated_tokens
+                            .div_ceil(request.sequence.block_size())
+                            .min(request.sequence.unique_blocks().len());
+                        let committed = (prev_blocks + allocated) * request.sequence.block_size();
+                        request
+                            .sequence
+                            .commit_allocation(committed.min(allocation_target));
+                        request.num_computed_tokens = actual_computed_after.min(committed);
+                    }
+                    // Remove from waiting and park until swap-in completes.
+                    self.state.waiting_members.remove(&uuid);
+                    let g2_reused_tokens = self.kv_manager.g2_reused_blocks * self.args.block_size;
+                    self.pending_swap_ins.push(PendingSwapIn {
+                        uuid,
+                        handle,
+                        reused_input_tokens: cached_prefix_tokens + g2_reused_tokens,
+                    });
+                    tracing::debug!(%uuid, cached_prefix_tokens, "KVBM: request deferred for swap-in");
+                    return ScheduleOutcome::Blocked;
                 }
-                // Remove from waiting and park until swap-in completes.
-                self.state.waiting_members.remove(&uuid);
-                self.pending_swap_ins.push(PendingSwapIn { uuid, handle });
-                tracing::debug!(%uuid, "KVBM: request deferred for swap-in");
-                return ScheduleOutcome::Blocked;
             }
 
             let (_committed_tokens, current_computed_tokens) = {
@@ -616,7 +701,7 @@ impl VllmCore {
                 break;
             };
             for signal in preempted.signals {
-                self.kv_manager.process(&signal);
+                self.kv_manager.process(&signal, now_ms);
             }
             *preempted_any = true;
             if let Some(undone) = scheduled.remove(&preempted.uuid) {
@@ -732,7 +817,7 @@ impl VllmCore {
                     break;
                 };
                 let signals = sequence.generate();
-                if process_signals(&mut self.kv_manager, &signals) {
+                if process_signals(&mut self.kv_manager, &signals, decode_start_ms) {
                     if sequence.generated_tokens() < sequence.max_output_tokens() {
                         sequence.commit_allocation(sequence.len());
                     }
@@ -746,7 +831,7 @@ impl VllmCore {
                     break;
                 };
                 for signal in preempted.signals {
-                    self.kv_manager.process(&signal);
+                    self.kv_manager.process(&signal, decode_start_ms);
                 }
                 if preempted.uuid == uuid {
                     break;
@@ -927,9 +1012,9 @@ fn scale_decode_time(decode_ms: f64, args: &MockEngineArgs) -> Duration {
     Duration::from_secs_f64(unscaled.as_secs_f64() / effective_ratio)
 }
 
-fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> bool {
+fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock], now_ms: f64) -> bool {
     for signal in signals {
-        if kv_manager.process(signal) > 0 {
+        if kv_manager.process(signal, now_ms) > 0 {
             continue;
         }
 

@@ -51,7 +51,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 #[cfg(feature = "kvbm")]
-use crate::kv_manager::kvbm_offload::{MockOffloadEngine, SwapInHandle};
+use crate::kv_manager::kvbm_offload::{MockOffloadEngine, PendingOffload, SwapInHandle};
 #[cfg(feature = "kvbm")]
 use kvbm_engine::BlockId;
 
@@ -73,6 +73,14 @@ pub struct KvManager {
     /// The scheduler takes this to defer the request (WAITING_FOR_SWAP_IN).
     #[cfg(feature = "kvbm")]
     pub swap_in_pending: Option<SwapInHandle>,
+    /// True for offline replay (virtual clock), false for live/online.
+    pub(crate) virtual_time: bool,
+    /// Pending G1→G2 offloads in virtual-time mode, drained by the caller.
+    #[cfg(feature = "kvbm")]
+    pending_offloads: Vec<PendingOffload>,
+    /// Number of blocks reused from G2 during the last `process()` call.
+    #[cfg(feature = "kvbm")]
+    pub(crate) g2_reused_blocks: usize,
 }
 
 impl KvManager {
@@ -107,6 +115,11 @@ impl KvManager {
             offload_engine: None,
             #[cfg(feature = "kvbm")]
             swap_in_pending: None,
+            virtual_time: false,
+            #[cfg(feature = "kvbm")]
+            pending_offloads: Vec::new(),
+            #[cfg(feature = "kvbm")]
+            g2_reused_blocks: 0,
         }
     }
 
@@ -114,6 +127,58 @@ impl KvManager {
     #[cfg(feature = "kvbm")]
     pub fn set_offload_engine(&mut self, engine: Arc<MockOffloadEngine>) {
         self.offload_engine = Some(engine);
+    }
+
+    /// Enable virtual-time mode (offline replay).
+    pub fn set_virtual_time(&mut self, enabled: bool) {
+        self.virtual_time = enabled;
+    }
+
+    /// Drain pending offloads accumulated during virtual-time `process()` calls.
+    #[cfg(feature = "kvbm")]
+    pub fn drain_pending_offloads(&mut self) -> Vec<PendingOffload> {
+        std::mem::take(&mut self.pending_offloads)
+    }
+
+    /// Return deadlines of pending virtual-time offloads.
+    #[cfg(feature = "kvbm")]
+    pub fn pending_offload_deadlines(&self) -> Vec<f64> {
+        self.pending_offloads
+            .iter()
+            .map(|o| o.complete_at_ms)
+            .collect()
+    }
+
+    /// Complete any virtual-time offloads whose deadline has arrived.
+    /// Called at the start of each `execute_pass_internal()` in offline mode.
+    #[cfg(feature = "kvbm")]
+    pub fn complete_ready_offloads(&mut self, now_ms: f64) {
+        if self.pending_offloads.is_empty() {
+            return;
+        }
+        let engine = match &self.offload_engine {
+            Some(e) => e.clone(),
+            None => return,
+        };
+        let mut completed = 0usize;
+        let mut still_pending = Vec::new();
+        for offload in self.pending_offloads.drain(..) {
+            if now_ms >= offload.complete_at_ms {
+                engine.complete_offload(offload.block_id, offload.seq_hash);
+                completed += 1;
+            } else {
+                still_pending.push(offload);
+            }
+        }
+        if completed > 0 {
+            tracing::debug!(
+                completed,
+                remaining = still_pending.len(),
+                now_ms,
+                "KVBM offline: completed pending offloads"
+            );
+        }
+        self.pending_offloads = still_pending;
     }
 
     /// Allocate a physical slot ID for a newly inserted G1 block.
@@ -217,7 +282,11 @@ impl KvManager {
     /// allocated. Callers should use the return value to track partial progress.
     ///
     /// For other variants, returns the total block count (they always succeed or panic).
-    pub fn process(&mut self, event: &MoveBlock) -> usize {
+    pub fn process(&mut self, event: &MoveBlock, #[allow(unused)] now_ms: f64) -> usize {
+        #[cfg(feature = "kvbm")]
+        {
+            self.g2_reused_blocks = 0;
+        }
         match event {
             MoveBlock::Use(hashes, local_hashes, token_ids, parent) => {
                 let mut blocks_stored = Vec::<u64>::new();
@@ -225,6 +294,9 @@ impl KvManager {
                     token_ids.as_ref().map(|_| Vec::new());
                 #[cfg(feature = "kvbm")]
                 let kvbm_engine = self.offload_engine.clone();
+                // Tracks whether we already did a batch G2 scan (avoid O(n^2) re-scanning)
+                #[cfg(feature = "kvbm")]
+                let mut g2_scanned = false;
 
                 let mut parent_block: Option<&UniqueBlock> = parent.as_ref();
                 let mut allocated = 0;
@@ -244,52 +316,119 @@ impl KvManager {
                         continue;
                     }
 
-                    // Check G2 for swap-in. Mirrors vLLM's kv_offload flow:
-                    // 1. Allocate GPU blocks (like allocate_slots with delay_cache_blocks)
-                    // 2. Start async transfer (like transfer_async on separate CUDA stream)
-                    // 3. Return early — scheduler defers request to WAITING_FOR_SWAP_IN
+                    // Batch G2 swap-in: scan ALL remaining blocks for G2 hits,
+                    // allocate GPU slots for all of them, create ONE SwapInHandle.
+                    // This mirrors vLLM's get_num_new_matched_tokens() which returns
+                    // the total external token count in one call, triggering a single
+                    // WAITING_FOR_REMOTE_KVS defer.
                     #[cfg(feature = "kvbm")]
-                    if let Some(ref engine) = kvbm_engine {
-                        if let UniqueBlock::FullBlock(seq_hash) = hash {
-                            if engine.find_in_tiers(*seq_hash) {
-                                // Allocate GPU slot for the swapped-in block.
-                                if self.cache.is_at_capacity() {
-                                    let Some(evicted) = self.cache.evict_inactive() else {
-                                        break;
-                                    };
-                                    if let UniqueBlock::FullBlock(eh) = &evicted {
-                                        self.publish_kv_event(vec![*eh], &[], None, false, None);
+                    if !g2_scanned {
+                        if let Some(ref engine) = kvbm_engine {
+                            g2_scanned = true;
+                            // Batch scan remaining blocks for G2 hits (single has_blocks call)
+                            let remaining = &hashes[i..];
+                            let batch_hashes: Vec<dynamo_tokens::SequenceHash> = remaining
+                                .iter()
+                                .filter_map(|h| match h {
+                                    UniqueBlock::FullBlock(seq_hash) => Some(*seq_hash),
+                                    _ => None,
+                                })
+                                .collect();
+                            let batch_results = engine.find_in_tiers_batch(&batch_hashes);
+                            // Map batch results back to remaining indices.
+                            // Only take CONTIGUOUS G2 hits from position 0 in remaining
+                            // (mirrors vLLM prefix-sequential matching). Stop on first miss.
+                            let mut g2_hits: Vec<usize> = Vec::new();
+                            let mut batch_idx = 0;
+                            for (j, h) in remaining.iter().enumerate() {
+                                if matches!(h, UniqueBlock::FullBlock(_)) {
+                                    if batch_idx < batch_results.len() && batch_results[batch_idx] {
+                                        g2_hits.push(j);
+                                    } else {
+                                        break; // first miss → stop (prefix-sequential)
                                     }
-                                    if let Some((bid, sh)) = self.release_block_id(&evicted) {
-                                        engine.enqueue_g1_eviction(bid, sh);
+                                    batch_idx += 1;
+                                } else {
+                                    break; // PartialBlock breaks contiguity
+                                }
+                            }
+
+                            if !g2_hits.is_empty() {
+                                // Allocate GPU slots for ALL G2 hit blocks at once
+                                let mut g2_allocated = 0usize;
+                                for &j in &g2_hits {
+                                    let g2_hash = &remaining[j];
+                                    if self.cache.is_at_capacity() {
+                                        let Some(evicted) = self.cache.evict_inactive() else {
+                                            break;
+                                        };
+                                        if let UniqueBlock::FullBlock(eh) = &evicted {
+                                            self.publish_kv_event(
+                                                vec![*eh],
+                                                &[],
+                                                None,
+                                                false,
+                                                None,
+                                            );
+                                        }
+                                        if let Some((bid, sh)) = self.release_block_id(&evicted) {
+                                            if self.virtual_time {
+                                                self.pending_offloads.push(
+                                                    engine.enqueue_g1_eviction_virtual(
+                                                        bid, sh, now_ms,
+                                                    ),
+                                                );
+                                            } else {
+                                                engine.enqueue_g1_eviction(bid, sh);
+                                            }
+                                        }
+                                    }
+                                    self.cache.insert_active(g2_hash.clone(), 1);
+                                    self.assign_block_id(g2_hash);
+                                    allocated += 1;
+                                    g2_allocated += 1;
+                                    self.g2_reused_blocks += 1;
+                                    // Track G2-reused blocks for KV 'Stored' event so the
+                                    // router's radix tree stays consistent after swap-in.
+                                    if let UniqueBlock::FullBlock(sh) = g2_hash {
+                                        blocks_stored.push(*sh);
                                     }
                                 }
-                                self.cache.insert_active(hash.clone(), 1);
-                                self.assign_block_id(hash);
-                                allocated += 1;
 
-                                // Start async swap-in and signal scheduler to defer.
-                                self.swap_in_pending = Some(engine.start_swap_in(1));
+                                if g2_allocated > 0 {
+                                    // Single batched swap-in for all G2 blocks
+                                    self.swap_in_pending = Some(if self.virtual_time {
+                                        engine.start_swap_in_virtual(g2_allocated, now_ms)
+                                    } else {
+                                        engine.start_swap_in(g2_allocated)
+                                    });
 
-                                // Publish blocks stored so far, then return.
-                                let parent_hash = match parent_block {
-                                    None => None,
-                                    Some(UniqueBlock::FullBlock(b)) => Some(*b),
-                                    Some(UniqueBlock::PartialBlock(_)) => {
-                                        panic!("parent block cannot be partial")
-                                    }
-                                };
-                                self.publish_kv_event(
-                                    blocks_stored,
-                                    local_hashes,
-                                    parent_hash,
-                                    true,
-                                    stored_token_ids,
-                                );
-                                return allocated;
+                                    tracing::debug!(
+                                        g2_allocated,
+                                        total_g2_hits = g2_hits.len(),
+                                        "KVBM: batched swap-in"
+                                    );
+
+                                    // Publish blocks stored so far, then return for single defer
+                                    let parent_hash = match parent_block {
+                                        None => None,
+                                        Some(UniqueBlock::FullBlock(b)) => Some(*b),
+                                        Some(UniqueBlock::PartialBlock(_)) => {
+                                            panic!("parent block cannot be partial")
+                                        }
+                                    };
+                                    self.publish_kv_event(
+                                        blocks_stored,
+                                        local_hashes,
+                                        parent_hash,
+                                        true,
+                                        stored_token_ids,
+                                    );
+                                    return allocated;
+                                }
                             }
                         }
-                    }
+                    } // !g2_scanned
 
                     // If at max capacity, evict the oldest entry from inactive blocks
                     if self.cache.is_at_capacity() {
@@ -312,8 +451,18 @@ impl KvManager {
                         // Enqueue evicted block for G2 offload if KVBM is enabled.
                         #[cfg(feature = "kvbm")]
                         if let Some(ref engine) = kvbm_engine {
-                            if let Some((block_id, seq_hash)) = self.release_block_id(&evicted) {
-                                engine.enqueue_g1_eviction(block_id, seq_hash);
+                            let released = self.release_block_id(&evicted);
+                            tracing::trace!(?evicted, ?released, "KVBM: G1 eviction");
+                            if let Some((block_id, seq_hash)) = released {
+                                if self.virtual_time {
+                                    self.pending_offloads.push(
+                                        engine.enqueue_g1_eviction_virtual(
+                                            block_id, seq_hash, now_ms,
+                                        ),
+                                    );
+                                } else {
+                                    engine.enqueue_g1_eviction(block_id, seq_hash);
+                                }
                             }
                         }
                     }
@@ -537,7 +686,7 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> usize {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes, None, None))
+            manager.process(&MoveBlock::Use(blocks, hashes, None, None), 0.0)
         }
 
         // First use 10 blocks (0 to 9) in a batch
@@ -564,19 +713,19 @@ mod tests {
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks: Vec<_> = ids.iter().map(|&id| UniqueBlock::FullBlock(id)).collect();
             let hashes: Vec<_> = ids.into_iter().collect();
-            manager.process(&MoveBlock::Use(blocks, hashes, None, None));
+            manager.process(&MoveBlock::Use(blocks, hashes, None, None), 0.0);
         }
 
         // Helper function to destroy multiple blocks
         fn destroy_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
-            manager.process(&MoveBlock::Destroy(blocks));
+            manager.process(&MoveBlock::Destroy(blocks), 0.0);
         }
 
         // Helper function to deref multiple blocks
         fn deref_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
-            manager.process(&MoveBlock::Deref(blocks));
+            manager.process(&MoveBlock::Deref(blocks), 0.0);
         }
 
         // Helper function to check if active blocks contain expected blocks with expected ref counts
@@ -711,12 +860,12 @@ mod tests {
 
         // Chunk 1: allocate blocks 0-3
         let signal = seq.prepare_allocation(256).unwrap();
-        manager.process(&signal);
+        manager.process(&signal, 0.0);
         seq.commit_allocation(256);
 
         // Chunk 2: allocate blocks 4-7
         let signal = seq.prepare_allocation(512).unwrap();
-        manager.process(&signal);
+        manager.process(&signal, 0.0);
         seq.commit_allocation(512);
 
         let events = sink.events.lock().unwrap();
@@ -753,12 +902,12 @@ mod tests {
         let mut manager = KvManager::new(16, 4);
 
         let signal = seq.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 2);
+        assert_eq!(manager.process(&signal, 0.0), 2);
 
         for _ in 0..3 {
             let signals = seq.generate();
             for signal in &signals {
-                manager.process(signal);
+                manager.process(signal, 0.0);
             }
             if seq.generated_tokens() < seq.max_output_tokens() {
                 seq.commit_allocation(seq.len());
@@ -768,18 +917,18 @@ mod tests {
 
         let first_reset = seq.reset_with_signal();
         for signal in &first_reset {
-            manager.process(signal);
+            manager.process(signal, 0.0);
         }
         assert_eq!(manager.num_active_blocks(), 0);
 
         let prompt_only = seq.prepare_allocation(seq.num_input_tokens()).unwrap();
-        assert_eq!(manager.process(&prompt_only), 2);
+        assert_eq!(manager.process(&prompt_only, 0.0), 2);
         seq.commit_allocation(seq.num_input_tokens());
         assert_eq!(manager.num_active_blocks(), 2);
 
         let second_reset = seq.reset_with_signal();
         for signal in &second_reset {
-            manager.process(signal);
+            manager.process(signal, 0.0);
         }
 
         assert_eq!(manager.num_active_blocks(), 0);
