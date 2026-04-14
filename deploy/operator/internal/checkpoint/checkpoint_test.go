@@ -325,6 +325,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 
 	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
 		podSpec := testPodSpec()
+		podSpec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
 		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash, GMS: true}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
@@ -346,7 +347,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		for _, item := range loader.Env {
 			env[item.Name] = item.Value
 		}
-		assert.Equal(t, "/checkpoints/"+testHash+"/versions/1", env["GMS_CHECKPOINT_DIR"])
+		assert.Equal(t, "/checkpoints/"+testHash+"/gms/versions/1", env["GMS_CHECKPOINT_DIR"])
 	})
 
 	t.Run("error cases", func(t *testing.T) {

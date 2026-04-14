@@ -8,6 +8,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	appsv1 "k8s.io/api/apps/v1"
@@ -45,6 +46,9 @@ import time
 import pynvml
 
 
+STOP_FILE = os.path.join(os.environ["GMS_CONTROL_DIR"], "checkpoint-done")
+
+
 def devices():
     pynvml.nvmlInit()
     try:
@@ -78,11 +82,16 @@ signal.signal(signal.SIGTERM, shutdown)
 signal.signal(signal.SIGINT, shutdown)
 
 while True:
+    stop_requested = os.path.exists(STOP_FILE)
+    if stop_requested:
+        shutdown()
     running = False
     for process in processes:
         code = process.poll()
         if code is None:
             running = True
+            continue
+        if stop_requested:
             continue
         shutdown()
         sys.exit(code)
@@ -98,6 +107,7 @@ import ssl
 import subprocess
 import time
 import urllib.request
+from pathlib import Path
 
 import pynvml
 from gpu_memory_service.common.utils import get_socket_path
@@ -116,6 +126,7 @@ POD_API_URL = (
     + f"/api/v1/namespaces/{os.environ['POD_NAMESPACE']}/pods/{os.environ['POD_NAME']}"
 )
 SSL_CONTEXT = ssl.create_default_context(cafile=SERVICE_CA)
+STOP_FILE = Path(os.environ["GMS_CONTROL_DIR"]) / "checkpoint-done"
 
 
 def devices():
@@ -126,13 +137,16 @@ def devices():
         pynvml.nvmlShutdown()
 
 
-def checkpoint_pod_ready():
+def checkpoint_pod():
     request = urllib.request.Request(
         POD_API_URL,
         headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
     )
     with urllib.request.urlopen(request, context=SSL_CONTEXT, timeout=5) as response:
-        pod = json.load(response)
+        return json.load(response)
+
+
+def checkpoint_pod_ready(pod):
     status = pod.get("status") or {}
     if str(status.get("phase", "")).strip() != "Running":
         return False
@@ -142,31 +156,50 @@ def checkpoint_pod_ready():
     return False
 
 
+def main_terminated(pod):
+    status = pod.get("status") or {}
+    for container in status.get("containerStatuses") or []:
+        if container.get("name") != "main":
+            continue
+        return bool((container.get("state") or {}).get("terminated"))
+    return False
+
+
 print("Waiting for checkpoint pod Ready=True before GMS save", flush=True)
 while True:
     try:
-        if checkpoint_pod_ready():
-            break
+        pod = checkpoint_pod()
     except Exception:
-        pass
+        time.sleep(1)
+        continue
+    if checkpoint_pod_ready(pod):
+        break
+    if main_terminated(pod):
+        raise SystemExit("main container terminated before GMS save could start")
     time.sleep(1)
 print("Checkpoint pod is Ready; starting GMS save", flush=True)
 
-for device in devices():
-    socket_path = get_socket_path(device, "weights")
-    while not os.path.exists(socket_path):
-        time.sleep(1)
-    output_dir = os.path.join(os.environ["GMS_CHECKPOINT_DIR"], "gms", f"device-{device}")
-    subprocess.run([
-        "python3",
-        "-m",
-        "gpu_memory_service.cli.storage_runner",
-        "save",
-        "--output-dir",
-        output_dir,
-        "--device",
-        str(device),
-    ], check=True)
+try:
+    device_ids = devices()
+    if not device_ids:
+        raise SystemExit("no nvidia devices found")
+    for device in device_ids:
+        socket_path = get_socket_path(device, "weights")
+        while not os.path.exists(socket_path):
+            time.sleep(1)
+        output_dir = os.path.join(os.environ["GMS_CHECKPOINT_DIR"], "gms", f"device-{device}")
+        subprocess.run([
+            "python3",
+            "-m",
+            "gpu_memory_service.cli.storage_runner",
+            "save",
+            "--output-dir",
+            output_dir,
+            "--device",
+            str(device),
+        ], check=True)
+finally:
+    STOP_FILE.write_text("done", encoding="utf-8")
 `
 
 const gmsLoadCommand = `
@@ -247,9 +280,18 @@ func EnsureGMSRestoreSidecars(podSpec *corev1.PodSpec, mainContainer *corev1.Con
 	applyGMSSocketEnv(mainContainer)
 	ensureVolumeMount(mainContainer, corev1.VolumeMount{Name: GMSSocketsVolumeName, MountPath: GMSSocketDir})
 	ensureInitContainer(podSpec, mainContainer.Image)
-	ensureGMSContainer(podSpec, gmsServerContainer(mainContainer.Image, GMSWeightsServerContainer, "weights"))
-	ensureGMSContainer(podSpec, gmsServerContainer(mainContainer.Image, GMSKVCacheServerContainer, "kv_cache"))
-	ensureGMSContainer(podSpec, gmsHelperContainer(mainContainer.Image, GMSLoaderContainer, gmsLoadCommand))
+
+	weightsServer := gmsServerContainer(mainContainer.Image, GMSWeightsServerContainer, "weights")
+	copyGMSDeviceClaims(mainContainer, &weightsServer)
+	ensureGMSContainer(podSpec, weightsServer)
+
+	kvCacheServer := gmsServerContainer(mainContainer.Image, GMSKVCacheServerContainer, "kv_cache")
+	copyGMSDeviceClaims(mainContainer, &kvCacheServer)
+	ensureGMSContainer(podSpec, kvCacheServer)
+
+	loader := gmsHelperContainer(mainContainer.Image, GMSLoaderContainer, gmsLoadCommand)
+	copyGMSDeviceClaims(mainContainer, &loader)
+	ensureGMSContainer(podSpec, loader)
 }
 
 func EnsureGMSRestoreHelperMounts(podSpec *corev1.PodSpec, storage snapshotprotocol.Storage) {
@@ -259,7 +301,7 @@ func EnsureGMSRestoreHelperMounts(podSpec *corev1.PodSpec, storage snapshotproto
 	}
 	ensureCheckpointVolume(podSpec, storage.PVCName)
 	ensureVolumeMount(loader, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
-	setEnv(loader, "GMS_CHECKPOINT_DIR", storage.Location)
+	setEnv(loader, "GMS_CHECKPOINT_DIR", resolveGMSArtifactDir(storage))
 }
 
 func EnsureGMSCheckpointJobSidecars(
@@ -270,6 +312,9 @@ func EnsureGMSCheckpointJobSidecars(
 	if podSpec == nil || mainContainer == nil {
 		return nil
 	}
+	if len(mainContainer.Resources.Claims) == 0 {
+		return fmt.Errorf("gms sidecars require main container resource claims")
+	}
 	if storage.PVCName == "" || storage.BasePath == "" || storage.Location == "" {
 		return fmt.Errorf("gms checkpoint jobs require resolved checkpoint storage")
 	}
@@ -278,15 +323,28 @@ func EnsureGMSCheckpointJobSidecars(
 	applyGMSSocketEnv(mainContainer)
 	ensureVolumeMount(mainContainer, corev1.VolumeMount{Name: GMSSocketsVolumeName, MountPath: GMSSocketDir})
 	ensureInitContainer(podSpec, mainContainer.Image)
-	ensureGMSContainer(podSpec, gmsServerContainer(mainContainer.Image, GMSWeightsServerContainer, "weights"))
-	ensureGMSContainer(podSpec, gmsServerContainer(mainContainer.Image, GMSKVCacheServerContainer, "kv_cache"))
+
+	weightsServer := gmsServerContainer(mainContainer.Image, GMSWeightsServerContainer, "weights")
+	copyGMSDeviceClaims(mainContainer, &weightsServer)
+	ensureGMSContainer(podSpec, weightsServer)
+
+	kvCacheServer := gmsServerContainer(mainContainer.Image, GMSKVCacheServerContainer, "kv_cache")
+	copyGMSDeviceClaims(mainContainer, &kvCacheServer)
+	ensureGMSContainer(podSpec, kvCacheServer)
 
 	saver := gmsHelperContainer(mainContainer.Image, GMSSaverContainer, gmsSaveCommand)
+	copyGMSDeviceClaims(mainContainer, &saver)
 	ensureCheckpointVolume(podSpec, storage.PVCName)
 	ensureVolumeMount(&saver, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
-	setEnv(&saver, "GMS_CHECKPOINT_DIR", storage.Location)
+	setEnv(&saver, "GMS_CHECKPOINT_DIR", resolveGMSArtifactDir(storage))
 	ensureGMSContainer(podSpec, saver)
 	return nil
+}
+
+func resolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
+	checkpointRoot := filepath.Dir(filepath.Dir(storage.Location))
+	artifactVersion := filepath.Base(storage.Location)
+	return filepath.Join(checkpointRoot, "gms", "versions", artifactVersion)
 }
 
 func gmsServerContainer(image string, name string, tag string) corev1.Container {
@@ -352,6 +410,13 @@ func applyGMSSocketEnv(container *corev1.Container) {
 	setEnv(container, "TMPDIR", GMSSocketDir)
 	setEnv(container, "GMS_SOCKET_DIR", GMSSocketDir)
 	setEnv(container, "GMS_CONTROL_DIR", GMSControlDir)
+}
+
+func copyGMSDeviceClaims(mainContainer *corev1.Container, container *corev1.Container) {
+	if mainContainer == nil || container == nil || len(mainContainer.Resources.Claims) == 0 {
+		return
+	}
+	container.Resources.Claims = append([]corev1.ResourceClaim{}, mainContainer.Resources.Claims...)
 }
 
 func ensureCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {

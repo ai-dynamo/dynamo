@@ -93,6 +93,9 @@ func InjectCheckpointIntoPodSpec(
 	}
 
 	if info.GMS {
+		if len(mainContainer.Resources.Claims) == 0 {
+			return fmt.Errorf("gms sidecars require main container resource claims")
+		}
 		storage, err := ResolveGMSCheckpointStorage(
 			ctx,
 			reader,
