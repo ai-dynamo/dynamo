@@ -234,8 +234,20 @@ where
 
         // Associate the subject with the backend instance so the discovery-driven
         // watcher can cancel all pending subjects when this instance is removed.
+        // If the instance is already tombstoned (removed before we got here),
+        // associate_instance returns false and the subject is already cancelled --
+        // skip the send_request round trip and fail fast with a migratable error.
         if let (Some(subject), Some(iid)) = (&recv_subject, instance_id) {
-            self.resp_transport.associate_instance(subject, iid).await;
+            if !self.resp_transport.associate_instance(subject, iid).await {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message(
+                            "Worker removed before request could be sent (tombstoned instance)"
+                        )
+                        .build()
+                ));
+            }
         }
 
         // package up the connection info as part of the "header" component of the two part message

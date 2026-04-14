@@ -218,7 +218,11 @@ impl TcpStreamServer {
     /// `cancel_instance_streams` call), the subject is immediately cancelled
     /// instead of being tracked. This closes the race window where the
     /// discovery watcher fires before the request path calls this method.
-    pub async fn associate_instance(&self, subject: &str, instance_id: u64) {
+    /// Returns `true` if the subject was tracked normally, `false` if the
+    /// instance was tombstoned and the subject was immediately cancelled.
+    /// When `false` is returned the caller should skip `send_request` and
+    /// return a migratable `Disconnected` error directly.
+    pub async fn associate_instance(&self, subject: &str, instance_id: u64) -> bool {
         let mut state = self.state.lock().await;
         if state.removed_instances.contains(&instance_id) {
             // Instance was already removed -- cancel immediately.
@@ -228,7 +232,7 @@ impl TcpStreamServer {
                 "Cancelling subject immediately: instance already removed (tombstoned)"
             );
             state.rx_subjects.remove(subject);
-            return;
+            return false;
         }
         state
             .subject_instance
@@ -238,6 +242,7 @@ impl TcpStreamServer {
             .entry(instance_id)
             .or_default()
             .insert(subject.to_string());
+        true
     }
 
     /// Cancel a single pending response-stream registration.
@@ -960,7 +965,7 @@ mod tests {
         let (subject, provider) = register_and_get_subject(&server).await;
 
         // Associate the subject with instance 42
-        server.associate_instance(&subject, 42).await;
+        assert!(server.associate_instance(&subject, 42).await);
 
         // Cancel all streams for instance 42
         let cancelled = server.cancel_instance_streams(42).await;
@@ -980,9 +985,9 @@ mod tests {
         let (subj3, prov3) = register_and_get_subject(&server).await;
 
         // Associate first two with instance 10, third with instance 20
-        server.associate_instance(&subj1, 10).await;
-        server.associate_instance(&subj2, 10).await;
-        server.associate_instance(&subj3, 20).await;
+        assert!(server.associate_instance(&subj1, 10).await);
+        assert!(server.associate_instance(&subj2, 10).await);
+        assert!(server.associate_instance(&subj3, 20).await);
 
         // Cancel instance 10 -- should cancel 2 subjects
         let cancelled = server.cancel_instance_streams(10).await;
@@ -1011,7 +1016,7 @@ mod tests {
         let server = test_server().await;
 
         let (subject, _provider) = register_and_get_subject(&server).await;
-        server.associate_instance(&subject, 42).await;
+        assert!(server.associate_instance(&subject, 42).await);
 
         // Cancel the individual subject
         server.cancel_recv_stream(&subject).await;
@@ -1113,7 +1118,13 @@ mod tests {
 
         // Now register a subject and try to associate it with the tombstoned instance.
         let (subject, provider) = register_and_get_subject(&server).await;
-        server.associate_instance(&subject, 42).await;
+        let associated = server.associate_instance(&subject, 42).await;
+
+        // associate_instance should return false when the instance is tombstoned.
+        assert!(
+            !associated,
+            "associate_instance on a tombstoned instance should return false"
+        );
 
         // The provider should resolve with an error because associate_instance
         // found the tombstone and immediately cancelled the subject.
@@ -1136,7 +1147,7 @@ mod tests {
 
         // Now associate should work normally (subject NOT cancelled).
         let (subject, _provider) = register_and_get_subject(&server).await;
-        server.associate_instance(&subject, 42).await;
+        assert!(server.associate_instance(&subject, 42).await);
 
         // Subject should be tracked, not cancelled.
         let cancelled = server.cancel_instance_streams(42).await;
