@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# DEPRECATED: This module is part of the legacy test framework.
+# New tests should use the event-based framework in test_deployment_scenario.py.
+# See tests/fault_tolerance/deploy/TESTING.md for the reference guide.
+
 """Factory module for selecting client implementation (legacy or AI-Perf)."""
 
 from typing import Callable
