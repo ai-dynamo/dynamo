@@ -41,6 +41,7 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # Skipped for pull_request events — tj-actions uses the REST API instead.
     - name: Get merge base for push events
       id: merge-base
       if: github.event_name != 'pull_request'
@@ -48,17 +49,27 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.gh_token }}
       run: |
-        # For push to pull-request/N branches, use the GitHub Compare API
-        # to get the true merge-base SHA. This avoids fetch-depth: 0
-        # (which fetches all 1600+ branches, ~3 min).
+        # How changed-file detection works (callers use fetch-depth: 1):
         #
-        # For pull_request events this step is skipped — tj-actions uses
-        # the GitHub REST API directly (use_rest_api: true).
+        #   pull_request events:
+        #     tj-actions/changed-files calls the GitHub REST API (GET /pulls/{n}/files)
+        #     to list changed files. No git history needed — works with shallow clones.
+        #
+        #   push to pull-request/N branches:
+        #     The GitHub Compare API returns the true merge-base SHA. We fetch that
+        #     single commit so tj-actions can run `git diff merge-base HEAD` locally.
+        #
+        #   push to main / release branches:
+        #     base_sha is empty, skip_initial_fetch is false — tj-actions falls back
+        #     to its default behaviour (deepens history and diffs against the previous
+        #     commit). Callers short-circuit outputs to true for main/release anyway.
         if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
           BASE=$(gh pr view "${BASH_REMATCH[1]}" --json baseRefName -q '.baseRefName')
+          # Compare API returns the true merge-base (fork point), not the branch tip.
           BASE_SHA=$(gh api "repos/${{ github.repository }}/compare/${BASE}...${{ github.sha }}" \
             --jq '.merge_base_commit.sha')
           echo "Merge base: $BASE_SHA"
+          # Fetch the merge-base commit so tj-actions can `git diff` against it.
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
         else
@@ -71,8 +82,13 @@ runs:
       with:
         files_yaml_from_source_file: .github/filters.yaml
         token: ${{ inputs.gh_token }}
+        # pull_request: calls GET /pulls/{n}/files — accurate, no git history needed.
         use_rest_api: ${{ github.event_name == 'pull_request' }}
+        # push to pull-request/N: merge-base SHA from Compare API (set above).
+        # push to main/release: empty — tj-actions uses default (previous commit).
         base_sha: ${{ steps.merge-base.outputs.base_sha || '' }}
+        # When we provide base_sha we've already fetched everything needed.
+        # When base_sha is empty, let tj-actions fetch history itself.
         skip_initial_fetch: ${{ steps.merge-base.outputs.base_sha != '' }}
 
     - name: Debug changed files
