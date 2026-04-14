@@ -10,16 +10,17 @@ For a quick overview, see the [Planner overview](README.md). For architecture in
 
 ## Scaling Modes
 
-The planner supports two scaling modes that can be used independently or together:
+The planner supports three optimization targets that determine how scaling decisions are made:
 
-- **Throughput-based scaling** (`enable_throughput_scaling: true`): Uses pre-deployment engine performance data (from self-benchmark or profiler) and traffic prediction to plan capacity. Best for stable, predictable workloads.
-- **Load-based scaling** (`enable_load_scaling: true`): Uses real-time ForwardPassMetrics (FPM) from the Dynamo event plane and online regression to make scaling decisions. Best for bursty or unpredictable traffic. Does not require pre-deployment data.
+- **`throughput`** (default): Uses static thresholds on queue depth and KV cache utilization. No SLA targets or profiling needed. Works out of the box.
+- **`latency`**: Same approach as `throughput` but with more aggressive thresholds — scales up earlier and tolerates less queuing. Ideal for latency-sensitive workloads.
+- **`sla`**: Uses regression-based performance models with specific TTFT/ITL targets. Supports both throughput-based (predictive) and load-based (reactive) scaling modes. For advanced users who need precise SLA control.
 
 **When to use which:**
 
-- Enable **throughput-based scaling** whenever pre-deployment performance data is available (via self-benchmark or profiler). It provides stable, prediction-based capacity planning.
-- Enable **load-based scaling** when traffic is bursty. It reacts quickly to real-time load changes.
-- Enable **both** for the best of both worlds: throughput-based provides a capacity floor, load-based handles bursts above it. When both are enabled, use a longer `throughput_adjustment_interval`.
+- Start with **`throughput`** (the default) — it works immediately with no configuration.
+- Switch to **`latency`** if your workload has strict latency requirements and you prefer to over-provision rather than queue.
+- Use **`sla`** when you have pre-deployment profiling data and want to target specific TTFT/ITL values.
 
 ## PlannerConfig Reference
 
@@ -28,6 +29,17 @@ The planner is configured via a `PlannerConfig` JSON/YAML object. When using the
 ```yaml
 features:
   planner:
+    mode: disagg
+    backend: vllm
+    # optimization_target defaults to "throughput" — works out of the box
+```
+
+For SLA-based scaling:
+
+```yaml
+features:
+  planner:
+    optimization_target: sla
     enable_throughput_scaling: true
     enable_load_scaling: false
     pre_deployment_sweeping_mode: rapid
@@ -35,14 +47,22 @@ features:
     backend: vllm
 ```
 
-### Scaling Mode Fields
+### Optimization Target
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enable_throughput_scaling` | bool | `true` | Enable throughput-based scaling (requires pre-deployment performance data). |
-| `enable_load_scaling` | bool | `false` | Enable load-based scaling. |
+| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `sla`: regression-based scaling with ttft/itl targets. |
 
-At least one scaling mode must be enabled.
+When `optimization_target` is `throughput` or `latency`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft`/`itl` fields are ignored.
+
+### Scaling Mode Fields (SLA mode)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enable_throughput_scaling` | bool | `true` | Enable throughput-based scaling (requires pre-deployment performance data). Only used when `optimization_target: sla`. |
+| `enable_load_scaling` | bool | `false` | Enable load-based scaling. Only used when `optimization_target: sla`. |
+
+At least one scaling mode must be enabled when using `optimization_target: sla`.
 
 ### Pre-Deployment Sweeping
 
@@ -99,6 +119,15 @@ When throughput-based scaling is enabled, the planner needs engine performance d
 | `kalman_q_trend` | float | `0.1` | Process noise for trend component. |
 | `kalman_r` | float | `10.0` | Measurement noise. |
 | `kalman_min_points` | int | `5` | Minimum data points before Kalman predictions activate. |
+
+### Diagnostics Reports
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `report_interval_hours` | float or `null` | `null` | Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable periodic report generation. |
+| `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
+
+The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 
 ## Integration with Profiler
 

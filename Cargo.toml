@@ -122,6 +122,7 @@ axum = { version = "=0.8.4", features = ["macros"] }
 axum-core = { version = "0.5.2" }
 hyper = { version = "=1.7.0" }
 hyper-util = { version = "=0.1.17" }
+mio = { version = "=1.1.1" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",

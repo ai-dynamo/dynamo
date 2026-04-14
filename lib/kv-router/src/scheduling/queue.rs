@@ -60,6 +60,9 @@ pub struct SchedulerQueue<
     /// Number of requests currently parked in the pending queue.
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
     pending_count: AtomicUsize,
+    /// Sum of `isl_tokens` for requests currently parked in the pending queue.
+    /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
+    pending_isl_tokens: AtomicUsize,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
@@ -94,6 +97,7 @@ impl<
         Self {
             pending: Mutex::new(BinaryHeap::new()),
             pending_count: AtomicUsize::new(0),
+            pending_isl_tokens: AtomicUsize::new(0),
             slots,
             workers_with_configs,
             threshold_frac,
@@ -151,8 +155,11 @@ impl<
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = self.policy.enqueue_key(arrival_offset, &request);
+            let isl_tokens = request.isl_tokens;
             self.pending.lock().await.push(QueueEntry { key, request });
             self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
+            self.pending_isl_tokens
+                .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
         } else {
             self.schedule(request, decay_now).await;
         }
@@ -189,6 +196,8 @@ impl<
                 break;
             };
             self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
+            self.pending_isl_tokens
+                .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
             self.schedule(entry.request, decay_now).await;
         }
@@ -301,6 +310,11 @@ impl<
     /// Number of requests currently parked in the pending queue (lock-free).
     pub fn pending_count(&self) -> usize {
         self.pending_count.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Sum of `isl_tokens` for requests currently parked in the pending queue (lock-free).
+    pub fn pending_isl_tokens(&self) -> usize {
+        self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
     }
 
     /// Check if all eligible workers are busy based on threshold.

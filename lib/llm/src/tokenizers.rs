@@ -19,6 +19,7 @@ pub use anyhow::{Error, Result};
 pub use fastokens::FastTokenizer;
 pub use hf::HuggingFaceTokenizer;
 pub use tiktoken::TikTokenTokenizer;
+pub use traits::DecodeResult;
 
 /// Represents the type of tokenizer being used
 #[derive(Debug)]
@@ -62,12 +63,66 @@ pub mod traits {
         fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>>;
     }
 
-    /// Implementations **must** use lossy UTF-8 conversion (e.g. `String::from_utf8_lossy`)
-    /// so that partial multi-byte sequences produce U+FFFD (`�`) rather than returning `Err`.
-    /// `DecodeStream::step()` relies on the replacement character to detect incomplete
-    /// sequences and buffer tokens until the full character arrives.
+    /// Result of decoding token IDs to text.
+    ///
+    /// Distinguishes between fully valid UTF-8 output and output that contains
+    /// trailing incomplete multi-byte sequences (represented as U+FFFD).
+    /// This lets callers like `DecodeStream::step()` decide whether to emit or
+    /// buffer without resorting to hardcoded replacement-character string checks.
+    #[derive(Debug, Clone, PartialEq, Eq, strum::EnumIs)]
+    pub enum DecodeResult {
+        /// No trailing incomplete multi-byte sequences (text does not end with U+FFFD).
+        /// Note: the string may still contain *interior* U+FFFD characters from
+        /// mid-stream invalid byte sequences; only trailing status is tracked here.
+        Complete(String),
+        /// The decoded string ends with U+FFFD, indicating incomplete trailing
+        /// multi-byte bytes that may be completed by subsequent tokens.
+        Partial(String),
+    }
+
+    impl DecodeResult {
+        /// Returns a reference to the inner string.
+        pub fn as_str(&self) -> &str {
+            match self {
+                DecodeResult::Complete(s) | DecodeResult::Partial(s) => s,
+            }
+        }
+
+        /// Construct from a decoded string: `Partial` if it ends with U+FFFD, else `Complete`.
+        pub fn from_decoded(text: String) -> Self {
+            if text.ends_with('\u{FFFD}') {
+                DecodeResult::Partial(text)
+            } else {
+                DecodeResult::Complete(text)
+            }
+        }
+    }
+
+    impl From<String> for DecodeResult {
+        fn from(text: String) -> Self {
+            DecodeResult::from_decoded(text)
+        }
+    }
+
+    impl From<DecodeResult> for String {
+        fn from(result: DecodeResult) -> Self {
+            match result {
+                DecodeResult::Complete(s) | DecodeResult::Partial(s) => s,
+            }
+        }
+    }
+
+    /// Implementations must ensure that partial multi-byte sequences produce U+FFFD
+    /// (`\u{FFFD}`) in the output rather than returning `Err`. This is commonly achieved
+    /// via `String::from_utf8_lossy` (tiktoken) or library-internal byte-fallback handling
+    /// (HuggingFace). `DecodeStream::step()` relies on `DecodeResult::Partial` to detect
+    /// incomplete sequences and buffer tokens until the full character arrives.
     pub trait Decoder: Send + Sync {
-        fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<String>;
+        fn decode(
+            &self,
+            token_ids: &[TokenIdType],
+            skip_special_tokens: bool,
+        ) -> Result<DecodeResult>;
     }
 
     pub trait Tokenizer: Encoder + Decoder {
@@ -219,23 +274,27 @@ impl DecodeStream {
     pub fn step(&mut self, id: u32) -> Result<Option<String>> {
         self.all_token_ids.push(id);
 
-        let prefix_text = self.tokenizer.decode(
-            &self.all_token_ids[self.prefix_offset..self.read_offset],
-            self.skip_special_tokens,
-        )?;
+        let prefix_text: String = self
+            .tokenizer
+            .decode(
+                &self.all_token_ids[self.prefix_offset..self.read_offset],
+                self.skip_special_tokens,
+            )?
+            .into();
 
-        let new_text = self.tokenizer.decode(
+        let new_result = self.tokenizer.decode(
             &self.all_token_ids[self.prefix_offset..],
             self.skip_special_tokens,
         )?;
 
-        if new_text.len() > prefix_text.len() && !new_text.ends_with("�") {
-            let new_text = new_text[prefix_text.len()..].to_string();
+        let new_text = new_result.as_str();
+        if new_text.len() > prefix_text.len() && !new_result.is_partial() {
+            let emitted = new_text[prefix_text.len()..].to_string();
 
             self.prefix_offset = self.read_offset;
             self.read_offset = self.all_token_ids.len();
 
-            Ok(Some(new_text))
+            Ok(Some(emitted))
         } else {
             Ok(None)
         }
@@ -322,13 +381,16 @@ impl Sequence {
         self.token_ids.push(token_id);
         // log::trace!("pushed token_id: {}", token_id);
 
-        let prefix_text = self
+        let prefix_text: String = self
             .tokenizer
-            .decode(&self.token_ids[self.prefix_offset..self.read_offset], false)?;
+            .decode(&self.token_ids[self.prefix_offset..self.read_offset], false)?
+            .into();
 
-        let new_text = self
+        let new_result = self
             .tokenizer
             .decode(&self.token_ids[self.prefix_offset..], false)?;
+
+        let new_text = new_result.as_str();
 
         // if the end character of the previous returned sequence is a multi-byte character
         // then we can not split the text on that byte offset, so we roll back to the byte offset
@@ -340,11 +402,13 @@ impl Sequence {
         let prefix_text_len = prefix_text_len;
 
         if new_text.len() > prefix_text.len() {
-            if new_text.ends_with("�") {
+            if new_result.is_partial() {
                 return Ok("".to_string());
             } else {
                 // shift and update the state
-                let new_text = new_text[prefix_text_len..].to_string().replace("�", "");
+                let new_text = new_text[prefix_text_len..]
+                    .to_string()
+                    .replace('\u{FFFD}', "");
                 self.prefix_offset = self.read_offset;
                 self.read_offset = self.token_ids.len();
                 return Ok(new_text);
@@ -366,7 +430,7 @@ impl Sequence {
         // let tokenizer = self.tokenizer.read().map_err(|err| {
         //     Error::msg(format!("Failed to acquire read lock on tokenizer: {}", err))
         // })?;
-        self.tokenizer.decode(&self.token_ids, false)
+        Ok(self.tokenizer.decode(&self.token_ids, false)?.into())
     }
 }
 
