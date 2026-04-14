@@ -95,8 +95,9 @@ func InjectCheckpointIntoPodSpec(
 	EnsurePodInfoVolume(podSpec)
 	EnsurePodInfoMount(mainContainer)
 
-	var gmsSidecars []corev1.Container
-	if info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
+	// GMS restore sidecars (server + loader) are only needed when the checkpoint
+	// is ready and the pod will actually be CRIU-restored.
+	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
 		if len(mainContainer.Resources.Claims) == 0 {
 			return fmt.Errorf("gms sidecars require main container resource claims")
 		}
@@ -110,9 +111,9 @@ func InjectCheckpointIntoPodSpec(
 		if err != nil {
 			return err
 		}
-		gmsSidecars = BuildGMSRestoreSidecars(podSpec, mainContainer, storage)
+		gmsSidecars := BuildGMSRestoreSidecars(podSpec, mainContainer, storage)
+		podSpec.Containers = append(podSpec.Containers, gmsSidecars...)
 	}
-	podSpec.Containers = append(podSpec.Containers, gmsSidecars...)
 
 	return nil
 }

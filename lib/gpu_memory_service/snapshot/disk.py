@@ -10,7 +10,7 @@ import os
 import queue
 import threading
 from collections import defaultdict
-from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -337,9 +337,7 @@ def read_shard_streaming_to_queue(
             def _read_chunk(idx: int) -> None:
                 try:
                     c_off, c_sz = chunks[idx]
-                    _preadv_chunk(
-                        fd, mv[c_off : c_off + c_sz], c_off, c_sz, os_module
-                    )
+                    _preadv_chunk(fd, mv[c_off : c_off + c_sz], c_off, c_sz, os_module)
                 except BaseException as exc:
                     chunk_errors.append(exc)
                 finally:
@@ -425,7 +423,9 @@ def read_shard_to_queue(
         pin_memory=pin_memory,
     )
     for entry in sorted_entries:
-        _put_entry(work_q, entry, shard_result[entry.allocation_id], cancel_event, abs_path)
+        _put_entry(
+            work_q, entry, shard_result[entry.allocation_id], cancel_event, abs_path
+        )
     return len(sorted_entries)
 
 

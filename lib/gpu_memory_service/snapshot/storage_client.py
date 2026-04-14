@@ -20,9 +20,7 @@ import numpy as np
 from gpu_memory_service.snapshot.disk import (  # noqa: F401  re-exported for external callers
     ShardWriter as _ShardWriter,
 )
-from gpu_memory_service.snapshot.disk import (
-    decode_metadata as _decode_metadata_impl,
-)
+from gpu_memory_service.snapshot.disk import decode_metadata as _decode_metadata_impl
 from gpu_memory_service.snapshot.disk import (
     group_entries_by_shard as _group_entries_by_shard_impl,
 )
@@ -38,9 +36,7 @@ from gpu_memory_service.snapshot.disk import (
 from gpu_memory_service.snapshot.disk import (
     read_shard_to_queue as _read_shard_to_queue_impl,
 )
-from gpu_memory_service.snapshot.model import (
-    CURRENT_VERSION as _CURRENT_VERSION,
-)
+from gpu_memory_service.snapshot.model import CURRENT_VERSION as _CURRENT_VERSION
 from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
 from gpu_memory_service.snapshot.restore import (
     RestorePipelineContext as _RestorePipelineContext,
@@ -173,7 +169,8 @@ class GMSStorageClient:
         self._validate_save_request()
         output_dir, shards_dir = self._prepare_output_dir()
 
-        with GMSClientMemoryManager(self._socket_path, device=self.device) as mm:
+        mm = GMSClientMemoryManager(self._socket_path, device=self.device)
+        try:
             mm.connect(RequestedLockType.RO, timeout_ms=self._timeout_ms)
             layout_hash = mm.get_memory_layout_hash()
             if not layout_hash:
@@ -191,6 +188,9 @@ class GMSStorageClient:
                 max_workers=max_workers,
             )
             metadata = self._save_metadata(mm)
+        except Exception:
+            mm.close(best_effort=True)
+            raise
 
         self._write_json(os.path.join(output_dir, "gms_metadata.json"), metadata)
         manifest = SaveManifest(
@@ -202,6 +202,11 @@ class GMSStorageClient:
         )
         self._write_json(os.path.join(output_dir, "manifest.json"), manifest.to_dict())
         logger.info("Wrote manifest with %d allocations", len(entries))
+
+        # Best-effort cleanup; CUDA context may be invalid after
+        # checkpoint (cuda-checkpoint tears down device state).
+        mm.close(best_effort=True)
+
         return manifest
 
     def _validate_save_request(self) -> None:

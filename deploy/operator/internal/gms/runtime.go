@@ -172,5 +172,3 @@ func copyDeviceClaims(src *corev1.Container, dst *corev1.Container) {
 	copy(claims, src.Resources.Claims)
 	dst.Resources.Claims = append(dst.Resources.Claims, claims...)
 }
-
-

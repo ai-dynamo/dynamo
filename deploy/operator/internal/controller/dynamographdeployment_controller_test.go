@@ -456,7 +456,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 
 	referenced := &v1alpha1.DynamoCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "friendly-checkpoint",
+			Name:      friendlyCheckpointName,
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
@@ -526,7 +526,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 	if info.Hash != hash {
 		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
 	}
-	if checkpointStatuses["worker"].CheckpointName != "friendly-checkpoint" {
+	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
 		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
 	}
 
@@ -537,7 +537,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 	if len(checkpoints.Items) != 1 {
 		t.Fatalf("expected only the referenced checkpoint to exist, found %d", len(checkpoints.Items))
 	}
-	if checkpoints.Items[0].Name != "friendly-checkpoint" {
+	if checkpoints.Items[0].Name != friendlyCheckpointName {
 		t.Fatalf("unexpected checkpoint %s", checkpoints.Items[0].Name)
 	}
 }
@@ -559,7 +559,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 
 	referenced := &v1alpha1.DynamoCheckpoint{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "friendly-checkpoint",
+			Name:      friendlyCheckpointName,
 			Namespace: "default",
 		},
 		Spec: v1alpha1.DynamoCheckpointSpec{
@@ -581,7 +581,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 		Recorder: record.NewFakeRecorder(10),
 	}
 
-	ref := "friendly-checkpoint"
+	ref := friendlyCheckpointName
 	dgd := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
@@ -619,7 +619,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 	if info.Hash != hash {
 		t.Fatalf("checkpoint hash = %s, want %s", info.Hash, hash)
 	}
-	if checkpointStatuses["worker"].CheckpointName != "friendly-checkpoint" {
+	if checkpointStatuses["worker"].CheckpointName != friendlyCheckpointName {
 		t.Fatalf("checkpoint status name = %s, want friendly-checkpoint", checkpointStatuses["worker"].CheckpointName)
 	}
 	if !checkpointStatuses["worker"].Ready {

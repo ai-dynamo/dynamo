@@ -352,7 +352,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		for _, item := range loader.Env {
 			env[item.Name] = item.Value
 		}
-		assert.Equal(t, "/checkpoints/"+testHash+"/gms/versions/1", env["GMS_CHECKPOINT_DIR"])
+		assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", env["GMS_CHECKPOINT_DIR"])
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gmsServer.Command)
 		assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.snapshot.loader"}, loader.Command)
 	})

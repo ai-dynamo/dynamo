@@ -121,9 +121,12 @@ func BuildGMSCheckpointJobSidecars(
 }
 
 func resolveGMSArtifactDir(storage snapshotprotocol.Storage) string {
-	checkpointRoot := filepath.Dir(filepath.Dir(storage.Location))
+	// GMS data lives under /checkpoints/gms/<hash>/versions/<version>
+	// separate from the CRIU tree (/checkpoints/<hash>/versions/<version>)
+	// so the non-root saver can create directories at the PVC root.
 	artifactVersion := filepath.Base(storage.Location)
-	return filepath.Join(checkpointRoot, "gms", "versions", artifactVersion)
+	checkpointID := filepath.Base(filepath.Dir(filepath.Dir(storage.Location)))
+	return filepath.Join(storage.BasePath, "gms", checkpointID, "versions", artifactVersion)
 }
 
 func gmsCheckpointLoaderContainer(image string) corev1.Container {
@@ -199,5 +202,3 @@ func ensureCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 		},
 	})
 }
-
-

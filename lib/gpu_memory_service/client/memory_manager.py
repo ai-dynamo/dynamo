@@ -197,14 +197,19 @@ class GMSClientMemoryManager:
         # After abort + CRIU restore the process may be on a different GPU.
         # Re-derive socket path from current UUID so we talk to the right server.
         if self._aborted and self.tag is not None:
-            from gpu_memory_service.common.utils import get_socket_path, invalidate_uuid_cache
+            from gpu_memory_service.common.utils import (
+                get_socket_path,
+                invalidate_uuid_cache,
+            )
 
             invalidate_uuid_cache()
             new_path = get_socket_path(self.device, self.tag)
             if new_path != self.socket_path:
                 logger.info(
                     "Refreshed socket path for tag=%s: %s -> %s",
-                    self.tag, self.socket_path, new_path,
+                    self.tag,
+                    self.socket_path,
+                    new_path,
                 )
                 self.socket_path = new_path
             self._aborted = False
@@ -602,18 +607,30 @@ class GMSClientMemoryManager:
 
     # ==================== Lifecycle ====================
 
-    def close(self) -> None:
-        """Strict cleanup.
+    def close(self, *, best_effort: bool = False) -> None:
+        """Cleanup mappings and abort.
 
         synchronize + unmap all + free all VAs + abort.
+
+        Args:
+            best_effort: If True, skip cuda_synchronize and swallow
+                errors during cleanup. Used after checkpoint where
+                cuda-checkpoint may have torn down the device context
+                (cuda_synchronize calls os._exit via fail()).
         """
-        cuda_synchronize()
-
-        for va in list(self._mappings.keys()):
-            self.unmap_va(va)
-            self.free_va(va)
-
-        self.abort()
+        if best_effort:
+            try:
+                self.abort()
+            except Exception:
+                pass
+            self._mappings.clear()
+            self._inverse_mapping.clear()
+        else:
+            cuda_synchronize()
+            for va in list(self._mappings.keys()):
+                self.unmap_va(va)
+                self.free_va(va)
+            self.abort()
         self._unmapped = False
         self._va_preserved = False
         from gpu_memory_service.client.torch.allocator import (

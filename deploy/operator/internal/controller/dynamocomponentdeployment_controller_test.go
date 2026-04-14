@@ -26,10 +26,10 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
@@ -1250,7 +1250,7 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 	g.Expect(deployment3).NotTo(gomega.BeNil())
 }
 
-func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabels(t *testing.T) {
+func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabels(t *testing.T) { //nolint:gocyclo
 	s := scheme.Scheme
 	if err := v1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
@@ -1436,7 +1436,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if got := mounts[snapshotprotocol.CheckpointVolumeName]; got != "/checkpoints" {
 			t.Fatalf("expected gms loader checkpoint mount at /checkpoints, got %q", got)
 		}
-		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.server" {
+		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.server" { //nolint:goconst
 			t.Fatalf("expected weights server to run python module, got %#v", got)
 		}
 		// Restore: gms-server should be a regular container, not an init container

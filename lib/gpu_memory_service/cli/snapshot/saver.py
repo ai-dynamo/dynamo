@@ -31,9 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _WEIGHTS_TAG = "weights"
-_SERVICE_ACCOUNT_TOKEN = Path(
-    "/var/run/secrets/kubernetes.io/serviceaccount/token"
-)
+_SERVICE_ACCOUNT_TOKEN = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _SERVICE_ACCOUNT_CA = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
 
@@ -62,9 +60,10 @@ def _checkpoint_pod_ready(pod: dict[str, Any]) -> bool:
     if str(status.get("phase", "")).strip() != "Running":
         return False
     for condition in status.get("conditions") or []:
-        if condition.get("type") == "Ready" and str(
-            condition.get("status", "")
-        ).strip() == "True":
+        if (
+            condition.get("type") == "Ready"
+            and str(condition.get("status", "")).strip() == "True"
+        ):
             return True
     return False
 
@@ -141,8 +140,7 @@ def main() -> None:
         t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=len(devices)) as pool:
             futures = {
-                pool.submit(_save_device, dev, max_workers): dev
-                for dev in devices
+                pool.submit(_save_device, dev, max_workers): dev for dev in devices
             }
             for future in as_completed(futures):
                 future.result()

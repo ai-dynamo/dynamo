@@ -25,8 +25,8 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,39 +129,6 @@ func makeCheckpointLease(name string, renewTime time.Time, durationSeconds int32
 			LeaseDurationSeconds: &durationSeconds,
 			AcquireTime:          &renewMicroTime,
 			RenewTime:            &renewMicroTime,
-		},
-	}
-}
-
-func testSnapshotAgentDaemonSet() *appsv1.DaemonSet {
-	return &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-agent",
-			Namespace: testNamespace,
-			Labels: map[string]string{
-				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: snapshotprotocol.SnapshotAgentContainerName,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name:      "checkpoints",
-							MountPath: "/checkpoints",
-						}},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: "checkpoints",
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-								ClaimName: "snapshot-pvc",
-							},
-						},
-					}},
-				},
-			},
 		},
 	}
 }
@@ -427,7 +394,7 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 	for _, env := range saver.Env {
 		saverEnv[env.Name] = env.Value
 	}
-	assert.Equal(t, "/checkpoints/"+testHash+"/gms/versions/1", saverEnv["GMS_CHECKPOINT_DIR"])
+	assert.Equal(t, "/checkpoints/gms/"+testHash+"/versions/1", saverEnv["GMS_CHECKPOINT_DIR"])
 }
 
 func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
