@@ -958,6 +958,26 @@ impl TcpConnectionPool {
         }
     }
 
+    /// Count active and idle connections across all host pools.
+    /// Active = healthy with inflight > 0, idle = healthy with inflight == 0.
+    fn connection_counts(&self) -> (usize, usize) {
+        let mut active = 0usize;
+        let mut idle = 0usize;
+        for entry in self.hosts.iter() {
+            let snap = entry.value().snapshot.load();
+            for conn in snap.iter() {
+                if conn.is_healthy() {
+                    if conn.inflight.load(Ordering::Relaxed) > 0 {
+                        active += 1;
+                    } else {
+                        idle += 1;
+                    }
+                }
+            }
+        }
+        (active, idle)
+    }
+
     /// Spawn a background task that periodically cleans up idle host pools.
     ///
     /// Uses a `Weak` reference so the task automatically stops when the
@@ -1150,14 +1170,15 @@ impl RequestPlaneClient for TcpRequestClient {
     }
 
     fn stats(&self) -> ClientStats {
+        let (active, idle) = self.pool.connection_counts();
         ClientStats {
             requests_sent: self.stats.requests_sent.load(Ordering::Relaxed),
             responses_received: self.stats.responses_received.load(Ordering::Relaxed),
             errors: self.stats.errors.load(Ordering::Relaxed),
             bytes_sent: self.stats.bytes_sent.load(Ordering::Relaxed),
             bytes_received: self.stats.bytes_received.load(Ordering::Relaxed),
-            active_connections: 0,
-            idle_connections: 0,
+            active_connections: active,
+            idle_connections: idle,
             avg_latency_us: 0,
         }
     }
