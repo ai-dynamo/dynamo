@@ -98,11 +98,55 @@ pub struct DefaultWorkerSelector {
     pub worker_type: &'static str,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WorkerScore {
+    overlap_blocks: u32,
+    logit: f64,
+}
+
 impl DefaultWorkerSelector {
     pub fn new(kv_router_config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
         Self {
             kv_router_config: kv_router_config.unwrap_or_default(),
             worker_type,
+        }
+    }
+
+    fn worker_score(
+        &self,
+        request: &SchedulingRequest,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+        overlap_weight: f64,
+        formula_name: &'static str,
+    ) -> WorkerScore {
+        let isl = request.isl_tokens;
+        let overlap_blocks = request.overlaps.scores.get(&worker).copied().unwrap_or(0);
+        let default_prefill_token = if request.track_prefill_tokens { isl } else { 0 };
+        let prefill_token = request
+            .prefill_tokens
+            .get(&worker)
+            .copied()
+            .unwrap_or(default_prefill_token);
+        let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
+        let decode_block = request
+            .decode_blocks
+            .get(&worker)
+            .copied()
+            .unwrap_or(potential_prefill_block.floor() as usize) as f64;
+        let logit = overlap_weight * potential_prefill_block + decode_block;
+
+        tracing::debug!(
+            "{formula_name} for worker_id={} dp_rank={:?} with {overlap_blocks} cached blocks: {logit:.3} \
+             = {overlap_weight:.1} * prefill_blocks + decode_blocks \
+             = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
+            worker.worker_id,
+            worker.dp_rank
+        );
+
+        WorkerScore {
+            overlap_blocks,
+            logit,
         }
     }
 }
@@ -128,14 +172,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
-        if let Some(worker) = pinned_worker
-            && let Some(ids) = allowed_ids
-            && !ids.contains(&worker.worker_id)
-        {
-            return Err(KvSchedulerError::PinnedWorkerNotAllowed {
-                worker_id: worker.worker_id,
-            });
-        }
+        let isl = request.isl_tokens;
+        let request_blocks = isl.div_ceil(block_size as usize);
+        let overlaps = &request.overlaps.scores;
 
         if let Some(worker) = pinned_worker {
             let Some(config) = workers.get(&worker.worker_id) else {
@@ -147,49 +186,25 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 return Err(KvSchedulerError::NoEndpoints);
             }
 
-            let isl = request.isl_tokens;
-            let request_blocks = isl.div_ceil(block_size as usize);
-            let overlaps = &request.overlaps.scores;
-            let decode_blocks = &request.decode_blocks;
-            let prefill_tokens = &request.prefill_tokens;
             let overlap_weight = request
                 .router_config_override
                 .as_ref()
                 .and_then(|cfg| cfg.overlap_score_weight)
                 .unwrap_or(self.kv_router_config.overlap_score_weight);
-            let overlap = *overlaps.get(&worker).unwrap_or(&0);
-            let default_prefill_token = if request.track_prefill_tokens { isl } else { 0 };
-            let prefill_token = *prefill_tokens
-                .get(&worker)
-                .unwrap_or(&default_prefill_token);
-            let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
-            let decode_block = *decode_blocks
-                .get(&worker)
-                .unwrap_or(&(potential_prefill_block.floor() as usize))
-                as f64;
-            let logit = overlap_weight * potential_prefill_block + decode_block;
-
-            tracing::debug!(
-                "Pinned formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
-                 = {overlap_weight:.1} * prefill_blocks + decode_blocks \
-                 = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
-                worker.worker_id,
-                worker.dp_rank
+            let score = self.worker_score(
+                request,
+                worker,
+                block_size,
+                overlap_weight,
+                "Pinned formula",
             );
 
             return Ok(WorkerSelectionResult {
                 worker,
                 required_blocks: request_blocks as u64,
-                overlap_blocks: overlaps.get(&worker).copied().unwrap_or(0),
+                overlap_blocks: score.overlap_blocks,
             });
         }
-
-        let isl = request.isl_tokens;
-        let request_blocks = isl.div_ceil(block_size as usize);
-        let overlaps = &request.overlaps.scores;
-
-        let decode_blocks = &request.decode_blocks;
-        let prefill_tokens = &request.prefill_tokens;
 
         let overlap_weight = request
             .router_config_override
@@ -204,30 +219,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or(self.kv_router_config.router_temperature);
 
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            let overlap = *overlaps.get(&worker).unwrap_or(&0);
-            // Use 0 for unregistered decode workers (track_prefill_tokens=false)
-            // to match registered idle workers; use isl otherwise.
-            let default_prefill_token = if request.track_prefill_tokens { isl } else { 0 };
-            let prefill_token = *prefill_tokens
-                .get(&worker)
-                .unwrap_or(&default_prefill_token);
-            let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
-            let decode_block = *decode_blocks
-                .get(&worker)
-                .unwrap_or(&(potential_prefill_block.floor() as usize))
-                as f64;
-
-            let logit = overlap_weight * potential_prefill_block + decode_block;
-
-            tracing::debug!(
-                "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
-                 = {overlap_weight:.1} * prefill_blocks + decode_blocks \
-                 = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
-                worker.worker_id,
-                worker.dp_rank
-            );
-
-            logit
+            self.worker_score(request, worker, block_size, overlap_weight, "Formula")
+                .logit
         };
 
         let worker_iter = workers
