@@ -101,6 +101,13 @@ def run_dynamo_headless(config: Config) -> None:
 async def worker() -> None:
     config = parse_args()
 
+    # Propagate --model-express-url to env var early, before any MX client code
+    # (Rust hub, Python MxModelLoader) reads it. The Rust fetch_model() and the
+    # MxClientConfig default both fall back to localhost:8001 when this env var
+    # is absent, so it must be set before the first MX connection attempt.
+    if config.model_express_url:
+        os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
+
     dump_config(config.dump_config_to, config)
 
     # Name the model. Use either the full path (vllm and sglang do the same),
@@ -470,9 +477,6 @@ def setup_vllm_engine(
         try:
             from modelexpress import register_modelexpress_loaders
 
-            # Ensure the ModelExpress server URL env var is set for the model loader
-            if config.model_express_url:
-                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
             register_modelexpress_loaders()
             # Use wrapper worker to ensure loaders are registered in spawned worker processes
             engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
