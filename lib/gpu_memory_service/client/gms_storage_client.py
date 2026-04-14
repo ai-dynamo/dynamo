@@ -36,6 +36,9 @@ from gpu_memory_service.client._gms_storage_disk import (
     read_shard_sequential as _read_shard_sequential_impl,
 )
 from gpu_memory_service.client._gms_storage_disk import (
+    read_shard_streaming_to_queue as _read_shard_streaming_to_queue_impl,
+)
+from gpu_memory_service.client._gms_storage_disk import (
     read_shard_to_queue as _read_shard_to_queue_impl,
 )
 from gpu_memory_service.client._gms_storage_model import (
@@ -129,13 +132,18 @@ def _read_shard_to_queue(
     pin_memory: bool,
     cancel_event: Optional[threading.Event] = None,
 ) -> int:
-    return _read_shard_to_queue_impl(
+    # Use streaming reader: overlaps disk I/O with GPU copies within each
+    # shard instead of reading the full shard before queuing any entries.
+    return _read_shard_streaming_to_queue_impl(
         abs_path,
         sorted_entries,
         work_q,
         pin_memory=pin_memory,
-        read_shard=_read_shard_sequential,
         cancel_event=cancel_event,
+        os_module=os,
+        np_module=np,
+        torch_module=torch,
+        logger=logger,
     )
 
 

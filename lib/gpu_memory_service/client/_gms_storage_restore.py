@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 from gpu_memory_service.client._gms_storage_model import AllocationEntry
 
-WORK_QUEUE_DEPTH_MULTIPLIER = 2
+WORK_QUEUE_DEPTH_MULTIPLIER = 4
 
 
 @dataclass
