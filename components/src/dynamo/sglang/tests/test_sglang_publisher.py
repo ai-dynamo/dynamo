@@ -3,10 +3,20 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from dynamo.sglang.publisher import (
     get_local_dp_rank_range,
     set_forward_pass_metrics_worker_id,
 )
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_1,  # needs sglang packages installed but does not use GPU
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.pre_merge,
+]
 
 
 def test_get_local_dp_rank_range_defaults_to_rank_zero():
