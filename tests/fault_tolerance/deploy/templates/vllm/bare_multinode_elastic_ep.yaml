@@ -1,0 +1,206 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Bare vLLM multinode elastic EP test — no Dynamo operator involvement.
+#
+# Tests whether vLLM itself supports cross-node elastic EP via a single Ray cluster.
+# Scale API is vLLM's native endpoint: POST /scale_elastic_ep
+#
+# Warm-standby topology:
+#   - Leader pod (Node 1): 2 GPUs active (dp=2). Starts Ray head, then vLLM.
+#   - Worker pod (Node 2): 2 GPUs idle. Waits for leader vLLM /health before joining Ray.
+#
+# The worker deliberately delays joining Ray until vLLM is fully serving. This ensures
+# vLLM initialises its dp=2 workers only on Node 1. Once the worker joins, its GPUs
+# appear idle in ray.available_resources_per_node() and are claimed on scale-up.
+#
+# Scale sequence (run_elastic_ep_scale_test_bare_multinode.sh):
+#   Baseline dp=2 → dp=3 → dp=4 → dp=3 → dp=2 → dp=4 → dp=2
+#
+# If scale-up succeeds and nvidia-smi on worker shows GPU memory used → multinode works.
+# If scale-up fails or worker GPUs stay idle → vLLM does not support cross-node elastic EP.
+---
+# Headless service so leader is reachable by DNS from worker pod
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-ep-leader
+spec:
+  clusterIP: None
+  selector:
+    app: vllm-ep-leader
+  ports:
+  - name: ray
+    port: 6379
+  - name: serve
+    port: 8000
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-ep-leader
+  labels:
+    app: vllm-ep-leader
+spec:
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  nodeSelector:
+    kubernetes.io/hostname: aks-a100a-36888584-vmss000003
+  imagePullSecrets:
+  - name: nvcr-imagepullsecret
+  volumes:
+  - name: model-cache
+    persistentVolumeClaim:
+      claimName: model-cache
+  - name: shm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 8Gi
+  containers:
+  - name: main
+    image: nvcr.io/nvidian/dynamo-dev/tzulingk-vllm:main
+    imagePullPolicy: Always
+    resources:
+      limits:
+        nvidia.com/gpu: "2"
+    env:
+    - name: HF_HOME
+      value: /model-cache
+    - name: HF_HUB_ENABLE_HF_TRANSFER
+      value: "1"
+    - name: VLLM_ALL2ALL_BACKEND
+      value: allgather_reducescatter
+    - name: VLLM_USE_ELASTIC_EP
+      value: "1"
+    - name: VLLM_USE_V1
+      value: "1"
+    - name: VLLM_WORKER_MULTIPROC_METHOD
+      value: spawn
+    - name: CUDA_VISIBLE_DEVICES
+      value: "0,1"
+    # ── NCCL cross-node configuration ──────────────────────────────────────
+    # NCCL_DEBUG/NCCL_DEBUG_SUBSYS: log transport selection and communicator
+    # init so we can confirm TCP socket is chosen. Remove once confirmed.
+    - name: NCCL_DEBUG
+      value: "INFO"
+    - name: NCCL_DEBUG_SUBSYS
+      value: "NET,INIT"
+    # NCCL_IB_DISABLE=1: disable InfiniBand even though /dev/infiniband/
+    # uverbs0-8 are mounted in both pods. Inspecting the GID table on
+    # 2026-04-14 via /sys/class/infiniband/*/ports/*/gids/* showed that every
+    # mlx5_* device only has a valid (non-zero) GID at index 0, and it is a
+    # fe80:: link-local IPv6 address. Link-local addresses are not routable
+    # between pods on different Kubernetes nodes — they only work within a
+    # single L2 segment. No RoCE v2 or globally routable GIDs exist, so NCCL
+    # cannot establish cross-node IB connections here. Without this flag, NCCL
+    # tries IB by default, fails with "unhandled system error", and aborts.
+    - name: NCCL_IB_DISABLE
+      value: "1"
+    # NCCL_SOCKET_IFNAME=eth0: with IB disabled NCCL falls back to TCP socket
+    # transport. This tells it which interface to bind to. Confirmed via
+    # /proc/net/if_inet6 inside both pods: eth0 is the only non-loopback
+    # interface and carries the routable pod IPs (leader: 10.244.3.73,
+    # worker: 10.244.7.32) that the Kubernetes CNI overlay network can route.
+    - name: NCCL_SOCKET_IFNAME
+      value: "eth0"
+    envFrom:
+    - secretRef:
+        name: hf-token-secret
+    volumeMounts:
+    - name: model-cache
+      mountPath: /model-cache
+    - name: shm
+      mountPath: /dev/shm
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      set -e
+      echo "=== Installing Ray ==="
+      pip install -q "ray[default]"
+      echo "=== Starting Ray head ==="
+      ray start --head --port=6379 --block &
+      RAY_HEAD_PID=$!
+      sleep 8
+      echo "=== Ray head started (pid=$RAY_HEAD_PID), launching vllm serve ==="
+      # --data-parallel-size-local is intentionally omitted. The worker pod delays
+      # joining Ray until vLLM is ready, so only this node is in the Ray cluster
+      # when create_dp_placement_groups runs. Both dp=2 workers land here.
+      vllm serve deepseek-ai/DeepSeek-V2-Lite \
+        --trust-remote-code \
+        --tensor-parallel-size 1 \
+        --data-parallel-size 2 \
+        --data-parallel-backend ray \
+        --gpu-memory-utilization 0.8 \
+        --max-model-len 4096 \
+        --enable-expert-parallel \
+        --enable-elastic-ep \
+        --enable-eplb \
+        --eplb-config.num_redundant_experts 0 \
+        --no-enable-prefix-caching \
+        --enforce-eager \
+        --port 8000
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-ep-worker
+spec:
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+  nodeSelector:
+    kubernetes.io/hostname: aks-a100b-22138447-vmss000000
+  imagePullSecrets:
+  - name: nvcr-imagepullsecret
+  volumes:
+  - name: shm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 8Gi
+  containers:
+  - name: main
+    image: nvcr.io/nvidian/dynamo-dev/tzulingk-vllm:main
+    imagePullPolicy: Always
+    resources:
+      limits:
+        nvidia.com/gpu: "2"
+    env:
+    - name: CUDA_VISIBLE_DEVICES
+      value: "0,1"
+    # ── NCCL cross-node configuration ──────────────────────────────────────
+    # Must match the leader pod exactly — NCCL requires all participating
+    # processes to use the same transport. See leader pod env block for the
+    # full rationale behind each variable.
+    - name: NCCL_DEBUG
+      value: "INFO"
+    - name: NCCL_DEBUG_SUBSYS
+      value: "NET,INIT"
+    # IB GIDs are fe80:: link-local only — not routable cross-node. Disable IB.
+    - name: NCCL_IB_DISABLE
+      value: "1"
+    # eth0 confirmed as the only non-loopback interface in this pod (10.244.7.32).
+    - name: NCCL_SOCKET_IFNAME
+      value: "eth0"
+    volumeMounts:
+    - name: shm
+      mountPath: /dev/shm
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      set -e
+      LEADER_URL="http://vllm-ep-leader.tzulingk-multinode-elastic.svc.cluster.local:8000"
+      echo "=== Installing Ray ==="
+      pip install -q "ray[default]"
+      echo "=== Waiting for leader vLLM to be ready before joining Ray ==="
+      # Deliberately wait until vLLM is fully serving on the leader. This ensures
+      # vLLM initialises dp=2 with only Node 1 in the Ray cluster, so both initial
+      # DP workers land on Node 1. Our GPUs then appear idle for elastic EP scale-up.
+      until curl -sf "${LEADER_URL}/health" > /dev/null 2>&1; do
+        echo "  leader not ready yet, retrying in 15s..."
+        sleep 15
+      done
+      echo "=== Leader vLLM ready — joining Ray cluster ==="
+      ray start --address=vllm-ep-leader.tzulingk-multinode-elastic.svc.cluster.local:6379 --block
