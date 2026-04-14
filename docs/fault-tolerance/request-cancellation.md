@@ -15,21 +15,20 @@ The frontend monitors each client connection for unexpected disconnects. When a 
 1. **Connection closed unexpectedly** — The client disconnects during request processing before response streaming begins.
 2. **Stream closed unexpectedly** — The client disconnects while an active SSE stream is delivering response tokens.
 
-In both cases, the frontend issues a `kill()` on the request's `AsyncEngineContext`, which propagates cancellation to any linked child contexts on downstream workers.
+In both cases, the frontend cancels the request's `AsyncEngineContext`, which propagates cancellation to any linked child contexts on downstream workers.
 
 ### Worker Cancellation Detection
 
 On the worker side, the runtime monitors the TCP connection from the frontend for cancellation signals. The worker detects cancellation in three scenarios:
 
-1. **Stop control message received** — The frontend explicitly sent a `Stop` message to gracefully cancel the request.
-2. **Kill control message received** — The frontend explicitly sent a `Kill` message for immediate termination.
-3. **TCP connection dropped** — The frontend disconnected without sending a control message (e.g., frontend crash or network failure).
+1. **Control message received** — The frontend explicitly sent a cancellation control message.
+2. **TCP connection dropped** — The frontend disconnected without sending a control message (e.g., frontend crash or network failure).
 
-When the worker receives a cancellation signal, it sets the corresponding state on the request's `AsyncEngineContext` (via `stop()` or `kill()`). It is then up to the worker's engine implementation to observe this state (e.g., by checking `is_stopped()`) and terminate processing accordingly.
+When the worker receives a cancellation signal, it sets the corresponding state on the request's `AsyncEngineContext`. It is then up to the worker's engine implementation to observe the cancellation (e.g., by checking `is_stopped()`) and terminate processing accordingly. For details on implementing cancellation handling in an engine, see the [AsyncEngineContext Trait](#asyncenginecontext-trait) section below.
 
 ### Cancellation Propagation
 
-Cancellation propagates through multi-tier request chains via linked `AsyncEngineContext` objects. When `stop()` or `kill()` is called on a parent context, the same method is automatically called on all linked child contexts. This ensures that when a client cancels a request at the frontend, all associated sub-requests on downstream workers are automatically cancelled, saving computational resources across the entire request pipeline.
+Cancellation propagates through multi-tier request chains via linked `AsyncEngineContext` objects. When a parent context is cancelled, all linked child contexts are automatically cancelled as well. This ensures that when a client cancels a request at the frontend, all associated sub-requests on downstream workers are automatically cancelled, saving computational resources across the entire request pipeline.
 
 ## Metrics
 
