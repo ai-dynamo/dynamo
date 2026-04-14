@@ -4,10 +4,9 @@
 name: Nightly CI Pipeline
 
 on:
-   pull_request:
-     branches:
-       - main
-  #workflow_dispatch:  # Allow manual triggering for testing
+  schedule:
+    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  workflow_dispatch:  # Allow manual triggering for testing
 
 permissions:
   contents: read
@@ -40,8 +39,7 @@ jobs:
         with:
           builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
           buildkit_worker_addresses: ''
-          fresh_builder: false
-          use_runner_docker_builder: true
+          fresh_builder: 'true'
 
 
   # ============================================================================
@@ -56,9 +54,9 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      fresh_builder: false
-      platform: 'linux/amd64'
-      version_selectors: '["xpu"]'
+      fresh_builder: true
+      platform: 'linux/amd64,linux/arm64'
+      cuda_versions: '["12.9", "13.0", "xpu"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
@@ -80,7 +78,6 @@ jobs:
   sglang-pipeline:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     needs: [create-fresh-builder]
-    if: false
     with:
       framework: sglang
       target: runtime
@@ -105,7 +102,6 @@ jobs:
   trtllm-pipeline:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     needs: [create-fresh-builder]
-    if: false
     with:
       framework: trtllm
       target: runtime
@@ -153,7 +149,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: ubuntu-slim
-    if: false
+    if: always() && failure()
     needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
     permissions:
       contents: read

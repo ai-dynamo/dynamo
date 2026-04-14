@@ -178,8 +178,8 @@ jobs:
   # ============================================================================
   build:
     if: inputs.build_image
-    name: Build ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) || inputs.device }}
-    runs-on: 'prod-builder-v3'
+    name: Build ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) }}
+    runs-on: prod-builder-v3
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
     outputs:
       target_tag_plain: ${{ steps.build.outputs.target_tag_plain }}
@@ -263,7 +263,7 @@ jobs:
         ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests || inputs.run_single_xpu_tests ) &&
         inputs.build_image
     needs: [build]
-    name: Test ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) || inputs.device }} (${{ matrix.arch }})
+    name: Test ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) }} (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -369,10 +369,9 @@ jobs:
     if: |
         inputs.run_multi_gpu_tests &&
         inputs.build_image &&
-        ( inputs.device != 'xpu' ) &&
-        ( inputs.platform != 'linux/arm64' )
+        inputs.device != 'xpu'
     needs: [build]
-    name: Multi-gpu test ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) || inputs.device }}
+    name: Multi-gpu test ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}
     runs-on: prod-tester-amd-gpu-4-v1
     env:
       FRAMEWORK: ${{ inputs.framework }}
@@ -432,7 +431,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: ${{ fromJson(needs.build.outputs.compliance_arches) }}
-    name: Compliance ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) || inputs.device }}-${{ matrix.arch }}
+    name: Compliance ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) }}-${{ matrix.arch }}
     runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
@@ -477,8 +476,8 @@ jobs:
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
-    name: copy-to-acr ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) || inputs.device }}
-    runs-on:  prod-skopeo-v1
+    name: copy-to-acr ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) }}
+    runs-on: prod-default-small-v2
     outputs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
     steps:
