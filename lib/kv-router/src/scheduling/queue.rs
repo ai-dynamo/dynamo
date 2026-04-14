@@ -13,8 +13,10 @@ use tokio::time::Instant;
 use super::policy::{FcfsPolicy, SchedulingPolicy};
 use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
-use super::types::{SchedulingRequest, SchedulingResponse, pinned_worker_config};
-use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use super::types::{KvSchedulerError, SchedulingRequest, SchedulingResponse, pinned_worker_config};
+use crate::protocols::{
+    PrefillLoadHint, RouterBackpressureReason, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -67,6 +69,8 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
     threshold_frac: Option<f64>,
+    /// Optional maximum queued requests per worker slot.
+    max_queue_depth_per_worker: Option<usize>,
     /// Reference instant for computing arrival offsets.
     start_time: Instant,
     block_size: u32,
@@ -82,10 +86,12 @@ impl<
     Sel: WorkerSelector<C>,
 > SchedulerQueue<P, C, S, Sel>
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         threshold_frac: Option<f64>,
+        max_queue_depth_per_worker: Option<usize>,
         block_size: u32,
         selector: Sel,
         policy: S,
@@ -101,6 +107,7 @@ impl<
             slots,
             workers_with_configs,
             threshold_frac,
+            max_queue_depth_per_worker,
             start_time: Instant::now(),
             block_size,
             selector,
@@ -144,7 +151,6 @@ impl<
             request.respond(Err(error));
             return;
         }
-
         let Some(threshold) = self.threshold_frac else {
             self.schedule(request, Instant::now()).await;
             return;
@@ -162,6 +168,17 @@ impl<
             request.pinned_worker,
             decay_now,
         ) {
+            let queue_depth = self.pending_count.load(AtomicOrdering::Relaxed);
+            if let Some(max_queue_depth) = self.effective_max_queue_depth()
+                && queue_depth >= max_queue_depth
+            {
+                request.respond(Err(KvSchedulerError::Backpressure {
+                    reason: RouterBackpressureReason::MaxQueueDepthExceeded,
+                    queue_depth,
+                    max_queue_depth: Some(max_queue_depth),
+                }));
+                return;
+            }
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = self.policy.enqueue_key(arrival_offset, &request);
@@ -339,6 +356,11 @@ impl<
         self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
     }
 
+    fn effective_max_queue_depth(&self) -> Option<usize> {
+        self.max_queue_depth_per_worker
+            .map(|depth| depth.saturating_mul(self.slots.num_workers()))
+    }
+
     /// Check if all eligible workers are busy based on threshold.
     /// When `pinned_worker` is `Some`, only that exact worker/rank is considered.
     /// Otherwise when `allowed` is `Some`, only those worker IDs are considered;
@@ -481,6 +503,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
+            None,
             block_size,
             selector,
             FcfsPolicy,

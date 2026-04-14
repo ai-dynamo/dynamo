@@ -34,6 +34,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_max_tree_size",
     "router_prune_target_ratio",
     "router_queue_threshold",
+    "router_max_queue_depth_per_worker",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
@@ -60,6 +61,7 @@ class KvRouterConfigBase(ConfigBase):
     router_max_tree_size: int
     router_prune_target_ratio: float
     router_queue_threshold: Optional[float]
+    router_max_queue_depth_per_worker: Optional[int]
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
@@ -205,6 +207,18 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_SNAPSHOT_THRESHOLD",
             default=1000000,
             help="KV Router: Number of messages in stream before triggering a snapshot.",
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--router-max-queue-depth-per-worker",
+            env_var="DYN_ROUTER_MAX_QUEUE_DEPTH_PER_WORKER",
+            default=None,
+            help=(
+                "KV Router: Maximum queued requests allowed per worker slot. "
+                "Effective queue limit is this value multiplied by the current worker slot count. "
+                "When exceeded, requests that would otherwise queue return backpressure immediately."
+            ),
             arg_type=int,
         )
         add_negatable_bool_argument(

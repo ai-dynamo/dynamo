@@ -330,6 +330,13 @@ impl Default for RouterRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouterBackpressureReason {
+    /// the total queue size has been reached.
+    MaxQueueDepthExceeded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterResponse {
     New {
@@ -337,6 +344,12 @@ pub enum RouterResponse {
         #[serde(default)]
         dp_rank: DpRank,
         overlap_blocks: u32,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queue_depth: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_queue_depth: Option<usize>,
     },
     PrefillMarked {
         success: bool,
