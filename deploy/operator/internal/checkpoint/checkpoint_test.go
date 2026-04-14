@@ -543,3 +543,19 @@ func TestResolveCheckpointForService(t *testing.T) {
 		assert.ErrorContains(t, err, "no checkpointRef or identity")
 	})
 }
+
+// findContainer is a test helper that locates a container by name across both
+// regular containers and init containers.
+func findContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
+	for i := range podSpec.Containers {
+		if podSpec.Containers[i].Name == name {
+			return &podSpec.Containers[i]
+		}
+	}
+	for i := range podSpec.InitContainers {
+		if podSpec.InitContainers[i].Name == name {
+			return &podSpec.InitContainers[i]
+		}
+	}
+	return nil
+}

@@ -230,19 +230,3 @@ func setEnv(container *corev1.Container, name string, value string) {
 	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
 }
 
-func findContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
-	if podSpec == nil {
-		return nil
-	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == name {
-			return &podSpec.Containers[i]
-		}
-	}
-	for i := range podSpec.InitContainers {
-		if podSpec.InitContainers[i].Name == name {
-			return &podSpec.InitContainers[i]
-		}
-	}
-	return nil
-}
