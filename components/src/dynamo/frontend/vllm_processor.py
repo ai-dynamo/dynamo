@@ -281,6 +281,7 @@ class VllmProcessor:
     async def _generator_inner(
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
+        _t_start = time.monotonic()
         request_id = random_uuid()
 
         # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
@@ -303,6 +304,7 @@ class VllmProcessor:
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
         # which wraps our ImageLoader (LRU cache + in-flight dedup).
         # No data URI encoding needed.
+        _t_preprocess_start = time.monotonic()
         with _nvtx.annotate("mm_frontend:preprocess_chat", color="yellow"):
             pre = await preprocess_chat_request(
                 request,
@@ -375,6 +377,8 @@ class VllmProcessor:
                 "mm_processor_kwargs"
             ] = request_for_sampling.mm_processor_kwargs
 
+        _t_preprocess_done = time.monotonic()
+
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
                 request_id,
@@ -383,6 +387,7 @@ class VllmProcessor:
                 GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
             )
 
+        _t_process_inputs_done = time.monotonic()
         InputProcessor.assign_request_id(vllm_preproc)
 
         # vLLM 0.17.0 removed EngineCoreRequest.eos_token_id. Dynamo now uses
@@ -437,11 +442,13 @@ class VllmProcessor:
         }
 
         # Extract MM routing metadata and prepare NIXL transfer.
+        _t_nixl_start = time.monotonic()
         (
             mm_routing_info,
             nixl_completion_futures,
             nixl_transferred,
         ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
+        _t_nixl_done = time.monotonic()
 
         # Forward multimodal URLs so the backend handler can load the media.
         # Skip when NIXL transferred successfully — the backend already has
@@ -461,6 +468,17 @@ class VllmProcessor:
             chat_template_kwargs=chat_template_kwargs,
         )
 
+        _t_backend_start = time.monotonic()
+        logger.info(
+            "[TIMING] %s preprocess=%.1fms process_inputs=%.1fms "
+            "nixl_routing=%.1fms frontend_total=%.1fms",
+            request_id,
+            (_t_preprocess_done - _t_preprocess_start) * 1000,
+            (_t_process_inputs_done - _t_preprocess_done) * 1000,
+            (_t_nixl_done - _t_nixl_start) * 1000,
+            (_t_backend_start - _t_start) * 1000,
+        )
+        _first_token = True
         async for item in self._generate_and_stream(
             request_id,
             request,
@@ -471,6 +489,15 @@ class VllmProcessor:
             mm_routing_info=mm_routing_info,
             nixl_completion_futures=nixl_completion_futures,
         ):
+            if _first_token:
+                _t_first_token = time.monotonic()
+                logger.info(
+                    "[TIMING] %s backend_ttft=%.1fms total=%.1fms",
+                    request_id,
+                    (_t_first_token - _t_backend_start) * 1000,
+                    (_t_first_token - _t_start) * 1000,
+                )
+                _first_token = False
             yield item
 
     def _preprocess_sync(
