@@ -12,11 +12,10 @@ No GPU or cluster profiling is required (gpu_0 only).  The only prerequisite is 
 running Kubernetes cluster with the Dynamo operator CRDs and webhooks installed.
 
 Run:
-  pytest tests/dgdr/test_dgdr_validation.py -m gpu_0 -v --dgdr-namespace=default
+  pytest tests/dgdr/test_dgdr_validation.py -m gpu_0 -v --dgdr-namespace=default --dgdr-image=<image>
 
 Test markers:
   gpu_0       No GPU required
-  pre_merge   Fast path – completes in seconds
   integration Integration-level (uses live webhook)
 """
 
@@ -47,7 +46,6 @@ logger = logging.getLogger(__name__)
 
 
 @pytest.mark.gpu_0
-@pytest.mark.pre_merge
 @pytest.mark.integration
 @pytest.mark.k8s
 class TestDGDRValidation:
@@ -249,7 +247,6 @@ class TestDGDRValidation:
 
 
 @pytest.mark.gpu_0
-@pytest.mark.pre_merge
 @pytest.mark.integration
 @pytest.mark.k8s
 class TestDGDRVersionConversion:
