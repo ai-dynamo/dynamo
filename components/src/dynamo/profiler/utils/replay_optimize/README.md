@@ -51,6 +51,35 @@ If the Python bindings are not importable yet, build them first:
 .venv/bin/maturin develop --uv -m lib/bindings/python/Cargo.toml
 ```
 
+This example uses AIC-backed replay optimization by default:
+
+- AIC is used to enumerate dense TP candidates
+- AIC-backed engine timing is used for the replay candidate configs
+
+Install `aiconfigurator` into the project environment:
+
+```bash
+uv pip install --python .venv/bin/python aiconfigurator
+```
+
+If a regular install fails to load usable perf data, reinstall from a source checkout that has real
+systems data materialized:
+
+```bash
+uv pip install --python .venv/bin/python --force-reinstall /path/to/aiconfigurator
+```
+
+If replay optimization fails with AIC errors about missing perf databases or parse failures such as
+`KeyError: 'gemm_dtype'`, inspect the installed files under:
+
+```text
+.venv/lib/python*/site-packages/aiconfigurator/systems/data/...
+```
+
+If those files begin with `version https://git-lfs.github.com/spec/v1`, you have Git LFS pointer
+stubs instead of real perf tables. In that case, install `aiconfigurator` from a checkout or wheel
+that includes the real LFS materialized payloads in `systems/`.
+
 When running directly from a source checkout, expose the in-repo Python packages:
 
 ```bash
@@ -76,6 +105,9 @@ This sweep uses:
 - router mode: `kv_router`
 - workload type: `SyntheticReplayWorkload`
 - GPU budget: `16`
+
+The GPU budget here is a simulated search constraint used by offline replay when it enumerates
+candidate TP and worker configurations. You do not need 16 real GPUs locally to run this search.
 
 The synthetic workload is intentionally large enough to make worker allocation and router settings
 matter:
@@ -104,9 +136,12 @@ Only add those when the experiment is specifically about scheduler limits.
 
 ## Driver Script
 
-Write the driver to a stable temp file such as `/tmp/dynamo_replay_kv_router_disagg_sweep.py`:
+The canonical starting point now lives in [example.py](example.py). Keeping it as a real module is
+better than carrying a large inline snippet in the README, and it also satisfies the macOS
+`ProcessPoolExecutor` requirement for a stable module path.
 
-Treat this script as a starting point, not a frozen harness. Modify it as needed for your search:
+Treat [example.py](example.py) as a starting point, not a frozen harness. Modify it as needed for
+your search:
 
 - change the workload shape
 - swap `SyntheticReplayWorkload` for `TraceReplayWorkload`
@@ -118,68 +153,9 @@ Treat this script as a starting point, not a frozen harness. Modify it as needed
 If you need to understand which knobs are available, see [models.py](models.py), [search.py](search.py),
 and [evaluate.py](evaluate.py).
 
-```python
-from dynamo.llm import KvRouterConfig, MockEngineArgs
-from dynamo.profiler.utils.replay_optimize import (
-    SyntheticReplayWorkload,
-    optimize_dense_disagg_with_replay,
-)
-
-result = optimize_dense_disagg_with_replay(
-    model="Qwen/Qwen3-32B",
-    backend="vllm",
-    system="h200_sxm",
-    workload=SyntheticReplayWorkload(
-        isl=32768,
-        osl=256,
-        request_count=5000,
-        replay_concurrency=200,
-        shared_prefix_ratio=0.5,
-        num_prefix_groups=50,
-    ),
-    base_prefill_engine_args=MockEngineArgs(
-        block_size=512,
-        num_gpu_blocks=20000,
-        enable_prefix_caching=True,
-        worker_type="prefill",
-    ),
-    base_decode_engine_args=MockEngineArgs(
-        block_size=512,
-        num_gpu_blocks=20000,
-        enable_prefix_caching=True,
-        worker_type="decode",
-    ),
-    base_router_config=KvRouterConfig(),
-    max_total_gpus=16,
-    constraints={
-        "mean_ttft_ms": 50000.0,
-        "mean_tpot_ms": 100.0,
-        "mean_e2e_latency_ms": 60000.0,
-    },
-    overlap_score_weights=[0.0, 0.5, 1.0, 2.0],
-)
-
-cols = [
-    "prefill_tp",
-    "decode_tp",
-    "prefill_workers",
-    "decode_workers",
-    "overlap_score_weight",
-    "total_gpus_used",
-    "output_throughput_tok_s",
-    "prefix_cache_reused_ratio",
-    "mean_ttft_ms",
-    "mean_tpot_ms",
-    "mean_e2e_latency_ms",
-]
-
-print("Best feasible:")
-print(result.best_feasible)
-print()
-
-print("Top feasible states:")
-print(result.feasible_df[cols].head(10).to_string(index=False))
-```
+The default path in [example.py](example.py) is the synthetic disaggregated sweep documented in
+this README. It also accepts `--trace-file` and `--arrival-speedup-ratio` so the same driver can be
+used for the Mooncake-style replay path below without rewriting the harness from scratch.
 
 ## Expected Outputs
 
@@ -195,6 +171,8 @@ Useful columns to inspect:
 - topology: `prefill_tp`, `decode_tp`, `prefill_workers`, `decode_workers`
 - routing: `router_mode`, `overlap_score_weight`
 - budget: `total_gpus_used`
+  This is the simulated GPU footprint of the candidate replay state, not a count of GPUs actually
+  allocated on the machine running the search.
 - throughput: `output_throughput_tok_s`
 - cache behavior: `prefix_cache_reused_ratio`
 - latency: `mean_ttft_ms`, `mean_tpot_ms`, `mean_e2e_latency_ms`
@@ -256,7 +234,10 @@ wget -O /tmp/toolagent_trace.jsonl \
 
 ### Replace the Synthetic Workload
 
-In the main driver, replace:
+If you use [example.py](example.py), pass `--trace-file /tmp/toolagent_trace.jsonl` and optionally
+`--arrival-speedup-ratio 0.8`.
+
+If you want to edit the driver directly, replace:
 
 ```python
 workload=SyntheticReplayWorkload(
