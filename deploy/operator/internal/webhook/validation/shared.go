@@ -134,6 +134,11 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		return nil, err
 	}
 
+	// Validate failover configuration
+	if err := v.validateFailover(); err != nil {
+		return nil, err
+	}
+
 	return warnings, nil
 }
 
@@ -261,7 +266,39 @@ func (v *SharedSpecValidator) validateFrontendSidecar() error {
 	return nil
 }
 
-// validateGPUMemoryService validates the GPU memory service configuration.
+// validateFailover validates the failover configuration for a service.
+// Structural checks only — DRA/DeviceClass availability is checked by the controller
+// at reconcile time (same pattern as Grove orchestrator availability).
+func (v *SharedSpecValidator) validateFailover() error {
+	if v.spec.Failover == nil || !v.spec.Failover.Enabled {
+		return nil
+	}
+
+	// Failover requires GPU memory service
+	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+		return fmt.Errorf(
+			"%s.failover: failover requires gpuMemoryService.enabled to be true",
+			v.fieldPath)
+	}
+
+	// Failover mode must match GMS mode when both are set
+	if v.spec.Failover.Mode != "" && v.spec.GPUMemoryService.Mode != "" &&
+		v.spec.Failover.Mode != v.spec.GPUMemoryService.Mode {
+		return fmt.Errorf(
+			"%s.failover: failover.mode %q must match gpuMemoryService.mode %q",
+			v.fieldPath, v.spec.Failover.Mode, v.spec.GPUMemoryService.Mode)
+	}
+
+	// interPod failover is not yet supported
+	if v.spec.Failover.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+		return fmt.Errorf(
+			"%s.failover: mode \"interPod\" is not yet supported",
+			v.fieldPath)
+	}
+
+	return nil
+}
+
 func (v *SharedSpecValidator) validateGPUMemoryService() error {
 	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
 		return nil
