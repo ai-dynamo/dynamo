@@ -27,11 +27,17 @@ _NO_DATA_HTML = (
 )
 
 
+_AUTO_REFRESH_TAG = '<meta http-equiv="refresh" content="30">'
+
+
 def _build_app(recorder: DiagnosticsRecorder) -> web.Application:
     async def handle_live(request: web.Request) -> web.Response:
         html = recorder.render_live_html()
         if html is None:
             return web.Response(text=_NO_DATA_HTML, content_type="text/html")
+        # Inject auto-refresh into the Plotly HTML so the dashboard
+        # updates every 30 seconds without manual browser refresh.
+        html = html.replace("<head>", f"<head>{_AUTO_REFRESH_TAG}", 1)
         return web.Response(text=html, content_type="text/html")
 
     app = web.Application()
