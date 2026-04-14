@@ -10,7 +10,7 @@ import os
 import queue
 import threading
 from collections import defaultdict
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -256,6 +256,33 @@ def _put_entry(
             pass
 
 
+# 64 MiB chunks for parallel preadv — gives high effective iodepth on NFS
+# while keeping each syscall large enough to amortize overhead.
+_CHUNK_SIZE = 64 * 1024 * 1024
+# How many preadv calls to keep in-flight per shard.  On Vast NFS each
+# outstanding preadv becomes a separate NFS READ RPC, so higher iodepth
+# means more network-level parallelism from a single file descriptor.
+_IO_DEPTH = 16
+
+
+def _preadv_chunk(
+    fd: int,
+    buf: memoryview,
+    file_offset: int,
+    size: int,
+    os_module,
+) -> None:
+    """Read exactly *size* bytes from *fd* at *file_offset* into *buf*."""
+    done = 0
+    while done < size:
+        n = os_module.preadv(fd, [buf[done:size]], file_offset + done)
+        if n == 0:
+            raise RuntimeError(
+                f"Unexpected EOF in preadv at offset {file_offset + done}"
+            )
+        done += n
+
+
 def read_shard_streaming_to_queue(
     abs_path: str,
     sorted_entries: List[AllocationEntry],
@@ -268,11 +295,12 @@ def read_shard_streaming_to_queue(
     torch_module=None,
     logger=None,
 ) -> int:
-    """Read a shard via O_DIRECT and stream entries to the queue as they
-    become readable, overlapping disk I/O with downstream GPU copies.
+    """Read a shard via parallel O_DIRECT preadv calls, streaming entries
+    to *work_q* as they become readable.
 
-    Falls back to the non-streaming ``read_shard_to_queue`` when O_DIRECT
-    is unavailable or the filesystem rejects it.
+    Multiple chunks are read concurrently from different file offsets to
+    achieve high effective I/O depth on network filesystems (e.g. Vast NFS)
+    where single-threaded synchronous reads severely under-utilize bandwidth.
     """
     if not sorted_entries:
         return 0
@@ -292,51 +320,76 @@ def read_shard_streaming_to_queue(
         shard_arr = np_module.empty(total_size, dtype=np_module.uint8)
 
     odirect_flag = getattr(os_module, "O_DIRECT", None)
-    if odirect_flag is not None:
+    preadv_fn = getattr(os_module, "preadv", None)
+    if odirect_flag is not None and preadv_fn is not None:
         fd: Optional[int] = None
+        io_pool: Optional[ThreadPoolExecutor] = None
         try:
             fd = os_module.open(abs_path, os_module.O_RDONLY | odirect_flag)
             mv = memoryview(shard_arr)
-            bytes_read = 0
-            entry_idx = 0
-            next_end = (
-                sorted_entries[0].tensor_offset + sorted_entries[0].aligned_size
-            )
 
-            while bytes_read < total_size:
+            # Build aligned chunk list covering the full shard.
+            chunk_size = _CHUNK_SIZE
+            chunks: List[Tuple[int, int]] = []  # (offset, size)
+            off = 0
+            while off < total_size:
+                sz = min(chunk_size, total_size - off)
+                chunks.append((off, sz))
+                off += sz
+
+            # chunks_done[i] is set when chunk i finishes (success or error).
+            chunks_done = [threading.Event() for _ in chunks]
+            chunk_errors: List[BaseException] = []
+
+            def _read_chunk(idx: int) -> None:
+                try:
+                    c_off, c_sz = chunks[idx]
+                    _preadv_chunk(
+                        fd, mv[c_off : c_off + c_sz], c_off, c_sz, os_module
+                    )
+                except BaseException as exc:
+                    chunk_errors.append(exc)
+                finally:
+                    chunks_done[idx].set()
+
+            # Submit chunk reads with bounded concurrency.
+            io_pool = ThreadPoolExecutor(max_workers=min(_IO_DEPTH, len(chunks)))
+            for i in range(len(chunks)):
+                io_pool.submit(_read_chunk, i)
+
+            # Stream entries to the work queue as their data arrives.
+            def _chunk_for_byte(byte_off: int) -> int:
+                return byte_off // chunk_size
+
+            for entry_idx in range(len(sorted_entries)):
                 if cancel_event is not None and cancel_event.is_set():
                     raise CancelledError(f"shard read cancelled: {abs_path}")
-                n = os_module.readv(fd, [mv[bytes_read:]])
-                if n == 0:
-                    raise RuntimeError(
-                        f"Unexpected EOF in streaming read from {abs_path}: "
-                        f"got {bytes_read} of {total_size} bytes"
+                entry = sorted_entries[entry_idx]
+                last_byte = entry.tensor_offset + entry.aligned_size - 1
+                chunks_done[_chunk_for_byte(last_byte)].wait()
+                if chunk_errors:
+                    raise chunk_errors[0]
+
+                eoff = entry.tensor_offset
+                if shard_t is not None:
+                    tensor = shard_t[eoff : eoff + entry.aligned_size]
+                else:
+                    tensor = torch_module.from_numpy(
+                        shard_arr[eoff : eoff + entry.aligned_size]
                     )
-                bytes_read += n
+                _put_entry(work_q, entry, tensor, cancel_event, abs_path)
 
-                # Queue every entry whose data is now fully in the buffer.
-                while entry_idx < len(sorted_entries) and next_end <= bytes_read:
-                    entry = sorted_entries[entry_idx]
-                    off = entry.tensor_offset
-                    if shard_t is not None:
-                        tensor = shard_t[off : off + entry.aligned_size]
-                    else:
-                        tensor = torch_module.from_numpy(
-                            shard_arr[off : off + entry.aligned_size]
-                        )
-                    _put_entry(work_q, entry, tensor, cancel_event, abs_path)
-                    entry_idx += 1
-                    if entry_idx < len(sorted_entries):
-                        next_end = (
-                            sorted_entries[entry_idx].tensor_offset
-                            + sorted_entries[entry_idx].aligned_size
-                        )
-
+            io_pool.shutdown(wait=True)
+            io_pool = None
             mv.release()
             os_module.close(fd)
             fd = None
+            if chunk_errors:
+                raise chunk_errors[0]
             return len(sorted_entries)
         except OSError as exc:
+            if io_pool is not None:
+                io_pool.shutdown(wait=False)
             if fd is not None:
                 os_module.close(fd)
                 fd = None
@@ -345,7 +398,7 @@ def read_shard_streaming_to_queue(
                 raise
             if logger is not None:
                 logger.debug(
-                    "O_DIRECT streaming failed on %s (errno %s); "
+                    "O_DIRECT preadv failed on %s (errno %s); "
                     "falling back to buffered read",
                     abs_path,
                     exc.errno,
