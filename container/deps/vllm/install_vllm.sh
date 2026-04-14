@@ -256,8 +256,7 @@ elif [ "$DEVICE" = "xpu" ] && [ "$ARCH" = "amd64" ]; then
     uv pip install lmcache==${LMCACHE_REF}
     echo "✓ LMCache ${LMCACHE_REF} installed from PyPI (XPU)"
 else
-    echo "❌ ERROR: unknown device"
-    exit 1
+    echo "⚠ Skipping LMCache for DEVICE=${DEVICE} ARCH=${ARCH} (not supported)"
 fi
 
 if [ "$DEVICE" = "cuda" ]; then
