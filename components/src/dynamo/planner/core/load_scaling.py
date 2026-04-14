@@ -259,6 +259,9 @@ class LoadScalingMixin:
             desired = p_desired
         elif d_desired is not None and d_desired > num_workers:
             desired = d_desired
+        elif p_desired is None and d_desired is not None and d_desired < num_workers:
+            # Prefill signal unavailable: allow decode-only scale-down.
+            desired = d_desired
         elif (
             p_desired is not None
             and p_desired < num_workers
