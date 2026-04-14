@@ -1196,3 +1196,132 @@ fn synthetic_token_id(request_idx: usize, token_idx: usize) -> u32 {
     let token = value as u32;
     if token == 0 { 1 } else { token }
 }
+
+// ---------------------------------------------------------------------------
+// Planner-in-the-loop replay bridge
+// ---------------------------------------------------------------------------
+
+/// Step-based bridge for driving an offline aggregated replay with a Python planner.
+///
+/// The Python adapter calls `advance_to()` to run the simulation forward,
+/// collects FPM/traffic metrics, feeds them to the planner state machine,
+/// then calls `apply_scaling()` to change the worker count.
+#[pyclass(unsendable)]
+pub struct PlannerReplayBridge {
+    handle: Option<dynamo_mocker::replay::PlannerReplayHandle>,
+}
+
+#[pymethods]
+impl PlannerReplayBridge {
+    /// Create a bridge for a Mooncake-style JSONL trace file.
+    #[new]
+    #[pyo3(signature = (trace_file, extra_engine_args, num_workers, router_mode="round_robin", router_config=None, arrival_speedup_ratio=1.0, trace_block_size=512))]
+    fn new(
+        trace_file: PathBuf,
+        extra_engine_args: &MockEngineArgs,
+        num_workers: usize,
+        router_mode: &str,
+        router_config: Option<KvRouterConfig>,
+        arrival_speedup_ratio: f64,
+        trace_block_size: usize,
+    ) -> PyResult<Self> {
+        let args = extra_engine_args.inner();
+        let router_mode = parse_replay_router_mode(router_mode)?;
+        let router_config = load_replay_router_config(router_config);
+
+        let handle = dynamo_mocker::replay::PlannerReplayHandle::from_trace_file(
+            args,
+            router_config,
+            None,
+            &trace_file,
+            trace_block_size,
+            num_workers,
+            arrival_speedup_ratio,
+            router_mode,
+        )
+        .map_err(to_pyerr)?;
+
+        Ok(Self {
+            handle: Some(handle),
+        })
+    }
+
+    /// Advance the simulation to `until_ms` simulated time.
+    ///
+    /// Returns a dict with: now_ms, is_done, fpm_snapshots, traffic, active_worker_count,
+    /// total_worker_count.
+    fn advance_to(&mut self, py: Python<'_>, until_ms: f64) -> PyResult<PyObject> {
+        let handle = self
+            .handle
+            .as_mut()
+            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
+
+        let tick_data = handle.advance_to(until_ms).map_err(to_pyerr)?;
+
+        // Convert FPM snapshots to a list of dicts
+        let fpm_list: Vec<_> = tick_data
+            .fpm_snapshots
+            .into_iter()
+            .map(|(worker_id, fpm)| {
+                json!({
+                    "worker_id": worker_id,
+                    "wall_time": fpm.wall_time_secs,
+                    "num_prefill_requests": fpm.num_prefill_requests,
+                    "sum_prefill_tokens": fpm.sum_prefill_tokens,
+                    "var_prefill_length": fpm.var_prefill_length,
+                    "sum_prefill_kv_tokens": fpm.sum_prefill_kv_tokens,
+                    "num_decode_requests": fpm.num_decode_requests,
+                    "sum_decode_kv_tokens": fpm.sum_decode_kv_tokens,
+                    "var_decode_kv_tokens": fpm.var_decode_kv_tokens,
+                    "num_queued_prefill": fpm.num_queued_prefill,
+                    "sum_queued_prefill_tokens": fpm.sum_queued_prefill_tokens,
+                    "var_queued_prefill_length": fpm.var_queued_prefill_length,
+                    "num_queued_decode": fpm.num_queued_decode,
+                    "sum_queued_decode_kv_tokens": fpm.sum_queued_decode_kv_tokens,
+                    "var_queued_decode_kv_tokens": fpm.var_queued_decode_kv_tokens,
+                })
+            })
+            .collect();
+
+        let (duration_s, num_req, avg_isl, avg_osl) = tick_data.traffic;
+
+        let result = json!({
+            "now_ms": tick_data.now_ms,
+            "is_done": tick_data.is_done,
+            "fpm_snapshots": fpm_list,
+            "traffic": {
+                "duration_s": duration_s,
+                "num_req": num_req,
+                "avg_isl": avg_isl,
+                "avg_osl": avg_osl,
+            },
+            "active_worker_count": tick_data.active_worker_count,
+            "total_worker_count": tick_data.total_worker_count,
+        });
+
+        pythonize(py, &result)
+            .map_err(to_pyerr)
+            .map(|obj| obj.unbind())
+    }
+
+    /// Apply a scaling decision: set the target number of workers.
+    fn apply_scaling(&mut self, target_workers: usize) -> PyResult<()> {
+        let handle = self
+            .handle
+            .as_mut()
+            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
+        handle.apply_scaling(target_workers).map_err(to_pyerr)
+    }
+
+    /// Finalize the replay and return the trace simulation report.
+    fn finalize(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let handle = self
+            .handle
+            .take()
+            .ok_or_else(|| PyException::new_err("bridge has already been finalized"))?;
+        let report = handle.finalize();
+        pythonize(py, &report)
+            .map_err(to_pyerr)
+            .map(|obj| obj.unbind())
+    }
+}

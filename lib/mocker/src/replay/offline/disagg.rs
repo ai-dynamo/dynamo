@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub(super) use super::components::ReplayMode;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-    ScheduledWorkerCompletion, WorkerAdmission,
+    ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
@@ -22,7 +22,7 @@ use super::runtime_utils::{
 #[cfg(test)]
 use super::state::DisaggRequestSnapshot;
 use super::state::{DisaggPhase, DisaggRequestState};
-use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector,
@@ -75,6 +75,11 @@ pub(super) struct DisaggRuntime {
     events: BinaryHeap<SimulationEvent>,
     progress: ReplayProgress,
     stats: DisaggRuntimeStats,
+    /// Forward pass metrics accumulated between planner ticks, keyed by (stage, worker_idx).
+    prefill_fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    decode_fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    /// Traffic statistics accumulated between planner ticks.
+    traffic: TrafficAccumulator,
 }
 
 impl DisaggRuntime {
@@ -192,6 +197,9 @@ impl DisaggRuntime {
             stats: DisaggRuntimeStats::default(),
             #[cfg(not(test))]
             stats: DisaggRuntimeStats,
+            prefill_fpm_buffer: Vec::new(),
+            decode_fpm_buffer: Vec::new(),
+            traffic: TrafficAccumulator::new(),
         })
     }
 
@@ -355,6 +363,8 @@ impl DisaggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
+        self.traffic
+            .on_request(request.tokens.len(), request.max_output_tokens);
 
         let queued_request = request.clone();
         self.requests
@@ -626,6 +636,7 @@ impl DisaggRuntime {
     }
 
     fn handle_prefill_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
+        self.prefill_fpm_buffer.extend(effects.fpm_snapshots);
         self.record_prefill_admissions(effects.admissions);
         self.apply_prefill_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
@@ -651,6 +662,7 @@ impl DisaggRuntime {
     }
 
     fn handle_decode_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
+        self.decode_fpm_buffer.extend(effects.fpm_snapshots);
         for payload in effects.immediate_completions {
             let payload = self.decode_engine.on_scheduled_completion(payload)?;
             self.process_decode_pass(
@@ -691,6 +703,30 @@ impl DisaggRuntime {
                 .map(|(uuid, state)| (*uuid, state.debug_snapshot()))
                 .collect();
         }
+    }
+
+    /// Advance the simulation up to `until_ms` simulated time, then pause.
+    /// Returns `true` if the replay is done (no more work).
+    pub(super) fn advance_to(&mut self, until_ms: f64) -> Result<bool> {
+        self.drain_current_timestamp()?;
+
+        while !self.is_done() {
+            let Some(next_timestamp_ms) = self.next_timestamp() else {
+                bail!(
+                    "offline disagg replay reached a dead end with {} in-flight requests remaining",
+                    self.cluster_in_flight()
+                );
+            };
+
+            if next_timestamp_ms > until_ms {
+                break;
+            }
+
+            self.now_ms = next_timestamp_ms;
+            self.drain_current_timestamp()?;
+        }
+
+        Ok(self.is_done())
     }
 
     /// Run the staged offline replay until both prefill and decode pipelines are drained.

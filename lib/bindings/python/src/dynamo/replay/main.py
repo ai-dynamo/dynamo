@@ -106,6 +106,64 @@ def _load_aic_perf_config(args: argparse.Namespace):
     )
 
 
+def _run_planner_replay(
+    trace_file: str,
+    extra_engine_args: MockEngineArgs | None,
+    router_config: KvRouterConfig | None,
+    num_workers: int,
+    router_mode: str,
+    arrival_speedup_ratio: float,
+    trace_block_size: int,
+    planner_config_arg: str,
+):
+    """Run an offline aggregated replay with planner-in-the-loop."""
+    from dynamo.llm import PlannerReplayBridge
+    from dynamo.planner.config.planner_config import PlannerConfig
+    from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
+    from dynamo.planner.offline.replay_adapter import ReplayPlannerAdapter
+
+    # Load planner config from file path or inline JSON
+    planner_config = PlannerConfig.from_config_arg(planner_config_arg)
+
+    # Override environment to replay (no real connectors)
+    planner_config.no_operation = True
+    if planner_config.mode not in ("agg",):
+        raise ValueError(
+            f"planner-in-the-loop replay only supports mode='agg', got '{planner_config.mode}'"
+        )
+
+    if extra_engine_args is None:
+        extra_engine_args = MockEngineArgs()
+
+    bridge = PlannerReplayBridge(
+        trace_file=trace_file,
+        extra_engine_args=extra_engine_args,
+        num_workers=num_workers,
+        router_mode=router_mode,
+        router_config=router_config,
+        arrival_speedup_ratio=arrival_speedup_ratio,
+        trace_block_size=trace_block_size,
+    )
+
+    # Derive WorkerCapabilities from engine args
+    max_kv_tokens = extra_engine_args.num_gpu_blocks * extra_engine_args.block_size
+    capabilities = WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=1,
+            max_num_batched_tokens=extra_engine_args.max_num_batched_tokens,
+            max_num_seqs=extra_engine_args.max_num_seqs,
+            max_kv_tokens=max_kv_tokens if max_kv_tokens > 0 else None,
+        ),
+    )
+
+    adapter = ReplayPlannerAdapter(
+        planner_config=planner_config,
+        bridge=bridge,
+        capabilities=capabilities,
+    )
+    return adapter.run()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
     parser.add_argument("trace_file", nargs="?")
@@ -155,6 +213,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--report-json",
         help="path to save the full replay report JSON; defaults to a timestamped file in the current directory",
     )
+    parser.add_argument(
+        "--planner-config",
+        help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg only)",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     using_trace_file = args.trace_file is not None
@@ -189,6 +251,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         aic_perf_config = _load_aic_perf_config(args)
     except ValueError as exc:
         parser.error(str(exc))
+
+    # Planner-in-the-loop mode
+    if args.planner_config is not None:
+        if args.replay_mode != "offline":
+            parser.error("--planner-config only supports --replay-mode=offline")
+        if not using_trace_file:
+            parser.error("--planner-config requires a trace file (not synthetic)")
+        if prefill_engine_args is not None or decode_engine_args is not None:
+            parser.error("--planner-config only supports aggregated mode (no separate prefill/decode engine args)")
+
+        planner_report = _run_planner_replay(
+            trace_file=args.trace_file,
+            extra_engine_args=extra_engine_args,
+            router_config=router_config,
+            num_workers=args.num_workers,
+            router_mode=args.router_mode,
+            arrival_speedup_ratio=args.arrival_speedup_ratio,
+            trace_block_size=args.trace_block_size,
+            planner_config_arg=args.planner_config,
+        )
+        report = planner_report.trace_report
+        if planner_report.scaling_events:
+            sys.stdout.write("\nScaling events:\n")
+            for event in planner_report.scaling_events:
+                sys.stdout.write(
+                    f"  t={event.at_s:.1f}s: {event.from_count} -> {event.to_count} workers"
+                    f" ({event.reason})\n"
+                )
+        report_path = write_report_json(report, args.report_json)
+        sys.stdout.write(format_report_table(report))
+        sys.stdout.write("\n")
+        sys.stdout.write(f"Saved full report to: {report_path}\n")
+        sys.stdout.write(f"Planner ticks: {planner_report.total_ticks}\n")
+        return 0
 
     if using_trace_file:
         report = run_trace_replay(
