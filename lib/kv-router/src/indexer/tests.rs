@@ -13,6 +13,7 @@ use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::positional::PositionalIndexer;
 use super::*;
+use crate::indexer::pruning::PruneConfig;
 use crate::protocols::*;
 use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
@@ -206,14 +207,14 @@ fn make_clear_event_with_dp_rank(worker_id: u64, dp_rank: u32) -> RouterEvent {
 #[template]
 #[rstest]
 fn indexer_template(
-    #[values("single", "sharded", "flat", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
 #[template]
 #[rstest]
 fn tree_size_indexer_template(
-    #[values("single", "sharded", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -224,7 +225,6 @@ fn make_indexer(variant: &str) -> Box<dyn KvIndexerInterface> {
 
     match variant {
         "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics)),
-        "sharded" => Box::new(KvIndexerSharded::new(token, 4, kv_block_size, metrics)),
         "flat" => Box::new(ThreadPoolIndexer::new(
             PositionalIndexer::new(32),
             4,
@@ -329,7 +329,7 @@ mod interface_tests {
         // tree-size accounting gap after mid-chain removes because descendant
         // lookup entries are cleaned up lazily. That means "store -> partial
         // remove -> restore continuation" can still miscount restored coverage
-        // in single, sharded, and concurrent. This test is intentionally scoped
+        // in single and concurrent. This test is intentionally scoped
         // to duplicate store/remove replay so all tree-size variants share the
         // same stable baseline.
 
@@ -1853,13 +1853,13 @@ mod long_sequence_tests {
 }
 
 // ============================================================================
-// Tests specific to tree-based implementations (KvIndexer, KvIndexerSharded)
+// Tests specific to tree-based implementations with frequency/pruning support.
 // These use features not available in PositionalIndexer
 // ============================================================================
 
 #[template]
 #[rstest]
-fn tree_indexer_template(#[values("single", "sharded")] variant: &str) {}
+fn tree_indexer_template(#[values("single")] variant: &str) {}
 
 fn make_tree_indexer_with_frequency(
     variant: &str,
@@ -1877,16 +1877,38 @@ fn make_tree_indexer_with_frequency(
             metrics,
             None,
         )),
-        "sharded" => Box::new(KvIndexerSharded::new_with_frequency(
-            token,
-            4,
-            Some(expiration),
-            kv_block_size,
-            metrics,
-            None,
-        )),
         _ => panic!("Unknown variant: {}", variant),
     }
+}
+
+#[tokio::test]
+async fn test_routing_decision_assigns_first_seen_worker() {
+    let token = CancellationToken::new();
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    let index = KvIndexer::new_with_frequency(
+        token,
+        Some(Duration::from_secs(60)),
+        32,
+        metrics,
+        Some(PruneConfig::default()),
+    );
+    let worker = WorkerWithDpRank::new(42, 0);
+    let local_hashes = vec![LocalBlockHash(11), LocalBlockHash(22)];
+    let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+
+    index
+        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes)
+        .await
+        .unwrap();
+    flush_and_settle(&index).await;
+
+    assert_score(&index, &[11, 22], worker, 2).await;
+
+    index.remove_worker(worker.worker_id).await;
+    flush_and_settle(&index).await;
+
+    let scores = query_scores(&index, &[11, 22]).await;
+    assert!(!scores.scores.contains_key(&worker));
 }
 
 mod tree_specific_tests {
@@ -2062,6 +2084,52 @@ mod local_indexer_tests {
     use super::*;
     use rstest_reuse::apply;
 
+    fn make_local_store_event(event_id: u64, block_hash: u64) -> RouterEvent {
+        RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(block_hash),
+                        tokens_hash: LocalBlockHash(block_hash),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+        )
+    }
+
+    fn make_local_remove_event(event_id: u64, block_hashes: &[u64]) -> RouterEvent {
+        RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: block_hashes
+                        .iter()
+                        .copied()
+                        .map(ExternalSequenceBlockHash)
+                        .collect(),
+                }),
+                dp_rank: 0,
+            },
+        )
+    }
+
+    fn make_local_clear_event(event_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            0,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Cleared,
+                dp_rank: 0,
+            },
+        )
+    }
+
     #[tokio::test]
     async fn test_local_indexer_slice_within_range() {
         let indexer = make_local_indexer_with_events(&[1, 2, 3, 4, 5]);
@@ -2069,9 +2137,17 @@ mod local_indexer_tests {
         // Helper to extract events from response
         let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
             match resp {
-                WorkerKvQueryResponse::Events(e) => e,
+                WorkerKvQueryResponse::Events { events: e, .. } => e,
                 WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
                 _ => panic!("Unexpected response type"),
+            }
+        };
+
+        let extract_last_event_id = |resp: &WorkerKvQueryResponse| -> Option<u64> {
+            match resp {
+                WorkerKvQueryResponse::Events { last_event_id, .. } => Some(*last_event_id),
+                WorkerKvQueryResponse::TreeDump { last_event_id, .. } => Some(*last_event_id),
+                _ => None,
             }
         };
 
@@ -2080,22 +2156,25 @@ mod local_indexer_tests {
         };
 
         // Test get_events_in_id_range (buffer queries)
-        // Range is [start, end] inclusive
+        // Buffer hits now return the contiguous suffix through the buffered tail.
         let result = indexer.get_events_in_id_range(Some(2), Some(4)).await;
-        let ids = get_ids(extract_events(result));
-        assert_eq!(ids, vec![2, 3, 4]); // inclusive range [2, 4]
+        let ids = get_ids(extract_events(result.clone()));
+        assert_eq!(ids, vec![2, 3, 4, 5]);
+        assert_eq!(extract_last_event_id(&result), Some(5));
 
         let result = indexer.get_events_in_id_range(Some(2), Some(6)).await;
-        let ids = get_ids(extract_events(result));
+        let ids = get_ids(extract_events(result.clone()));
         assert_eq!(ids, vec![2, 3, 4, 5]); // clamp end to buffer max
+        assert_eq!(extract_last_event_id(&result), Some(5));
 
         // start_id=0 is before buffer (first is 1), so should trigger tree dump
         let result = indexer.get_events_in_id_range(Some(0), Some(4)).await;
         assert!(matches!(result, WorkerKvQueryResponse::TreeDump { .. }));
 
         let result = indexer.get_events_in_id_range(Some(3), Some(3)).await;
-        let ids = get_ids(extract_events(result));
-        assert_eq!(ids, vec![3]); // single element when start == end
+        let ids = get_ids(extract_events(result.clone()));
+        assert_eq!(ids, vec![3, 4, 5]);
+        assert_eq!(extract_last_event_id(&result), Some(5));
 
         // Invalid range: end < start
         let result = indexer.get_events_in_id_range(Some(5), Some(2)).await;
@@ -2144,9 +2223,17 @@ mod local_indexer_tests {
 
         let extract_events = |resp: WorkerKvQueryResponse| -> Vec<RouterEvent> {
             match resp {
-                WorkerKvQueryResponse::Events(e) => e,
+                WorkerKvQueryResponse::Events { events: e, .. } => e,
                 WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
                 _ => panic!("Unexpected response type: {:?}", resp),
+            }
+        };
+
+        let extract_last_event_id = |resp: &WorkerKvQueryResponse| -> Option<u64> {
+            match resp {
+                WorkerKvQueryResponse::Events { last_event_id, .. } => Some(*last_event_id),
+                WorkerKvQueryResponse::TreeDump { last_event_id, .. } => Some(*last_event_id),
+                _ => None,
             }
         };
 
@@ -2160,10 +2247,25 @@ mod local_indexer_tests {
 
         // Buffer path tests
         let result = indexer.get_events_in_id_range(Some(11), None).await;
-        assert_eq!(get_ids(extract_events(result)), vec![11, 12, 13, 14]);
+        assert_eq!(
+            get_ids(extract_events(result.clone())),
+            vec![11, 12, 13, 14]
+        );
+        assert_eq!(extract_last_event_id(&result), Some(14));
 
         let result = indexer.get_events_in_id_range(Some(10), Some(14)).await;
-        assert_eq!(get_ids(extract_events(result)), vec![10, 11, 12, 13, 14]);
+        assert_eq!(
+            get_ids(extract_events(result.clone())),
+            vec![10, 11, 12, 13, 14]
+        );
+        assert_eq!(extract_last_event_id(&result), Some(14));
+
+        let result = indexer.get_events_in_id_range(Some(11), Some(12)).await;
+        assert_eq!(
+            get_ids(extract_events(result.clone())),
+            vec![11, 12, 13, 14]
+        );
+        assert_eq!(extract_last_event_id(&result), Some(14));
 
         // Tree dump path tests
         let result = indexer.get_events_in_id_range(None, None).await;
@@ -2308,16 +2410,23 @@ mod local_indexer_tests {
         assert_eq!(buffered_events[0].worker_id, worker_id);
 
         // Test serialization round-trip
-        let response = WorkerKvQueryResponse::Events(buffered_events);
+        let response = WorkerKvQueryResponse::Events {
+            events: buffered_events,
+            last_event_id: 1,
+        };
         let serialized = serde_json::to_vec(&response).unwrap();
         let deserialized: WorkerKvQueryResponse = serde_json::from_slice(&serialized).unwrap();
 
-        let events = match deserialized {
-            WorkerKvQueryResponse::Events(e) => e,
+        let (events, last_event_id) = match deserialized {
+            WorkerKvQueryResponse::Events {
+                events,
+                last_event_id,
+            } => (events, last_event_id),
             _ => panic!("Expected Events variant"),
         };
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].worker_id, worker_id);
+        assert_eq!(last_event_id, 1);
     }
 
     #[tokio::test]
@@ -2363,6 +2472,281 @@ mod local_indexer_tests {
             }
             other => panic!("Expected TreeDump, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_remove_worker_dp_rank_only_clears_target_rank() {
+        let local_indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+
+        local_indexer
+            .apply_event_with_buffer(make_store_event_with_dp_rank(7, &[101], 0))
+            .await
+            .unwrap();
+        local_indexer
+            .apply_event_with_buffer(make_store_event_with_dp_rank(7, &[202], 1))
+            .await
+            .unwrap();
+        local_indexer.flush().await;
+
+        local_indexer.remove_worker_dp_rank(7, 0).await;
+        local_indexer.flush().await;
+
+        let events = local_indexer.dump_events().await.unwrap();
+        let mut rank0 = events
+            .iter()
+            .filter(|event| event.worker_id == 7 && event.event.dp_rank == 0)
+            .collect::<Vec<_>>();
+        let mut rank1 = events
+            .iter()
+            .filter(|event| event.worker_id == 7 && event.event.dp_rank == 1)
+            .collect::<Vec<_>>();
+        rank0.sort_by_key(|event| event.event.event_id);
+        rank1.sort_by_key(|event| event.event.event_id);
+
+        assert!(rank0.is_empty());
+        assert_eq!(rank1.len(), 1);
+        assert!(matches!(
+            &rank1[0].event.data,
+            KvCacheEventData::Stored(data)
+                if data.blocks.first().map(|block| block.block_hash.0) == Some(202)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_coalesces_concurrent_tree_dumps() {
+        let indexer = Arc::new(LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        ));
+        indexer.set_dump_build_delay(Some(Duration::from_millis(50)));
+
+        let first = {
+            let indexer = indexer.clone();
+            tokio::spawn(async move { indexer.get_events_in_id_range(None, None).await })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let second = {
+            let indexer = indexer.clone();
+            tokio::spawn(async move { indexer.get_events_in_id_range(None, None).await })
+        };
+
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+
+        assert!(matches!(first, WorkerKvQueryResponse::TreeDump { .. }));
+        assert!(matches!(second, WorkerKvQueryResponse::TreeDump { .. }));
+        assert_eq!(indexer.dump_build_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_local_indexer_reuses_cached_tree_dump_without_time_expiry() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let first = indexer.get_events_in_id_range(None, None).await;
+        time::advance(Duration::from_secs(60)).await;
+        let second = indexer.get_events_in_id_range(None, None).await;
+
+        assert!(matches!(first, WorkerKvQueryResponse::TreeDump { .. }));
+        assert!(matches!(second, WorkerKvQueryResponse::TreeDump { .. }));
+        assert_eq!(indexer.dump_build_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_rebuilds_when_cumulative_append_budget_exceeded() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_store_event(2, 202))
+            .await
+            .unwrap();
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_store_event(3, 303))
+            .await
+            .unwrap();
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_store_event(4, 404))
+            .await
+            .unwrap();
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_appends_safe_tail_to_cached_dump() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let first = indexer.get_events_in_id_range(None, None).await;
+        assert!(matches!(first, WorkerKvQueryResponse::TreeDump { .. }));
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_remove_event(2, &[101]))
+            .await
+            .unwrap();
+
+        match indexer.get_events_in_id_range(None, None).await {
+            WorkerKvQueryResponse::TreeDump {
+                events,
+                last_event_id,
+            } => {
+                assert_eq!(last_event_id, 2);
+                assert!(events.iter().any(|event| event.event.event_id == 2));
+                assert!(
+                    events
+                        .iter()
+                        .any(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
+                );
+            }
+            other => panic!("Expected TreeDump, got: {other:?}"),
+        }
+        assert_eq!(indexer.dump_build_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_invalidates_cache_on_clear() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_clear_event(2))
+            .await
+            .unwrap();
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_invalidates_cache_on_event_gap() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_store_event(3, 303))
+            .await
+            .unwrap();
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_invalidates_cache_on_missing_tail_coverage() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            1,
+        );
+        indexer
+            .apply_event_with_buffer(make_local_store_event(1, 101))
+            .await
+            .unwrap();
+        indexer.flush().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 1);
+
+        indexer
+            .apply_event_with_buffer(make_local_store_event(2, 202))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_with_buffer(make_local_store_event(3, 303))
+            .await
+            .unwrap();
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        assert_eq!(indexer.dump_build_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_indexer_failed_dump_is_not_cached() {
+        let indexer = LocalKvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            5,
+        );
+
+        let dump_tx = indexer.snapshot_event_sender();
+        indexer.shutdown();
+        dump_tx.closed().await;
+
+        let _ = indexer.get_events_in_id_range(None, None).await;
+        let _ = indexer.get_events_in_id_range(None, None).await;
+
+        assert_eq!(indexer.dump_build_count(), 2);
     }
 
     #[tokio::test]

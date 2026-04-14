@@ -401,8 +401,6 @@ class TestDecodeWorkerMultimodalBranching:
             model="llava-hf/llava-1.5-7b-hf",
             disaggregation_mode="DECODE",
         )
-        # Return an error from _build_prompt_from_request so we don't need
-        # to mock the full engine — just verify we get past the decode guard.
         handler._build_prompt_from_request = MagicMock(
             return_value=(None, None, {"status": "error", "message": "test stop"})
         )
@@ -493,6 +491,66 @@ class TestBuildEmbeddingParams:
         assert "image_grid_thw" in result
         assert "embeddings_shape" in result
         assert result["embeddings_shape"] == [1, 256, 1024]
+
+    def test_pil_image_qwen_computes_grid(self):
+        """PIL image for Qwen VL with grid params -> computes valid embedding_params."""
+        from PIL import Image
+
+        from dynamo.vllm.multimodal_utils.models.qwen import QwenGridParams
+
+        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
+        # Qwen3-VL: patch=16, merge=2, factor=32
+        handler._qwen_grid_params = QwenGridParams(
+            patch_size=16,
+            merge_size=2,
+            factor=32,
+            min_pixels=65536,
+            max_pixels=16777216,
+            vision_hidden_dim=2048,
+        )
+
+        img = Image.new("RGB", (640, 480))
+        result = handler._build_embedding_params({"image": img})
+
+        assert result is not None
+        assert result["image_grid_thw"] == [[1, 30, 40]]
+        # total_tokens = 1*30*40 // 4 = 300
+        assert result["embeddings_shape"] == [300, 2048]
+
+    def test_pil_multi_image_qwen_computes_grid(self):
+        """Multiple PIL images for Qwen VL -> computes combined embedding_params."""
+        from PIL import Image
+
+        from dynamo.vllm.multimodal_utils.models.qwen import QwenGridParams
+
+        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
+        handler._qwen_grid_params = QwenGridParams(
+            patch_size=16,
+            merge_size=2,
+            factor=32,
+            min_pixels=65536,
+            max_pixels=16777216,
+            vision_hidden_dim=2048,
+        )
+
+        imgs = [Image.new("RGB", (640, 480)), Image.new("RGB", (320, 320))]
+        result = handler._build_embedding_params({"image": imgs})
+
+        assert result is not None
+        assert len(result["image_grid_thw"]) == 2
+        assert result["image_grid_thw"][0] == [1, 30, 40]
+        assert result["embeddings_shape"][1] == 2048
+
+    def test_pil_image_qwen_params_unavailable_returns_none(self):
+        """Qwen VL with no grid params -> returns None (fallback)."""
+        from PIL import Image
+
+        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
+        handler._qwen_grid_params = None
+
+        img = Image.new("RGB", (640, 480))
+        result = handler._build_embedding_params({"image": img})
+        assert result is None
 
     def test_pil_image_list_non_qwen_returns_none(self):
         """PIL image list for non-Qwen model -> returns None."""

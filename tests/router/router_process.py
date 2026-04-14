@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
 
 from tests.utils.managed_process import ManagedProcess
 
@@ -30,9 +31,11 @@ class FrontendRouterProcess(ManagedProcess):
         router_mode: str = "kv",
         min_initial_workers: int | None = None,
         router_aic_config: dict[str, str | int] | None = None,
+        serve_indexer: bool = False,
+        use_remote_indexer: bool = False,
     ):
         command = [
-            "python3",
+            sys.executable,
             "-m",
             "dynamo.frontend",
             "--router-mode",
@@ -64,6 +67,12 @@ class FrontendRouterProcess(ManagedProcess):
 
         if durable_kv_events:
             command.append("--router-durable-kv-events")
+
+        if serve_indexer:
+            command.append("--serve-indexer")
+
+        if use_remote_indexer:
+            command.append("--use-remote-indexer")
 
         if router_aic_config is not None:
             command.extend(
@@ -105,6 +114,7 @@ class FrontendRouterProcess(ManagedProcess):
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
+            display_name=f"dynamo-frontend-{router_mode}",
         )
         self.port = frontend_port
         self.router_mode = router_mode
@@ -133,7 +143,7 @@ class DirectRouterProcess(ManagedProcess):
         request_plane: str = "nats",
     ):
         command = [
-            "python3",
+            sys.executable,
             "-m",
             "dynamo.frontend",
             "--router-mode",
@@ -161,6 +171,7 @@ class DirectRouterProcess(ManagedProcess):
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
+            display_name="dynamo-frontend-direct",
         )
         self.port = frontend_port
 

@@ -54,7 +54,7 @@ See the instructions here: [Running KVBM in TensorRT-LLM](../../components/kvbm/
 
 ## Observability
 
-TensorRT-LLM exposes Prometheus metrics for monitoring inference performance. For detailed metrics reference, collection setup, and Grafana integration, see the [Prometheus Metrics Guide](./trtllm-prometheus.md).
+TensorRT-LLM exposes Prometheus metrics for monitoring inference performance. For detailed metrics reference, collection setup, and Grafana integration, see the [Observability Guide](./trtllm-observability.md).
 
 ## Known Issues and Mitigations
 

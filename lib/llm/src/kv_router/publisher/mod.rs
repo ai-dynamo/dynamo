@@ -24,7 +24,7 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, worker_query::start_worker_kv_query_endpoint,
+    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
 };
 
 mod event_processor;
@@ -34,7 +34,7 @@ mod worker_metrics;
 mod zmq_listener;
 
 #[cfg(test)]
-use event_processor::{BatchingState, run_event_processor_loop};
+use event_processor::{BatchingState, EventDedupFilter, run_event_processor_loop};
 use event_processor::{
     EventPlanePublisher, start_event_processor, start_event_processor_jetstream,
 };

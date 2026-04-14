@@ -25,7 +25,6 @@ crate-type = ["cdylib", "rlib"]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
-kv-indexer-runtime = ["kv-indexer", "dynamo-kv-router/indexer-runtime"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 nvtx = ["dynamo-runtime/nvtx"]
 

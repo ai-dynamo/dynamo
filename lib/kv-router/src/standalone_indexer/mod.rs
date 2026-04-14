@@ -6,8 +6,6 @@ pub mod listener;
 pub mod metrics;
 pub mod recovery;
 pub mod registry;
-#[cfg(feature = "indexer-runtime")]
-pub mod runtime;
 pub mod server;
 mod zmq;
 
@@ -29,13 +27,6 @@ pub struct IndexerConfig {
     pub model_name: String,
     pub tenant_id: String,
     pub peers: Option<String>,
-}
-
-#[cfg(feature = "indexer-runtime")]
-pub struct RuntimeConfig {
-    pub namespace: String,
-    pub component_name: String,
-    pub worker_component: String,
 }
 
 pub(super) fn validate_zmq_endpoint(endpoint: &str) -> anyhow::Result<()> {
@@ -152,81 +143,6 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
     );
 
     let registry = Arc::new(WorkerRegistry::new(config.threads));
-    run_common(&config, &registry, cancel_token).await
-}
-
-#[cfg(feature = "indexer-runtime")]
-pub async fn run_with_runtime(
-    runtime: dynamo_runtime::Runtime,
-    config: IndexerConfig,
-    runtime_config: RuntimeConfig,
-) -> anyhow::Result<()> {
-    use dynamo_runtime::{
-        DistributedRuntime,
-        pipeline::{ManyOut, SingleIn, network::Ingress},
-    };
-
-    use crate::indexer::{IndexerQueryRequest, IndexerQueryResponse, KV_INDEXER_QUERY_ENDPOINT};
-
-    let distributed_runtime = DistributedRuntime::from_settings(runtime).await?;
-    let cancel_token = distributed_runtime.primary_token();
-    let component = distributed_runtime
-        .namespace(&runtime_config.namespace)?
-        .component(&runtime_config.component_name)?;
-
-    tracing::info!(
-        namespace = %runtime_config.namespace,
-        component = %runtime_config.component_name,
-        block_size = ?config.block_size,
-        port = config.port,
-        threads = config.threads,
-        model_name = %config.model_name,
-        tenant_id = %config.tenant_id,
-        worker_component = %runtime_config.worker_component,
-        num_peers = config.peers.as_ref().map(|p| p.split(',').count()).unwrap_or(0),
-        "Starting standalone KV cache indexer (Dynamo runtime mode)"
-    );
-
-    let registry = Arc::new(WorkerRegistry::new(config.threads));
-    let engine = Arc::new(runtime::query_engine::IndexerQueryEngine {
-        registry: registry.clone(),
-    });
-    let ingress =
-        Ingress::<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>>::for_engine(
-            engine,
-        )?;
-    let query_endpoint = component
-        .endpoint(KV_INDEXER_QUERY_ENDPOINT)
-        .endpoint_builder()
-        .handler(ingress)
-        .graceful_shutdown(true);
-
-    distributed_runtime.runtime().secondary().spawn(async move {
-        if let Err(err) = query_endpoint.start().await {
-            tracing::error!(error = %err, "Query endpoint failed");
-        }
-    });
-
-    tracing::info!(
-        endpoint = KV_INDEXER_QUERY_ENDPOINT,
-        "Query endpoint registered"
-    );
-
-    runtime::discovery::spawn_discovery_watcher(
-        &distributed_runtime,
-        registry.clone(),
-        cancel_token.clone(),
-    )
-    .await?;
-    runtime::subscriber::spawn_event_subscriber(
-        &distributed_runtime,
-        &runtime_config.namespace,
-        &runtime_config.worker_component,
-        registry.clone(),
-        cancel_token.clone(),
-    )
-    .await?;
-
     run_common(&config, &registry, cancel_token).await
 }
 

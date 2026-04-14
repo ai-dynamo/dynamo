@@ -204,12 +204,16 @@ pub struct KvRouterConfig {
     /// "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
     pub router_queue_policy: RouterQueuePolicy,
 
-    /// Component name of a standalone KV indexer to use for overlap scoring.
-    /// When set, the router creates a `Remote` indexer that queries the standalone
-    /// indexer via the request plane instead of maintaining a local radix tree.
-    /// The standalone indexer handles its own event subscription and discovery.
+    /// Whether to query a remote KV indexer served from the worker component
+    /// instead of maintaining a local radix tree for overlap scoring.
     #[serde(default)]
-    pub remote_indexer_component: Option<String>,
+    pub use_remote_indexer: bool,
+
+    /// Whether this router should serve its local indexer from the worker component.
+    /// This enables other routers/frontends in the same namespace to query
+    /// overlap scores remotely over the request plane by component + endpoint.
+    #[serde(default)]
+    pub serve_indexer: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -234,7 +238,8 @@ impl Default for KvRouterConfig {
             router_event_threads: 4,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
-            remote_indexer_component: None,
+            use_remote_indexer: false,
+            serve_indexer: false,
         }
     }
 }
@@ -266,6 +271,16 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
     {
         return Err(ValidationError::new(
             "router_prefill_load_model currently requires router_queue_policy='fcfs'",
+        ));
+    }
+    if config.use_remote_indexer && config.serve_indexer {
+        return Err(ValidationError::new(
+            "use_remote_indexer and serve_indexer are mutually exclusive",
+        ));
+    }
+    if config.serve_indexer && config.overlap_score_weight == 0.0 {
+        return Err(ValidationError::new(
+            "serve_indexer requires overlap_score_weight > 0",
         ));
     }
     Ok(())

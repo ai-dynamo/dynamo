@@ -23,6 +23,25 @@ type CheckpointJobOptions struct {
 	WrapLaunchJob         bool
 }
 
+type CheckpointObservationPhase string
+
+const (
+	CheckpointObservationPhaseRunning                CheckpointObservationPhase = "running"
+	CheckpointObservationPhaseWaitingForConfirmation CheckpointObservationPhase = "waiting_for_confirmation"
+	CheckpointObservationPhaseReady                  CheckpointObservationPhase = "ready"
+	CheckpointObservationPhaseFailed                 CheckpointObservationPhase = "failed"
+)
+
+type CheckpointObservation struct {
+	Phase   CheckpointObservationPhase
+	Reason  string
+	Message string
+}
+
+func GetCheckpointJobName(checkpointID string, artifactVersion string) string {
+	return "checkpoint-job-" + checkpointID + "-" + ArtifactVersion(artifactVersion)
+}
+
 func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOptions) (*batchv1.Job, error) {
 	podTemplate = podTemplate.DeepCopy()
 	if podTemplate.Labels == nil {
@@ -37,15 +56,16 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}
 	if opts.WrapLaunchJob {
-		if len(podTemplate.Spec.Containers) == 0 {
-			return nil, fmt.Errorf("checkpoint job requires one worker container")
+		container, err := ResolveCheckpointWorkerContainer(&podTemplate.Spec)
+		if err != nil {
+			return nil, err
 		}
-		if len(podTemplate.Spec.Containers[0].Command) == 0 {
+		if len(container.Command) == 0 {
 			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
 		}
-		podTemplate.Spec.Containers[0].Command, podTemplate.Spec.Containers[0].Args = wrapWithCudaCheckpointLaunchJob(
-			podTemplate.Spec.Containers[0].Command,
-			podTemplate.Spec.Containers[0].Args,
+		container.Command, container.Args = wrapWithCudaCheckpointLaunchJob(
+			container.Command,
+			container.Args,
 		)
 	}
 
@@ -65,6 +85,65 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 			Template:                *podTemplate,
 		},
 	}, nil
+}
+
+func ObserveCheckpointJob(job *batchv1.Job, checkpointWorkerActive bool) CheckpointObservation {
+	jobComplete := false
+	jobFailed := false
+	for _, condition := range job.Status.Conditions {
+		if condition.Status != corev1.ConditionTrue {
+			continue
+		}
+		if condition.Type == batchv1.JobComplete {
+			jobComplete = true
+			continue
+		}
+		if condition.Type == batchv1.JobFailed {
+			jobFailed = true
+		}
+	}
+
+	status := job.Annotations[CheckpointStatusAnnotation]
+	if status == CheckpointStatusFailed {
+		observation := CheckpointObservation{
+			Phase:   CheckpointObservationPhaseFailed,
+			Reason:  "JobFailed",
+			Message: "Checkpoint job failed",
+		}
+		if jobComplete {
+			observation.Reason = "CheckpointVerificationFailed"
+			observation.Message = "Checkpoint job completed but snapshot-agent reported checkpoint failure"
+		}
+		return observation
+	}
+
+	if jobComplete {
+		if status == CheckpointStatusCompleted {
+			return CheckpointObservation{
+				Phase:   CheckpointObservationPhaseReady,
+				Reason:  "JobSucceeded",
+				Message: "Checkpoint job completed successfully",
+			}
+		}
+		if checkpointWorkerActive {
+			return CheckpointObservation{Phase: CheckpointObservationPhaseWaitingForConfirmation}
+		}
+		return CheckpointObservation{
+			Phase:   CheckpointObservationPhaseFailed,
+			Reason:  "CheckpointVerificationFailed",
+			Message: "Checkpoint job completed without snapshot-agent completion confirmation",
+		}
+	}
+
+	if jobFailed {
+		return CheckpointObservation{
+			Phase:   CheckpointObservationPhaseFailed,
+			Reason:  "JobFailed",
+			Message: "Checkpoint job failed",
+		}
+	}
+
+	return CheckpointObservation{Phase: CheckpointObservationPhaseRunning}
 }
 
 func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {

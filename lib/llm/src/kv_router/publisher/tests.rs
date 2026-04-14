@@ -502,7 +502,9 @@ mod tests_startup_helpers {
     use super::*;
     use crate::utils::zmq::{bind_pub_socket, send_multipart};
     use bytes::Bytes;
-    use dynamo_kv_router::indexer::{GetWorkersRequest, KvIndexer, KvIndexerInterface};
+    use dynamo_kv_router::indexer::{
+        GetWorkersRequest, KvIndexer, KvIndexerInterface, WorkerKvQueryResponse,
+    };
     use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use std::sync::{Arc, Mutex};
 
@@ -1152,8 +1154,12 @@ mod tests_startup_helpers {
         );
 
         // assert: Worker's local indexer buffered event
-        let buffered = local_indexer_1.get_all_events_in_buffer();
-        assert_eq!(buffered.len(), 1, "Local indexer should buffer 1 event");
+        match local_indexer_1.get_events_in_id_range(Some(1), None).await {
+            WorkerKvQueryResponse::Events { events, .. } => {
+                assert_eq!(events.len(), 1, "Local indexer should buffer 1 event");
+            }
+            other => panic!("Expected buffered events, got {other:?}"),
+        }
 
         // === STEP 2 & 3: Simulate Outage - Stop forwarding to router ===
         let event_2 = KvCacheEvent {
@@ -1192,12 +1198,16 @@ mod tests_startup_helpers {
         }
 
         // assert: Worker's local indexer has both events
-        let buffered = local_indexer_1.get_all_events_in_buffer();
-        assert_eq!(
-            buffered.len(),
-            2,
-            "Local indexer should have both events during outage"
-        );
+        match local_indexer_1.get_events_in_id_range(Some(1), None).await {
+            WorkerKvQueryResponse::Events { events, .. } => {
+                assert_eq!(
+                    events.len(),
+                    2,
+                    "Local indexer should have both events during outage"
+                );
+            }
+            other => panic!("Expected buffered events, got {other:?}"),
+        }
 
         // assert: Router DOESN'T have event_2
         let block_hashes_2 = vec![LocalBlockHash(200), LocalBlockHash(202)];
@@ -1223,7 +1233,7 @@ mod tests_startup_helpers {
             .get_events_in_id_range(Some(last_known_id + 1), None)
             .await;
         let missed_events = match response {
-            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
+            dynamo_kv_router::indexer::WorkerKvQueryResponse::Events { events: e, .. } => e,
             dynamo_kv_router::indexer::WorkerKvQueryResponse::TreeDump { events: e, .. } => e,
             dynamo_kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
                 panic!("Unexpected error response: {message}")
@@ -1260,6 +1270,157 @@ mod tests_startup_helpers {
         );
 
         token.cancel();
+    }
+}
+
+#[cfg(test)]
+mod test_event_dedup_filter {
+    use super::*;
+
+    fn store_data(hashes: &[u64]) -> KvCacheStoreData {
+        KvCacheStoreData {
+            parent_hash: None,
+            blocks: hashes
+                .iter()
+                .map(|&h| KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(h),
+                    tokens_hash: LocalBlockHash(h * 10),
+                    mm_extra_info: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn remove_data(hashes: &[u64]) -> KvCacheRemoveData {
+        KvCacheRemoveData {
+            block_hashes: hashes
+                .iter()
+                .map(|&h| ExternalSequenceBlockHash(h))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn stores_track_refcounts_for_removes() {
+        let mut filter = EventDedupFilter::new();
+        let data = store_data(&[1, 2, 3]);
+
+        // Store same hashes twice — refcount should be 2
+        filter.track_store(0, &data);
+        filter.track_store(0, &data);
+
+        // First remove — refcounts 2→1, all filtered out
+        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        assert!(result.is_none());
+
+        // Second remove — refcounts 1→0, all pass through
+        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().block_hashes.len(), 3);
+    }
+
+    #[test]
+    fn duplicate_removes_are_filtered() {
+        let mut filter = EventDedupFilter::new();
+
+        // Store same hash twice
+        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, &store_data(&[1]));
+
+        // First remove — refcount 2→1, filtered out
+        let result = filter.filter_remove(0, remove_data(&[1]));
+        assert!(result.is_none());
+
+        // Second remove — refcount 1→0, passes through
+        let result = filter.filter_remove(0, remove_data(&[1]));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().block_hashes.len(), 1);
+    }
+
+    #[test]
+    fn store_remove_store_cycle() {
+        let mut filter = EventDedupFilter::new();
+
+        // Store hash 1
+        filter.track_store(0, &store_data(&[1]));
+
+        // Remove hash 1 — refcount 1→0, passes through
+        let result = filter.filter_remove(0, remove_data(&[1]));
+        assert!(result.is_some());
+
+        // Store hash 1 again — refcount starts fresh at 1
+        filter.track_store(0, &store_data(&[1]));
+
+        // Remove again — refcount 1→0, passes through
+        let result = filter.filter_remove(0, remove_data(&[1]));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn clear_resets_all_ranks() {
+        let mut filter = EventDedupFilter::new();
+
+        // Store on rank 0 and rank 1
+        filter.track_store(0, &store_data(&[1, 2]));
+        filter.track_store(0, &store_data(&[1, 2]));
+        filter.track_store(1, &store_data(&[1, 2]));
+        filter.track_store(1, &store_data(&[1, 2]));
+
+        // Clear wipes all ranks (matches indexer semantics where Cleared
+        // from any rank removes all blocks for the entire worker).
+        filter.clear();
+
+        // Both ranks pass through defensively after clear
+        let result = filter.filter_remove(0, remove_data(&[1]));
+        assert!(result.is_some());
+
+        let result = filter.filter_remove(1, remove_data(&[1]));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn mixed_blocks_in_single_remove() {
+        let mut filter = EventDedupFilter::new();
+
+        // Hash 1: stored twice (refcount 2)
+        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, &store_data(&[1]));
+
+        // Hash 2: stored once (refcount 1)
+        filter.track_store(0, &store_data(&[2]));
+
+        // Hash 3: stored twice (refcount 2)
+        filter.track_store(0, &store_data(&[3]));
+        filter.track_store(0, &store_data(&[3]));
+
+        // Remove all three — only hash 2 (refcount 1→0) passes through
+        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert_eq!(result.block_hashes.len(), 1);
+        assert_eq!(result.block_hashes[0], ExternalSequenceBlockHash(2));
+    }
+
+    #[test]
+    fn same_hash_on_different_ranks_are_independent() {
+        let mut filter = EventDedupFilter::new();
+
+        // Store hash 1 on rank 0 (twice) and rank 1 (once)
+        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(1, &store_data(&[1]));
+
+        // Remove hash 1 on rank 1 — refcount 1→0, passes through
+        let result = filter.filter_remove(1, remove_data(&[1]));
+        assert!(result.is_some());
+
+        // Remove hash 1 on rank 0 — refcount 2→1, filtered out
+        let result = filter.filter_remove(0, remove_data(&[1]));
+        assert!(result.is_none());
+
+        // Remove hash 1 on rank 0 again — refcount 1→0, passes through
+        let result = filter.filter_remove(0, remove_data(&[1]));
+        assert!(result.is_some());
     }
 }
 

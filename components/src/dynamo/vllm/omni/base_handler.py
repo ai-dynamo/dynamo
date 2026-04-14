@@ -17,6 +17,8 @@ except ImportError:
     DiffusionParallelConfig = None  # type: ignore[assignment, misc]
 
 from dynamo._core import Context
+from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
+from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
 logger = logging.getLogger(__name__)
@@ -170,11 +172,7 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         For AUDIO_GENERATION returns NvAudioSpeechResponse format.
         For all other types returns OpenAI chat.completion.chunk format.
         """
-        from dynamo.common.utils.output_modalities import RequestType
-
         if request_type == RequestType.AUDIO_GENERATION:
-            from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
-
             return NvAudioSpeechResponse(
                 id=request_id,
                 model=self.config.served_model_name or self.config.model,

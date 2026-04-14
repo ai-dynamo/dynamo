@@ -281,6 +281,13 @@ impl Client {
         });
     }
 
+    /// Override `instance_avail` for testing. This allows creating an inconsistency
+    /// between `instance_ids_avail()` and `instances()` to simulate race conditions.
+    #[cfg(test)]
+    pub(crate) fn override_instance_avail(&self, ids: Vec<u64>) {
+        self.instance_avail.store(Arc::new(ids));
+    }
+
     async fn get_or_create_dynamic_instance_source(
         endpoint: &Endpoint,
     ) -> Result<Arc<tokio::sync::watch::Receiver<Vec<Instance>>>> {
