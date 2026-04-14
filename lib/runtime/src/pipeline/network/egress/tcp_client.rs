@@ -985,10 +985,17 @@ impl TcpConnectionPool {
     /// The cleanup interval is half the idle TTL so hosts are reaped
     /// reasonably promptly after expiry.
     fn start_idle_cleanup(self: &Arc<Self>) {
+        // Only spawn when a tokio runtime is available. In production this is
+        // always the case (clients are created from async contexts), but sync
+        // unit tests construct TcpRequestClient without a runtime.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::debug!("No tokio runtime available; idle host cleanup disabled");
+            return;
+        };
         let pool = Arc::downgrade(self);
         // Floor at 30s to prevent busy-loop if DYN_TCP_HOST_IDLE_TTL_SECS=0
         let interval = Duration::from_millis((self.host_idle_ttl_ms / 2).max(30_000));
-        tokio::spawn(async move {
+        handle.spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
                 match pool.upgrade() {
