@@ -32,16 +32,16 @@ use tokio_util::codec::FramedRead;
 const DEFAULT_TCP_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 /// Default connection pool size per host
-const DEFAULT_POOL_SIZE: usize = 8;
+const DEFAULT_POOL_SIZE: usize = 100;
 
 /// Buffer size for request channel per connection (backpressure control)
-const REQUEST_CHANNEL_BUFFER: usize = 50;
+const REQUEST_CHANNEL_BUFFER: usize = 256;
 
 /// Maximum retries when another task is connecting (prevents unbounded recursion)
 const MAX_CONNECT_RETRIES: usize = 5;
 
 /// Default global connect concurrency limit across all hosts
-const DEFAULT_GLOBAL_CONNECT_LIMIT: usize = 16;
+const DEFAULT_GLOBAL_CONNECT_LIMIT: usize = 64;
 
 /// Default idle host TTL in seconds before cleanup
 const DEFAULT_HOST_IDLE_TTL_SECS: u64 = 300;
@@ -52,8 +52,8 @@ const DEFAULT_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 /// Spin loop limit before falling back to async Notify in writer task
 const WRITER_SPIN_LIMIT: u32 = 64;
 
-/// BufWriter capacity for batched writes (64 KB)
-const WRITER_BUF_CAPACITY: usize = 64 * 1024;
+/// BufWriter capacity for batched writes (256 KB)
+const WRITER_BUF_CAPACITY: usize = 256 * 1024;
 
 /// Get maximum message size from environment or use default
 fn get_max_message_size() -> usize {
@@ -947,7 +947,14 @@ impl TcpConnectionPool {
             .iter()
             .filter(|entry| {
                 let last = entry.value().last_used_ms.load(Ordering::Relaxed);
-                now.saturating_sub(last) > ttl
+                if now.saturating_sub(last) <= ttl {
+                    return false;
+                }
+                // Don't evict hosts that still have in-flight requests --
+                // a long-running request with no new checkouts would look
+                // idle but killing it would fail legitimate work.
+                let snap = entry.value().snapshot.load();
+                !snap.iter().any(|c| c.inflight.load(Ordering::Relaxed) > 0)
             })
             .map(|entry| *entry.key())
             .collect();
@@ -955,14 +962,15 @@ impl TcpConnectionPool {
         for addr in stale {
             tracing::debug!("Removing idle TCP host pool for {}", addr);
             if let Some((_, host)) = self.hosts.remove(&addr) {
-                // Gracefully shut down connections: mark unhealthy and wake
-                // writers so they exit and drain pending callers. Without this,
-                // dropping the HostPool only detaches the JoinHandles (tokio
-                // does not abort on drop), leaving zombie tasks holding sockets.
+                // Shut down connections: mark unhealthy, wake writers so they
+                // exit and drain pending callers, and abort readers since they
+                // may be blocked in framed.next().await on a quiet peer and
+                // would otherwise hold the socket FD indefinitely.
                 let snap = host.snapshot.load();
                 for conn in snap.iter() {
                     conn.healthy.store(false, Ordering::Relaxed);
                     conn.writer_notify.notify_one();
+                    conn.reader_handle.abort();
                 }
             }
         }
