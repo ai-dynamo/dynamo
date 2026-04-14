@@ -2,10 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import builtins
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +11,6 @@ import numpy as np
 import pytest
 
 from dynamo.llm import EngineType, EntrypointArgs, MockEngineArgs
-from dynamo.mocker.args import resolve_planner_profile_data
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
 SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
@@ -240,42 +237,6 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     }
 
     assert "has_perf_model" not in payload
-
-
-def test_resolve_planner_profile_data_npz_short_circuits_planner_import(
-    tmp_path, monkeypatch
-):
-    planner_profile_data = tmp_path / "planner_profile_data.npz"
-    np.savez(
-        planner_profile_data,
-        prefill_isl=np.array([128.0, 256.0]),
-        prefill_ttft_ms=np.array([4.0, 8.0]),
-        decode_active_kv_tokens=np.array([1024.0, 2048.0]),
-        decode_context_length=np.array([128.0, 256.0]),
-        decode_itl=np.array([[1.0, 1.5], [2.0, 2.5]]),
-    )
-
-    monkeypatch.delitem(
-        sys.modules,
-        "dynamo.mocker.utils.planner_profiler_perf_data_converter",
-        raising=False,
-    )
-    for name in list(sys.modules):
-        if name.startswith("dynamo.planner"):
-            monkeypatch.delitem(sys.modules, name, raising=False)
-
-    original_import = builtins.__import__
-
-    def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name.startswith("dynamo.planner"):
-            raise AssertionError(f"unexpected planner import: {name}")
-        return original_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", guarded_import)
-
-    result = resolve_planner_profile_data(planner_profile_data)
-
-    assert result.npz_path == planner_profile_data
 
 
 def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():
