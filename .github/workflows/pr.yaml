@@ -276,7 +276,7 @@ jobs:
       framework: dynamo
       target: planner
       cuda_version: '[""]'
-      platform: 'linux/amd64, linux/arm64'
+      platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
     secrets: inherit
@@ -399,7 +399,7 @@ jobs:
       amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
