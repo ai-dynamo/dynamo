@@ -65,11 +65,7 @@ logger.info("[GMS] Worker module loaded - model loader registered, all patches a
 if os.environ.get("MX_ENABLED", "0") == "1":
     try:
         from modelexpress import configure_vllm_logging
-        from modelexpress.load_strategy import (
-            publish_metadata,
-            register_tensors,
-            unpublish_metadata,
-        )
+        from modelexpress.load_strategy import publish_metadata, unpublish_metadata
 
         configure_vllm_logging()
     except ImportError as e:
@@ -341,7 +337,6 @@ class GMSWorker(Worker):
             mx_ctx = get_mx_load_context()
             if mx_ctx is not None:
                 try:
-                    register_tensors(self.model_runner.model, mx_ctx)
                     publish_metadata(mx_ctx)
                 except Exception as e:
                     logger.warning("[GMS-MX] Re-registration failed during wake: %s", e)
