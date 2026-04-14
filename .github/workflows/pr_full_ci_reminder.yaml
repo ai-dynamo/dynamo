@@ -41,7 +41,7 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: `👋 Hi ${CONTRIBUTOR}! Thank you for contributing to ${REPOSITORY}.\n\n` +
-                'Just a reminder: The `NVIDIA Test Github Validation` CI runs an essential subset of the testing framework to quickly catch errors.' +
+                'Just a reminder: The `NVIDIA Test Github Validation` CI runs an essential subset of the testing framework to quickly catch errors. ' +
                 'Your PR reviewers may elect to test the changes comprehensively before approving your changes.\n\n' +
                 '🚀'
             })
