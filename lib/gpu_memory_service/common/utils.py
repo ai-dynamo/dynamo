@@ -38,4 +38,5 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
         uuid = pynvml.nvmlDeviceGetUUID(handle)
     finally:
         pynvml.nvmlShutdown()
-    return os.path.join(tempfile.gettempdir(), f"gms_{uuid}_{tag}.sock")
+    socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
+    return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
