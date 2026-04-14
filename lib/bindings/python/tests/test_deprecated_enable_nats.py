@@ -233,9 +233,7 @@ def test_create_runtime_use_kv_events_false_emits_warning(
 
 
 @pytest.mark.forked
-def test_create_runtime_no_use_kv_events_no_warning(
-    discovery_backend, request_plane
-):
+def test_create_runtime_no_use_kv_events_no_warning(discovery_backend, request_plane):
     """Omitting use_kv_events should not emit a DeprecationWarning.
 
     Uses asyncio.run() — see test_enable_nats_emits_deprecation_warning docstring.
