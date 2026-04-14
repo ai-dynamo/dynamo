@@ -1178,6 +1178,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         return prompt, sequence_length, embeddings_tensor
 
+    @staticmethod
+    def _get_mm_processor_kwargs(
+        request: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        """Extract mm_processor_kwargs from a request dict.
+
+        Checks the top-level key (client router / Rust preprocessor path)
+        and falls back to ``extra_args`` (KV router path).
+        """
+        mm_processor_kwargs = request.get("mm_processor_kwargs")
+        if mm_processor_kwargs is None:
+            req_extra_args = request.get("extra_args")
+            if isinstance(req_extra_args, dict):
+                mm_processor_kwargs = req_extra_args.get("mm_processor_kwargs")
+        return mm_processor_kwargs
+
     async def _extract_multimodal_data(
         self,
         request: Dict[str, Any],
@@ -1672,13 +1688,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             "multi_modal_data" in request and request["multi_modal_data"] is not None
         )
 
-        # Extract mm_processor_kwargs (top-level from client router, or
-        # nested in extra_args from KV router).
-        mm_processor_kwargs = request.get("mm_processor_kwargs")
-        if mm_processor_kwargs is None:
-            req_extra_args = request.get("extra_args")
-            if isinstance(req_extra_args, dict):
-                mm_processor_kwargs = req_extra_args.get("mm_processor_kwargs")
+        mm_processor_kwargs = self._get_mm_processor_kwargs(request)
 
         multi_modal_data = None
         if is_decode_only:
@@ -1940,13 +1950,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
-        # Extract mm_processor_kwargs (top-level from client router, or
-        # nested in extra_args from KV router).
-        mm_processor_kwargs = request.get("mm_processor_kwargs")
-        if mm_processor_kwargs is None:
-            req_extra_args = request.get("extra_args")
-            if isinstance(req_extra_args, dict):
-                mm_processor_kwargs = req_extra_args.get("mm_processor_kwargs")
+        mm_processor_kwargs = self._get_mm_processor_kwargs(request)
 
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(
