@@ -424,7 +424,7 @@ mod tests {
     use tokio::sync::watch;
 
     use super::*;
-    use crate::protocols::OverlapScores;
+    use crate::protocols::{OverlapScores, RouterBackpressureReason};
     use crate::scheduling::types::KvSchedulerError;
     use crate::selector::DefaultWorkerSelector;
     use crate::sequences::ActiveSequencesMultiWorker;
@@ -458,8 +458,14 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        let (queue, slots, _tx) =
-            make_queue_with_sender(num_workers, block_size, isl, threshold_frac, None);
+        let (queue, slots, _tx) = make_queue_with_sender_with_max_depth(
+            num_workers,
+            block_size,
+            isl,
+            threshold_frac,
+            None,
+            None,
+        );
         (queue, slots)
     }
 
@@ -469,6 +475,29 @@ mod tests {
         block_size: u32,
         isl: usize,
         threshold_frac: Option<f64>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        watch::Sender<HashMap<u64, SimpleWorkerConfig>>,
+    ) {
+        make_queue_with_sender_with_max_depth(
+            num_workers,
+            block_size,
+            isl,
+            threshold_frac,
+            None,
+            prefill_load_estimator,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_sender_with_max_depth(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        max_queue_depth_per_worker: Option<usize>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
@@ -503,7 +532,7 @@ mod tests {
             Arc::clone(&slots),
             cfg_rx,
             threshold_frac,
-            None,
+            max_queue_depth_per_worker,
             block_size,
             selector,
             FcfsPolicy,
@@ -672,6 +701,40 @@ mod tests {
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_backpressure_when_max_queue_depth_per_worker_reached() {
+        let block_size = 16;
+        let isl = 512;
+
+        let (queue, _slots, _cfg_tx) =
+            make_queue_with_sender_with_max_depth(1, block_size, isl, Some(0.0), Some(1), None);
+
+        let (req1, rx1) = make_request("req-1", isl);
+        queue.enqueue(req1).await;
+        let _resp1 = rx1.await.unwrap().unwrap();
+
+        let (req2, _rx2) = make_request("req-2", isl);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        let (req3, rx3) = make_request("req-3", isl);
+        queue.enqueue(req3).await;
+
+        let resp3 = rx3.await.expect("oneshot dropped");
+        assert!(
+            matches!(
+                resp3,
+                Err(KvSchedulerError::Backpressure {
+                    reason: RouterBackpressureReason::MaxQueueDepthExceeded,
+                    queue_depth: 1,
+                    max_queue_depth: Some(1),
+                })
+            ),
+            "expected backpressure when queue is full, got {resp3:?}"
+        );
+        assert_eq!(queue.pending_count(), 1);
     }
 
     #[tokio::test(start_paused = true)]
