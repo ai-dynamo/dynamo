@@ -11,7 +11,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Extension, Path, State},
     http::Request,
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -19,7 +19,7 @@ use axum::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use base64::Engine as _;
 use bytes::Bytes;
@@ -43,6 +43,9 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
+use crate::http::middleware::session::{
+    DEFAULT_SESSION_ID, DEFAULT_TENANT_ID, RequestSession, extract_session_middleware,
+};
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
@@ -59,6 +62,7 @@ use crate::protocols::openai::{
 };
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
+use crate::storage::StorageError;
 use crate::types::Annotated;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
@@ -69,6 +73,9 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+
+/// Default time-to-live for stored Responses API responses (24 hours).
+const DEFAULT_RESPONSE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 // Default axum max body limit without configuring is 2MB: https://docs.rs/axum/latest/axum/extract/struct.DefaultBodyLimit.html
 /// Default body limit in bytes (45MB) to support 500k+ token payloads.
@@ -1455,13 +1462,128 @@ pub fn validate_completion_fields_generic(
     })
 }
 
-/// OpenAI Responses Request Handler
+/// OpenAI Responses Request Handler (stateless mode)
 ///
-/// This method will handle the incoming request for the /v1/responses endpoint.
-async fn handler_responses(
+/// When `--enable-stateful-responses` is OFF, this handler serves POST /v1/responses
+/// without session middleware. It rejects `store: true` and `previous_response_id`
+/// with a 400 error, making misconfiguration visible to callers.
+async fn handler_responses_stateless(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateResponse>,
+    Json(request): Json<NvCreateResponse>,
+) -> Result<Response, ErrorResponse> {
+    // Reject stateful features early -- make misconfiguration visible
+    if request.inner.store == Some(true) {
+        return Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "Stateful features require --enable-stateful-responses. \
+                      `store: true` is not available in stateless mode."
+                .to_string(),
+        }));
+    }
+    if request.inner.previous_response_id.is_some() {
+        return Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "Stateful features require --enable-stateful-responses. \
+                      `previous_response_id` is not available in stateless mode."
+                .to_string(),
+        }));
+    }
+
+    // Delegate with a placeholder session. The early returns above guarantee
+    // that no storage reads or writes will execute with these defaults.
+    let default_session = RequestSession {
+        tenant_id: DEFAULT_TENANT_ID.to_string(),
+        session_id: DEFAULT_SESSION_ID.to_string(),
+    };
+
+    handler_responses_inner(state, template, default_session, headers, request).await
+}
+
+/// OpenAI Responses Request Handler (stateful mode)
+///
+/// POST handler that conditionally requires session headers based on the request body.
+/// When `store: true` or `previous_response_id` is set, `x-tenant-id` is required.
+/// Otherwise, `x-tenant-id` is optional (defaults to "default").
+/// `x-session-id` is always optional (defaults to "default").
+async fn handler_responses_stateful_post(
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateResponse>,
+) -> Result<Response, ErrorResponse> {
+    let needs_tenant =
+        request.inner.store == Some(true) || request.inner.previous_response_id.is_some();
+    let session = extract_session_from_headers(&headers, needs_tenant)?;
+    handler_responses_inner(state, template, session, headers, request).await
+}
+
+/// Extract session from request headers with conditional tenant requirement.
+fn extract_session_from_headers(
+    headers: &HeaderMap,
+    require_tenant: bool,
+) -> Result<RequestSession, ErrorResponse> {
+    use crate::http::middleware::session::validate_header_value;
+
+    let tenant_id = match headers.get("x-tenant-id") {
+        Some(value) => {
+            let value = value.to_str().map_err(|_| {
+                ErrorMessage::from_http_error(HttpError {
+                    code: 400,
+                    message: "x-tenant-id contains invalid characters".to_string(),
+                })
+            })?;
+            validate_header_value(value, "x-tenant-id").map_err(|(_, msg)| {
+                ErrorMessage::from_http_error(HttpError {
+                    code: 400,
+                    message: msg,
+                })
+            })?;
+            value.to_string()
+        }
+        None if require_tenant => {
+            return Err(ErrorMessage::from_http_error(HttpError {
+                code: 400,
+                message: "Missing required header: x-tenant-id. \
+                          This header is required when using `store: true` or \
+                          `previous_response_id`."
+                    .to_string(),
+            }));
+        }
+        None => DEFAULT_TENANT_ID.to_string(),
+    };
+
+    let session_id = match headers.get("x-session-id") {
+        Some(value) => {
+            let value = value.to_str().map_err(|_| {
+                ErrorMessage::from_http_error(HttpError {
+                    code: 400,
+                    message: "x-session-id contains invalid characters".to_string(),
+                })
+            })?;
+            validate_header_value(value, "x-session-id").map_err(|(_, msg)| {
+                ErrorMessage::from_http_error(HttpError {
+                    code: 400,
+                    message: msg,
+                })
+            })?;
+            value.to_string()
+        }
+        None => DEFAULT_SESSION_ID.to_string(),
+    };
+
+    Ok(RequestSession {
+        tenant_id,
+        session_id,
+    })
+}
+
+/// Shared inner handler for both stateful and stateless response paths
+async fn handler_responses_inner(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    session: RequestSession,
+    headers: HeaderMap,
+    mut request: NvCreateResponse,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -1487,15 +1609,16 @@ async fn handler_responses(
     )
     .await;
 
-    let response =
-        tokio::spawn(responses(state, template, request, stream_handle).in_current_span())
-            .await
-            .map_err(|e| {
-                ErrorMessage::internal_server_error(&format!(
-                    "Failed to await responses task: {:?}",
-                    e,
-                ))
-            })?;
+    let response = tokio::spawn(
+        responses(state, template, session, request, stream_handle).in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        ErrorMessage::internal_server_error(&format!(
+            "Failed to await responses task: {:?}",
+            e,
+        ))
+    })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -1508,6 +1631,7 @@ async fn handler_responses(
 async fn responses(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
+    session: RequestSession,
     mut request: Context<NvCreateResponse>,
     mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
@@ -1574,7 +1698,101 @@ async fn responses(
         truncation: request.inner.truncation,
     };
     let request_id = request.id().to_string();
-    let (orig_request, context) = request.into_parts();
+    // Get shared response storage from state
+    let storage = state.response_storage().clone();
+
+    let (mut orig_request, context) = request.into_parts();
+
+    // Save store flag before orig_request is consumed
+    let should_store = orig_request.inner.store.unwrap_or(false);
+
+    // Handle previous_response_id -- fetch previous context and prepend to input
+    if let Some(ref prev_id) = orig_request.inner.previous_response_id {
+        match storage
+            .get_response(&session.tenant_id, &session.session_id, prev_id)
+            .await
+        {
+            Ok(prev_response) => {
+                tracing::info!(
+                    tenant_id = %session.tenant_id,
+                    session_id = %session.session_id,
+                    previous_response_id = %prev_id,
+                    "Retrieved previous response for context"
+                );
+
+                // Extract output items from previous response and prepend to current input
+                if let Some(output_items) = prev_response
+                    .response
+                    .get("output")
+                    .and_then(|o| o.as_array())
+                {
+                    use dynamo_protocols::types::responses::{InputItem, InputParam};
+
+                    let mut new_items: Vec<InputItem> = Vec::new();
+
+                    // Add previous output items as context (they become input for next turn)
+                    for item in output_items {
+                        match serde_json::from_value::<InputItem>(item.clone()) {
+                            Ok(input_item) => new_items.push(input_item),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("unknown"),
+                                    "Could not convert previous output item to input item, skipping"
+                                );
+                            }
+                        }
+                    }
+
+                    // Add current input
+                    match &orig_request.inner.input {
+                        InputParam::Text(text) => {
+                            use dynamo_protocols::types::responses::{
+                                EasyInputContent, EasyInputMessage, MessageType,
+                                Role as ResponseRole,
+                            };
+                            new_items.push(InputItem::EasyMessage(EasyInputMessage {
+                                r#type: MessageType::Message,
+                                role: ResponseRole::User,
+                                content: EasyInputContent::Text(text.clone()),
+                            }));
+                        }
+                        InputParam::Items(items) => {
+                            new_items.extend(items.clone());
+                        }
+                    }
+
+                    orig_request.inner.input = InputParam::Items(new_items);
+                }
+            }
+            Err(StorageError::NotFound | StorageError::TenantMismatch) => {
+                // Map TenantMismatch to 404 to avoid leaking whether a response
+                // exists under a different tenant.
+                tracing::warn!(
+                    tenant_id = %session.tenant_id,
+                    session_id = %session.session_id,
+                    previous_response_id = %prev_id,
+                    "Previous response not found"
+                );
+                return Err(ErrorMessage::from_http_error(HttpError {
+                    code: 404,
+                    message: "Previous response not found".to_string(),
+                }));
+            }
+            Err(e) => {
+                tracing::error!(
+                    tenant_id = %session.tenant_id,
+                    session_id = %session.session_id,
+                    previous_response_id = %prev_id,
+                    error = %e,
+                    "Storage error retrieving previous response"
+                );
+                return Err(ErrorMessage::internal_server_error(
+                    "Failed to retrieve previous response",
+                ));
+            }
+        }
+    }
 
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
         tracing::error!(
@@ -1653,6 +1871,50 @@ async fn responses(
             Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
             None => ResponseStreamConverter::new(model.clone(), response_params),
         };
+
+        // Set up storage callback if storing is requested
+        if should_store {
+            let storage_for_callback = storage.clone();
+            let tenant_id = session.tenant_id.clone();
+            let session_id = session.session_id.clone();
+            let response_id = converter.response_id().to_string();
+            let ttl = Some(DEFAULT_RESPONSE_TTL);
+
+            // Streaming storage is best-effort. If this write fails, the client
+            // received the streamed response but GET /v1/responses/{id} returns 404.
+            converter = converter.with_storage_callback(move |response_json| {
+                tokio::spawn(async move {
+                    match storage_for_callback
+                        .store_response(
+                            &tenant_id,
+                            &session_id,
+                            Some(&response_id),
+                            response_json,
+                            ttl,
+                        )
+                        .await
+                    {
+                        Ok(stored_id) => {
+                            tracing::info!(
+                                tenant_id = %tenant_id,
+                                session_id = %session_id,
+                                response_id = %stored_id,
+                                "Stored streaming response successfully"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                tenant_id = %tenant_id,
+                                session_id = %session_id,
+                                error = %e,
+                                "Failed to store streaming response"
+                            );
+                        }
+                    }
+                });
+            });
+        }
+
         let start_events = converter.emit_start_events();
 
         // Use std::sync::Mutex (not tokio) since process_chunk/emit_end_events are
@@ -1781,6 +2043,52 @@ async fn responses(
             inflight_guard.mark_error(ErrorType::Cancelled);
         }
 
+        // Store response if requested
+        if should_store {
+            // Serialize response for storage -- skip entirely on failure
+            // rather than storing an empty {} that would corrupt GET lookups
+            match serde_json::to_value(&response) {
+                Ok(response_json) => {
+                    let store_result = storage
+                        .store_response(
+                            &session.tenant_id,
+                            &session.session_id,
+                            Some(&response.inner.id),
+                            response_json,
+                            Some(DEFAULT_RESPONSE_TTL),
+                        )
+                        .await;
+
+                    match store_result {
+                        Ok(stored_id) => {
+                            tracing::info!(
+                                tenant_id = %session.tenant_id,
+                                session_id = %session.session_id,
+                                response_id = %stored_id,
+                                "Stored response successfully"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                tenant_id = %session.tenant_id,
+                                session_id = %session.session_id,
+                                error = %e,
+                                "Failed to store response"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        tenant_id = %session.tenant_id,
+                        session_id = %session.session_id,
+                        error = %e,
+                        "Failed to serialize response for storage, skipping"
+                    );
+                }
+            }
+        }
+
         Ok(Json(response).into_response())
     }
 }
@@ -1795,11 +2103,6 @@ pub fn validate_response_unsupported_fields(
     if inner.background == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
-        ));
-    }
-    if inner.previous_response_id.is_some() {
-        return Some(ErrorMessage::not_implemented_error(
-            VALIDATION_PREFIX.to_string() + "`previous_response_id` is not supported.",
         ));
     }
     if inner.prompt.is_some() {
@@ -2013,19 +2316,159 @@ async fn get_model_openai(
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint
 /// If not path is provided, the default path is `/v1/responses`
+/// Handle GET /v1/responses/{id} -- retrieve a stored response
+async fn handler_get_response(
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Extension(session): Extension<RequestSession>,
+    Path(response_id): Path<String>,
+) -> Result<Response, ErrorResponse> {
+    let storage = state.response_storage();
+
+    match storage
+        .get_response(&session.tenant_id, &session.session_id, &response_id)
+        .await
+    {
+        Ok(stored) => {
+            tracing::info!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                "Retrieved stored response"
+            );
+            Ok(Json(stored.response).into_response())
+        }
+        Err(StorageError::NotFound | StorageError::TenantMismatch) => {
+            tracing::debug!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                "Response not found"
+            );
+            Err(ErrorMessage::from_http_error(HttpError {
+                code: 404,
+                message: "Response not found".to_string(),
+            }))
+        }
+        Err(StorageError::InvalidKey(msg)) => Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: format!("Invalid response ID: {msg}"),
+        })),
+        Err(e) => {
+            tracing::error!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                error = %e,
+                "Failed to retrieve response"
+            );
+            Err(ErrorMessage::internal_server_error(
+                "Failed to retrieve response",
+            ))
+        }
+    }
+}
+
+/// Handle DELETE /v1/responses/{id} -- delete a stored response
+async fn handler_delete_response(
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Extension(session): Extension<RequestSession>,
+    Path(response_id): Path<String>,
+) -> Result<Response, ErrorResponse> {
+    let storage = state.response_storage();
+
+    match storage
+        .delete_response(&session.tenant_id, &session.session_id, &response_id)
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                "Deleted stored response"
+            );
+            // Return 204 No Content for successful deletion
+            Ok(StatusCode::NO_CONTENT.into_response())
+        }
+        Err(StorageError::NotFound | StorageError::TenantMismatch) => {
+            tracing::debug!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                "Response not found for deletion"
+            );
+            Err(ErrorMessage::from_http_error(HttpError {
+                code: 404,
+                message: "Response not found".to_string(),
+            }))
+        }
+        Err(StorageError::InvalidKey(msg)) => Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: format!("Invalid response ID: {msg}"),
+        })),
+        Err(e) => {
+            tracing::error!(
+                tenant_id = %session.tenant_id,
+                session_id = %session.session_id,
+                response_id = %response_id,
+                error = %e,
+                "Failed to delete response"
+            );
+            Err(ErrorMessage::internal_server_error(
+                "Failed to delete response",
+            ))
+        }
+    }
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Responses endpoint.
+///
+/// When `stateful` is true: registers POST, GET, DELETE routes.
+/// - POST: headers extracted conditionally -- `x-tenant-id` required only when
+///   `store: true` or `previous_response_id` is set; `x-session-id` always optional
+/// - GET/DELETE: session middleware requires `x-tenant-id` (always access stored data)
+///
+/// When `stateful` is false: registers only POST (stateless). No session middleware.
+/// Requests with `store: true` or `previous_response_id` return 400.
 pub fn responses_router(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     path: Option<String>,
+    stateful: bool,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
-    let router = Router::new()
-        .route(&path, post(handler_responses))
-        .layer(middleware::from_fn(smart_json_error_middleware))
-        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
-        .with_state((state, template));
-    (vec![doc], router)
+
+    if stateful {
+        let path_with_id = format!("{}/{{id}}", &path);
+
+        // POST route: no session middleware -- handler extracts headers conditionally
+        let post_router = Router::new()
+            .route(&path, post(handler_responses_stateful_post))
+            .layer(middleware::from_fn(smart_json_error_middleware))
+            .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+            .with_state((state.clone(), template.clone()));
+
+        // GET/DELETE routes: session middleware required (always access stored data)
+        let crud_router = Router::new()
+            .route(&path_with_id, get(handler_get_response))
+            .route(&path_with_id, delete(handler_delete_response))
+            .layer(middleware::from_fn(extract_session_middleware))
+            .layer(middleware::from_fn(smart_json_error_middleware))
+            .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+            .with_state((state, template));
+
+        let router = post_router.merge(crud_router);
+        (vec![doc], router)
+    } else {
+        // Stateless mode: POST only, no session middleware, no GET/DELETE
+        let router = Router::new()
+            .route(&path, post(handler_responses_stateless))
+            .layer(middleware::from_fn(smart_json_error_middleware))
+            .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+            .with_state((state, template));
+        (vec![doc], router)
+    }
 }
 
 async fn images(
@@ -2677,10 +3120,7 @@ mod tests {
         #[allow(clippy::type_complexity)]
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
             ("background", Box::new(|r| r.background = Some(true))),
-            (
-                "previous_response_id",
-                Box::new(|r| r.previous_response_id = Some("prev-id".into())),
-            ),
+            // previous_response_id is now supported via stateful responses
             (
                 "prompt",
                 Box::new(|r| {
