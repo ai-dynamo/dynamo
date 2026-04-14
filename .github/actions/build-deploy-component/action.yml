@@ -56,11 +56,9 @@ runs:
         if [[ "${{ inputs.component }}" == "operator" ]]; then
           echo "lint_platform=linux/arm64" >> $GITHUB_OUTPUT
           echo "build_platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
-          echo "all_arch=true" >> $GITHUB_OUTPUT
         else
           echo "lint_platform=linux/amd64" >> $GITHUB_OUTPUT
           echo "build_platforms=linux/amd64" >> $GITHUB_OUTPUT
-          echo "all_arch=false" >> $GITHUB_OUTPUT
         fi
 
     - name: Initialize Dynamo Builder
@@ -68,7 +66,7 @@ runs:
       with:
         builder_name: ${{ inputs.builder_name }}
         flavor: general
-        all_arch: ${{ steps.settings.outputs.all_arch }}
+        arch: ${{ steps.settings.outputs.build_platforms }}
 
     - name: Docker Login
       uses: ./.github/actions/docker-login
