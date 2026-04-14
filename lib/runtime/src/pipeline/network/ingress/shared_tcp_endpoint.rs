@@ -32,11 +32,13 @@ const DEFAULT_WORKER_POOL_SIZE: usize = 1500;
 /// this is 4X the worker pool size to handle burst traffic
 const DEFAULT_WORK_QUEUE_SIZE: usize = 6000;
 
+const WRITE_BUF_CAPACITY: usize = 65536;
+
 /// Get maximum message size from environment or use default
 fn get_max_message_size() -> usize {
     std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
         .ok()
-        .and_then(|s| s.parse::<usize>().ok())
+        .and_then(|s: String| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_MESSAGE_SIZE)
 }
 
@@ -559,7 +561,7 @@ impl SharedTcpServer {
         write_half: tokio::io::WriteHalf<TcpStream>,
         mut response_rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
     ) -> Result<()> {
-        let mut writer = tokio::io::BufWriter::with_capacity(64 * 1024, write_half);
+        let mut writer = tokio::io::BufWriter::with_capacity(WRITE_BUF_CAPACITY, write_half);
 
         while let Some(first) = response_rx.recv().await {
             writer.write_all(&first).await?;
