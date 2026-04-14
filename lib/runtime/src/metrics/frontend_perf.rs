@@ -5,13 +5,53 @@
 //! Used by both runtime (route, transport_roundtrip) and llm (preprocess, postprocess, tokenize, template, detokenize).
 
 use once_cell::sync::{Lazy, OnceCell};
-use prometheus::{Counter, Histogram, HistogramOpts, HistogramVec, Opts, Registry};
+use prometheus::{Counter, Histogram, HistogramOpts, HistogramVec, IntGaugeVec, Opts, Registry};
 
 use super::prometheus_names::{frontend_perf, name_prefix};
 use crate::MetricsRegistry;
 
 fn frontend_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::FRONTEND, suffix)
+}
+
+/// Per-stage inflight request count: preprocess, route, dispatch.
+/// Labels: stage (pipeline stage), phase (prefill/decode/aggregated or empty for preprocess).
+pub static STAGE_REQUESTS: Lazy<IntGaugeVec> = Lazy::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            frontend_metric_name(frontend_perf::STAGE_REQUESTS),
+            "Number of requests currently in the given pipeline stage",
+        ),
+        &["stage", "phase"],
+    )
+    .expect("stage_requests gauge vec")
+});
+
+/// RAII guard that increments a per-stage gauge on creation and decrements on drop.
+///
+/// Used to track how many requests are in each frontend pipeline stage at any given time.
+/// Create with [`StageGuard::new`] at stage entry; the gauge decrements automatically when
+/// the guard is dropped (end of scope, explicit drop, or stream completion).
+pub struct StageGuard {
+    gauge: prometheus::IntGauge,
+}
+
+impl StageGuard {
+    /// Increment the stage gauge and return a guard that decrements on drop.
+    ///
+    /// * `stage` — pipeline stage name (e.g. `"preprocess"`, `"route"`, `"dispatch"`)
+    /// * `phase` — request phase (e.g. `"prefill"`, `"decode"`, `"aggregated"`, or `""`)
+    pub fn new(stage: &str, phase: &str) -> Self {
+        let gauge = STAGE_REQUESTS.with_label_values(&[stage, phase]);
+        gauge.inc();
+        Self { gauge }
+    }
+}
+
+impl Drop for StageGuard {
+    fn drop(&mut self) {
+        self.gauge.dec();
+    }
 }
 
 /// Per-stage latency: preprocess, route, transport_roundtrip, postprocess.
@@ -88,6 +128,9 @@ static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
 pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
     let _ = REGISTERED.get_or_init(|| {
         registry
+            .add_metric(Box::new(STAGE_REQUESTS.clone()))
+            .ok();
+        registry
             .add_metric(Box::new(STAGE_DURATION_SECONDS.clone()))
             .ok();
         registry.add_metric(Box::new(TOKENIZE_SECONDS.clone())).ok();
@@ -109,6 +152,7 @@ pub fn ensure_frontend_perf_metrics_registered_prometheus(
     if PROMETHEUS_REGISTERED.get().is_some() {
         return Ok(());
     }
+    registry.register(Box::new(STAGE_REQUESTS.clone()))?;
     registry.register(Box::new(STAGE_DURATION_SECONDS.clone()))?;
     registry.register(Box::new(TOKENIZE_SECONDS.clone()))?;
     registry.register(Box::new(TEMPLATE_SECONDS.clone()))?;

@@ -7,6 +7,7 @@ use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
     dynamo_nvtx_range,
+    metrics::frontend_perf::StageGuard,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -56,6 +57,8 @@ struct RequestGuard {
     freed: bool,
     prefill_marked: bool,
     first_token_recorded: bool,
+    first_response_received: bool,
+    dispatch_guard: Option<StageGuard>,
     track_output_blocks: bool,
     current_total_blocks: usize,
     isl_tokens: usize,
@@ -65,6 +68,12 @@ struct RequestGuard {
 
 impl RequestGuard {
     async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
+        // End dispatch stage on first response from backend (any item, not just tokens).
+        if !self.first_response_received {
+            self.first_response_received = true;
+            self.dispatch_guard.take();
+        }
+
         if !self.prefill_marked {
             let has_tokens = item
                 .data
@@ -372,6 +381,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .as_ref()
             .map(|t| t.phase())
             .unwrap_or(RequestPhase::Aggregated);
+        let phase_label = phase.to_string();
+        let route_guard = StageGuard::new("route", &phase_label);
 
         let block_size = self.chooser.block_size() as usize;
         let selection = self
@@ -472,7 +483,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        // Route to worker
+        // End route stage — worker has been selected and routing metrics recorded.
+        drop(route_guard);
+
+        // Dispatch to worker
         let isl_tokens = request.token_ids.len();
         let expected_output_tokens = request
             .routing
@@ -491,6 +505,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
+        let dispatch_guard = StageGuard::new("dispatch", &phase_label);
         let mut response_stream = self
             .inner
             .direct(updated_request, instance_id)
@@ -518,6 +533,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 freed: false,
                 prefill_marked: false,
                 first_token_recorded: false,
+                first_response_received: false,
+                dispatch_guard: Some(dispatch_guard),
                 track_output_blocks: scheduler_tracked && track_output_blocks,
                 current_total_blocks: isl_tokens.div_ceil(block_size),
                 isl_tokens,

@@ -245,6 +245,7 @@ struct MetricsHandlerState {
 pub struct Metrics {
     request_counter: IntCounterVec,
     inflight_gauge: IntGaugeVec,
+    active_requests_gauge: IntGaugeVec,
     client_disconnect_gauge: prometheus::IntGauge,
     http_queue_gauge: IntGaugeVec,
     request_duration: HistogramVec,
@@ -497,6 +498,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let active_requests_gauge = IntGaugeVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::ACTIVE_REQUESTS),
+                "Number of requests currently being handled by the frontend, from HTTP handler entry to response completion",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         let client_disconnect_gauge = prometheus::IntGauge::new(
             frontend_metric_name(frontend_service::DISCONNECTED_CLIENTS),
             "Number of disconnected clients",
@@ -715,6 +725,7 @@ impl Metrics {
         Metrics {
             request_counter,
             inflight_gauge,
+            active_requests_gauge,
             client_disconnect_gauge,
             http_queue_gauge,
             request_duration,
@@ -792,11 +803,17 @@ impl Metrics {
     }
 
     fn inc_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).inc()
+        self.inflight_gauge.with_label_values(&[model]).inc();
+        self.active_requests_gauge
+            .with_label_values(&[model])
+            .inc();
     }
 
     fn dec_inflight_gauge(&self, model: &str) {
-        self.inflight_gauge.with_label_values(&[model]).dec()
+        self.inflight_gauge.with_label_values(&[model]).dec();
+        self.active_requests_gauge
+            .with_label_values(&[model])
+            .dec();
     }
 
     /// Increment the gauge for client disconnections
@@ -820,6 +837,7 @@ impl Metrics {
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
+        registry.register(Box::new(self.active_requests_gauge.clone()))?;
         registry.register(Box::new(self.client_disconnect_gauge.clone()))?;
         registry.register(Box::new(self.http_queue_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
