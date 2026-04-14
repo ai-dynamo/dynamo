@@ -833,6 +833,55 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(
 
 
 @pytest.mark.asyncio
+async def test_allocation_manager_caches_exported_fd(monkeypatch):
+    export_calls = 0
+
+    monkeypatch.setattr(server_allocations, "cuda_ensure_initialized", lambda: None)
+    monkeypatch.setattr(
+        server_allocations,
+        "cumem_get_allocation_granularity",
+        lambda device: 4096,
+    )
+    monkeypatch.setattr(
+        server_allocations,
+        "cumem_create_tolerate_oom",
+        lambda size, device: (True, 4242),
+    )
+    monkeypatch.setattr(server_allocations, "cumem_release", lambda handle: None)
+
+    def export_fd(handle: int) -> int:
+        nonlocal export_calls
+        export_calls += 1
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        return read_fd
+
+    monkeypatch.setattr(
+        server_allocations, "cumem_export_to_shareable_handle", export_fd
+    )
+
+    allocations = GMSAllocationManager(device=0)
+    info = await allocations.allocate(size=4096, tag="weights")
+
+    first_fd = allocations.export_allocation(info.allocation_id)
+    second_fd = allocations.export_allocation(info.allocation_id)
+
+    try:
+        assert export_calls == 1
+        assert info.export_fd >= 0
+        assert first_fd != info.export_fd
+        assert second_fd != info.export_fd
+        assert first_fd != second_fd
+        os.fstat(first_fd)
+        os.fstat(second_fd)
+    finally:
+        os.close(first_fd)
+        os.close(second_fd)
+
+    assert allocations.free_allocation(info.allocation_id)
+
+
+@pytest.mark.asyncio
 @pytest.mark.timeout(180)
 async def test_large_allocation_unblocks_after_export_fd_holder_dies(
     tmp_path,
