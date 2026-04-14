@@ -141,6 +141,7 @@ pub fn register_worker_load_metrics(
 /// disaggregated mode. At most 2 label combinations.
 pub struct RouterQueueMetrics {
     pub pending_requests: IntGaugeVec,
+    pub pending_isl_tokens: IntGaugeVec,
 }
 
 pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
@@ -157,6 +158,14 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
             &[labels::WORKER_TYPE],
         )
         .expect("Failed to create router_queue_pending_requests gauge"),
+        pending_isl_tokens: IntGaugeVec::new(
+            Opts::new(
+                format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
+                "Sum of isl_tokens for requests pending in the router scheduler queue",
+            ),
+            &[labels::WORKER_TYPE],
+        )
+        .expect("Failed to create router_queue_pending_isl_tokens gauge"),
     });
 
 impl RouterQueueMetrics {
@@ -164,6 +173,12 @@ impl RouterQueueMetrics {
         self.pending_requests
             .with_label_values(&[worker_type])
             .set(count as i64);
+    }
+
+    pub fn set_pending_isl_tokens(&self, worker_type: &str, tokens: usize) {
+        self.pending_isl_tokens
+            .with_label_values(&[worker_type])
+            .set(tokens as i64);
     }
 }
 
@@ -174,6 +189,7 @@ pub fn register_router_queue_metrics(
 ) -> Result<(), prometheus::Error> {
     let m = &*ROUTER_QUEUE_METRICS;
     registry.register(Box::new(m.pending_requests.clone()))?;
+    registry.register(Box::new(m.pending_isl_tokens.clone()))?;
     Ok(())
 }
 
@@ -545,15 +561,30 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                 &[labels::WORKER_TYPE],
             )
             .unwrap(),
+            pending_isl_tokens: IntGaugeVec::new(
+                Opts::new(
+                    format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
+                    "Sum of isl_tokens for requests pending in the router scheduler queue",
+                ),
+                &[labels::WORKER_TYPE],
+            )
+            .unwrap(),
         };
         registry
             .register(Box::new(metrics.pending_requests.clone()))
             .unwrap();
+        registry
+            .register(Box::new(metrics.pending_isl_tokens.clone()))
+            .unwrap();
 
         metrics.set_pending("decode", 5);
+        metrics.set_pending_isl_tokens("decode", 1024);
 
         let output = gather_pef(&registry);
         let expected = "\
+# HELP dynamo_frontend_router_queue_pending_isl_tokens Sum of isl_tokens for requests pending in the router scheduler queue
+# TYPE dynamo_frontend_router_queue_pending_isl_tokens gauge
+dynamo_frontend_router_queue_pending_isl_tokens{worker_type=\"decode\"} 1024
 # HELP dynamo_frontend_router_queue_pending_requests Number of requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_requests gauge
 dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
