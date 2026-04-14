@@ -840,8 +840,10 @@ impl TcpConnectionPool {
     /// Get a connection from the pool or create a new one.
     /// Hot path: DashMap shard read lock → ArcSwap load → atomic RR.
     async fn get_connection(&self, addr: SocketAddr) -> Result<Arc<TcpConnection>> {
-        // Fast: DashMap shard read lock (no write contention)
-        if let Some(host) = self.hosts.get(&addr) {
+        // Fast: clone the Arc out of the DashMap guard so the shard lock is
+        // released before any `.await` (DashMap guards are !Send and holding
+        // them across await points blocks other shard operations).
+        if let Some(host) = self.hosts.get(&addr).map(|entry| Arc::clone(&*entry)) {
             host.last_used_ms
                 .store(current_time_ms(), Ordering::Relaxed);
             return host.get_connection(&self.connect_limiter).await;
@@ -942,7 +944,7 @@ impl TcpConnectionPool {
     }
 
     /// Opportunistic cleanup of idle host pools.
-    /// Called periodically or when convenient; not on the hot path.
+    /// Called periodically by the background maintenance task; not on the hot path.
     fn cleanup_idle_hosts(&self) {
         let now = current_time_ms();
         let ttl = self.host_idle_ttl_ms;
@@ -961,6 +963,26 @@ impl TcpConnectionPool {
             tracing::debug!("Removing idle TCP host pool for {}", addr);
             self.hosts.remove(&addr);
         }
+    }
+
+    /// Spawn a background task that periodically cleans up idle host pools.
+    ///
+    /// Uses a `Weak` reference so the task automatically stops when the
+    /// `TcpConnectionPool` is dropped (no explicit cancellation needed).
+    /// The cleanup interval is half the idle TTL so hosts are reaped
+    /// reasonably promptly after expiry.
+    fn start_idle_cleanup(self: &Arc<Self>) {
+        let pool = Arc::downgrade(self);
+        let interval = Duration::from_millis(self.host_idle_ttl_ms / 2);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                match pool.upgrade() {
+                    Some(pool) => pool.cleanup_idle_hosts(),
+                    None => break,
+                }
+            }
+        });
     }
 }
 
@@ -987,8 +1009,10 @@ impl TcpRequestClient {
 
     /// Create a new TCP request client with custom configuration
     pub fn with_config(config: TcpRequestConfig) -> Result<Self> {
+        let pool = Arc::new(TcpConnectionPool::new(config.clone()));
+        pool.start_idle_cleanup();
         Ok(Self {
-            pool: Arc::new(TcpConnectionPool::new(config.clone())),
+            pool,
             config,
             stats: Arc::new(TcpClientStats {
                 requests_sent: AtomicU64::new(0),
