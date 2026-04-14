@@ -91,7 +91,7 @@ pub use async_openai::types::chat::FunctionType;
 // Flexible `arguments` deserialisation helpers
 // ---------------------------------------------------------------------------
 // Some agent frameworks (e.g. LangChain, custom harnesses) send tool-call
-// arguments as a pre-parsed JSON object/array instead of the canonical JSON
+// arguments as a pre-parsed JSON object instead of the canonical JSON
 // string.  The helpers below normalise both representations to a `String` so
 // downstream code never needs to branch on the wire format.
 
@@ -739,11 +739,7 @@ pub struct ChatCompletionStreamResponseDelta {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ChatCompletionStreamResponseDeltaFunctionCall {
     pub name: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_arguments_opt",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, deserialize_with = "deserialize_arguments_opt")]
     pub arguments: Option<String>,
 }
 
