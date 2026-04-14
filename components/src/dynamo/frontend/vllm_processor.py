@@ -124,9 +124,12 @@ class VllmProcessor:
         self.enable_auto_tool_choice = enable_auto_tool_choice
         # Persistent NIXL sender — caches pickled mm_kwargs across requests.
         self._mm_kwargs_sender: Any = None
-        # Set DYNAMO_DISABLE_NIXL_MM=1 to disable NIXL mm_kwargs transfer
-        # (useful for debugging routing without the pre-rendered input path).
+        # SHM sender for same-node transfers (~1.5ms vs NIXL's ~50ms).
+        self._shm_sender: Any = None
+        # Set DYNAMO_DISABLE_NIXL_MM=1 to disable mm_kwargs transfer entirely.
+        # Set DYNAMO_MM_TRANSFER=shm to use shared memory instead of NIXL.
         self.nixl_mm_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
+        self.use_shm_transfer = os.environ.get("DYNAMO_MM_TRANSFER", "") == "shm"
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -154,15 +157,16 @@ class VllmProcessor:
         self,
         vllm_preproc: EngineCoreRequest,
         dynamo_preproc: dict[str, Any],
-    ) -> tuple[dict | None, list, bool]:
-        """Extract MM routing info and prepare NIXL transfer.
+    ) -> tuple[dict | None, list, bool, list]:
+        """Extract MM routing info and prepare NIXL/SHM transfer.
 
         Returns:
-            (mm_routing_info, nixl_completion_futures, nixl_transferred)
+            (mm_routing_info, nixl_completion_futures, nixl_transferred, shm_handles)
         """
         mm_routing_info = None
         nixl_completion_futures: list = []
         nixl_transferred = False
+        shm_handles: list = []
 
         rng_routing = _nvtx.start_range("mm_frontend:build_routing_info", color="cyan")
         if self.is_kv_router and vllm_preproc.mm_features:
@@ -220,6 +224,31 @@ class VllmProcessor:
                 logger.debug(
                     "[mm-routing] NIXL mm_kwargs transfer disabled via DYNAMO_DISABLE_NIXL_MM"
                 )
+            elif self.use_shm_transfer:
+                # Shared memory path: ~1.5ms same-node transfer.
+                try:
+                    from dynamo.common.multimodal.mm_kwargs_transfer import (
+                        MmKwargsShmSender,
+                    )
+
+                    if self._shm_sender is None:
+                        self._shm_sender = MmKwargsShmSender()
+                    shm_meta, shm_handles_local = self._shm_sender.prepare(
+                        vllm_preproc.mm_features, modality="image"
+                    )
+                    if shm_meta is not None:
+                        dynamo_preproc["extra_args"]["mm_kwargs_shm"] = shm_meta
+                        shm_handles = shm_handles_local
+                        logger.debug(
+                            "[mm-routing] SHM: wrote %d item(s) to shared memory",
+                            len(shm_meta["items"]),
+                        )
+                        nixl_transferred = True
+                except Exception:
+                    logger.warning(
+                        "[mm-routing] SHM sender failed, backend will run HF processor",
+                        exc_info=True,
+                    )
             else:
                 try:
                     from dynamo.common.multimodal.mm_kwargs_transfer import (
@@ -258,7 +287,7 @@ class VllmProcessor:
             logger.debug("[mm-routing] No mm_features — text-only request")
         _nvtx.end_range(rng_routing)
 
-        return mm_routing_info, nixl_completion_futures, nixl_transferred
+        return mm_routing_info, nixl_completion_futures, nixl_transferred, shm_handles
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -447,11 +476,12 @@ class VllmProcessor:
             mm_routing_info,
             nixl_completion_futures,
             nixl_transferred,
+            shm_handles,
         ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
         _t_nixl_done = time.monotonic()
 
         # Forward multimodal URLs so the backend handler can load the media.
-        # Skip when NIXL transferred successfully — the backend already has
+        # Skip when NIXL/SHM transferred successfully — the backend already has
         # the pre-processed mm_kwargs and does not need to re-download.
         if not nixl_transferred:
             mm_data = extract_mm_urls(request.get("messages") or [])
@@ -488,6 +518,7 @@ class VllmProcessor:
             post,
             mm_routing_info=mm_routing_info,
             nixl_completion_futures=nixl_completion_futures,
+            shm_handles=shm_handles,
         ):
             if _first_token:
                 _t_first_token = time.monotonic()
@@ -688,11 +719,12 @@ class VllmProcessor:
             }
             return
 
-        # --- Phase 2: NIXL + routing + streaming (async event loop) ---
+        # --- Phase 2: NIXL/SHM + routing + streaming (async event loop) ---
         (
             _,
             nixl_completion_futures,
             nixl_transferred,
+            shm_handles,
         ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
 
         if not nixl_transferred:
@@ -723,6 +755,7 @@ class VllmProcessor:
             post,
             mm_routing_info=mm_routing_info,
             nixl_completion_futures=nixl_completion_futures,
+            shm_handles=shm_handles,
         ):
             yield item
 
@@ -736,6 +769,7 @@ class VllmProcessor:
         post: StreamingPostProcessor,
         mm_routing_info: dict[str, Any] | None = None,
         nixl_completion_futures: list | None = None,
+        shm_handles: list | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         self.output_processor.add_request(vllm_preproc, None)
 
@@ -856,6 +890,13 @@ class VllmProcessor:
                             "[mm-routing] NIXL: transfer completion failed",
                             exc_info=True,
                         )
+            # Clean up SHM handles after backend has read.
+            if shm_handles:
+                from dynamo.common.multimodal.mm_kwargs_transfer import (
+                    MmKwargsShmSender,
+                )
+
+                MmKwargsShmSender.cleanup(shm_handles)
             if vllm_preproc.request_id in self.output_processor.request_states:
                 self.output_processor.abort_requests(
                     [vllm_preproc.request_id], internal=True

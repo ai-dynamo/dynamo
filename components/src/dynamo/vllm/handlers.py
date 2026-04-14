@@ -1205,6 +1205,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         logger.debug(
             "[mm-routing] _try_receive_mm_kwargs_nixl: extra_args keys=%s", ea_keys
         )
+
+        # Try SHM path first (same-node, ~1.5ms).
+        shm_meta = extra_args.get("mm_kwargs_shm")
+        if shm_meta:
+            return await self._receive_mm_kwargs_shm(request, shm_meta)
+
         nixl_meta_raw = extra_args.get("mm_kwargs_nixl")
         if not nixl_meta_raw:
             logger.debug("[mm-routing] No mm_kwargs_nixl in extra_args, skipping NIXL")
@@ -1304,6 +1310,70 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         except Exception:
             logger.exception("Failed to receive mm_kwargs via NIXL, falling back")
             _nvtx.end_range(rng)
+            return None
+
+    async def _receive_mm_kwargs_shm(
+        self, request: Dict[str, Any], shm_meta: Dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """Receive pre-processed mm_kwargs via shared memory (~1.5ms)."""
+        import time as _time
+
+        _t0 = _time.monotonic()
+        extra_args = request.get("extra_args") or {}
+        mm_hashes = extra_args.get("mm_hashes")
+        mm_placeholders = extra_args.get("mm_placeholders")
+        if not mm_hashes or not mm_placeholders:
+            logger.warning(
+                "[mm-routing] SHM present but mm_hashes/mm_placeholders missing"
+            )
+            return None
+
+        try:
+            from dynamo.common.multimodal.mm_kwargs_transfer import MmKwargsShmReceiver
+
+            receiver = MmKwargsShmReceiver()
+            results = receiver.receive(shm_meta)
+
+            pickled_items = results.get("__pickled_kwargs_item__")
+            if not pickled_items:
+                logger.warning("[mm-routing] SHM: no pickled items received")
+                return None
+
+            kwargs_items = []
+            for pi in pickled_items:
+                item = pickle.loads(pi)
+                kwargs_items.append(item)
+
+            expanded_token_ids = extra_args.get("expanded_token_ids")
+            if not expanded_token_ids:
+                expanded_token_ids = request["token_ids"]
+
+            engine_input = {
+                "type": "multimodal",
+                "externally_processed": True,
+                "prompt_token_ids": expanded_token_ids,
+                "mm_kwargs": {
+                    shm_meta["modality"]: kwargs_items,
+                },
+                "mm_hashes": {
+                    shm_meta["modality"]: mm_hashes,
+                },
+                "mm_placeholders": {
+                    shm_meta["modality"]: [
+                        PlaceholderRange(offset=off, length=length)
+                        for off, length in mm_placeholders
+                    ],
+                },
+            }
+            _t1 = _time.monotonic()
+            logger.info(
+                "[TIMING-BACKEND] shm_receive=%.1fms items=%d",
+                (_t1 - _t0) * 1000,
+                len(kwargs_items),
+            )
+            return engine_input
+        except Exception:
+            logger.exception("[mm-routing] SHM receive failed, falling back")
             return None
 
     async def _extract_multimodal_data(
