@@ -152,7 +152,12 @@ impl<
         }
 
         let decay_now = Instant::now();
-        if self.request_is_busy(threshold, &request, decay_now) {
+        if self.all_workers_busy(
+            threshold,
+            request.allowed_worker_ids.as_ref(),
+            request.pinned_worker,
+            decay_now,
+        ) {
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = self.policy.enqueue_key(arrival_offset, &request);
@@ -320,7 +325,12 @@ impl<
         let mut schedulable = None;
 
         while let Some(entry) = heap.pop() {
-            if self.request_is_busy(threshold, &entry.request, decay_now) {
+            if self.all_workers_busy(
+                threshold,
+                entry.request.allowed_worker_ids.as_ref(),
+                entry.request.pinned_worker,
+                decay_now,
+            ) {
                 blocked.push(entry);
                 continue;
             }
@@ -333,20 +343,6 @@ impl<
         }
 
         schedulable
-    }
-
-    fn request_is_busy(
-        &self,
-        threshold: f64,
-        request: &SchedulingRequest,
-        decay_now: Instant,
-    ) -> bool {
-        self.all_workers_busy(
-            threshold,
-            request.allowed_worker_ids.as_ref(),
-            request.pinned_worker,
-            decay_now,
-        )
     }
 
     /// Check if all eligible workers are busy based on threshold.

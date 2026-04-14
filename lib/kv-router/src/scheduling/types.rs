@@ -78,7 +78,9 @@ impl SchedulingRequest {
         })
     }
 
-    pub fn wspt_overlap_blocks(&self) -> u32 {
+    /// Scheduling consumers use the exact pinned-worker overlap when present;
+    /// otherwise they use the best available overlap across eligible workers.
+    pub fn overlap_blocks(&self) -> u32 {
         self.pinned_worker
             .and_then(|worker| self.overlaps.scores.get(&worker).copied())
             .unwrap_or_else(|| self.overlaps.scores.values().copied().max().unwrap_or(0))

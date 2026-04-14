@@ -76,7 +76,7 @@ impl SchedulingPolicy for WsptPolicy {
 
     fn enqueue_key(&self, _arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
         let weight = 1.0 + request.priority_jump.max(0.0);
-        let cached_tokens = request.wspt_overlap_blocks() as usize * self.block_size;
+        let cached_tokens = request.overlap_blocks() as usize * self.block_size;
         let new_tokens = request.isl_tokens.saturating_sub(cached_tokens).max(1);
         OrderedFloat(weight / new_tokens as f64)
     }
