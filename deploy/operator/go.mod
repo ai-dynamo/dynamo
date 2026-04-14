@@ -3,7 +3,6 @@ module github.com/ai-dynamo/dynamo/deploy/operator
 go 1.25.0
 
 require (
-	emperror.dev/errors v0.8.1
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/ai-dynamo/dynamo/deploy/snapshot v0.0.0
 	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.6
