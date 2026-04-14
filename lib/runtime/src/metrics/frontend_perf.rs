@@ -161,3 +161,48 @@ pub fn ensure_frontend_perf_metrics_registered_prometheus(
     let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stage_guard_inc_dec() {
+        let gauge = STAGE_REQUESTS.with_label_values(&["test_stage", "test_phase"]);
+        assert_eq!(gauge.get(), 0);
+
+        {
+            let _guard = StageGuard::new("test_stage", "test_phase");
+            assert_eq!(gauge.get(), 1);
+
+            {
+                let _guard2 = StageGuard::new("test_stage", "test_phase");
+                assert_eq!(gauge.get(), 2);
+            }
+            // guard2 dropped
+            assert_eq!(gauge.get(), 1);
+        }
+        // guard dropped
+        assert_eq!(gauge.get(), 0);
+    }
+
+    #[test]
+    fn test_stage_guard_different_labels() {
+        let preprocess = STAGE_REQUESTS.with_label_values(&["preprocess_t", ""]);
+        let route_prefill = STAGE_REQUESTS.with_label_values(&["route_t", "prefill"]);
+        let route_decode = STAGE_REQUESTS.with_label_values(&["route_t", "decode"]);
+
+        let _g1 = StageGuard::new("preprocess_t", "");
+        let _g2 = StageGuard::new("route_t", "prefill");
+        let _g3 = StageGuard::new("route_t", "decode");
+
+        assert_eq!(preprocess.get(), 1);
+        assert_eq!(route_prefill.get(), 1);
+        assert_eq!(route_decode.get(), 1);
+
+        drop(_g2);
+        assert_eq!(preprocess.get(), 1);
+        assert_eq!(route_prefill.get(), 0);
+        assert_eq!(route_decode.get(), 1);
+    }
+}

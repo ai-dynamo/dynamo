@@ -2361,6 +2361,77 @@ mod tests {
     }
 
     #[test]
+    fn test_active_requests_tracks_inflight_guard() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model-active";
+
+        // Both gauges start at 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+
+        {
+            let _guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, true, "req-1");
+
+            // Both gauges increment together
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+
+            {
+                let _guard2 = metrics.clone().create_inflight_guard(
+                    model,
+                    Endpoint::ChatCompletions,
+                    true,
+                    "req-2",
+                );
+                assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 2);
+                assert_eq!(
+                    metrics
+                        .active_requests_gauge
+                        .with_label_values(&[model])
+                        .get(),
+                    2
+                );
+            }
+            // guard2 dropped
+            assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);
+            assert_eq!(
+                metrics
+                    .active_requests_gauge
+                    .with_label_values(&[model])
+                    .get(),
+                1
+            );
+        }
+        // guard dropped — both back to 0
+        assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 0);
+        assert_eq!(
+            metrics
+                .active_requests_gauge
+                .with_label_values(&[model])
+                .get(),
+            0
+        );
+    }
+
+    #[test]
     fn test_all_error_types_recorded_correctly() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
