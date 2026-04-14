@@ -186,13 +186,13 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	// Sync GMS ResourceClaimTemplate before creating workload resources
 	if r.RuntimeConfig.DRAEnabled {
-		parentName := dynamoComponentDeployment.GetParentGraphDeploymentName()
 		serviceName := dynamoComponentDeployment.Spec.ServiceName
 		if serviceName == "" {
 			serviceName = dynamoComponentDeployment.Name
 		}
+		claimTemplateName := dynamo.GMSResourceClaimTemplateName(dynamoComponentDeployment.GetParentGraphDeploymentName(), serviceName)
 		_, _, err = commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-			return dynamo.GenerateGMSResourceClaimTemplate(ctx, r.Client, parentName, dynamoComponentDeployment.Namespace, serviceName, &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec)
+			return dynamo.GenerateGMSResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoComponentDeployment.Namespace, &dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec)
 		})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate: %w", err)

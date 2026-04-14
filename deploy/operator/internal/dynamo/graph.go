@@ -1184,7 +1184,8 @@ func GenerateBasePodSpec(
 
 	// Inject GMS sidecar with DRA shared GPU access when GPU memory service is enabled.
 	if isGMSEnabled(component) {
-		if err := applyGPUMemoryService(&podSpec, component, parentGraphDeploymentName, serviceName); err != nil {
+		claimTemplateName := GMSResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
+		if err := applyGPUMemoryService(&podSpec, component, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply GPU memory service: %w", err)
 		}
 	}

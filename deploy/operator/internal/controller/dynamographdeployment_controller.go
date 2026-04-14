@@ -665,13 +665,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	if r.RuntimeConfig.DRAEnabled {
 		for serviceName, component := range dynamoDeployment.Spec.Services {
 			svcComponent := component
-			svcName := serviceName
+			claimTemplateName := dynamo.GMSResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
 			_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-				return dynamo.GenerateGMSResourceClaimTemplate(ctx, r.Client, dynamoDeployment.Name, dynamoDeployment.Namespace, svcName, svcComponent)
+				return dynamo.GenerateGMSResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, svcComponent)
 			})
 			if err != nil {
-				logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", svcName)
-				return ReconcileResult{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", svcName, err)
+				logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
+				return ReconcileResult{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", serviceName, err)
 			}
 		}
 	} else {

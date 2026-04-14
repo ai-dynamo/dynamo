@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -22,10 +24,13 @@ import (
 )
 
 const (
-	gmsSharedVolumeName    = "gms-shared"
-	gmsSharedMountPath     = "/shared"
-	gmsDRAClaimName        = "shared-gpu"
-	defaultDeviceClassName = "gpu.nvidia.com"
+	gmsSharedVolumeName     = "gms-shared"
+	gmsSharedMountPath      = "/shared"
+	gmsDRAClaimName         = "shared-gpu"
+	defaultDeviceClassName  = "gpu.nvidia.com"
+	gmsProcessesPerGPU      = 2
+	gmsStartupProbeTimeout  = 2 * time.Minute
+	gmsStartupProbePeriodSec = 2
 )
 
 func isGMSEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
@@ -67,11 +72,13 @@ func getDeviceClassName(component *v1alpha1.DynamoComponentDeploymentSharedSpec)
 // applyGPUMemoryService transforms a pod spec to include a GMS sidecar with
 // DRA shared GPU access. The main container's GPU resources are replaced with
 // a DRA ResourceClaim, and a GMS init container is added.
+//
+// claimTemplateName is the name of the ResourceClaimTemplate that will provide
+// shared GPU access; callers should compute it via GMSResourceClaimTemplateName.
 func applyGPUMemoryService(
 	podSpec *corev1.PodSpec,
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
-	parentName string,
-	serviceName string,
+	claimTemplateName string,
 ) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for GPU memory service")
@@ -106,8 +113,10 @@ func applyGPUMemoryService(
 	// Add shared volume
 	podSpec.Volumes = append(podSpec.Volumes, gmsSharedVolume())
 
-	// DRA replaces normal GPU scheduling, so the default GPU toleration that
-	// kubelet/device-plugin would add is lost. Re-add it explicitly.
+	// GPU nodes are typically tainted with nvidia.com/gpu=NoSchedule. With
+	// traditional scheduling the device-plugin injects the matching toleration,
+	// but DRA bypasses that path. Re-add the toleration explicitly so the pod
+	// can schedule on GPU nodes.
 	podSpec.Tolerations = append(podSpec.Tolerations, corev1.Toleration{
 		Key:      commonconsts.KubeResourceGPUNvidia,
 		Operator: corev1.TolerationOpExists,
@@ -115,7 +124,6 @@ func applyGPUMemoryService(
 	})
 
 	// Add pod-level DRA resource claim referencing the ResourceClaimTemplate
-	claimTemplateName := GMSResourceClaimTemplateName(parentName, serviceName)
 	podSpec.ResourceClaims = append(podSpec.ResourceClaims, corev1.PodResourceClaim{
 		Name:                      gmsDRAClaimName,
 		ResourceClaimTemplateName: &claimTemplateName,
@@ -161,8 +169,8 @@ func buildGMSSidecar(image string, gpuCount int) corev1.Container {
 					Command: gmsReadyCheckCommand(gpuCount),
 				},
 			},
-			PeriodSeconds:    2,
-			FailureThreshold: 150, // 2s * 150 = 5 min
+			PeriodSeconds:    int32(gmsStartupProbePeriodSec),
+			FailureThreshold: int32(gmsStartupProbeTimeout/time.Second) / int32(gmsStartupProbePeriodSec),
 		},
 		Resources: corev1.ResourceRequirements{
 			Claims: []corev1.ResourceClaim{
@@ -181,8 +189,7 @@ func gmsWrapperScript(gpuCount int) string {
 		devList[i] = strconv.Itoa(i)
 	}
 	return fmt.Sprintf(
-		`cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
-trap cleanup SIGTERM SIGINT
+		`trap 'kill 0 2>/dev/null || true' EXIT
 for dev in %s; do
   python3 -m gpu_memory_service --device "$dev" --tag weights &
   echo "Started GMS device=$dev tag=weights pid=$!"
@@ -190,8 +197,7 @@ for dev in %s; do
   echo "Started GMS device=$dev tag=kv_cache pid=$!"
 done
 wait -n
-echo "A GMS subprocess exited, shutting down"
-cleanup`, strings.Join(devList, " "))
+echo "A GMS subprocess exited, shutting down"`, strings.Join(devList, " "))
 }
 
 // gmsReadyCheckCommand returns the exec probe command that verifies the
@@ -200,7 +206,7 @@ cleanup`, strings.Join(devList, " "))
 func gmsReadyCheckCommand(gpuCount int) []string {
 	return []string{
 		"sh", "-c",
-		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsSharedMountPath, gpuCount*2),
+		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsSharedMountPath, gpuCount*gmsProcessesPerGPU),
 	}
 }
 
@@ -222,6 +228,9 @@ func GMSResourceClaimTemplateName(parentName, serviceName string) string {
 // GenerateGMSResourceClaimTemplate builds the ResourceClaimTemplate that
 // provides shared GPU access to all containers in a GMS-enabled pod via DRA.
 //
+// claimTemplateName is the deterministic name for the template; callers should
+// compute it via GMSResourceClaimTemplateName.
+//
 // When GMS is not enabled for the component, it returns the template skeleton
 // with toDelete=true so that SyncResource cleans up any previously created template.
 //
@@ -230,14 +239,12 @@ func GMSResourceClaimTemplateName(parentName, serviceName string) string {
 func GenerateGMSResourceClaimTemplate(
 	ctx context.Context,
 	cl client.Client,
-	parentName, namespace, serviceName string,
+	claimTemplateName, namespace string,
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 ) (*resourcev1.ResourceClaimTemplate, bool, error) {
-	name := GMSResourceClaimTemplateName(parentName, serviceName)
-
 	template := &resourcev1.ResourceClaimTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      claimTemplateName,
 			Namespace: namespace,
 		},
 	}
@@ -257,9 +264,12 @@ func GenerateGMSResourceClaimTemplate(
 	if cl != nil {
 		dc := &resourcev1.DeviceClass{}
 		if err := cl.Get(ctx, types.NamespacedName{Name: deviceClassName}, dc); err != nil {
-			return nil, false, fmt.Errorf(
-				"DeviceClass %q not found: ensure the GPU DRA driver is installed and the device class is registered: %w",
-				deviceClassName, err)
+			if apierrors.IsNotFound(err) {
+				return nil, false, fmt.Errorf(
+					"DeviceClass %q not found: ensure the GPU DRA driver is installed and the device class is registered",
+					deviceClassName)
+			}
+			return nil, false, fmt.Errorf("failed to verify DeviceClass %q: %w", deviceClassName, err)
 		}
 	}
 

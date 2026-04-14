@@ -276,13 +276,27 @@ func (v *SharedSpecValidator) validateGPUMemoryService() error {
 			v.fieldPath)
 	}
 
-	if v.spec.Resources == nil || v.spec.Resources.Limits == nil || v.spec.Resources.Limits.GPU == "" {
+	if v.spec.Resources == nil {
 		return fmt.Errorf(
 			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
 			v.fieldPath)
 	}
 
-	gpuCount, err := strconv.Atoi(v.spec.Resources.Limits.GPU)
+	gpuStr := ""
+	switch {
+	case v.spec.Resources.Limits != nil && v.spec.Resources.Limits.GPU != "":
+		gpuStr = v.spec.Resources.Limits.GPU
+	case v.spec.Resources.Requests != nil && v.spec.Resources.Requests.GPU != "":
+		gpuStr = v.spec.Resources.Requests.GPU
+	}
+
+	if gpuStr == "" {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
+			v.fieldPath)
+	}
+
+	gpuCount, err := strconv.Atoi(gpuStr)
 	if err != nil || gpuCount < 1 {
 		return fmt.Errorf(
 			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",

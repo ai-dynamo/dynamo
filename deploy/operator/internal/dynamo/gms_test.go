@@ -63,14 +63,14 @@ func gmsBasePodSpec() corev1.PodSpec {
 
 func TestApplyGPUMemoryService_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp", "Worker")
+	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
 func TestApplyGPUMemoryService_MainContainerTransformed(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp", "Worker")
+	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	main := ps.Containers[0]
@@ -100,7 +100,7 @@ func TestApplyGPUMemoryService_MainContainerTransformed(t *testing.T) {
 
 func TestApplyGPUMemoryService_GMSSidecarInjected(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp", "Worker")
+	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	require.Len(t, ps.InitContainers, 1)
@@ -123,7 +123,7 @@ func TestApplyGPUMemoryService_GMSSidecarInjected(t *testing.T) {
 
 func TestApplyGPUMemoryService_SharedVolume(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp", "Worker")
+	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	var found bool
@@ -138,7 +138,7 @@ func TestApplyGPUMemoryService_SharedVolume(t *testing.T) {
 
 func TestApplyGPUMemoryService_GPUToleration(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp", "Worker")
+	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	var found bool
@@ -153,7 +153,7 @@ func TestApplyGPUMemoryService_GPUToleration(t *testing.T) {
 
 func TestApplyGPUMemoryService_DRAResourceClaim(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp", "Worker")
+	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	require.Len(t, ps.ResourceClaims, 1)
@@ -163,7 +163,7 @@ func TestApplyGPUMemoryService_DRAResourceClaim(t *testing.T) {
 
 func TestApplyGPUMemoryService_PreservesExistingEnv(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp", "Worker")
+	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	main := ps.Containers[0]
@@ -174,7 +174,7 @@ func TestApplyGPUMemoryService_PreservesExistingEnv(t *testing.T) {
 
 func TestApplyGPUMemoryService_SingleContainer(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp", "Worker")
+	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	// Should still have exactly 1 regular container (no duplication)
@@ -189,7 +189,7 @@ func TestGmsWrapperScript_TwoTagsPerDevice(t *testing.T) {
 	assert.Contains(t, script, "for dev in 0 1 2")
 	assert.Contains(t, script, "--tag weights")
 	assert.Contains(t, script, "--tag kv_cache")
-	assert.Contains(t, script, "trap cleanup SIGTERM SIGINT")
+	assert.Contains(t, script, "trap 'kill 0")
 	assert.Contains(t, script, "wait -n")
 }
 
@@ -212,7 +212,7 @@ func TestGmsReadyCheckCommand_SingleGPU(t *testing.T) {
 
 func TestGenerateGMSResourceClaimTemplate_Enabled(t *testing.T) {
 	component := gmsComponent(4)
-	tmpl, toDelete, err := GenerateGMSResourceClaimTemplate(context.Background(), nil, "myapp", "default", "Worker", component)
+	tmpl, toDelete, err := GenerateGMSResourceClaimTemplate(context.Background(), nil, "myapp-worker-gpu", "default", component)
 
 	require.NoError(t, err)
 	assert.False(t, toDelete)
@@ -230,7 +230,7 @@ func TestGenerateGMSResourceClaimTemplate_Enabled(t *testing.T) {
 func TestGenerateGMSResourceClaimTemplate_CustomGPUType(t *testing.T) {
 	component := gmsComponent(2)
 	component.Resources.Limits.GPUType = "gpu.intel.com/xe"
-	tmpl, toDelete, err := GenerateGMSResourceClaimTemplate(context.Background(), nil, "myapp", "default", "Worker", component)
+	tmpl, toDelete, err := GenerateGMSResourceClaimTemplate(context.Background(), nil, "myapp-worker-gpu", "default", component)
 
 	require.NoError(t, err)
 	assert.False(t, toDelete)
@@ -241,7 +241,7 @@ func TestGenerateGMSResourceClaimTemplate_DisabledReturnsDelete(t *testing.T) {
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
 	}
-	tmpl, toDelete, err := GenerateGMSResourceClaimTemplate(context.Background(), nil, "myapp", "default", "Worker", component)
+	tmpl, toDelete, err := GenerateGMSResourceClaimTemplate(context.Background(), nil, "myapp-worker-gpu", "default", component)
 
 	require.NoError(t, err)
 	assert.True(t, toDelete)
@@ -253,7 +253,7 @@ func TestGenerateGMSResourceClaimTemplate_NoGPUCountError(t *testing.T) {
 		ComponentType:    commonconsts.ComponentTypeWorker,
 		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
 	}
-	_, _, err := GenerateGMSResourceClaimTemplate(context.Background(), nil, "myapp", "default", "Worker", component)
+	_, _, err := GenerateGMSResourceClaimTemplate(context.Background(), nil, "myapp-worker-gpu", "default", component)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "resources must be specified")
 }
