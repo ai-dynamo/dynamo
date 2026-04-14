@@ -51,6 +51,7 @@ jobs:
     needs:
       - changed-files
       - operator
+      - snapshot-agent
       - vllm-build
       - vllm-dev-build
       - vllm-test
@@ -83,99 +84,60 @@ jobs:
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
 
+  # ============================================================================
+  # Operator
+  # ============================================================================
+
   operator:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
     name: Operator
     runs-on: prod-default-v2
-    env:
-      IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     outputs:
-      operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
+      operator_default_tag: ${{ steps.build.outputs.image_tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
+      - name: Build and push operator
+        id: build
+        uses: ./.github/actions/build-deploy-component
         with:
+          component: operator
+          image_tag: ${{ github.sha }}-operator
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          flavor: general
-          arch: 'linux/amd64,linux/arm64'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Linter
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
-      - name: Tester
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
-      - name: Set up Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
+
+
+# ============================================================================
+# Snapshot Agent
+# ============================================================================
+
+  snapshot-agent:
+    needs: changed-files
+    if: needs.changed-files.outputs.deploy == 'true'
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
         with:
-          go-version: '1.25'
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install Python dependencies for operator codegen
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
-      - name: Check for uncommitted changes
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          make check
-      - name: Build and push Container
-        id: build-and-push-image
-        shell: bash
-        working-directory: ./deploy/operator
-        env:
-          NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
-        run: |
-          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          IMAGE_URIS=(
-            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-          )
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
 
-          echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          echo "flags for docker buildx: ${TAGGING_FLAGS}"
-
-          if [[ "$NO_CACHE_FLAG" == "true" ]]; then
-            NO_CACHE_FLAG="--no-cache"
-          fi
-          docker buildx build --push ${NO_CACHE_FLAG} \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              --build-context snapshot=../snapshot \
-              ${TAGGING_FLAGS} -f Dockerfile .
-
-          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
-
+# ============================================================================
+# FRAMEWORK PIPELINES (Build → Test → Copy)
+# ============================================================================
   # ============================================================================
   # BUILD PIPELINES
   # ============================================================================
@@ -471,7 +433,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build, vllm-test]
     if: |
-      always() &&
+      always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.vllm-build.result == 'success' &&
       (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
@@ -487,7 +449,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build, sglang-test]
     if: |
-      always() &&
+      always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.sglang-build.result == 'success' &&
       (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
@@ -503,7 +465,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build, trtllm-test]
     if: |
-      always() &&
+      always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.trtllm-build.result == 'success' &&
       (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
