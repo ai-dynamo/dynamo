@@ -1132,6 +1132,7 @@ class RouterMode:
     KV: "RouterMode"
     Direct: "RouterMode"
     LeastLoaded: "RouterMode"
+    DeviceAwareWeighted: "RouterMode"
     ...
 
 class RouterConfig:
@@ -1152,7 +1153,7 @@ class RouterConfig:
         Create a RouterConfig.
 
         Args:
-            mode: The router mode (RoundRobin, Random, KV, Direct, or LeastLoaded)
+            mode: The router mode (RoundRobin, Random, KV, Direct, LeastLoaded, or DeviceAwareWeighted)
             config: Optional KV router configuration (used when mode is KV)
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
