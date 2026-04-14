@@ -336,6 +336,15 @@ impl ModelWatcher {
                     "Removed WorkerSet (no remaining instances in namespace)"
                 );
             }
+
+            // If the removed component was a prefill worker, deactivate the decode-side
+            // prefill router so requests fall back to aggregated mode (or fail cleanly
+            // with enforce_disagg). The decode WorkerSet's namespace matches the
+            // deployment namespace, not the ws_key.
+            if card.model_type.supports_prefill() {
+                self.manager
+                    .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
+            }
         }
 
         // Check if the Model still has instances in any namespace
@@ -542,9 +551,12 @@ impl ModelWatcher {
                 self.router_config.load_threshold_config.clone(),
             ));
 
-            // Store KV router and worker monitor on the WorkerSet
+            // Store KV router, worker monitor, and prefill router on the WorkerSet.
+            // The prefill router is stored so the watcher can deactivate/reactivate it
+            // when prefill workers die or rejoin.
             worker_set.kv_router = kv_chooser.clone();
             worker_set.worker_monitor = worker_monitor.clone();
+            worker_set.prefill_router = prefill_chooser.clone();
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {

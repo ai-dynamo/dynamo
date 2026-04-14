@@ -51,7 +51,6 @@ class DistributedRuntime:
         event_loop: Any,
         discovery_backend: str,
         request_plane: str,
-        enable_nats: Optional[bool] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -60,9 +59,6 @@ class DistributedRuntime:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp", "http", or "nats")
-            enable_nats: Whether to enable NATS for KV events. Defaults to True.
-                        If request_plane is "nats", NATS is always enabled.
-                        Pass False to disable NATS initialization (e.g., for approximate routing).
         """
         ...
 
