@@ -241,6 +241,22 @@ async def test_audio_from_video_raises_on_silent_video():
 
 
 @pytest.mark.asyncio
+async def test_audio_from_video_raises_on_non_url_video():
+    """A decoded (non-URL) video item raises when use_audio_in_video is set."""
+    handler = _make_handler()
+    video = (np.zeros((2, 4, 4, 3), dtype=np.uint8), {"fps": 2.0})
+    handler.video_loader.load_video_batch = AsyncMock(return_value=[video])
+
+    with pytest.raises(ValueError, match="non-URL video item"):
+        await handler._extract_multimodal_data(
+            {"multi_modal_data": {"video_url": [{"Decoded": {"shape": [2, 4, 4, 3]}}]}},
+            "req-aiv-decoded",
+            context=None,
+            mm_processor_kwargs={"use_audio_in_video": True},
+        )
+
+
+@pytest.mark.asyncio
 async def test_audio_from_video_merges_with_standalone_audio():
     """Standalone audio_url items and video-extracted audio are both included."""
     handler = _make_handler()

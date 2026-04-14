@@ -1271,7 +1271,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             for item in video_mm_items:
                 url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
                 if not url:
-                    continue
+                    raise ValueError(
+                        "use_audio_in_video requires all video items to be "
+                        "URL-based. Got a non-URL video item (e.g. frontend-"
+                        "decoded). Audio extraction from decoded video data "
+                        "is not yet supported."
+                    )
                 try:
                     audio = await self.audio_loader.load_audio(url)
                     video_audios.append(audio)
