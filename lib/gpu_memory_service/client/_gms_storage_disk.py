@@ -114,16 +114,11 @@ def read_shard_sequential(
         done = 0
         try:
             total_size = sum(entry.aligned_size for entry in sorted_entries)
-            if pin_memory and torch_module.cuda.is_available():
-                shard_t = torch_module.empty(
-                    total_size,
-                    dtype=torch_module.uint8,
-                    pin_memory=True,
-                )
-                arr = shard_t.numpy()
-            else:
-                shard_t = None
-                arr = np_module.empty(total_size, dtype=np_module.uint8)
+            # Avoid torch.empty(pin_memory=True): cudaHostAlloc is ~1-3 s/GiB
+            # and dominates wall time.  Plain numpy gives good throughput since
+            # PCIe H2D bandwidth far exceeds network disk bandwidth.
+            shard_t = None
+            arr = np_module.empty(total_size, dtype=np_module.uint8)
 
             fd = os_module.open(abs_path, os_module.O_RDONLY | odirect_flag)
             try:
@@ -309,15 +304,13 @@ def read_shard_streaming_to_queue(
 
     total_size = sum(e.aligned_size for e in sorted_entries)
 
-    # Allocate a single pinned buffer for the whole shard.
-    if pin_memory and torch_module.cuda.is_available():
-        shard_t = torch_module.empty(
-            total_size, dtype=torch_module.uint8, pin_memory=True
-        )
-        shard_arr = shard_t.numpy()
-    else:
-        shard_t = None
-        shard_arr = np_module.empty(total_size, dtype=np_module.uint8)
+    # Allocate a buffer for the whole shard.  We intentionally avoid
+    # torch.empty(pin_memory=True) because cudaHostAlloc is extremely
+    # slow (~1-3 s per GiB) and dominates wall time for large shards.
+    # A plain numpy buffer still gives good H2D throughput (the copy is
+    # synchronous but PCIe bandwidth ≫ disk bandwidth).
+    shard_t = None
+    shard_arr = np_module.empty(total_size, dtype=np_module.uint8)
 
     odirect_flag = getattr(os_module, "O_DIRECT", None)
     preadv_fn = getattr(os_module, "preadv", None)
