@@ -13,51 +13,68 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+version: 2
 run:
-  timeout: 10m
   allow-parallel-runners: true
 
-issues:
-  # don't skip warning about doc comments
-  # don't exclude the default set of lint
-  exclude-use-default: false
-  # restore some of the defaults
-  # (fill in the rest as needed)
-  exclude-rules:
-    - path: "api/*"
-      linters:
-        - lll
-    - path: "internal/*"
-      linters:
-        - dupl
-        - lll
-    - path: "pkg/dynamo/*"
-      linters:
-        - lll
-        - nakedret
-    # Intentional internal usage of deprecated namespace-restricted mode fields/packages.
-    # The feature is soft-deprecated (still functional) so internal references are expected.
-    - linters:
-        - staticcheck
-      text: "SA1019:.*deprecated.*namespace"
 linters:
-  disable-all: true
+  default: none
   enable:
     - dupl
     - errcheck
     - goconst
     - gocyclo
-    - gofmt
-    - goimports
-    - gosimple
     - govet
     - ineffassign
     - lll
     - misspell
     - nakedret
-    - prealloc
     - staticcheck
-    - typecheck
     - unconvert
     - unparam
     - unused
+
+  exclusions:
+    # don't skip warning about doc comments
+    # don't exclude the default set of lint
+    generated: lax
+    rules:
+      - linters:
+          - lll
+        path: api/*
+      - linters:
+          - dupl
+          - lll
+        path: internal/*
+      - linters:
+          - lll
+          - nakedret
+        path: pkg/dynamo/*
+      # Intentional internal usage of deprecated namespace-restricted mode fields/packages.
+      # The feature is soft-deprecated (still functional) so internal references are expected.
+      - linters:
+          - staticcheck
+        text: SA1019:.*deprecated.*[Nn]amespace
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gofmt
+    - gci
+
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

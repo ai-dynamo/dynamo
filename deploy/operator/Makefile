@@ -137,8 +137,8 @@ generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (req
 	@python3 api/scripts/validate_pydantic_models.py
 
 .PHONY: fmt
-fmt: ## Run go fmt against code.
-	go fmt ./...
+fmt: golangci-lint ## Run golangci-lint formatter
+	$(GOLANGCI_LINT) fmt
 
 .PHONY: vet
 vet: ## Run go vet against code.
@@ -378,7 +378,7 @@ YQ_VERSION ?= v4.45.4
 KUSTOMIZE_VERSION ?= v5.5.0
 CONTROLLER_TOOLS_VERSION ?= v0.16.4
 ENVTEST_VERSION ?= release-0.19
-GOLANGCI_LINT_VERSION ?= v1.64.8
+GOLANGCI_LINT_VERSION ?= v2.11.4
 
 ## Tool Binaries
 KUBECTL ?= $(LOCALBIN)/kubectl-$(KUBECTL_VERSION)
@@ -442,7 +442,7 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,${GOLANGCI_LINT_VERSION})
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary (ideally with version)
