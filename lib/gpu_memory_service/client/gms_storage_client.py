@@ -102,6 +102,18 @@ def _group_entries_by_shard(
     return _group_entries_by_shard_impl(allocations)
 
 
+def _allocation_record(alloc: Any) -> Dict[str, Any]:
+    if isinstance(alloc, dict):
+        return alloc
+    return {
+        "allocation_id": str(alloc.allocation_id),
+        "size": int(alloc.size),
+        "aligned_size": int(alloc.aligned_size),
+        "tag": str(alloc.tag),
+        "layout_slot": int(alloc.layout_slot),
+    }
+
+
 def _plan_shard_layout(
     allocations_info: List[Dict[str, Any]],
     shard_size_bytes: int,
@@ -168,7 +180,9 @@ class GMSStorageClient:
                 raise RuntimeError(
                     "GMS server has no committed weights; nothing to dump"
                 )
-            allocations_info = mm.list_handles()
+            allocations_info = [
+                _allocation_record(alloc) for alloc in mm.list_handles()
+            ]
             va_list = self._import_source_mappings(mm, allocations_info)
             entries = self._write_shards(
                 shards_dir,
