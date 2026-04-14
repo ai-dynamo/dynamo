@@ -182,6 +182,50 @@ func TestCreateOrGetAutoCheckpointSetsDefaultArtifactVersion(t *testing.T) {
 
 // --- InjectCheckpointIntoPodSpec tests ---
 
+func TestEnsurePodInfoVolumeMergesExistingDownwardAPIItems(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Volumes: []corev1.Volume{{
+			Name: consts.PodInfoVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
+					Items: []corev1.DownwardAPIVolumeFile{
+						{
+							Path:     "pod_name",
+							FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+						},
+						{
+							Path:     "custom",
+							FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.labels['custom']"},
+						},
+					},
+				},
+			},
+		}},
+	}
+
+	EnsurePodInfoVolume(podSpec)
+
+	require.Len(t, podSpec.Volumes, 1)
+	require.NotNil(t, podSpec.Volumes[0].DownwardAPI)
+
+	fields := map[string]string{}
+	for _, item := range podSpec.Volumes[0].DownwardAPI.Items {
+		if item.FieldRef != nil {
+			fields[item.Path] = item.FieldRef.FieldPath
+		}
+	}
+
+	assert.Equal(t, consts.PodInfoFieldPodName, fields["pod_name"])
+	assert.Equal(t, consts.PodInfoFieldPodUID, fields["pod_uid"])
+	assert.Equal(t, consts.PodInfoFieldPodNamespace, fields["pod_namespace"])
+	assert.Equal(t, "metadata.labels['custom']", fields["custom"])
+	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fields[consts.PodInfoFileDynNamespace])
+	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fields[consts.PodInfoFileDynNamespaceWorkerSuffix])
+	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fields[consts.PodInfoFileDynComponent])
+	assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fields[consts.PodInfoFileDynParentDGDName])
+	assert.Equal(t, consts.PodInfoFieldPodNamespace, fields[consts.PodInfoFileDynParentDGDNamespace])
+}
+
 func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 	t.Run("ready checkpoint injects podinfo and overrides command", func(t *testing.T) {
 		podSpec := testPodSpec()
