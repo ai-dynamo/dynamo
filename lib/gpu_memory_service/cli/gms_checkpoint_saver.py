@@ -9,6 +9,7 @@ import os
 import ssl
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -92,22 +93,39 @@ def main() -> None:
             raise SystemExit("main container terminated before GMS save could start")
         time.sleep(1)
 
+    def _save_device(device: int, max_workers: int) -> None:
+        wait_for_weights_socket(device)
+        output_dir = checkpoint_device_dir(checkpoint_dir, device)
+        logger.info(
+            "Saving GMS checkpoint: device=%d output_dir=%s",
+            device,
+            output_dir,
+        )
+        t0 = time.monotonic()
+        client = GMSStorageClient(
+            output_dir,
+            socket_path=get_socket_path(device),
+            device=device,
+        )
+        client.save(max_workers=max_workers)
+        elapsed = time.monotonic() - t0
+        logger.info("GMS checkpoint saved: device=%d elapsed=%.2fs", device, elapsed)
+
+    max_workers = int(os.environ.get("GMS_SAVE_WORKERS", "8"))
     logger.info("Checkpoint pod is Ready; starting GMS save")
     try:
-        for device in list_devices():
-            wait_for_weights_socket(device)
-            output_dir = checkpoint_device_dir(checkpoint_dir, device)
-            logger.info(
-                "Saving GMS checkpoint: device=%d output_dir=%s",
-                device,
-                output_dir,
-            )
-            client = GMSStorageClient(
-                output_dir,
-                socket_path=get_socket_path(device),
-                device=device,
-            )
-            client.save(max_workers=4)
+        devices = list_devices()
+        t0 = time.monotonic()
+        # Save all devices in parallel to saturate PVC write bandwidth.
+        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+            futures = {
+                pool.submit(_save_device, dev, max_workers): dev
+                for dev in devices
+            }
+            for future in as_completed(futures):
+                future.result()  # propagate exceptions
+        elapsed = time.monotonic() - t0
+        logger.info("All %d devices saved in %.2fs", len(devices), elapsed)
     finally:
         (Path(os.environ["GMS_CONTROL_DIR"]) / "checkpoint-done").write_text(
             "done",

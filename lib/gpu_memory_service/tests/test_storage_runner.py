@@ -13,4 +13,4 @@ def test_cli_parser_builds_save_and_load_commands() -> None:
     assert save_args.subcommand == "save"
     assert save_args.device == 0
     assert load_args.subcommand == "load"
-    assert load_args.workers == 4
+    assert load_args.workers == 8

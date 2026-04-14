@@ -183,8 +183,8 @@ def _build_parser() -> argparse.ArgumentParser:
     save_p.add_argument(
         "--save-workers",
         type=int,
-        default=4,
-        help="Thread pool size for parallel shard writes (default: 4).",
+        default=8,
+        help="Thread pool size for parallel shard writes (default: 8).",
     )
     save_p.add_argument(
         "--verbose",
@@ -229,8 +229,8 @@ def _build_parser() -> argparse.ArgumentParser:
     load_p.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="Thread pool size for parallel shard reads (default: 4).",
+        default=8,
+        help="Thread pool size for parallel shard reads (default: 8).",
     )
     load_p.add_argument(
         "--no-clear",
