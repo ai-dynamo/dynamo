@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Build Deploy Component'
+description: 'Lint, test, and build/push a deploy component container (operator or snapshot)'
+
+inputs:
+  component:
+    description: 'Component to build: operator or snapshot'
+    required: true
+  image_tag:
+    description: 'Image tag to apply to built images'
+    required: true
+  builder_name:
+    description: 'Buildx builder name'
+    required: true
+  aws_default_region:
+    description: 'AWS Default Region'
+    required: true
+  aws_account_id:
+    description: 'AWS Account ID'
+    required: true
+  azure_acr_hostname:
+    description: 'Azure ACR hostname (operator only)'
+    required: false
+    default: ''
+  azure_acr_user:
+    description: 'Azure ACR user (operator only)'
+    required: false
+    default: ''
+  azure_acr_password:
+    description: 'Azure ACR password (operator only)'
+    required: false
+    default: ''
+
+outputs:
+  image_tag:
+    description: 'The image tag applied to built images'
+    value: ${{ inputs.image_tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: Determine build settings
+      id: settings
+      shell: bash
+      run: |
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          echo "lint_platform=linux/arm64" >> $GITHUB_OUTPUT
+          echo "build_platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
+          echo "all_arch=true" >> $GITHUB_OUTPUT
+        else
+          echo "lint_platform=linux/amd64" >> $GITHUB_OUTPUT
+          echo "build_platforms=linux/amd64" >> $GITHUB_OUTPUT
+          echo "all_arch=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Initialize Dynamo Builder
+      uses: ./.github/actions/init-dynamo-builder
+      with:
+        builder_name: ${{ inputs.builder_name }}
+        flavor: general
+        all_arch: ${{ steps.settings.outputs.all_arch }}
+
+    - name: Docker Login
+      uses: ./.github/actions/docker-login
+      with:
+        aws_default_region: ${{ inputs.aws_default_region }}
+        aws_account_id: ${{ inputs.aws_account_id }}
+        azure_acr_hostname: ${{ inputs.azure_acr_hostname }}
+        azure_acr_user: ${{ inputs.azure_acr_user }}
+        azure_acr_password: ${{ inputs.azure_acr_password }}
+
+    - name: Linter
+      shell: bash
+      working-directory: ./deploy/${{ inputs.component }}
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        docker buildx build --platform ${{ steps.settings.outputs.lint_platform }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+
+    - name: Tester
+      shell: bash
+      working-directory: ./deploy/${{ inputs.component }}
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        docker buildx build --platform ${{ steps.settings.outputs.lint_platform }} --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+
+    - name: Set up Go
+      if: ${{ inputs.component == 'operator' }}
+      uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      with:
+        go-version: '1.25'
+
+    - name: Set up Python
+      if: ${{ inputs.component == 'operator' }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install Python dependencies for operator codegen
+      if: ${{ inputs.component == 'operator' }}
+      shell: bash
+      working-directory: ./deploy/operator
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
+
+    - name: Check for uncommitted changes
+      if: ${{ inputs.component == 'operator' }}
+      shell: bash
+      working-directory: ./deploy/operator
+      run: |
+        make check
+
+    - name: Build and push Container
+      shell: bash
+      working-directory: ./deploy/${{ inputs.component }}
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+        IMAGE_REGISTRY: ai-dynamo
+        IMAGE_REPOSITORY: dynamo
+        NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
+      run: |
+        ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+        IMAGE_URIS=("${ECR_DEFAULT_IMAGE_BASE}:${{ inputs.image_tag }}")
+
+        if [[ "${{ inputs.component }}" == "operator" && -n "${{ inputs.azure_acr_hostname }}" ]]; then
+          ACR_IMAGE_BASE="${{ inputs.azure_acr_hostname }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          IMAGE_URIS+=("${ACR_IMAGE_BASE}:${{ inputs.image_tag }}")
+        fi
+
+        TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+        echo "flags for docker buildx: ${TAGGING_FLAGS}"
+
+        TARGET_FLAG=""
+        if [[ "${{ inputs.component }}" == "snapshot" ]]; then
+          TARGET_FLAG="--target agent"
+        fi
+
+        if [[ "$NO_CACHE_FLAG" == "true" ]]; then
+          NO_CACHE_FLAG="--no-cache"
+        fi
+
+        docker buildx build --push ${NO_CACHE_FLAG} \
+            --platform ${{ steps.settings.outputs.build_platforms }} \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            ${TARGET_FLAG} \
+            ${TAGGING_FLAGS} -f Dockerfile .
+
+        DISPLAY_NAME="${{ inputs.component }}"
+        echo "### 🐳 ${DISPLAY_NAME^} Container Images" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----|" >> $GITHUB_STEP_SUMMARY
+        for image_uri in "${IMAGE_URIS[@]}"; do
+          echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+        done
