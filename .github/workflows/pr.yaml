@@ -4,9 +4,9 @@
 name: PR
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
+      - "pull-request/[0-9]+"
 
 concurrency:
   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
