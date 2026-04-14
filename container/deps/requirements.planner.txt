@@ -9,7 +9,7 @@ aiohttp>=3.9.0,<4.0
 filterpy==1.4.5
 kubernetes==32.0.1
 kubernetes_asyncio==32.0.0
-plotly>=5.0.0,<6.0
+plotly>=6.0.1
 pmdarima==2.1.1
 prometheus-api-client==0.6.0
 prophet==1.2.1
