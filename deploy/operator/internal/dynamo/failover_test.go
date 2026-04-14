@@ -70,7 +70,6 @@ func failoverPodSpec() corev1.PodSpec {
 	}
 }
 
-
 // --- buildFailoverPod ---
 
 func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
