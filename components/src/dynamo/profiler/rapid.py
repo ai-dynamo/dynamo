@@ -120,9 +120,9 @@ def _run_naive_fallback(
     """Handle the AIC-unsupported path via naive config generation.
 
     When ``optimizationType`` is active the GPU count is computed from model
-    weight and VRAM (1.5× rule) via :func:`resolve_optimization_type_config`.
-    The parallelization strategy (TP/TEP/DEP) is logged but full MoE support
-    in the AIC naive generator requires Task 2B in the aiconfigurator repo.
+    weight and VRAM (1.5× rule) via :func:`resolve_optimization_type_config`,
+    and the appropriate parallelization strategy (TP/TEP/DEP) and serving
+    mode (agg/disagg) are passed to the AIC naive generator.
     """
     if backend == "auto":
         backend = _DEFAULT_NAIVE_BACKEND
@@ -143,8 +143,7 @@ def _run_naive_fallback(
             effective_gpus = opt_config.num_gpus
             logger.info(
                 "optimizationType=%s: naive fallback using %d GPUs "
-                "(target parallelization: %s). "
-                "Note: full TEP/DEP support in naive requires AIC Task 2B.",
+                "(target parallelization: %s).",
                 dgdr.sla.optimizationType.value,
                 effective_gpus,
                 opt_config.prefill_mapping.label(),
@@ -156,11 +155,21 @@ def _run_naive_fallback(
                 total_gpus,
             )
 
+    # Determine serving mode: prefer disagg when we have enough GPUs
+    opt_type_value = None
+    naive_mode = "agg"
+    if dgdr.sla and dgdr.sla.optimizationType is not None:
+        opt_type_value = dgdr.sla.optimizationType.value
+        if effective_gpus >= 2:
+            naive_mode = "disagg"
+
     generator_params = build_naive_generator_params(
         model_name=model,
         total_gpus=effective_gpus,
         system_name=system,
         backend_name=backend,
+        mode=naive_mode,
+        optimization_type=opt_type_value,
     )
 
     k8s_overrides = _build_k8s_overrides(dgdr, backend)
