@@ -14,7 +14,7 @@ Serve vision-language models (VLMs) with dynamically loadable LoRA adapters usin
 ### 1. Launch the server
 
 ```bash
-cd examples/multimodal/launch/lora
+cd examples/backends/vllm/launch/lora/multimodal
 ./lora_agg.sh
 ```
 

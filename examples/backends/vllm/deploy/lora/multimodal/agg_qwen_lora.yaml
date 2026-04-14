@@ -12,7 +12,7 @@
 #   List:   curl http://<worker>:9090/v1/loras
 #   Unload: curl -X DELETE http://<worker>:9090/v1/loras/my-adapter
 #
-# Matches the pattern in: examples/multimodal/launch/lora/lora_agg.sh
+# Matches the pattern in: examples/backends/vllm/launch/lora/multimodal/lora_agg.sh
 
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
