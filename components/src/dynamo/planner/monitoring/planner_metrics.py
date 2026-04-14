@@ -152,3 +152,13 @@ class PlannerPrometheusMetrics:
             "Inflight (scheduled) decode KV tokens per engine (from FPM)",
             labelnames=_engine_labels,
         )
+
+        # -- Advisory mode metrics ----------------------------------------
+        self.advisory_recommended_replicas = Gauge(
+            f"{PREFIX}_advisory_recommended_replicas",
+            "Recommended replica count in advisory mode (not executed)",
+        )
+        self.advisory_current_replicas = Gauge(
+            f"{PREFIX}_advisory_current_replicas",
+            "Current replica count when in advisory mode",
+        )

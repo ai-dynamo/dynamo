@@ -24,7 +24,7 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
-from dynamo.planner.config.defaults import SLAPlannerDefaults
+from dynamo.planner.config.defaults import ScalingMode, SLAPlannerDefaults
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,21 @@ class PlannerConfig(BaseModel):
     )
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
+
+    # Advisory mode configuration
+    scaling_mode: ScalingMode = Field(
+        default=SLAPlannerDefaults.scaling_mode,
+        description=(
+            "Operating mode for scaling decisions. "
+            "'active': execute scaling automatically (default). "
+            "'advisory': compute and log recommendations without executing. "
+            "'noop': disable scaling entirely."
+        ),
+    )
+    advisory_log_interval: int = Field(
+        default=SLAPlannerDefaults.advisory_log_interval,
+        description="Seconds between advisory mode log entries.",
+    )
 
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(

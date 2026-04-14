@@ -243,11 +243,12 @@ class LoadScalingMixin:
         d_caps = self._capabilities.decode
         max_tokens = d_caps.max_num_batched_tokens if d_caps else None
         if not max_tokens or max_tokens <= 0:
-            logger.warning("max_num_batched_tokens not available, skipping agg scaling")
-            self._diag_load_reason = "insufficient_data"
-            return None
-
-        p_desired = self._agg_prefill_scaling(fpm_stats, num_workers, max_tokens)
+            logger.warning(
+                "max_num_batched_tokens not available, skipping prefill load scaling"
+            )
+            p_desired = None
+        else:
+            p_desired = self._agg_prefill_scaling(fpm_stats, num_workers, max_tokens)
         d_desired = self._agg_decode_scaling(fpm_stats, num_workers)
 
         logger.info(
