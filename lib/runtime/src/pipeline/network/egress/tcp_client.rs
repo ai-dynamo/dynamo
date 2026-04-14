@@ -954,7 +954,17 @@ impl TcpConnectionPool {
 
         for addr in stale {
             tracing::debug!("Removing idle TCP host pool for {}", addr);
-            self.hosts.remove(&addr);
+            if let Some((_, host)) = self.hosts.remove(&addr) {
+                // Gracefully shut down connections: mark unhealthy and wake
+                // writers so they exit and drain pending callers. Without this,
+                // dropping the HostPool only detaches the JoinHandles (tokio
+                // does not abort on drop), leaving zombie tasks holding sockets.
+                let snap = host.snapshot.load();
+                for conn in snap.iter() {
+                    conn.healthy.store(false, Ordering::Relaxed);
+                    conn.writer_notify.notify_one();
+                }
+            }
         }
     }
 
