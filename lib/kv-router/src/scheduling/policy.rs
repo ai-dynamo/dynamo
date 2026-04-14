@@ -301,6 +301,17 @@ mod tests {
     }
 
     #[test]
+    fn wspt_missing_pinned_overlap_uses_zero() {
+        let policy = WsptPolicy { block_size: 16 };
+        let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
+        req.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+
+        let key = policy.enqueue_key(Duration::ZERO, &req);
+        let expected = OrderedFloat(1.0 / 1024.0);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
     fn wspt_no_overlap_falls_back_to_isl() {
         let policy = WsptPolicy { block_size: 16 };
         let req = request_with(512, 0.0, OverlapScores::default());
