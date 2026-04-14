@@ -282,6 +282,5 @@ The example source lives at [`examples/diffusers/`](https://github.com/ai-dynamo
 - [vLLM-Omni Text-to-Image](../../backends/vllm/vllm-omni.md#text-to-image) — vLLM-Omni image generation
 - [SGLang Video Generation](../../backends/sglang/sglang-diffusion.md#video-generation) — SGLang video generation worker
 - [SGLang Image Diffusion](../../backends/sglang/sglang-diffusion.md#image-diffusion) — SGLang image diffusion worker
-<!-- [gluo WIP] separate entry for video and image -->
 - [TRT-LLM Diffusion](../../backends/trtllm/trtllm-diffusion.md#quick-start) — TensorRT-LLM diffusion quick start
 - [Diffusion Overview](README.md) — Full backend support matrix

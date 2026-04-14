@@ -18,11 +18,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from dynamo.common.protocols.video_protocol import (
-    NvCreateVideoRequest,
-    NvVideosResponse,
-    VideoData,
-    VideoNvExt,
+from dynamo.common.protocols.image_protocol import (
+    ImageData,
+    ImageNvExt,
+    NvCreateImageRequest,
+    NvImagesResponse,
 )
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 
@@ -33,6 +33,8 @@ pytestmark = [
     pytest.mark.gpu_0,
 ]
 
+# [gluo FIXME] many parts of the test are validated as part of test_trtllm_video_diffusion.py,
+# we should have common test suite for diffusion and additional tests for different modalities.
 
 # =============================================================================
 # Part 1: Modality Enum Tests
@@ -149,232 +151,146 @@ class TestImageHandlerParseSize:
 
 
 # =============================================================================
-# Part 4: Video Protocol Tests
+# Part 4: Image Protocol Tests
 # =============================================================================
 
-# [gluo WIP] change below to fit with image diffusion
 
-
-class TestNvCreateVideoRequest:
-    """Tests for NvCreateVideoRequest protocol type."""
+class TestNvCreateImageRequest:
+    """Tests for NvCreateImageRequest protocol type."""
 
     def test_required_fields(self):
         """Test that prompt and model are required."""
-        req = NvCreateVideoRequest(prompt="A cat", model="wan_t2v")
+        req = NvCreateImageRequest(prompt="A cat", model="black-forest-labs/FLUX.1-dev")
         assert req.prompt == "A cat"
-        assert req.model == "wan_t2v"
+        assert req.model == "black-forest-labs/FLUX.1-dev"
 
     def test_required_fields_missing_prompt(self):
         """Test that missing prompt raises validation error."""
         with pytest.raises(Exception):  # Pydantic ValidationError
-            NvCreateVideoRequest(model="wan_t2v")  # type: ignore
-
-    def test_required_fields_missing_model(self):
-        """Test that missing model raises validation error."""
-        with pytest.raises(Exception):  # Pydantic ValidationError
-            NvCreateVideoRequest(prompt="A cat")  # type: ignore
+            NvCreateImageRequest(model="black-forest-labs/FLUX.1-dev")  # type: ignore
 
     def test_optional_fields_default_none(self):
         """Test that optional fields default to None."""
-        req = NvCreateVideoRequest(prompt="A cat", model="wan_t2v")
+        req = NvCreateImageRequest(prompt="A cat")
 
+        # [gluo NOTE] in protocol the model is optional, but actually Dynamo will
+        # fill with default value if not provided.
+        assert req.model is None
+        assert req.n is None
+        assert req.quality is None
+        assert req.style is None
+        assert req.user is None
+        assert req.moderation is None
         assert req.input_reference is None
-        assert req.seconds is None
         assert req.size is None
         assert req.response_format is None
         assert req.nvext is None
 
     def test_full_request_valid(self):
         """Test a fully populated request with nvext."""
-        req = NvCreateVideoRequest(
+        req = NvCreateImageRequest(
             prompt="A majestic lion",
-            model="wan_t2v",
-            seconds=5,
+            model="black-forest-labs/FLUX.1-dev",
             size="1920x1080",
             response_format="b64_json",
-            nvext=VideoNvExt(
-                fps=30,
-                num_frames=150,
+            nvext=ImageNvExt(
+                annotations=["tag1", "tag2"],
+                negative_prompt="blurry, low quality",
                 num_inference_steps=30,
                 guidance_scale=7.5,
-                negative_prompt="blurry, low quality",
                 seed=42,
             ),
         )
 
         assert req.prompt == "A majestic lion"
-        assert req.model == "wan_t2v"
-        assert req.seconds == 5
+        assert req.model == "black-forest-labs/FLUX.1-dev"
         assert req.size == "1920x1080"
         assert req.response_format == "b64_json"
-        assert req.nvext.fps == 30
-        assert req.nvext.num_frames == 150
+        assert req.nvext.annotations == ["tag1", "tag2"]
+        assert req.nvext.negative_prompt == "blurry, low quality"
         assert req.nvext.num_inference_steps == 30
         assert req.nvext.guidance_scale == 7.5
-        assert req.nvext.negative_prompt == "blurry, low quality"
         assert req.nvext.seed == 42
 
 
-class TestVideoData:
-    """Tests for VideoData protocol type."""
+class TestImageData:
+    """Tests for ImageData protocol type."""
 
     def test_url_only(self):
-        """Test VideoData with URL only."""
-        data = VideoData(url="/tmp/video.mp4")
-        assert data.url == "/tmp/video.mp4"
+        """Test ImageData with URL only."""
+        data = ImageData(url="/tmp/image.png")
+        assert data.url == "/tmp/image.png"
         assert data.b64_json is None
 
     def test_b64_only(self):
-        """Test VideoData with base64 only."""
-        data = VideoData(b64_json="SGVsbG8gV29ybGQ=")
+        """Test ImageData with base64 only."""
+        data = ImageData(b64_json="SGVsbG8gV29ybGQ=")
         assert data.url is None
         assert data.b64_json == "SGVsbG8gV29ybGQ="
 
     def test_both_fields(self):
-        """Test VideoData with both fields (unusual but valid)."""
-        data = VideoData(url="/tmp/video.mp4", b64_json="SGVsbG8=")
-        assert data.url == "/tmp/video.mp4"
+        """Test ImageData with both fields (unusual but valid)."""
+        data = ImageData(url="/tmp/image.png", b64_json="SGVsbG8=")
+        assert data.url == "/tmp/image.png"
         assert data.b64_json == "SGVsbG8="
 
     def test_empty_defaults(self):
-        """Test VideoData with no arguments."""
-        data = VideoData()
+        """Test ImageData with no arguments."""
+        data = ImageData()
         assert data.url is None
         assert data.b64_json is None
 
 
-class TestNvVideosResponse:
-    """Tests for NvVideosResponse protocol type."""
+class TestNvImagesResponse:
+    """Tests for NvImagesResponse protocol type."""
 
     def test_default_values(self):
         """Test default values for completed response."""
-        response = NvVideosResponse(
-            id="req-123",
-            model="wan_t2v",
+        response = NvImagesResponse(
             created=1234567890,
         )
-
-        assert response.id == "req-123"
-        assert response.object == "video"
-        assert response.model == "wan_t2v"
-        assert response.status == "completed"
-        assert response.progress == 100
         assert response.created == 1234567890
         assert response.data == []
-        assert response.error is None
 
-    def test_error_response(self):
-        """Test error response structure."""
-        response = NvVideosResponse(
-            id="req-456",
-            model="wan_t2v",
+    def test_with_image_data(self):
+        """Test response with image data."""
+        image = ImageData(url="/tmp/output.png")
+        response = NvImagesResponse(
             created=1234567890,
-            status="failed",
-            progress=0,
-            error="Model failed to load",
+            data=[image],
         )
-
-        assert response.status == "failed"
-        assert response.progress == 0
-        assert response.error == "Model failed to load"
-
-    def test_with_video_data(self):
-        """Test response with video data."""
-        video = VideoData(url="/tmp/output.mp4")
-        response = NvVideosResponse(
-            id="req-789",
-            model="wan_t2v",
-            created=1234567890,
-            data=[video],
-            inference_time_s=42.5,
-        )
-
         assert len(response.data) == 1
-        assert response.data[0].url == "/tmp/output.mp4"
-        assert response.inference_time_s == 42.5
+        assert response.data[0].url == "/tmp/output.png"
 
     def test_model_dump(self):
         """Test serialization with model_dump()."""
-        response = NvVideosResponse(
+        response = NvImagesResponse(
             id="req-123",
-            model="wan_t2v",
             created=1234567890,
-            data=[VideoData(url="/tmp/video.mp4")],
+            data=[ImageData(url="/tmp/image.png")],
         )
 
         dumped = response.model_dump()
 
         assert isinstance(dumped, dict)
-        assert dumped["id"] == "req-123"
-        assert dumped["object"] == "video"
-        assert dumped["model"] == "wan_t2v"
-        assert dumped["status"] == "completed"
+        assert dumped["created"] == 1234567890
         assert len(dumped["data"]) == 1
-        assert dumped["data"][0]["url"] == "/tmp/video.mp4"
+        assert dumped["data"][0]["url"] == "/tmp/image.png"
 
 
 # =============================================================================
 # Part 5: DiffusionEngine Unit Tests
 # =============================================================================
 
-
-class TestDiffusionEngineGenerate:
-    """Tests for DiffusionEngine.generate() logic."""
-
-    def _make_engine(self):
-        """Create a DiffusionEngine with mocked pipeline (no TRT-LLM needed)."""
-        from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
-
-        config = DiffusionConfig()
-        engine = DiffusionEngine(config=config)
-        engine._initialized = True
-        engine._pipeline = MagicMock()
-        engine._pipeline.infer.return_value = SimpleNamespace(
-            video=torch.zeros((1, 4, 64, 64, 3), dtype=torch.uint8),
-            image=None,
-            audio=None,
-        )
-        return engine
-
-    def test_generate_wraps_prompt_as_list(self):
-        """Verify DiffusionEngine passes prompt as List[str] to DiffusionRequest."""
-        engine = self._make_engine()
-
-        captured = {}
-
-        class FakeDiffusionRequest:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-                for k, v in kwargs.items():
-                    setattr(self, k, v)
-
-        # DiffusionRequest is imported inside generate() via
-        #   from tensorrt_llm._torch.visual_gen.executor import DiffusionRequest
-        # so we inject a fake module into sys.modules.
-        fake_executor = MagicMock(DiffusionRequest=FakeDiffusionRequest)
-        with patch.dict(
-            "sys.modules",
-            {
-                "tensorrt_llm._torch.visual_gen.executor": fake_executor,
-            },
-        ):
-            engine.generate(
-                prompt="a golden retriever",
-                height=64,
-                width=64,
-                num_frames=4,
-                num_inference_steps=1,
-            )
-
-        assert isinstance(
-            captured["prompt"], list
-        ), f"Expected list, got {type(captured['prompt'])}"
-        assert captured["prompt"] == ["a golden retriever"]
-
+# This part of the test has been covered in test_trtllm_video_diffusion.py
 
 # =============================================================================
 # Part 6: Concurrency Safety Tests
 # =============================================================================
+
+# [gluo NOTE] this part have been covered in test_trtllm_video_diffusion.py,
+# but need sanity check with image generation as the handler is different.
+# Could be merged once a base DiffusionHandler is introduced.
 
 
 class ConcurrencyTracker:
@@ -435,13 +351,13 @@ class ConcurrencyTracker:
 
 
 class TestVideoHandlerConcurrency:
-    """Verifies that ``VideoGenerationHandler`` serializes access to the
+    """Verifies that ``ImageGenerationHandler`` serializes access to the
     underlying ``engine.generate()`` call.
 
     Why this matters:
         The visual_gen pipeline is a global singleton with mutable state,
         unprotected CUDA graph caches, and shared config objects.  It is
-        NOT thread-safe.  ``VideoGenerationHandler`` dispatches generate()
+        NOT thread-safe.  ``ImageGenerationHandler`` dispatches generate()
         via ``asyncio.to_thread()``, which runs each request in a
         separate OS thread.  Without an ``asyncio.Lock`` guarding the
         call, concurrent requests would enter generate() simultaneously
@@ -472,9 +388,9 @@ class TestVideoHandlerConcurrency:
     """
 
     def _make_handler(self):
-        """Create a VideoGenerationHandler with mock engine and config."""
+        """Create a ImageGenerationHandler with mock engine and config."""
         from dynamo.trtllm.request_handlers.diffusion.video_handler import (
-            VideoGenerationHandler,
+            ImageGenerationHandler,
         )
 
         tracker = ConcurrencyTracker(sleep_seconds=0.1)
@@ -489,10 +405,10 @@ class TestVideoHandlerConcurrency:
         )
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.get_fs",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.get_fs",
             return_value=MagicMock(),
         ):
-            handler = VideoGenerationHandler(
+            handler = ImageGenerationHandler(
                 engine=mock_engine,
                 config=config,
             )
@@ -500,9 +416,9 @@ class TestVideoHandlerConcurrency:
         return handler, tracker
 
     def _make_request(self):
-        """Create a minimal valid video generation request dict."""
+        """Create a minimal valid image generation request dict."""
         return {
-            "prompt": "a test video",
+            "prompt": "a test image",
             "model": "test-model",
         }
 
@@ -515,7 +431,7 @@ class TestVideoHandlerConcurrency:
         """Fires 3 concurrent requests and asserts only one thread enters
         engine.generate() at a time (max_concurrent == 1).
 
-        If the asyncio.Lock in VideoGenerationHandler is removed, the 3
+        If the asyncio.Lock in ImageGenerationHandler is removed, the 3
         asyncio.to_thread() calls run in parallel OS threads, overlapping
         inside the tracker's sleep window, and max_concurrent rises to 3.
         """
@@ -526,11 +442,11 @@ class TestVideoHandlerConcurrency:
             requests = [self._make_request() for _ in range(3)]
 
             with patch(
-                "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_mp4_bytes",
-                return_value=b"fake_mp4_bytes",
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+                return_value=b"fake_image_bytes",
             ), patch(
-                "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
-                return_value="http://fake/video.mp4",
+                "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+                return_value="http://fake/image.png",
             ):
                 await asyncio.gather(
                     *(self._drain_generator(handler, req) for req in requests)
@@ -547,17 +463,17 @@ class TestVideoHandlerConcurrency:
 
 
 # =============================================================================
-# Part 6: VideoGenerationHandler Response Format Tests
+# Part 6: ImageGenerationHandler Response Format Tests
 # =============================================================================
 
 
-class TestVideoHandlerResponseFormats:
-    """Tests for VideoGenerationHandler generate() response format branching."""
+class TestImageHandlerResponseFormats:
+    """Tests for ImageGenerationHandler generate() response format branching."""
 
     def _make_handler(self):
         """Create a handler with mocked engine and fs."""
-        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
-            VideoGenerationHandler,
+        from dynamo.trtllm.request_handlers.diffusion.image_handler import (
+            ImageGenerationHandler,
         )
 
         mock_output = SimpleNamespace(
@@ -576,10 +492,10 @@ class TestVideoHandlerResponseFormats:
         )
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.get_fs",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.get_fs",
             return_value=MagicMock(),
         ):
-            handler = VideoGenerationHandler(
+            handler = ImageGenerationHandler(
                 engine=mock_engine,
                 config=config,
             )
@@ -592,17 +508,17 @@ class TestVideoHandlerResponseFormats:
         handler = self._make_handler()
 
         request = {
-            "prompt": "a test video",
+            "prompt": "a test image",
             "model": "test-model",
             "response_format": "url",
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_mp4_bytes",
-            return_value=b"fake_mp4",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
         ), patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
-            return_value="https://cdn.example.com/media/videos/test.mp4",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            return_value="https://cdn.example.com/media/images/test.png",
         ) as mock_upload:
             results = []
             async for result in handler.generate(request, MagicMock()):
@@ -614,24 +530,24 @@ class TestVideoHandlerResponseFormats:
         assert len(response["data"]) == 1
         assert (
             response["data"][0]["url"]
-            == "https://cdn.example.com/media/videos/test.mp4"
+            == "https://cdn.example.com/media/images/test.png"
         )
         mock_upload.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_b64_response_format(self):
-        """Test generate() with b64_json response format returns base64 encoded video."""
+        """Test generate() with b64_json response format returns base64 encoded image."""
         handler = self._make_handler()
 
         request = {
-            "prompt": "a test video",
+            "prompt": "a test image",
             "model": "test-model",
             "response_format": "b64_json",
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_mp4_bytes",
-            return_value=b"fake_mp4_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
         ):
             results = []
             async for result in handler.generate(request, MagicMock()):
@@ -648,7 +564,7 @@ class TestVideoHandlerResponseFormats:
         import base64
 
         decoded = base64.b64decode(response["data"][0]["b64_json"])
-        assert decoded == b"fake_mp4_bytes"
+        assert decoded == b"fake_image_bytes"
 
     @pytest.mark.asyncio
     async def test_default_response_format_is_url(self):
@@ -656,44 +572,44 @@ class TestVideoHandlerResponseFormats:
         handler = self._make_handler()
 
         request = {
-            "prompt": "a test video",
+            "prompt": "a test image",
             "model": "test-model",
             # No response_format specified
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_mp4_bytes",
-            return_value=b"fake_mp4",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.encode_to_png_bytes",
+            return_value=b"fake_image_bytes",
         ), patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
-            return_value="https://cdn.example.com/media/videos/test.mp4",
+            "dynamo.trtllm.request_handlers.diffusion.image_handler.upload_to_fs",
+            return_value="https://cdn.example.com/media/images/test.png",
         ) as mock_upload:
             results = []
             async for result in handler.generate(request, MagicMock()):
                 results.append(result)
 
         assert len(results) == 1
-        # Default should be "url" format, so upload_to_fs should be called
+        # Default should be "url" format, so upload_to_fs should be called.
         mock_upload.assert_called_once()
         assert results[0]["data"][0]["url"] is not None
 
     @pytest.mark.asyncio
     async def test_error_response_on_failure(self):
-        """Test that generate() returns error response on engine failure."""
+        """
+        Test that generate() raises exception on engine failure. This is different from video generation.
+        In video generation where the error is embedded in the response, but in image generation,
+        the response doesn't contain the error, so the handler doesn't suppress it and let it propagate.
+        """
         handler = self._make_handler()
         handler.engine.generate = MagicMock(side_effect=RuntimeError("GPU OOM"))
 
         request = {
-            "prompt": "a test video",
+            "prompt": "a test image",
             "model": "test-model",
         }
 
-        results = []
-        async for result in handler.generate(request, MagicMock()):
-            results.append(result)
+        with pytest.raises(RuntimeError) as exc_info:
+            async for _ in handler.generate(request, MagicMock()):
+                pass
 
-        assert len(results) == 1
-        response = results[0]
-        assert response["status"] == "failed"
-        assert response["error"] == "GPU OOM"
-        assert response["data"] == []
+        assert "GPU OOM" in str(exc_info.value)
