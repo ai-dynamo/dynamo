@@ -21,15 +21,23 @@ inputs:
     description: 'AWS Account ID'
     required: true
   azure_acr_hostname:
-    description: 'Azure ACR hostname (operator only)'
+    description: 'Optional Azure ACR hostname for docker login'
     required: false
     default: ''
   azure_acr_user:
-    description: 'Azure ACR user (operator only)'
+    description: 'Optional Azure ACR username for docker login'
     required: false
     default: ''
   azure_acr_password:
-    description: 'Azure ACR password (operator only)'
+    description: 'Optional Azure ACR password for docker login'
+    required: false
+    default: ''
+  ngc_ci_access_token:
+    description: 'Optional NGC CI access token for nvcr.io login'
+    required: false
+    default: ''
+  extra_tags:
+    description: 'Optional newline-separated list of fully-qualified extra image URIs to also tag and push'
     required: false
     default: ''
 
@@ -70,6 +78,7 @@ runs:
         azure_acr_hostname: ${{ inputs.azure_acr_hostname }}
         azure_acr_user: ${{ inputs.azure_acr_user }}
         azure_acr_password: ${{ inputs.azure_acr_password }}
+        ngc_ci_access_token: ${{ inputs.ngc_ci_access_token }}
 
     - name: Linter
       shell: bash
@@ -121,15 +130,16 @@ runs:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
         IMAGE_REGISTRY: ai-dynamo
         IMAGE_REPOSITORY: dynamo
-        NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
       run: |
         ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
         IMAGE_URIS=("${ECR_DEFAULT_IMAGE_BASE}:${{ inputs.image_tag }}")
 
-        if [[ "${{ inputs.component }}" == "operator" && -n "${{ inputs.azure_acr_hostname }}" ]]; then
-          ACR_IMAGE_BASE="${{ inputs.azure_acr_hostname }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          IMAGE_URIS+=("${ACR_IMAGE_BASE}:${{ inputs.image_tag }}")
-        fi
+        # Append optional full extra image URIs provided by caller.
+        while IFS= read -r extra_image; do
+          if [[ -n "$extra_image" ]]; then
+            IMAGE_URIS+=("$extra_image")
+          fi
+        done <<< "${{ inputs.extra_tags }}"
 
         TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
         echo "flags for docker buildx: ${TAGGING_FLAGS}"
@@ -137,10 +147,6 @@ runs:
         TARGET_FLAG=""
         if [[ "${{ inputs.component }}" == "snapshot" ]]; then
           TARGET_FLAG="--target agent"
-        fi
-
-        if [[ "$NO_CACHE_FLAG" == "true" ]]; then
-          NO_CACHE_FLAG="--no-cache"
         fi
 
         docker buildx build --push ${NO_CACHE_FLAG} \
