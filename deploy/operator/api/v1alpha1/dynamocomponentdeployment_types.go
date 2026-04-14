@@ -149,6 +149,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// must be narrower than or equal to the spec-level packDomain.
 	// +optional
 	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+	// When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+	// +optional
+	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 }
 
 type MultinodeSpec struct {

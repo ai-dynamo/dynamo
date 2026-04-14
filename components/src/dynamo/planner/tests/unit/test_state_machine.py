@@ -85,6 +85,7 @@ def _make_fpm(
 def _make_config(**overrides) -> PlannerConfig:
     defaults = dict(
         mode="disagg",
+        optimization_target="sla",
         ttft=500.0,
         itl=50.0,
         min_endpoint=1,
