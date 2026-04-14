@@ -38,6 +38,7 @@ jobs:
       cpu_only_test_timeout_minutes: 30
       run_single_gpu_tests: false
       run_multi_gpu_tests: false
+      copy_to_acr: false
     secrets: inherit
 
   # ============================================================================
