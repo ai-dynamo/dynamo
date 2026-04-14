@@ -272,14 +272,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
 
-        # Extract LoRA name if model name matches a loaded adapter.
-        # SGLang's lora_registry and lora_ref_cache are keyed by lora_name,
-        # so we pass the name (not the filesystem path) as lora_path.
-        lora_path = None
-        model_name = request.get("model")
-        if model_name and model_name in self.lora_id_for_name:
-            lora_path = model_name
-            logging.debug(f"Request {context.id()} will use LoRA adapter: {model_name}")
+        lora_path = self._resolve_lora(request)
+        if lora_path:
+            logging.debug(f"Request {context.id()} will use LoRA adapter: {lora_path}")
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)

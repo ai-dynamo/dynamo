@@ -147,15 +147,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         trace_header = build_trace_headers(context) if self.enable_trace else None
 
-        # Extract LoRA name if model name matches a loaded adapter.
-        # SGLang's lora_registry and lora_ref_cache are keyed by lora_name,
-        # so we pass the name (not the filesystem path) as lora_path.
-        lora_path = None
-        model_name = inner_request.get("model")
-        if model_name and model_name in self.lora_id_for_name:
-            lora_path = model_name
+        lora_path = self._resolve_lora(inner_request)
+        if lora_path:
             logging.debug(
-                f"Prefill request {context.id()} will use LoRA adapter: {model_name}"
+                f"Prefill request {context.id()} will use LoRA adapter: {lora_path}"
             )
 
         results = await self.engine.async_generate(

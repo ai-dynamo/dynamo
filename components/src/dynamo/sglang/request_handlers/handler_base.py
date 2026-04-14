@@ -285,6 +285,17 @@ class LoraMixin:
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
 
+    def _resolve_lora(self, request: Dict[str, Any]) -> Optional[str]:
+        """Return the LoRA name to pass as ``lora_path`` to SGLang, or *None*.
+
+        SGLang's lora_registry and lora_ref_cache are keyed by lora_name,
+        so we pass the name (not the filesystem path) as lora_path.
+        """
+        model_name = request.get("model")
+        if model_name and model_name in self.lora_id_for_name:
+            return model_name
+        return None
+
     async def load_lora(self, request: Optional[Dict[str, Any]] = None):
         """
         Load a LoRA adapter dynamically into the SGLang engine.
