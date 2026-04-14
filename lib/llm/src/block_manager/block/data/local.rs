@@ -10,6 +10,10 @@ pub struct LocalBlockData<S: Storage> {
     block_idx: usize,
     block_set_idx: usize,
     worker_id: WorkerID,
+    /// Optional per-layer block indices for HMA multi-group support.
+    /// When set, `local_layer_view` uses `per_layer_block_idxs[layer_idx]`
+    /// instead of `self.block_idx` to compute the memory offset.
+    per_layer_block_idxs: Option<Arc<Vec<usize>>>,
 }
 
 impl<S: Storage> Clone for LocalBlockData<S> {
@@ -19,6 +23,7 @@ impl<S: Storage> Clone for LocalBlockData<S> {
             block_idx: self.block_idx,
             block_set_idx: self.block_set_idx,
             worker_id: self.worker_id,
+            per_layer_block_idxs: self.per_layer_block_idxs.clone(),
         }
     }
 }
@@ -39,6 +44,24 @@ where
             block_idx,
             block_set_idx,
             worker_id,
+            per_layer_block_idxs: None,
+        }
+    }
+
+    /// Set per-layer block indices for HMA multi-group transfers.
+    /// Each entry maps a layer index to its actual device block index.
+    pub fn with_per_layer_block_idxs(mut self, idxs: Vec<usize>) -> Self {
+        self.per_layer_block_idxs = Some(Arc::new(idxs));
+        self
+    }
+
+    /// Get the effective block index for a given layer.
+    /// Returns per-layer override if set, otherwise the uniform block_idx.
+    #[inline(always)]
+    fn effective_block_idx(&self, layer_idx: usize) -> usize {
+        match &self.per_layer_block_idxs {
+            Some(idxs) => idxs[layer_idx],
+            None => self.block_idx,
         }
     }
 }
@@ -102,9 +125,8 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
         layer_idx: usize,
         outer_idx: usize,
     ) -> BlockResult<view::LayerView<'_, S>> {
-        let mr = self
-            .layout
-            .memory_region(self.block_idx, layer_idx, outer_idx)?;
+        let block_idx = self.effective_block_idx(layer_idx);
+        let mr = self.layout.memory_region(block_idx, layer_idx, outer_idx)?;
         let storage_type = mr.storage_type();
         unsafe { view::LayerView::new(self, mr.addr(), mr.size(), storage_type) }
     }
@@ -114,9 +136,8 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
         layer_idx: usize,
         outer_idx: usize,
     ) -> BlockResult<view::LayerViewMut<'_, S>> {
-        let mr = self
-            .layout
-            .memory_region(self.block_idx, layer_idx, outer_idx)?;
+        let block_idx = self.effective_block_idx(layer_idx);
+        let mr = self.layout.memory_region(block_idx, layer_idx, outer_idx)?;
         unsafe { view::LayerViewMut::new(self, mr.addr(), mr.size(), mr.storage_type()) }
     }
 

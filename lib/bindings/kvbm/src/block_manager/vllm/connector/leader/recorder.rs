@@ -355,4 +355,17 @@ impl Leader for KvConnectorLeaderRecorder {
     fn feed_tokens(&mut self, request_id: String, tokens: Vec<u32>) -> anyhow::Result<()> {
         self.connector_leader.feed_tokens(request_id, tokens)
     }
+
+    fn set_per_group_device_blocks(
+        &self,
+        request_id: String,
+        per_group_block_ids: Vec<Vec<BlockId>>,
+    ) -> anyhow::Result<()> {
+        self.connector_leader
+            .set_per_group_device_blocks(request_id, per_group_block_ids)
+    }
+
+    fn set_layer_to_group(&mut self, layer_to_group: Vec<usize>) {
+        self.connector_leader.set_layer_to_group(layer_to_group);
+    }
 }

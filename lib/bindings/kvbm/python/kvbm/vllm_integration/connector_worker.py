@@ -269,7 +269,12 @@ class KvConnectorWorker:
             the same.
 
         """
-        pass
+        # Synchronize all CUDA streams to ensure any pending onboard
+        # (H2D) transfers from the KVBM block manager have completed
+        # before vLLM's forward pass reads from the KV cache tensors.
+        # The KVBM transfer runs on a separate CUDA stream; without
+        # this sync the attention kernel may read stale/uninitialized data.
+        torch.cuda.synchronize()
 
     def save_kv_layer(
         self,

@@ -137,5 +137,94 @@ def main():
         sys.exit(1)
 
 
+def patch_scheduler_block_ids():
+    """Patch vLLM scheduler for HMA multi-group block_ids unpacking.
+
+    vLLM 0.16's _update_waiting_for_remote_kv does:
+        (block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)
+    which fails with HMA because get_block_ids returns a tuple with one
+    list per cache group.  Fix: use [0] to extract the first group.
+    """
+    for sp in site.getsitepackages() + [site.getusersitepackages()]:
+        candidate = Path(sp) / "vllm" / "v1" / "core" / "sched" / "scheduler.py"
+        if candidate.exists():
+            sched_path = candidate
+            break
+    else:
+        for p in sys.path:
+            candidate = Path(p) / "vllm" / "v1" / "core" / "sched" / "scheduler.py"
+            if candidate.exists():
+                sched_path = candidate
+                break
+        else:
+            print("WARNING: Could not find vllm scheduler.py — skipping block_ids patch.")
+            return
+
+    content = sched_path.read_text()
+
+    old = "(block_ids,) = self.kv_cache_manager.get_block_ids(request.request_id)"
+    new = "block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]"
+
+    if new in content:
+        print("Scheduler block_ids patch already applied — skipping.")
+        return
+
+    if old not in content:
+        print("WARNING: Could not find block_ids unpacking in scheduler.py — skipping.")
+        return
+
+    patched = content.replace(old, new, 1)
+    sched_path.write_text(patched)
+    print(f"SUCCESS: Patched {sched_path} for HMA multi-group block_ids.")
+
+
+def patch_scheduler_all_token_ids():
+    """Patch vLLM scheduler to always propagate all_token_ids in CachedRequestData.
+
+    vLLM 0.18's _make_cached_request_data only includes all_token_ids for
+    requests that were NOT scheduled in the previous step (optimisation to
+    reduce data transfer).  KVBM needs decode tokens on every step to grow
+    the internal TokenBlockSequence for incremental offloading.  Without
+    this, the sequence stays empty and offloading is deferred to
+    request_finished (flush-on-finish only).
+
+    Fix: remove the ``if not scheduled_in_prev_step`` guard so
+    all_token_ids is always populated.
+    """
+    for sp in site.getsitepackages() + [site.getusersitepackages()]:
+        candidate = Path(sp) / "vllm" / "v1" / "core" / "sched" / "scheduler.py"
+        if candidate.exists():
+            sched_path = candidate
+            break
+    else:
+        for p in sys.path:
+            candidate = Path(p) / "vllm" / "v1" / "core" / "sched" / "scheduler.py"
+            if candidate.exists():
+                sched_path = candidate
+                break
+        else:
+            print("WARNING: Could not find vllm scheduler.py — skipping all_token_ids patch.")
+            return
+
+    content = sched_path.read_text()
+
+    old = "            if not scheduled_in_prev_step:\n                all_token_ids[req_id] = req.all_token_ids.copy()"
+    new = "            all_token_ids[req_id] = req.all_token_ids.copy()"
+
+    if old not in content:
+        # Check if already patched (the guard is gone)
+        if "all_token_ids[req_id] = req.all_token_ids.copy()" in content:
+            print("Scheduler all_token_ids patch already applied — skipping.")
+        else:
+            print("WARNING: Could not find all_token_ids guard in scheduler.py — skipping.")
+        return
+
+    patched = content.replace(old, new, 1)
+    sched_path.write_text(patched)
+    print(f"SUCCESS: Patched {sched_path} to always propagate all_token_ids.")
+
+
 if __name__ == "__main__":
     main()
+    patch_scheduler_block_ids()
+    patch_scheduler_all_token_ids()

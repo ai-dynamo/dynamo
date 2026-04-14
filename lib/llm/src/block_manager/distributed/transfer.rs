@@ -64,6 +64,8 @@ impl ConnectorTransferBatcher {
                     from_pool: *request.from_pool(),
                     to_pool: *request.to_pool(),
                     blocks: batch.to_vec(),
+                    per_layer_src_block_idxs: None, // Batching doesn't support per-layer yet
+                    per_layer_dst_block_idxs: None,
                     connector_req: None,
                 };
                 handler.execute_transfer_direct(batch_request)
@@ -158,15 +160,34 @@ impl BlockTransferHandler {
         };
 
         // Extract the `from` and `to` indices from the request.
-        let source_idxs = request.blocks().iter().map(|(from, _)| *from);
-        let target_idxs = request.blocks().iter().map(|(_, to)| *to);
+        let source_idxs: Vec<usize> = request.blocks().iter().map(|(from, _)| *from).collect();
+        let target_idxs: Vec<usize> = request.blocks().iter().map(|(_, to)| *to).collect();
 
         // Get the blocks corresponding to the indices.
+        // Apply per-layer block index overrides for HMA multi-group transfers.
         let sources: Vec<LocalBlockData<Source>> = source_idxs
-            .map(|idx| source_pool_list[idx].clone())
+            .iter()
+            .enumerate()
+            .map(|(pos, &idx)| {
+                let block = source_pool_list[idx].clone();
+                if let Some(ref per_layer) = request.per_layer_src_block_idxs {
+                    block.with_per_layer_block_idxs(per_layer[pos].clone())
+                } else {
+                    block
+                }
+            })
             .collect();
         let mut targets: Vec<LocalBlockData<Target>> = target_idxs
-            .map(|idx| target_pool_list[idx].clone())
+            .iter()
+            .enumerate()
+            .map(|(pos, &idx)| {
+                let block = target_pool_list[idx].clone();
+                if let Some(ref per_layer) = request.per_layer_dst_block_idxs {
+                    block.with_per_layer_block_idxs(per_layer[pos].clone())
+                } else {
+                    block
+                }
+            })
             .collect();
 
         // Perform the transfer, and return the notifying channel.

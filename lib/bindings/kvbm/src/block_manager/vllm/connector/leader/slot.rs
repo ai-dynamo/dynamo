@@ -5,7 +5,7 @@ use std::{
     any::Any,
     cmp::max,
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use dynamo_llm::{
@@ -170,6 +170,11 @@ pub trait ExternallyManagedDeviceSlot: Slot {
     ///
     /// The external device block manager has provided a set of mutable blocks to the slot.
     fn append_mutable_device_blocks(&mut self, block_ids: &[BlockId]) -> Result<(), SlotError>;
+
+    /// Append per-group device block IDs for HMA multi-group support.
+    fn append_per_group_device_blocks(&mut self, _per_group_block_ids: &[Vec<BlockId>]) {
+        // Default no-op for non-HMA slots
+    }
 }
 
 pub struct ConnectorSlotManager<R: RequestKey> {
@@ -185,6 +190,9 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     kvbm_metrics: KvbmMetrics,
     /// Minimum priority threshold for host offload filtering (read once at init)
     offload_min_priority: u32,
+    /// Layer-to-group mapping for HMA multi-group support.
+    /// Set once during initialization via `set_layer_to_group`.
+    layer_to_group: OnceLock<Arc<Vec<usize>>>,
 }
 
 impl std::fmt::Debug for ConnectorSlotManager<String> {
@@ -261,7 +269,19 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             cache_stats,
             kvbm_metrics: kvbm_metrics.clone(),
             offload_min_priority,
+            layer_to_group: OnceLock::new(),
         }
+    }
+
+    pub fn set_layer_to_group(&self, layer_to_group: Vec<usize>) {
+        let _ = self.layer_to_group.set(Arc::new(layer_to_group));
+    }
+
+    fn get_layer_to_group(&self) -> Arc<Vec<usize>> {
+        self.layer_to_group
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(Vec::new()))
     }
 }
 
@@ -291,6 +311,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             self.xfer_tx.clone(),
             self.cache_stats.clone(),
             self.offload_min_priority,
+            self.get_layer_to_group(),
         );
         self.slots
             .lock()
@@ -396,6 +417,17 @@ pub struct VllmConnectorSlot {
     /// Stored block priorities from previous apply_scheduler_output calls.
     /// Used as fallback when priorities=None in subsequent chunked prefill iterations.
     stored_block_priorities: HashMap<BlockId, u32>,
+
+    /// Per-group device block IDs for HMA multi-group support.
+    /// `per_group_device_blocks[group_idx][position]` gives the device block
+    /// ID for that group at that sequence position.
+    /// Empty when num_kv_cache_groups <= 1.
+    per_group_device_blocks: Vec<Vec<BlockId>>,
+
+    /// Maps layer index to KV cache group index.
+    /// `layer_to_group[layer_idx]` gives the group index for that layer.
+    /// Empty when num_kv_cache_groups <= 1.
+    layer_to_group: Arc<Vec<usize>>,
 }
 
 impl VllmConnectorSlot {
@@ -407,11 +439,13 @@ impl VllmConnectorSlot {
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
         cache_stats: Arc<CacheStatsTracker>,
         offload_min_priority: u32,
+        layer_to_group: Arc<Vec<usize>>,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
         debug_assert!(block_size > 0 && block_size <= 4096);
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
+        let num_groups = layer_to_group.iter().copied().max().unwrap_or(0) + 1;
 
         Self {
             request_id,
@@ -437,6 +471,8 @@ impl VllmConnectorSlot {
             offload_min_priority,
             offload_terminated_at_block: None,
             stored_block_priorities: HashMap::new(),
+            per_group_device_blocks: vec![Vec::new(); num_groups],
+            layer_to_group,
         }
     }
 
@@ -475,6 +511,8 @@ impl VllmConnectorSlot {
             offload_min_priority,
             offload_terminated_at_block: None,
             stored_block_priorities: HashMap::new(),
+            per_group_device_blocks: Vec::new(),
+            layer_to_group: Arc::new(Vec::new()),
         }
     }
 
@@ -552,6 +590,9 @@ impl Slot for VllmConnectorSlot {
         self.current_position = 0;
         self.evaluated_blocks = 0;
         self.device_blocks.clear();
+        for group in &mut self.per_group_device_blocks {
+            group.clear();
+        }
         self.tokens_cached_from_device = 0;
         self.tokens_cached_from_host = 0;
         self.tokens_cached_from_disk = 0;
@@ -1346,6 +1387,21 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
 
         Ok(())
     }
+
+    /// Append per-group device block IDs for HMA multi-group support.
+    /// `per_group_block_ids[group_idx]` contains the new block IDs for that group.
+    fn append_per_group_device_blocks(&mut self, per_group_block_ids: &[Vec<BlockId>]) {
+        if per_group_block_ids.is_empty() {
+            return;
+        }
+        // Ensure we have enough groups
+        while self.per_group_device_blocks.len() < per_group_block_ids.len() {
+            self.per_group_device_blocks.push(Vec::new());
+        }
+        for (group_idx, group_ids) in per_group_block_ids.iter().enumerate() {
+            self.per_group_device_blocks[group_idx].extend(group_ids);
+        }
+    }
 }
 
 impl VllmConnectorSlot {
@@ -1372,13 +1428,42 @@ impl VllmConnectorSlot {
         assert!(block_ids.len() == priorities.len());
         let operation_id = uuid::Uuid::new_v4();
 
-        let xfer_req = LocalTransferRequest::Offload(LocalOffloadRequest::new(
+        let mut offload_req = LocalOffloadRequest::new(
             self.request_id.clone(),
             block_ids.to_vec(),
             token_blocks.to_vec(),
             priorities.to_vec(),
             operation_id,
-        ));
+        );
+
+        // Build per-layer source block_idxs for HMA multi-group.
+        // The block_ids are group 0's device blocks at positions
+        // [evaluated_blocks .. evaluated_blocks + n].  For each position,
+        // build a vec of per-layer block_ids using the per-group mapping.
+        if !self.per_group_device_blocks.is_empty() && !self.layer_to_group.is_empty() {
+            let num_layers = self.layer_to_group.len();
+            let start_pos = self.evaluated_blocks;
+            let per_layer: Vec<Vec<usize>> = (0..block_ids.len())
+                .map(|i| {
+                    let pos = start_pos + i;
+                    (0..num_layers)
+                        .map(|layer_idx| {
+                            let group = self.layer_to_group[layer_idx];
+                            if group < self.per_group_device_blocks.len()
+                                && pos < self.per_group_device_blocks[group].len()
+                            {
+                                self.per_group_device_blocks[group][pos]
+                            } else {
+                                block_ids[i] // fallback to group 0
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            offload_req.per_layer_src_block_idxs = Some(per_layer);
+        }
+
+        let xfer_req = LocalTransferRequest::Offload(offload_req);
 
         let worker_req = WorkerTransferRequest {
             request_id: self.request_id.clone(),
@@ -1418,12 +1503,37 @@ impl VllmConnectorSlot {
         let src_storage_pool = src_blocks.storage_pool();
         let operation_id = uuid::Uuid::new_v4();
 
-        let xfer_req = LocalTransferRequest::Onboard(LocalOnboardRequest::new(
+        let mut onboard_req = LocalOnboardRequest::new(
             self.request_id.clone(),
             src_blocks,
-            dst_block_ids,
+            dst_block_ids.clone(),
             operation_id,
-        ));
+        );
+
+        // Build per-layer destination block_idxs for HMA multi-group.
+        // Onboarded blocks go to positions [0..num_blocks] in the device.
+        if !self.per_group_device_blocks.is_empty() && !self.layer_to_group.is_empty() {
+            let num_layers = self.layer_to_group.len();
+            let per_layer: Vec<Vec<usize>> = (0..num_blocks)
+                .map(|pos| {
+                    (0..num_layers)
+                        .map(|layer_idx| {
+                            let group = self.layer_to_group[layer_idx];
+                            if group < self.per_group_device_blocks.len()
+                                && pos < self.per_group_device_blocks[group].len()
+                            {
+                                self.per_group_device_blocks[group][pos]
+                            } else {
+                                dst_block_ids[pos] // fallback to group 0
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            onboard_req.per_layer_dst_block_idxs = Some(per_layer);
+        }
+
+        let xfer_req = LocalTransferRequest::Onboard(onboard_req);
 
         let worker_req = WorkerTransferRequest {
             request_id: self.request_id.clone(),
@@ -1474,6 +1584,10 @@ struct LocalOffloadRequest {
     /// Priorities for each block, used to set BasicMetadata.priority during offload.
     priorities: Vec<u32>,
     operation_id: uuid::Uuid,
+    /// Per-layer source block indices for HMA multi-group offload.
+    /// `per_layer_src_block_idxs[block_pos][layer_idx]` gives the device
+    /// block index for that block position and layer.
+    per_layer_src_block_idxs: Option<Vec<Vec<usize>>>,
 }
 
 impl LocalOffloadRequest {
@@ -1492,6 +1606,7 @@ impl LocalOffloadRequest {
             token_blocks,
             priorities,
             operation_id,
+            per_layer_src_block_idxs: None,
         }
     }
 }
@@ -1501,6 +1616,8 @@ struct LocalOnboardRequest {
     src_blocks: Box<dyn AnyBlocks>,
     dst_block_ids: Vec<BlockId>,
     operation_id: uuid::Uuid,
+    /// Per-layer destination block indices for HMA multi-group onboard.
+    per_layer_dst_block_idxs: Option<Vec<Vec<usize>>>,
 }
 
 impl LocalOnboardRequest {
@@ -1516,6 +1633,7 @@ impl LocalOnboardRequest {
             src_blocks,
             dst_block_ids,
             operation_id,
+            per_layer_dst_block_idxs: None,
         }
     }
 }
@@ -1618,6 +1736,8 @@ impl LocalTransferEngine {
                             from_pool: BlockTransferPool::Device, // Use valid Device->Host transfer type
                             to_pool: BlockTransferPool::Host,     // (offload path, but no blocks)
                             blocks: vec![],                       // Empty - nothing to transfer
+                            per_layer_src_block_idxs: None,
+                            per_layer_dst_block_idxs: None,
                             connector_req: Some(LeaderTransferRequest {
                                 request_id: request_id.clone(),
                                 uuid: operation_id,
@@ -1822,6 +1942,8 @@ where
         from_pool: BlockTransferPool::Device,
         to_pool: transfer_pool,
         blocks: block_pairs,
+        per_layer_src_block_idxs: offload_req.per_layer_src_block_idxs.clone(),
+        per_layer_dst_block_idxs: None,
         connector_req: Some(LeaderTransferRequest {
             request_id: offload_req.request_id.clone(),
             uuid: offload_req.operation_id,
@@ -1905,6 +2027,8 @@ async fn process_onboard_request(
         from_pool: onboard_req.src_blocks.storage_pool(),
         to_pool: BlockTransferPool::Device,
         blocks: block_pairs,
+        per_layer_src_block_idxs: None,
+        per_layer_dst_block_idxs: onboard_req.per_layer_dst_block_idxs.clone(),
         connector_req: Some(LeaderTransferRequest {
             request_id: request_id.clone(),
             uuid: *operation_id,

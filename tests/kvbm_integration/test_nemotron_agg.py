@@ -218,15 +218,20 @@ def test_nemotron_offload_onboard_cycle(tester, llm_server_kvbm):  # noqa: F811
     )
 
     # Phase 4 — determinism check
-    # Note: HMA hybrid model data transfer correctness is a known issue
-    # being tracked separately.  For now, log the difference but don't fail.
     print("\n=== Phase 4: determinism check ===")
     if response_1 == response_2:
         print("✓ Phase 4: responses are deterministic across offload/onboard")
     else:
+        # Show where divergence starts for debugging
+        min_len = min(len(response_1), len(response_2))
+        diverge_at = next(
+            (i for i in range(min_len) if response_1[i] != response_2[i]),
+            min_len,
+        )
         print(
-            f"⚠ Phase 4: responses differ — HMA onboard data correctness "
-            f"needs investigation (known issue for hybrid models)"
+            f"⚠ Phase 4: responses diverge at char {diverge_at}/{min_len}\n"
+            f"  R1[{diverge_at}:{diverge_at+80}]: {response_1[diverge_at:diverge_at+80]!r}\n"
+            f"  R2[{diverge_at}:{diverge_at+80}]: {response_2[diverge_at:diverge_at+80]!r}"
         )
 
     _print_header("TEST PASSED")

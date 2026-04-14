@@ -54,7 +54,13 @@ class KvConnectorLeader:
     that can be used in the vLLM KV cache manager protocol.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        engine_id: str,
+        kv_cache_config=None,
+        **kwargs,
+    ):
         drt: Optional[object] = kwargs.get("drt")
 
         if drt is None and is_dyn_runtime_enabled():
@@ -65,6 +71,8 @@ class KvConnectorLeader:
         self.drt = drt
         self.vllm_config = vllm_config
         self._slot_seq_len: dict[str, int] = {}
+        self._kv_cache_config = kv_cache_config
+        self._num_groups = 1
         world_size = vllm_config.parallel_config.world_size
 
         leader = KvbmLeader(world_size, drt=self.drt)
@@ -110,6 +118,36 @@ class KvConnectorLeader:
                 consolidator_output_endpoint=None,
             )
 
+        # Build layer-to-group mapping for HMA multi-group support.
+        # Each KV cache group contains a subset of layers; the mapping
+        # tells the Rust transfer engine which device block_id to use
+        # for each layer (since different groups get different block_ids).
+        if kv_cache_config is not None and hasattr(kv_cache_config, "kv_cache_groups"):
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            groups = kv_cache_config.kv_cache_groups
+            self._num_groups = len(groups)
+            if self._num_groups > 1:
+                # Build layer_name → group_index mapping
+                layer_name_to_group: dict[str, int] = {}
+                for group_idx, group in enumerate(groups):
+                    for layer_name in group.layer_names:
+                        layer_name_to_group[layer_name] = group_idx
+
+                # Build ordered layer_to_group list (sorted by layer index)
+                ordered_layers = sorted(
+                    layer_name_to_group.keys(),
+                    key=lambda n: extract_layer_index(n),
+                )
+                layer_to_group = [
+                    layer_name_to_group[name] for name in ordered_layers
+                ]
+                self._connector.set_layer_to_group(layer_to_group)
+                print(
+                    f"KvConnectorLeader: HMA multi-group enabled with "
+                    f"{self._num_groups} groups, {len(layer_to_group)} layers"
+                )
+
     # KV Connector
 
     def get_num_new_matched_tokens(
@@ -143,7 +181,16 @@ class KvConnectorLeader:
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        block_ids = blocks.get_block_ids()[0]
+        all_group_ids = blocks.get_block_ids()
+        block_ids = all_group_ids[0]
+        # Pass per-group block IDs BEFORE update_state_after_alloc because
+        # the Rust side may trigger onboarding inside update_state_after_alloc
+        # and needs the per-group mapping to compute correct per-layer offsets.
+        if self._num_groups > 1:
+            self._connector.set_per_group_device_blocks(
+                request.request_id,
+                [list(g) for g in all_group_ids],
+            )
         self._connector.update_state_after_alloc(
             request.request_id, block_ids, num_external_tokens
         )
@@ -167,6 +214,12 @@ class KvConnectorLeader:
                 req.block_ids[0],
                 req.num_computed_tokens,
             )
+            # Pass per-group block IDs for new requests
+            if self._num_groups > 1:
+                self._connector.set_per_group_device_blocks(
+                    req.req_id,
+                    [list(g) for g in req.block_ids],
+                )
 
         # In vLLM 0.14.0+, resumed_from_preemption was changed to resumed_req_ids (a set)
         resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
@@ -215,6 +268,12 @@ class KvConnectorLeader:
                     new_block_ids=new_block_ids[0],
                     num_computed_tokens=num_computed_tokens,
                 )
+                # Pass per-group block IDs for cached requests with new blocks
+                if self._num_groups > 1 and any(len(g) > 0 for g in new_block_ids):
+                    self._connector.set_per_group_device_blocks(
+                        req_id,
+                        [list(g) for g in new_block_ids],
+                    )
             else:
                 output.add_cached_request(
                     request_id=req_id,

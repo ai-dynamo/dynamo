@@ -311,18 +311,6 @@ impl Worker for KvConnectorWorker {
             )?;
         }
 
-        // Collect request_ids that have active slots in this metadata.
-        // Operations for these requests are "normal" offload ops that must be
-        // deferred to save_kv_layer for CUDA event synchronization.
-        // Operations for OTHER request_ids are "flush-on-finish" ops from
-        // request_finished → deferred_flush_ops — these can be enqueued
-        // immediately since the request's GPU work is already complete.
-        let active_request_ids: HashSet<String> = metadata
-            .new_slots
-            .iter()
-            .map(|s| s.request_id.clone())
-            .collect();
-
         let mut onboarding_operations = Vec::new();
         let mut offloading_operations = Vec::new();
 
@@ -345,26 +333,29 @@ impl Worker for KvConnectorWorker {
             self.maybe_finished_onboarding.insert(request_id);
         }
 
-        // Split offloading operations: flush-on-finish ops (for finished
-        // requests not in this metadata's new_slots) are enqueued immediately;
-        // normal ops (for active requests) are deferred to save_kv_layer.
-        let mut deferred_offloading = Vec::new();
+        // Split: flush-on-finish ops can be enqueued immediately (the
+        // request already finished, GPU data is committed).  Normal ops
+        // for active requests must wait for save_kv_layer CUDA sync.
+        // We distinguish by checking if the worker's scheduler still has
+        // a slot for the request — finished requests' slots were already
+        // removed in get_finished.
+        let mut deferred = Vec::new();
         for operation in offloading_operations {
-            if active_request_ids.contains(&operation.request_id) {
-                deferred_offloading.push(operation);
-            } else {
+            if self.maybe_finished_offloading.contains(&operation.request_id)
+                || self.maybe_finished_onboarding.contains(&operation.request_id)
+            {
+                // Request already tracked as finishing — this is a flush op
                 tracing::debug!(
                     request_id = %operation.request_id,
                     operation_id = %operation.uuid,
-                    "enqueuing flush-on-finish offload operation immediately"
+                    "enqueuing flush-on-finish offload operation"
                 );
-                self.maybe_finished_offloading
-                    .insert(operation.request_id.clone());
                 self.connector.enqueue_request(operation);
+            } else {
+                deferred.push(operation);
             }
         }
-
-        self.offloading_operations = deferred_offloading;
+        self.offloading_operations = deferred;
 
         Ok(())
     }

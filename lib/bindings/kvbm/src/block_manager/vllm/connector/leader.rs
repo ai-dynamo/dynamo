@@ -77,6 +77,16 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
     fn feed_tokens(&mut self, request_id: String, tokens: Vec<u32>) -> anyhow::Result<()>;
 
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
+
+    /// Set per-group device block IDs for a request (HMA multi-group support).
+    fn set_per_group_device_blocks(
+        &self,
+        request_id: String,
+        per_group_block_ids: Vec<Vec<BlockId>>,
+    ) -> anyhow::Result<()>;
+
+    /// Set the layer-to-group mapping for HMA multi-group support.
+    fn set_layer_to_group(&mut self, layer_to_group: Vec<usize>);
 }
 
 #[derive(Debug)]
@@ -661,6 +671,23 @@ impl Leader for KvConnectorLeader {
         slot.sequence_mut().extend(tokens.into())?;
         Ok(())
     }
+
+    fn set_per_group_device_blocks(
+        &self,
+        request_id: String,
+        per_group_block_ids: Vec<Vec<BlockId>>,
+    ) -> anyhow::Result<()> {
+        let shared_slot = self.slot_manager().get_slot(&request_id)?;
+        let mut slot = shared_slot
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
+        slot.append_per_group_device_blocks(&per_group_block_ids);
+        Ok(())
+    }
+
+    fn set_layer_to_group(&mut self, layer_to_group: Vec<usize>) {
+        self.slot_manager().set_layer_to_group(layer_to_group);
+    }
 }
 
 #[pyclass]
@@ -757,6 +784,20 @@ impl PyKvConnectorLeader {
         self.connector_leader
             .feed_tokens(request_id.to_string(), tokens)
             .map_err(to_pyerr)
+    }
+
+    fn set_per_group_device_blocks(
+        &self,
+        request_id: &str,
+        per_group_block_ids: Vec<Vec<usize>>,
+    ) -> PyResult<()> {
+        self.connector_leader
+            .set_per_group_device_blocks(request_id.to_string(), per_group_block_ids)
+            .map_err(to_pyerr)
+    }
+
+    fn set_layer_to_group(&mut self, layer_to_group: Vec<usize>) {
+        self.connector_leader.set_layer_to_group(layer_to_group);
     }
 }
 

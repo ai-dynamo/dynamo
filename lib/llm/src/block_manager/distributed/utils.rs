@@ -49,6 +49,16 @@ pub struct BlockTransferRequest {
     pub to_pool: BlockTransferPool,
     pub blocks: Vec<(usize, usize)>,
 
+    /// Per-layer source block indices for HMA multi-group transfers.
+    /// `per_layer_src_block_idxs[block_pos][layer_idx]` overrides the
+    /// source block_idx for that block position and layer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_layer_src_block_idxs: Option<Vec<Vec<usize>>>,
+
+    /// Per-layer target block indices for HMA multi-group transfers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_layer_dst_block_idxs: Option<Vec<Vec<usize>>>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connector_req: Option<LeaderTransferRequest>,
 }
@@ -64,6 +74,8 @@ impl BlockTransferRequest {
             from_pool,
             to_pool,
             blocks,
+            per_layer_src_block_idxs: None,
+            per_layer_dst_block_idxs: None,
             connector_req: None,
         }
     }
@@ -78,6 +90,8 @@ impl BlockTransferRequest {
             from_pool,
             to_pool,
             blocks,
+            per_layer_src_block_idxs: None,
+            per_layer_dst_block_idxs: None,
             connector_req: Some(connector_req),
         }
     }
