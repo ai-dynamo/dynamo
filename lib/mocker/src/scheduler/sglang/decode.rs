@@ -143,7 +143,7 @@ pub(super) fn simulate_decode_step(
     let decode_time =
         config
             .perf_model
-            .predict_decode_time(running.len(), total_context, avg_context);
+            .predict_decode_time(running.len(), total_context, avg_context, config.total_kv_tokens);
     let unscaled_time = Duration::from_secs_f64(decode_time / 1000.0);
     let effective_ratio = config.speedup_ratio * config.decode_speedup_ratio;
     let total_time = if apply_speedup && effective_ratio > 0.0 && unscaled_time > Duration::ZERO {

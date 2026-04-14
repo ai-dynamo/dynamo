@@ -564,33 +564,15 @@ impl AggRuntime {
     /// Apply a scaling decision: set the target number of workers.
     /// Scale-up is immediate; scale-down marks excess workers for drain-based removal.
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
-        let active_ids = self.engine.active_worker_ids();
-        let current = active_ids.len();
-
-        if target_workers > current {
-            // Scale up: add workers
-            for _ in 0..(target_workers - current) {
-                let new_id = self.engine.add_worker();
-                if let Some(router) = self.router.as_mut() {
-                    router.add_worker(new_id)?;
-                }
-            }
-        } else if target_workers < current {
-            // Scale down: mark excess workers for removal (prefer highest IDs)
-            let excess = current - target_workers;
-            for &id in active_ids.iter().rev().take(excess) {
-                self.engine.mark_for_removal(id);
-            }
-        }
-
-        // Try to remove any fully drained workers
-        let removed = self.engine.try_remove_drained();
+        let (added, removed) = self.engine.apply_target_count(target_workers);
         if let Some(router) = self.router.as_mut() {
+            for id in added {
+                router.add_worker(id)?;
+            }
             for id in removed {
                 router.remove_worker(id)?;
             }
         }
-
         Ok(())
     }
 

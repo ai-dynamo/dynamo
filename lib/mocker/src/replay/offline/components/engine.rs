@@ -96,6 +96,31 @@ impl EngineComponent {
         removed
     }
 
+    /// Apply a target worker count: add new workers or mark excess for removal.
+    /// Returns `(added_ids, removed_ids)` so the caller can update any router.
+    pub(in crate::replay::offline) fn apply_target_count(
+        &mut self,
+        target: usize,
+    ) -> (Vec<usize>, Vec<usize>) {
+        let active_ids = self.active_worker_ids();
+        let current = active_ids.len();
+        let mut added = Vec::new();
+
+        if target > current {
+            for _ in 0..(target - current) {
+                added.push(self.add_worker());
+            }
+        } else if target < current {
+            let excess = current - target;
+            for &id in active_ids.iter().rev().take(excess) {
+                self.mark_for_removal(id);
+            }
+        }
+
+        let removed = self.try_remove_drained();
+        (added, removed)
+    }
+
     /// Return stable IDs of all active (non-pending-removal) workers.
     pub(in crate::replay::offline) fn active_worker_ids(&self) -> Vec<usize> {
         self.workers
