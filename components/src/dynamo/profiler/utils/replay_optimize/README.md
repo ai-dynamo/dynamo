@@ -181,79 +181,6 @@ print("Top feasible states:")
 print(result.feasible_df[cols].head(10).to_string(index=False))
 ```
 
-## Run Command
-
-From the repo root:
-
-```bash
-cat >/tmp/dynamo_replay_kv_router_disagg_sweep.py <<'PYCODE'
-from dynamo.llm import KvRouterConfig, MockEngineArgs
-from dynamo.profiler.utils.replay_optimize import (
-    SyntheticReplayWorkload,
-    optimize_dense_disagg_with_replay,
-)
-
-result = optimize_dense_disagg_with_replay(
-    model="Qwen/Qwen3-32B",
-    backend="vllm",
-    system="h200_sxm",
-    workload=SyntheticReplayWorkload(
-        isl=32768,
-        osl=256,
-        request_count=5000,
-        replay_concurrency=200,
-        shared_prefix_ratio=0.5,
-        num_prefix_groups=50,
-    ),
-    base_prefill_engine_args=MockEngineArgs(
-        block_size=512,
-        num_gpu_blocks=20000,
-        enable_prefix_caching=True,
-        worker_type="prefill",
-    ),
-    base_decode_engine_args=MockEngineArgs(
-        block_size=512,
-        num_gpu_blocks=20000,
-        enable_prefix_caching=True,
-        worker_type="decode",
-    ),
-    base_router_config=KvRouterConfig(),
-    max_total_gpus=16,
-    constraints={
-        "mean_ttft_ms": 50000.0,
-        "mean_tpot_ms": 100.0,
-        "mean_e2e_latency_ms": 60000.0,
-    },
-    overlap_score_weights=[0.0, 0.5, 1.0, 2.0],
-)
-
-cols = [
-    "prefill_tp",
-    "decode_tp",
-    "prefill_workers",
-    "decode_workers",
-    "overlap_score_weight",
-    "total_gpus_used",
-    "output_throughput_tok_s",
-    "prefix_cache_reused_ratio",
-    "mean_ttft_ms",
-    "mean_tpot_ms",
-    "mean_e2e_latency_ms",
-]
-
-print("Best feasible:")
-print(result.best_feasible)
-print()
-
-print("Top feasible states:")
-print(result.feasible_df[cols].head(10).to_string(index=False))
-PYCODE
-
-DYN_LOG='info,dynamo_kv_router::scheduling::selector=warn' \
-PYTHONPATH=lib/bindings/python/src:components/src \
-  .venv/bin/python /tmp/dynamo_replay_kv_router_disagg_sweep.py
-```
-
 ## Expected Outputs
 
 The returned object is a `DenseReplayOptimizationResult` with:
@@ -327,22 +254,6 @@ wget -O /tmp/toolagent_trace.jsonl \
   https://raw.githubusercontent.com/kvcache-ai/Mooncake/refs/heads/main/FAST25-release/traces/toolagent_trace.jsonl
 ```
 
-If you want to slow the arrival process to `0.80x` of the original trace rate:
-
-```bash
-.venv/bin/python - <<'PY'
-import json
-
-with open("/tmp/toolagent_trace.jsonl", encoding="utf-8") as src, open(
-    "/tmp/toolagent_trace_080x.jsonl", "w", encoding="utf-8"
-) as dst:
-    for line in src:
-        rec = json.loads(line)
-        rec["timestamp"] = int(rec["timestamp"] / 0.80)
-        dst.write(json.dumps(rec) + "\n")
-PY
-```
-
 ### Replace the Synthetic Workload
 
 In the main driver, replace:
@@ -369,12 +280,13 @@ workload=TraceReplayWorkload(
 ),
 ```
 
-or, if you rewrote the timestamps:
+If you want to replay the same trace at `0.80x` of its original arrival rate, keep the same file
+and set:
 
 ```python
 workload=TraceReplayWorkload(
-    trace_file="/tmp/toolagent_trace_080x.jsonl",
-    arrival_speedup_ratio=1.0,
+    trace_file="/tmp/toolagent_trace.jsonl",
+    arrival_speedup_ratio=0.8,
 ),
 ```
 
