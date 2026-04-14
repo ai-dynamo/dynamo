@@ -303,6 +303,33 @@ pub mod llm {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
+    /// Enable the LoRA allocation controller (set to "true" to enable)
+    pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
+
+    /// LoRA allocation algorithm ("hrw" or "random")
+    pub const DYN_LORA_ALLOCATION_ALGORITHM: &str = "DYN_LORA_ALLOCATION_ALGORITHM";
+
+    /// LoRA allocation controller recompute interval in seconds
+    pub const DYN_LORA_ALLOCATION_TIMESTEP_SECS: &str = "DYN_LORA_ALLOCATION_TIMESTEP_SECS";
+
+    /// Ticks to wait before scaling down a LoRA's replicas
+    pub const DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS: &str =
+        "DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS";
+
+    /// Multiplier for the load estimator's rate window relative to the controller timestep.
+    pub const DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER: &str =
+        "DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER";
+
+    /// Number of counter buckets per second in the BucketedRateCounter.
+    pub const DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND: &str =
+        "DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND";
+
+    /// Load predictor type: "none" (raw counts) or "ema" (exponential moving average).
+    pub const DYN_LORA_ALLOCATION_PREDICTOR_TYPE: &str = "DYN_LORA_ALLOCATION_PREDICTOR_TYPE";
+
+    /// EMA smoothing factor (alpha) for the EMA predictor. Range [0.0, 1.0].
+    pub const DYN_LORA_ALLOCATION_EMA_ALPHA: &str = "DYN_LORA_ALLOCATION_EMA_ALPHA";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -506,6 +533,14 @@ mod tests {
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_LORA_ALLOCATION_ENABLED,
+            llm::DYN_LORA_ALLOCATION_ALGORITHM,
+            llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
+            llm::DYN_LORA_ALLOCATION_SCALE_DOWN_COOLDOWN_TICKS,
+            llm::DYN_LORA_ALLOCATION_RATE_WINDOW_MULTIPLIER,
+            llm::DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND,
+            llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
+            llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
             llm::metrics::DYN_METRICS_PREFIX,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
