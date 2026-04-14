@@ -134,6 +134,20 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Number of requests pending in the router's scheduler queue (gauge per worker_type)
     ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
+    # Number of replicas allocated for a LoRA adapter
+    LORA_REPLICA_FACTOR = "lora_replica_factor"
+    # Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)
+    LORA_IS_ACTIVE = "lora_is_active"
+    # Estimated load (windowed request count) for a LoRA adapter
+    LORA_ESTIMATED_LOAD = "lora_estimated_load"
+    # Number of in-flight (active) requests for a LoRA adapter
+    LORA_ACTIVE_REQUESTS = "lora_active_requests"
+    # Total LoRA loads (new placements) this controller tick
+    LORA_CHURN_LOADS_TOTAL = "lora_churn_loads_total"
+    # Total LoRA unloads (removed placements) this controller tick
+    LORA_CHURN_UNLOADS_TOTAL = "lora_churn_unloads_total"
+    # MCF solver overflow count (unplaceable replicas)
+    LORA_OVERFLOW_COUNT = "lora_overflow_count"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
     # Label name for tokenizer operation

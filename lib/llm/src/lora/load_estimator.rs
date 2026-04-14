@@ -5,9 +5,14 @@
 //!
 //! Tracks LORA adapter usage over time to estimate load for allocation decisions.
 //! Supports single-router (polling) and multi-router (event-based) modes.
+//!
+//! The primary load signal is **arrival count in a sliding window**, tracked by
+//! a lock-free [`BucketedRateCounter`] per LoRA. An optional [`LoadPredictor`]
+//! (e.g. EMA) can smooth the raw counts for the allocation controller.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -18,66 +23,240 @@ use dynamo_runtime::transports::event_plane::EventSubscriber;
 
 use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 use crate::kv_router::scheduler::KvScheduler;
+use crate::lora::config::PredictorType;
+use crate::lora::predictor::{EmaPredictor, LoadPredictor};
 
-/// Time-series sample of LORA load
-#[derive(Debug, Clone)]
-pub struct LoadSample {
-    pub timestamp: Instant,
-    pub active_count: usize,
+// ─── BucketedRateCounter ────────────────────────────────────────────────────
+
+/// Lock-free, epoch-based sliding-window rate counter.
+///
+/// Divides time into fixed-duration buckets. Each bucket has an atomic counter
+/// and an epoch (the absolute bucket index it was last used for). Stale buckets
+/// are detected by epoch mismatch and lazily reset via CAS.
+pub struct BucketedRateCounter {
+    buckets: Vec<AtomicU64>,
+    epochs: Vec<AtomicU64>,
+    epoch_start: Instant,
+    bucket_duration: Duration,
+    num_buckets: usize,
 }
 
-/// Per-LORA load data combining active count and history
-#[derive(Debug, Clone, Default)]
+// SAFETY: Composed entirely of atomics and an immutable Instant.
+unsafe impl Sync for BucketedRateCounter {}
+
+impl std::fmt::Debug for BucketedRateCounter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BucketedRateCounter")
+            .field("num_buckets", &self.num_buckets)
+            .field("bucket_duration", &self.bucket_duration)
+            .finish()
+    }
+}
+
+impl BucketedRateCounter {
+    pub fn new(num_buckets: usize, bucket_duration: Duration, now: Instant) -> Self {
+        assert!(num_buckets > 0, "num_buckets must be > 0");
+        let mut buckets = Vec::with_capacity(num_buckets);
+        let mut epochs = Vec::with_capacity(num_buckets);
+        for _ in 0..num_buckets {
+            buckets.push(AtomicU64::new(0));
+            epochs.push(AtomicU64::new(0));
+        }
+        Self {
+            buckets,
+            epochs,
+            epoch_start: now,
+            bucket_duration,
+            num_buckets,
+        }
+    }
+
+    /// Record a single arrival at time `now`. Lock-free.
+    pub fn record(&self, now: Instant) {
+        self.record_count(1, now);
+    }
+
+    /// Record `n` arrivals at time `now`. Lock-free.
+    pub fn record_count(&self, n: u64, now: Instant) {
+        if n == 0 {
+            return;
+        }
+        let elapsed = now.duration_since(self.epoch_start);
+        let global_bucket = elapsed.as_nanos() / self.bucket_duration.as_nanos();
+        let global_bucket = global_bucket as u64;
+        let index = (global_bucket as usize) % self.num_buckets;
+
+        let current_epoch = self.epochs[index].load(Ordering::Acquire);
+        if current_epoch == global_bucket {
+            self.buckets[index].fetch_add(n, Ordering::Relaxed);
+        } else if current_epoch < global_bucket {
+            match self.epochs[index].compare_exchange(
+                current_epoch,
+                global_bucket,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.buckets[index].store(n, Ordering::Release);
+                }
+                Err(actual) => {
+                    if actual == global_bucket {
+                        self.buckets[index].fetch_add(n, Ordering::Relaxed);
+                    }
+                    // else: another thread advanced to a newer epoch; drop this record
+                }
+            }
+        }
+    }
+
+    /// Count total arrivals within the sliding window ending at `now`.
+    pub fn count(&self, now: Instant) -> u64 {
+        let elapsed = now.duration_since(self.epoch_start);
+        let global_bucket = (elapsed.as_nanos() / self.bucket_duration.as_nanos()) as u64;
+
+        let mut total = 0u64;
+        for i in 0..self.num_buckets {
+            let epoch = self.epochs[i].load(Ordering::Acquire);
+            let min_valid_epoch = global_bucket.saturating_sub(self.num_buckets as u64 - 1);
+            if epoch >= min_valid_epoch && epoch <= global_bucket {
+                total += self.buckets[i].load(Ordering::Relaxed);
+            }
+        }
+        total
+    }
+
+    pub fn clear(&self) {
+        for i in 0..self.num_buckets {
+            self.buckets[i].store(0, Ordering::Release);
+            self.epochs[i].store(0, Ordering::Release);
+        }
+    }
+}
+
+// ─── LoraLoadData ───────────────────────────────────────────────────────────
+
+/// Per-LORA load data: lock-free hot-path atomics only.
 struct LoraLoadData {
-    /// Current active request count
-    active_count: usize,
-    /// Historical load samples
-    samples: VecDeque<LoadSample>,
+    active_count: AtomicUsize,
+    rate_counter: BucketedRateCounter,
 }
 
-/// Configuration for load estimation
+impl std::fmt::Debug for LoraLoadData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoraLoadData")
+            .field("active_count", &self.active_count.load(Ordering::Relaxed))
+            .field("rate_counter", &self.rate_counter)
+            .finish()
+    }
+}
+
+// ─── LoadEstimatorConfig ────────────────────────────────────────────────────
+
 #[derive(Debug, Clone)]
 pub struct LoadEstimatorConfig {
-    /// How often to poll for load updates (single-router mode)
     pub poll_interval: Duration,
-
-    /// Maximum number of samples to keep per LORA
-    pub max_samples: usize,
+    /// Sliding window size for request-rate calculation.
+    pub rate_window: Duration,
+    pub buckets_per_second: u64,
+    pub predictor_type: PredictorType,
+    pub ema_alpha: f64,
 }
 
 impl Default for LoadEstimatorConfig {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
-            max_samples: 1000,
+            rate_window: Duration::from_secs(30),
+            buckets_per_second: 1,
+            predictor_type: PredictorType::Ema,
+            ema_alpha: 0.5,
         }
     }
 }
 
-/// Estimates LORA load based on active request counts over time
-pub struct LoadEstimator {
-    /// Per-LORA load data (active count + history) with atomic updates
-    data: DashMap<String, LoraLoadData>,
+impl LoadEstimatorConfig {
+    /// Derive a config synchronized with the allocation controller.
+    pub fn from_controller_timestep(timestep_secs: u64, multiplier: u64) -> Self {
+        let min_window = crate::lora::config::MIN_RATE_WINDOW_SECS;
+        Self {
+            rate_window: Duration::from_secs((timestep_secs * multiplier).max(min_window)),
+            ..Default::default()
+        }
+    }
 
-    /// Configuration
-    config: LoadEstimatorConfig,
+    fn num_buckets(&self) -> usize {
+        let secs = self.rate_window.as_secs().max(1);
+        (secs * self.buckets_per_second).max(1) as usize
+    }
+
+    fn bucket_duration(&self) -> Duration {
+        if self.buckets_per_second == 0 {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_nanos(1_000_000_000 / self.buckets_per_second)
+        }
+    }
+}
+
+// ─── LoadEstimator ──────────────────────────────────────────────────────────
+
+/// Estimates LORA load based on arrival counts over a sliding time window.
+///
+/// The hot path (`increment_load`) is lock-free for existing LoRAs.
+pub struct LoadEstimator {
+    data: DashMap<String, LoraLoadData>,
+    predictors: Mutex<HashMap<String, Box<dyn LoadPredictor>>>,
+    config: parking_lot::RwLock<LoadEstimatorConfig>,
 }
 
 impl LoadEstimator {
-    /// Create a new load estimator with default configuration
     pub fn new() -> Self {
         Self::with_config(LoadEstimatorConfig::default())
     }
 
-    /// Create a new load estimator with custom configuration
     pub fn with_config(config: LoadEstimatorConfig) -> Self {
         Self {
             data: DashMap::new(),
-            config,
+            predictors: Mutex::new(HashMap::new()),
+            config: parking_lot::RwLock::new(config),
         }
     }
 
-    /// Start polling the scheduler for LORA load (single-router mode)
+    /// Update the rate window at runtime.
+    pub fn set_rate_window(&self, window: Duration) {
+        let mut cfg = self.config.write();
+        let old_window = cfg.rate_window;
+        cfg.rate_window = window;
+        let num_buckets = cfg.num_buckets();
+        let bucket_duration = cfg.bucket_duration();
+        drop(cfg);
+
+        if old_window != window {
+            let now = Instant::now();
+            for mut entry in self.data.iter_mut() {
+                let new_counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
+                let old_active = entry.value().active_count.load(Ordering::Relaxed);
+                *entry.value_mut() = LoraLoadData {
+                    active_count: AtomicUsize::new(old_active),
+                    rate_counter: new_counter,
+                };
+            }
+        }
+
+        tracing::info!(
+            rate_window_secs = window.as_secs(),
+            num_buckets,
+            "LoadEstimator rate_window updated"
+        );
+    }
+
+    /// Clear all windowed arrival data for a LoRA.
+    pub fn clear_rate_counter(&self, lora_name: &str) {
+        if let Some(entry) = self.data.get(lora_name) {
+            entry.value().rate_counter.clear();
+        }
+    }
+
     pub fn start_polling(
         self: Arc<Self>,
         scheduler: Arc<KvScheduler>,
@@ -85,7 +264,7 @@ impl LoadEstimator {
     ) -> tokio::task::JoinHandle<()> {
         let cancel_token = component.drt().child_token();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(self.config.poll_interval);
+            let mut interval = tokio::time::interval(self.config.read().poll_interval);
             tracing::info!("Started LORA load polling");
 
             loop {
@@ -95,10 +274,7 @@ impl LoadEstimator {
                         break;
                     }
                     _ = interval.tick() => {
-                        // Poll scheduler for current LORA counts
                         let lora_counts = scheduler.get_active_lora_counts();
-
-                        // Update load estimates
                         self.update_from_counts(lora_counts);
                     }
                 }
@@ -106,7 +282,6 @@ impl LoadEstimator {
         })
     }
 
-    /// Start subscribing to ActiveSequenceEvent for LORA load (multi-router mode)
     pub fn start_event_subscription(
         self: Arc<Self>,
         component: Component,
@@ -118,7 +293,6 @@ impl LoadEstimator {
         })
     }
 
-    /// Subscribe to ActiveSequenceEvent and update load tracking
     async fn subscribe_to_events(&self, component: Component) -> anyhow::Result<()> {
         let cancel_token = component.drt().child_token();
         let mut subscriber = EventSubscriber::for_component(&component, ACTIVE_SEQUENCES_SUBJECT)
@@ -153,146 +327,183 @@ impl LoadEstimator {
         Ok(())
     }
 
-    /// Handle an ActiveSequenceEvent and update load tracking
     fn handle_event(&self, event: ActiveSequenceEvent) {
         if let Some(lora_name) = event.lora_name {
             match event.data {
                 ActiveSequenceEventData::AddRequest { .. } => {
-                    // Increment load for this LORA
                     self.increment_load(&lora_name);
                 }
                 ActiveSequenceEventData::Free => {
-                    // Decrement load for this LORA
                     self.decrement_load(&lora_name);
                 }
-                ActiveSequenceEventData::MarkPrefillCompleted => {
-                    // No load change for prefill completion
-                }
+                ActiveSequenceEventData::MarkPrefillCompleted => {}
             }
         }
     }
 
-    /// Increment load count for a LORA and record sample (atomic)
-    fn increment_load(&self, lora_name: &str) {
+    /// Increment load count for a LORA and record arrival. Lock-free for existing LoRAs.
+    pub fn increment_load(&self, lora_name: &str) {
         let now = Instant::now();
-        let max_samples = self.config.max_samples;
+
+        // Fast path: LoRA already exists
+        if let Some(entry) = self.data.get(lora_name) {
+            entry.value().active_count.fetch_add(1, Ordering::Relaxed);
+            entry.value().rate_counter.record(now);
+            return;
+        }
+
+        // Slow path: first time seeing this LoRA
+        let cfg = self.config.read();
+        let num_buckets = cfg.num_buckets();
+        let bucket_duration = cfg.bucket_duration();
+        drop(cfg);
 
         self.data
             .entry(lora_name.to_string())
             .and_modify(|data| {
-                data.active_count += 1;
-                data.samples.push_back(LoadSample {
-                    timestamp: now,
-                    active_count: data.active_count,
-                });
-                // Trim old samples
-                while data.samples.len() > max_samples {
-                    data.samples.pop_front();
-                }
+                data.active_count.fetch_add(1, Ordering::Relaxed);
+                data.rate_counter.record(now);
             })
             .or_insert_with(|| {
-                let mut data = LoraLoadData {
-                    active_count: 1,
-                    samples: VecDeque::new(),
-                };
-                data.samples.push_back(LoadSample {
-                    timestamp: now,
-                    active_count: 1,
-                });
-                data
+                let counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
+                counter.record(now);
+                LoraLoadData {
+                    active_count: AtomicUsize::new(1),
+                    rate_counter: counter,
+                }
             });
     }
 
-    /// Decrement load count for a LORA and record sample (atomic)
-    fn decrement_load(&self, lora_name: &str) {
-        let now = Instant::now();
-        let max_samples = self.config.max_samples;
-
-        // Update existing entry or ignore if not present
-        if let Some(mut entry) = self.data.get_mut(lora_name) {
-            let data = entry.value_mut();
-            data.active_count = data.active_count.saturating_sub(1);
-            data.samples.push_back(LoadSample {
-                timestamp: now,
-                active_count: data.active_count,
-            });
-            // Trim old samples
-            while data.samples.len() > max_samples {
-                data.samples.pop_front();
-            }
+    /// Decrement in-flight count for a LORA.
+    pub fn decrement_load(&self, lora_name: &str) {
+        if let Some(entry) = self.data.get(lora_name) {
+            entry.value().active_count.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
-    /// Update load estimates from a snapshot of LORA counts
+    /// Remove all tracking data for a LoRA. After this call the LoRA will no
+    /// longer appear in [`get_current_load`] results. Useful when a LoRA is
+    /// permanently unloaded and its stale rate-counter / predictor entries
+    /// should be purged.
+    pub fn remove_lora(&self, lora_name: &str) {
+        self.data.remove(lora_name);
+        if let Ok(mut predictors) = self.predictors.lock() {
+            predictors.remove(lora_name);
+        }
+    }
+
     fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
         let now = Instant::now();
-        let max_samples = self.config.max_samples;
+        let cfg = self.config.read();
+        let num_buckets = cfg.num_buckets();
+        let bucket_duration = cfg.bucket_duration();
+        drop(cfg);
 
-        // Update or insert entries for all LORAs in the snapshot
         for (lora_name, count) in &lora_counts {
             self.data
                 .entry(lora_name.clone())
                 .and_modify(|data| {
-                    data.active_count = *count;
-                    data.samples.push_back(LoadSample {
-                        timestamp: now,
-                        active_count: *count,
-                    });
-                    // Trim old samples
-                    while data.samples.len() > max_samples {
-                        data.samples.pop_front();
-                    }
+                    data.active_count.store(*count, Ordering::Relaxed);
+                    data.rate_counter.record_count(*count as u64, now);
                 })
                 .or_insert_with(|| {
-                    let mut data = LoraLoadData {
-                        active_count: *count,
-                        samples: VecDeque::new(),
-                    };
-                    data.samples.push_back(LoadSample {
-                        timestamp: now,
-                        active_count: *count,
-                    });
-                    data
+                    let counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
+                    counter.record_count(*count as u64, now);
+                    LoraLoadData {
+                        active_count: AtomicUsize::new(*count),
+                        rate_counter: counter,
+                    }
                 });
         }
 
-        // Remove LORAs that are no longer active (set count to 0, keep history)
-        for mut entry in self.data.iter_mut() {
+        for entry in self.data.iter() {
             if !lora_counts.contains_key(entry.key()) {
-                let data = entry.value_mut();
-                if data.active_count > 0 {
-                    data.active_count = 0;
-                    data.samples.push_back(LoadSample {
-                        timestamp: now,
-                        active_count: 0,
-                    });
-                    // Trim old samples
-                    while data.samples.len() > max_samples {
-                        data.samples.pop_front();
-                    }
-                }
+                entry.value().active_count.store(0, Ordering::Relaxed);
             }
         }
     }
 
-    /// Get current active counts
+    /// Get current load using arrival count in the sliding window.
     pub fn get_current_load(&self) -> HashMap<String, usize> {
+        let now = Instant::now();
+        let cfg = self.config.read();
+        let predictor_type = cfg.predictor_type;
+        let ema_alpha = cfg.ema_alpha;
+        drop(cfg);
+
+        if predictor_type == PredictorType::None {
+            return self
+                .data
+                .iter()
+                .filter_map(|entry| {
+                    let count = entry.value().rate_counter.count(now);
+                    if count > 0 {
+                        Some((entry.key().clone(), count as usize))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+
+        let mut predictors = self.predictors.lock().unwrap_or_else(|e| e.into_inner());
         self.data
             .iter()
-            .filter(|entry| entry.value().active_count > 0)
-            .map(|entry| (entry.key().clone(), entry.value().active_count))
+            .filter_map(|entry| {
+                let lora_name = entry.key();
+                let counter = &entry.value().rate_counter;
+
+                let predictor = predictors
+                    .entry(lora_name.clone())
+                    .or_insert_with(|| Self::create_predictor(predictor_type, ema_alpha));
+
+                predictor.update(counter, now);
+                let load = predictor.predict();
+                let load_rounded = load.round() as usize;
+
+                if load_rounded > 0 {
+                    Some((lora_name.clone(), load_rounded))
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
-    /// Get time series samples for all LORAs (oldest -> newest)
-    pub fn get_time_series(&self) -> HashMap<String, Vec<LoadSample>> {
+    fn create_predictor(predictor_type: PredictorType, ema_alpha: f64) -> Box<dyn LoadPredictor> {
+        match predictor_type {
+            PredictorType::None => unreachable!("should not create predictor for None type"),
+            PredictorType::Ema => Box::new(EmaPredictor::new(ema_alpha)),
+        }
+    }
+
+    /// Get raw arrival counts from the sliding-window rate counters.
+    pub fn get_raw_arrival_counts(&self) -> HashMap<String, u64> {
+        let now = Instant::now();
         self.data
             .iter()
-            .map(|entry| {
-                (
-                    entry.key().clone(),
-                    entry.value().samples.iter().cloned().collect(),
-                )
+            .filter_map(|entry| {
+                let count = entry.value().rate_counter.count(now);
+                if count > 0 {
+                    Some((entry.key().clone(), count))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get instantaneous in-flight counts (for metrics).
+    pub fn get_inflight_counts(&self) -> HashMap<String, usize> {
+        self.data
+            .iter()
+            .filter_map(|entry| {
+                let count = entry.value().active_count.load(Ordering::Relaxed);
+                if count > 0 {
+                    Some((entry.key().clone(), count))
+                } else {
+                    None
+                }
             })
             .collect()
     }
@@ -309,71 +520,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_load_estimator_time_series() {
-        let estimator = LoadEstimator::new();
+    fn test_bucketed_rate_counter_basic() {
+        let now = Instant::now();
+        let counter = BucketedRateCounter::new(10, Duration::from_secs(1), now);
 
-        // Simulate updates
-        let mut counts = HashMap::new();
-        counts.insert("lora-math".to_string(), 5);
-        counts.insert("lora-code".to_string(), 3);
+        counter.record(now);
+        counter.record(now);
+        counter.record(now);
 
-        estimator.update_from_counts(counts);
-
-        let all_series = estimator.get_time_series();
-        let series_math = all_series.get("lora-math").unwrap();
-        let series_code = all_series.get("lora-code").unwrap();
-
-        assert_eq!(series_math.len(), 1);
-        assert_eq!(series_math[0].active_count, 5);
-        assert_eq!(series_code.len(), 1);
-        assert_eq!(series_code[0].active_count, 3);
-        assert!(!all_series.contains_key("lora-xyz"));
+        assert_eq!(counter.count(now), 3);
     }
 
     #[test]
-    fn test_load_estimator_max_samples() {
-        let config = LoadEstimatorConfig {
-            max_samples: 2,
-            ..Default::default()
-        };
-        let estimator = LoadEstimator::with_config(config);
+    fn test_bucketed_rate_counter_expiry() {
+        let start = Instant::now();
+        let bucket_duration = Duration::from_secs(1);
+        let counter = BucketedRateCounter::new(5, bucket_duration, start);
 
-        for count in [1, 2, 3] {
-            let mut counts = HashMap::new();
-            counts.insert("lora-math".to_string(), count);
-            estimator.update_from_counts(counts);
-        }
+        counter.record(start);
+        counter.record(start);
 
-        let all_series = estimator.get_time_series();
-        let series = all_series.get("lora-math").unwrap();
-        assert_eq!(series.len(), 2);
-        assert_eq!(series[0].active_count, 2);
-        assert_eq!(series[1].active_count, 3);
+        let t2 = start + Duration::from_secs(2);
+        counter.record(t2);
+
+        assert_eq!(counter.count(t2), 3);
+
+        let t6 = start + Duration::from_secs(6);
+        assert_eq!(counter.count(t6), 1, "t=0 arrivals should have expired");
+
+        let t8 = start + Duration::from_secs(8);
+        assert_eq!(counter.count(t8), 0, "all arrivals should have expired");
     }
 
     #[test]
-    fn test_increment_decrement_atomicity() {
+    fn test_increment_decrement_load() {
         let estimator = LoadEstimator::new();
 
-        // Increment twice
         estimator.increment_load("lora-test");
         estimator.increment_load("lora-test");
 
         let load = estimator.get_current_load();
         assert_eq!(load.get("lora-test"), Some(&2));
 
-        // Decrement once
+        let inflight = estimator.get_inflight_counts();
+        assert_eq!(inflight.get("lora-test"), Some(&2));
+
         estimator.decrement_load("lora-test");
 
-        let load = estimator.get_current_load();
-        assert_eq!(load.get("lora-test"), Some(&1));
+        let inflight = estimator.get_inflight_counts();
+        assert_eq!(inflight.get("lora-test"), Some(&1));
 
-        // Check history has all samples
-        let series = estimator.get_time_series();
-        let samples = series.get("lora-test").unwrap();
-        assert_eq!(samples.len(), 3);
-        assert_eq!(samples[0].active_count, 1);
-        assert_eq!(samples[1].active_count, 2);
-        assert_eq!(samples[2].active_count, 1);
+        // Windowed load still sees 2 arrivals
+        let load = estimator.get_current_load();
+        assert_eq!(load.get("lora-test"), Some(&2));
+    }
+
+    #[test]
+    fn test_update_from_counts() {
+        let estimator = LoadEstimator::new();
+
+        let mut counts = HashMap::new();
+        counts.insert("lora-math".to_string(), 5);
+        counts.insert("lora-code".to_string(), 3);
+
+        estimator.update_from_counts(counts);
+
+        let load = estimator.get_current_load();
+        assert_eq!(load.get("lora-math"), Some(&5));
+        assert_eq!(load.get("lora-code"), Some(&3));
+    }
+
+    #[test]
+    fn test_load_with_ema_predictor() {
+        let config = LoadEstimatorConfig {
+            predictor_type: PredictorType::Ema,
+            ema_alpha: 1.0,
+            ..Default::default()
+        };
+        let estimator = LoadEstimator::with_config(config);
+
+        estimator.increment_load("lora-test");
+        estimator.increment_load("lora-test");
+        estimator.increment_load("lora-test");
+
+        let load = estimator.get_current_load();
+        assert_eq!(
+            load.get("lora-test"),
+            Some(&3),
+            "EMA with alpha=1.0 should match raw count"
+        );
     }
 }

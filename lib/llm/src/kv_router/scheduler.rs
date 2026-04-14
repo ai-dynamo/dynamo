@@ -14,6 +14,7 @@ use super::sequence::{
 };
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::lora::filter::LoraFilter;
 use anyhow::Result;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
@@ -48,6 +49,7 @@ where
         kv_router_config: &KvRouterConfig,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_type: &'static str,
+        lora_filter: Option<Arc<LoraFilter>>,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();

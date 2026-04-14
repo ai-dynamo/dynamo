@@ -15,7 +15,7 @@ use axum::http::Response;
 use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
-use super::metrics::register_worker_timing_metrics;
+use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
@@ -502,6 +502,9 @@ impl HttpServiceConfigBuilder {
         }
         if let Err(e) = ensure_transport_metrics_registered_prometheus(&registry) {
             tracing::warn!("Failed to register transport metrics: {}", e);
+        }
+        if let Err(e) = register_lora_allocation_metrics(&registry) {
+            tracing::warn!("Failed to register LoRA allocation metrics: {}", e);
         }
 
         let mut all_docs = Vec::new();
