@@ -104,7 +104,8 @@ where
     match value {
         serde_json::Value::String(s) => Ok(s),
         v @ serde_json::Value::Object(_) => {
-            serde_json::to_string(&v).map_err(|e| D::Error::custom(e.to_string()))
+            // serde_json::to_string on a Value is infallible
+            Ok(serde_json::to_string(&v).unwrap())
         }
         other => Err(D::Error::custom(format!(
             "expected string or object for `arguments`, got {other}"
@@ -135,12 +136,12 @@ where
 // ---------------------------------------------------------------------------
 // Upstream `async-openai` only accepts a JSON string for `arguments`.
 // We define these locally so we can attach `#[serde(deserialize_with)]` and
-// accept both string and object/array representations on the wire.
+// accept both string and object representations on the wire.
 
 /// The name and arguments of a function that should be called.
 ///
 /// Accepts `arguments` as either a JSON string (`"{\"key\":\"value\"}"`) or a
-/// JSON object/array (`{"key": "value"}`); both are normalised to a JSON string
+/// JSON object (`{"key": "value"}`); both are normalised to a JSON string
 /// on deserialisation so callers always see the canonical form.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct FunctionCall {
@@ -150,7 +151,7 @@ pub struct FunctionCall {
 }
 
 /// Streaming variant of [`FunctionCall`] where both fields are optional.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct FunctionCallStream {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_arguments_opt")]
@@ -162,7 +163,7 @@ pub struct FunctionCallStream {
 /// Defined locally (instead of re-exporting from upstream) because its
 /// `function` field references our local [`FunctionCallStream`] with the
 /// flexible `arguments` deserialiser.
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct ChatCompletionMessageToolCallChunk {
     pub index: u32,
     pub id: Option<String>,
