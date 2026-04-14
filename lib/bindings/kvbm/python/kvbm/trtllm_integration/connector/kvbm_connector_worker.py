@@ -93,6 +93,10 @@ def _create_kvbm_nccl_comm(rank: int, world_size: int):
     # all ranks, which causes ncclCommInitRank to fail (all ranks on same
     # device). Explicitly set the device to match the MPI rank.
     device_count = torch.cuda.device_count()
+    if device_count <= 0:
+        raise RuntimeError(
+            "KVBM NCCL MLA mode requires at least one visible CUDA device."
+        )
     device_id = rank % device_count
     torch.cuda.set_device(device_id)
     logger.info(
