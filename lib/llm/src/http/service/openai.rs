@@ -1812,7 +1812,7 @@ pub fn validate_response_unsupported_fields(
 
 // todo - abstract this to the top level lib.rs to be reused
 // todo - move the service_observer to its own state/arc
-fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
+pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
     // if state.service_observer.stage() != ServiceStage::Ready {
     //     return Err(ErrorMessage::service_unavailable());
     // }
@@ -1841,15 +1841,34 @@ async fn list_models_openai(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
+
+    // Build context_length lookup from model deployment cards
+    let cards = state.manager().get_model_cards();
+    let card_map: HashMap<String, u32> = cards
+        .iter()
+        .map(|c| (c.display_name.clone(), c.context_length))
+        .collect();
+
+    // Env var overrides (take precedence over MDC values)
+    let cw_override: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    let mot_override: Option<u64> = std::env::var("DYN_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+
     let mut data = Vec::new();
 
     let models: HashSet<String> = state.manager().model_display_names();
     for model_name in models {
+        let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
         data.push(ModelListing {
             id: model_name.clone(),
-            object: "model", // Per OpenAI spec, this should be "model"
+            object: "model",
             created,
             owned_by: "nvidia".to_string(),
+            context_window,
+            max_output_tokens: mot_override,
         });
     }
 
@@ -1872,6 +1891,10 @@ struct ModelListing {
     object: &'static str, // always "model" per OpenAI spec
     created: u64,         // Seconds since epoch
     owned_by: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u64>,
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
@@ -1930,13 +1953,62 @@ pub fn list_models_router(
 ) -> (Vec<RouteDoc>, Router) {
     // Standard OpenAI compatible list models endpoint
     let openai_path = path.unwrap_or("/v1/models".to_string());
+    let retrieve_path = format!("{}/{{*model_id}}", openai_path);
     let doc_for_openai = RouteDoc::new(axum::http::Method::GET, &openai_path);
+    let doc_for_retrieve = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
 
     let router = Router::new()
         .route(&openai_path, get(list_models_openai))
+        .route(&retrieve_path, get(get_model_openai))
         .with_state(state);
 
-    (vec![doc_for_openai], router)
+    (vec![doc_for_openai, doc_for_retrieve], router)
+}
+
+/// Retrieve a single model by ID (OpenAI format).
+///
+/// Per the OpenAI API spec: `GET /v1/models/{model}` returns a model object.
+/// Uses wildcard path to support model IDs with slashes (e.g. `Qwen/Qwen3.5-35B-A3B-FP8`).
+async fn get_model_openai(
+    State(state): State<Arc<service_v2::State>>,
+    axum::extract::Path(model_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    check_ready(&state)?;
+
+    let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    let models: HashSet<String> = state.manager().model_display_names();
+    if !models.contains(model_id) {
+        return Err(ErrorMessage::model_not_found());
+    }
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let cards = state.manager().get_model_cards();
+    let context_length = cards
+        .iter()
+        .find(|c| c.display_name == model_id)
+        .map(|c| c.context_length as u64);
+    let context_window: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .or(context_length);
+    let max_output_tokens: Option<u64> = std::env::var("DYN_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok());
+
+    Ok(Json(ModelListing {
+        id: model_id.to_string(),
+        object: "model",
+        created,
+        owned_by: "nvidia".to_string(),
+        context_window,
+        max_output_tokens,
+    })
+    .into_response())
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Responses endpoint

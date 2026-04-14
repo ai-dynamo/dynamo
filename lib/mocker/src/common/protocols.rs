@@ -80,6 +80,59 @@ impl KvEventPublishers {
     }
 }
 
+/// Per-iteration forward pass snapshot, mirroring the Python `ForwardPassMetrics`
+/// schema in `components/src/dynamo/common/forward_pass_metrics.py`.
+///
+/// Produced by the scheduler core after each `execute_pass_internal()` call.
+/// The runtime-dependent layer (`lib/llm`) wraps this with identity fields
+/// (worker_id, dp_rank, counter_id) and serializes to msgpack for the event plane.
+#[derive(Debug, Clone, Default)]
+pub struct ForwardPassSnapshot {
+    // -- scheduled requests (executed this iteration) --
+    pub num_prefill_requests: u32,
+    pub sum_prefill_tokens: u64,
+    pub var_prefill_length: f64,
+    pub sum_prefill_kv_tokens: u64,
+    pub num_decode_requests: u32,
+    pub sum_decode_kv_tokens: u64,
+    pub var_decode_kv_tokens: f64,
+    // -- queued requests (waiting, not scheduled) --
+    pub num_queued_prefill: u32,
+    pub sum_queued_prefill_tokens: u64,
+    pub var_queued_prefill_length: f64,
+    pub num_queued_decode: u32,
+    pub sum_queued_decode_kv_tokens: u64,
+    pub var_queued_decode_kv_tokens: f64,
+    // -- timing --
+    pub wall_time_secs: f64,
+}
+
+/// Trait for publishing forward pass metrics snapshots.
+/// This abstracts the FPM publishing pipeline so mocker schedulers remain generic.
+pub trait FpmSink: Send + Sync {
+    fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()>;
+}
+
+/// Optional FPM sink used by schedulers.
+/// Wraps `Option<Arc<dyn FpmSink>>` for ergonomic passing and no-op default behavior.
+#[derive(Clone, Default)]
+pub struct FpmPublisher {
+    sink: Option<Arc<dyn FpmSink>>,
+}
+
+impl FpmPublisher {
+    pub fn new(sink: Option<Arc<dyn FpmSink>>) -> Self {
+        Self { sink }
+    }
+
+    pub fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()> {
+        if let Some(sink) = &self.sink {
+            sink.publish(snapshot)?;
+        }
+        Ok(())
+    }
+}
+
 pub type NumBlocks = usize;
 
 /// Represents different block movement operations in the cache
