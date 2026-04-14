@@ -127,9 +127,9 @@ def register_engine_metrics_callback(
         try:
             conn_id = endpoint.connection_id()
             auto_labels[labels.WORKER_ID] = format(conn_id, "x")
-        except Exception:
+        except Exception as e:
             logging.debug(
-                "Could not obtain connection_id for worker_id label injection"
+                f"Could not obtain connection_id for worker_id label injection: {e}"
             )
 
         # Add model labels if model_name is provided
