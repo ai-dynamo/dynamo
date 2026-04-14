@@ -403,6 +403,7 @@ _Appears in:_
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
+| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures active-passive GPU failover for this service.<br />When enabled, the main container is cloned into two engine containers<br />(active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -446,6 +447,7 @@ _Appears in:_
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
+| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures active-passive GPU failover for this service.<br />When enabled, the main container is cloned into two engine containers<br />(active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -801,6 +803,27 @@ _Appears in:_
 | `mainContainer` _[Container](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#container-v1-core)_ |  |  |  |
 
 
+#### FailoverSpec
+
+
+
+FailoverSpec configures active-passive failover for a worker component.
+Requires gpuMemoryService.enabled and the nvidia.com/dynamo-kube-discovery-mode: container
+annotation on the DGD.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled activates failover mode. The main container is cloned into two<br />engine containers (active + standby) sharing GPUs via DRA. The standby<br />acquires the flock when the active engine fails. |  |  |
+| `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the failover deployment topology. Must match gpuMemoryService.mode. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
+| `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine containers per rank.<br />Reserved for future use — the operator currently creates exactly one shadow. | 1 | Maximum: 1 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+
+
 #### FrontendSidecarSpec
 
 
@@ -832,6 +855,7 @@ GPUMemoryServiceMode selects the GMS deployment topology.
 
 
 _Appears in:_
+- [FailoverSpec](#failoverspec)
 - [GPUMemoryServiceSpec](#gpumemoryservicespec)
 
 | Field | Description |
