@@ -86,3 +86,15 @@ func TestNewCheckpointJob(t *testing.T) {
 		t.Fatalf("unexpected ttlSecondsAfterFinished: %#v", job.Spec.TTLSecondsAfterFinished)
 	}
 }
+
+func TestGetCheckpointJobName(t *testing.T) {
+	name := GetCheckpointJobName("abc123def4567890", "2")
+	if name != "checkpoint-job-abc123def4567890-2" {
+		t.Fatalf("unexpected checkpoint job name: %s", name)
+	}
+
+	defaultName := GetCheckpointJobName("abc123def4567890", "")
+	if defaultName != "checkpoint-job-abc123def4567890-"+DefaultCheckpointArtifactVersion {
+		t.Fatalf("unexpected default checkpoint job name: %s", defaultName)
+	}
+}

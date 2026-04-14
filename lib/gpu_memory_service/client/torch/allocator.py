@@ -11,7 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
 if TYPE_CHECKING:
     import torch

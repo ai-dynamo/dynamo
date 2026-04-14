@@ -10,11 +10,13 @@ import subprocess
 from contextlib import contextmanager
 
 import torch
-from gpu_memory_service import get_or_create_gms_client_memory_manager
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-from gpu_memory_service.client.torch.allocator import gms_use_mem_pool
+from gpu_memory_service.client.torch.allocator import (
+    get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
+)
 from gpu_memory_service.client.torch.module import register_module_tensors
-from gpu_memory_service.common.types import RequestedLockType
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME

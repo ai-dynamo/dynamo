@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package checkpointjob
+package controller
 
 import (
 	"fmt"
@@ -10,16 +10,13 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
-
-func DesiredCheckpointJobName(identityHash string, annotations map[string]string) string {
-	return "checkpoint-job-" + identityHash + "-" + snapshotprotocol.ArtifactVersion(annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
-}
 
 func buildCheckpointWorkerDefaultEnv(
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
@@ -50,7 +47,7 @@ func buildCheckpointWorkerDefaultEnv(
 	return defaultContainer.Env
 }
 
-func BuildCheckpointJob(
+func buildCheckpointJob(
 	config *configv1alpha1.OperatorConfiguration,
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
 	jobName string,
@@ -70,6 +67,9 @@ func BuildCheckpointJob(
 	}
 	if podTemplate.Annotations == nil {
 		podTemplate.Annotations = make(map[string]string)
+	}
+	if podTemplate.Spec.ServiceAccountName == "" {
+		podTemplate.Spec.ServiceAccountName = discovery.GetK8sDiscoveryServiceAccountName(ckpt.Name)
 	}
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
@@ -118,7 +118,7 @@ func BuildCheckpointJob(
 		Namespace:             ckpt.Namespace,
 		CheckpointID:          hash,
 		ArtifactVersion:       snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
-		SeccompProfile:        consts.SeccompProfilePath,
+		SeccompProfile:        snapshotprotocol.DefaultSeccompLocalhostProfile,
 		Name:                  jobName,
 		ActiveDeadlineSeconds: activeDeadlineSeconds,
 		TTLSecondsAfterFinish: &ttlSecondsAfterFinish,

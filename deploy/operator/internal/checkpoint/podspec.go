@@ -86,7 +86,7 @@ func InjectCheckpointIntoPodSpec(
 		mainContainer,
 		info.Hash,
 		info.ArtifactVersion,
-		commonconsts.SeccompProfilePath,
+		snapshotprotocol.DefaultSeccompLocalhostProfile,
 		info.Ready,
 	); err != nil {
 		return err
