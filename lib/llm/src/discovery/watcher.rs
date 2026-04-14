@@ -357,6 +357,17 @@ impl ModelWatcher {
                         continue;
                     }
 
+                    // Feed LoRA state tracker for every worker registration.
+                    // Done before the spawn below so `card.lora` is read before
+                    // `card` is moved into the spawned task's closure.
+                    if let Some(ref lora_info) = card.lora {
+                        use crate::kv_router::protocols::WorkerWithDpRank;
+                        let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+                        self.manager
+                            .lora_state_tracker()
+                            .handle_mdc_addition(worker, lora_info);
+                    }
+
                     // Spawn each handle_put into its own task so that a slow
                     // HuggingFace config download for one model cannot block
                     // discovery events for all subsequent models.
@@ -415,6 +426,21 @@ impl ModelWatcher {
                             continue;
                         }
                     };
+
+                    // Feed LoRA state tracker for worker removal
+                    {
+                        let key = model_card_instance_id.to_path();
+                        if let Some(card) = self.manager.get_model_card(&key)
+                            && let Some(ref lora_info) = card.lora
+                        {
+                            use crate::kv_router::protocols::WorkerWithDpRank;
+                            let worker =
+                                WorkerWithDpRank::new(model_card_instance_id.instance_id, 0);
+                            self.manager
+                                .lora_state_tracker()
+                                .handle_mdc_removal(worker, &lora_info.name);
+                        }
+                    }
 
                     match self
                         .handle_delete(model_card_instance_id, &namespace_filter)

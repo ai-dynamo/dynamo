@@ -352,8 +352,13 @@ pub mod llm {
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
 
-    /// LoRA allocation algorithm ("hrw" or "random")
+    /// LoRA allocation algorithm ("hrw", "random", or "mcf")
     pub const DYN_LORA_ALLOCATION_ALGORITHM: &str = "DYN_LORA_ALLOCATION_ALGORITHM";
+
+    /// JSON configuration for the MCF (min-cost flow) placement solver.
+    /// Example: '{"candidate_m":16,"gamma_load":2000,"beta_keep":500}'
+    /// Omitted fields use defaults. Only relevant when algorithm is "mcf".
+    pub const DYN_LORA_MCF_CONFIG: &str = "DYN_LORA_MCF_CONFIG";
 
     /// LoRA allocation controller recompute interval in seconds
     pub const DYN_LORA_ALLOCATION_TIMESTEP_SECS: &str = "DYN_LORA_ALLOCATION_TIMESTEP_SECS";
@@ -718,6 +723,7 @@ mod tests {
             llm::DYN_LORA_ALLOCATION_BUCKETS_PER_SECOND,
             llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
             llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
+            llm::DYN_LORA_MCF_CONFIG,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::audit::DYN_AUDIT_SINKS,
             llm::audit::DYN_AUDIT_FORCE_LOGGING,

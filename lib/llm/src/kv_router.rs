@@ -245,6 +245,7 @@ where
         model_name: Option<String>,
         is_eagle: bool,
         shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
@@ -295,6 +296,7 @@ where
             Some(overloaded_worker_provider),
             model_name.as_deref(),
             worker_type,
+            lora_filter,
         )
         .await?;
 
@@ -465,7 +467,7 @@ where
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
-            anyhow::bail!("context_id must be provided when update_states is true");
+            anyhow::bail!("context_id must be provided if update_states is true");
         }
         let mode = if update_states {
             ScheduleMode::Tracked {

@@ -14,6 +14,7 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::indexer::try_build_cache_indexer,
     kv_router::{KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics},
+    lora::LoraFilteredRouter,
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
@@ -145,14 +146,30 @@ fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter>>,
+    model_manager: &Arc<crate::discovery::ModelManager>,
     session_affinity_ttl: Option<Duration>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct
-        | RouterMode::Random
-        | RouterMode::RoundRobin
-        | RouterMode::PowerOfTwoChoices
+        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new(
+            router,
+            session_affinity_ttl,
+            true,
+        )?),
+        RouterMode::Random | RouterMode::RoundRobin => {
+            // Non-KV routing: wrap PushRouter with LoraFilteredRouter for 2-stage routing.
+            // When no LoRAs are registered, the filter is a no-op pass-through.
+            let lora_filter = model_manager
+                .lora_filter()
+                .expect("lora_filter() always returns Some");
+            Arc::new(LoraFilteredRouter::new(
+                router,
+                lora_filter,
+                model_manager.lora_load_estimator().clone(),
+                router_mode,
+            ))
+        }
+        RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => Arc::new(SessionAffinityPushRouter::new(
             router,
@@ -219,7 +236,7 @@ pub async fn build_preprocessed_routing(
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
         PrefillRouter::disabled(
-            model_manager,
+            model_manager.clone(),
             router_mode,
             enforce_disagg,
             session_affinity_ttl_secs,
@@ -230,9 +247,9 @@ pub async fn build_preprocessed_routing(
         router,
         router_mode,
         chooser,
+        &model_manager,
         session_affinity_ttl_secs.map(Duration::from_secs),
     )?;
-
     Ok(PreprocessedRouting {
         backend_engine,
         prefill_router,
