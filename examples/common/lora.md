@@ -16,17 +16,15 @@ This example demonstrates how to:
 
 ### Required Software
 - Docker (for running MinIO)
-- Python 3.8+
+- Python 3.10+
 - AWS CLI: `pip install awscli`
 - Hugging Face CLI: `pip install huggingface-hub[cli]`
 - jq (optional, for pretty JSON output): `sudo apt install jq`
 
 ### Python Dependencies
-Make sure you have Dynamo installed with your chosen backend:
-```bash
-pip install dynamo vllm    # for vLLM backend
-pip install dynamo sglang  # for SGLang backend
-```
+Make sure you have Dynamo installed with your chosen backend. See the
+[Dynamo quickstart guide](https://docs.nvidia.com/dynamo/getting-started/quickstart)
+for setup instructions.
 
 ## Quick Start
 

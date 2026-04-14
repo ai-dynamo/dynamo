@@ -11,7 +11,7 @@ For the full LoRA integration guide (setup, usage, API reference, troubleshootin
 
 ## vLLM-Specific Notes
 
-- Default `--max-lora-rank 64` (higher than SGLang's 32)
+- Default `--max-lora-rank 64` (same as SGLang)
 - Override with environment variables: `MODEL`, `LORA_NAME`, `MAX_MODEL_LEN`, `MAX_CONCURRENT_SEQS`
 
 ### KV-Aware Routing (2 GPUs)
