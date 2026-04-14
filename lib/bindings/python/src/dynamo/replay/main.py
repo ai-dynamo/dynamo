@@ -64,13 +64,16 @@ def _load_engine_args(raw_args: str | None):
                 "worker_type must be one of 'aggregated', 'prefill', or 'decode'"
             )
     if "planner_profile_data" in raw:
-        profile_data_result = resolve_planner_profile_data(
-            Path(raw["planner_profile_data"])
-        )
-        if profile_data_result.npz_path is not None:
-            raw["planner_profile_data"] = str(profile_data_result.npz_path)
-        else:
+        if raw["planner_profile_data"] is None:
             del raw["planner_profile_data"]
+        else:
+            profile_data_result = resolve_planner_profile_data(
+                Path(raw["planner_profile_data"])
+            )
+            if profile_data_result.npz_path is not None:
+                raw["planner_profile_data"] = str(profile_data_result.npz_path)
+            else:
+                del raw["planner_profile_data"]
     return MockEngineArgs.from_json(json.dumps(raw))
 
 

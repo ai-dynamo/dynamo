@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from dynamo.replay.main import _load_engine_args
+
 from .replay_utils import (
     _assert_basic_report_counts,
     _assert_basic_report_metrics,
@@ -54,6 +56,21 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
         output_tokens=25,
     )
     _assert_basic_report_metrics(report)
+
+
+def test_load_engine_args_accepts_null_planner_profile_data():
+    engine_args = _load_engine_args(
+        json.dumps(
+            {
+                "block_size": 64,
+                "speedup_ratio": 1000.0,
+                "planner_profile_data": None,
+            }
+        )
+    )
+
+    assert engine_args is not None
+    assert json.loads(engine_args.dump_json())["planner_profile_data"] is None
 
 
 @pytest.mark.timeout(30)
