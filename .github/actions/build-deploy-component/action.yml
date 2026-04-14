@@ -86,7 +86,7 @@ runs:
       env:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        docker buildx build --platform ${{ steps.settings.outputs.lint_platform }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+        docker buildx build --platform ${{ steps.settings.outputs.lint_platform }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
 
     - name: Tester
       shell: bash
@@ -94,7 +94,7 @@ runs:
       env:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
-        docker buildx build --platform ${{ steps.settings.outputs.lint_platform }} --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+        docker buildx build --platform ${{ steps.settings.outputs.lint_platform }} --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
 
     - name: Set up Go
       if: ${{ inputs.component == 'operator' }}
@@ -149,9 +149,10 @@ runs:
           TARGET_FLAG="--target agent"
         fi
 
-        docker buildx build --push ${NO_CACHE_FLAG} \
+        docker buildx build --push \
             --platform ${{ steps.settings.outputs.build_platforms }} \
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            --build-context snapshot=../snapshot \
             ${TARGET_FLAG} \
             ${TAGGING_FLAGS} -f Dockerfile .
 
