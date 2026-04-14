@@ -50,9 +50,14 @@ impl PushEndpoint {
         let endpoint_name_local: Arc<String> = Arc::from(endpoint_name);
         let namespace_local: Arc<String> = Arc::from(namespace);
 
-        system_health
-            .lock()
-            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
+        // Only set Ready eagerly when canary health checks are disabled.
+        // When canary is enabled, it is the sole authority on readiness —
+        // it verifies end-to-end functionality before marking Ready.
+        if !system_health.lock().health_check_enabled() {
+            system_health
+                .lock()
+                .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
+        }
 
         loop {
             let req = tokio::select! {

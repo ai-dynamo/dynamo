@@ -51,6 +51,11 @@ pub struct SystemHealth {
     new_endpoint_tx: mpsc::UnboundedSender<String>,
     new_endpoint_rx: Arc<parking_lot::Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     use_endpoint_health_status: Vec<String>,
+    /// When true, active canary health checks are enabled and the canary is the sole
+    /// authority on endpoint readiness. Transport endpoints (push, http, tcp) should
+    /// NOT eagerly set endpoints to Ready — only the canary should transition
+    /// endpoints from NotReady to Ready after verifying end-to-end functionality.
+    health_check_enabled: bool,
     health_path: String,
     live_path: String,
     start_time: Instant,
@@ -61,6 +66,7 @@ impl SystemHealth {
     pub fn new(
         starting_health_status: HealthStatus,
         use_endpoint_health_status: Vec<String>,
+        health_check_enabled: bool,
         health_path: String,
         live_path: String,
     ) -> Self {
@@ -80,11 +86,19 @@ impl SystemHealth {
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
+            health_check_enabled,
             health_path,
             live_path,
             start_time: Instant::now(),
             uptime_gauge: OnceLock::new(),
         }
+    }
+
+    /// Returns true if active canary health checks are enabled.
+    /// When true, transport endpoints should NOT eagerly set Ready —
+    /// the canary is the sole authority on endpoint readiness.
+    pub fn health_check_enabled(&self) -> bool {
+        self.health_check_enabled
     }
     pub fn set_health_status(&mut self, status: HealthStatus) {
         self.system_health = status;
