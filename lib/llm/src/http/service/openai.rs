@@ -3086,6 +3086,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -3110,6 +3111,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3133,6 +3135,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3156,6 +3159,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3181,6 +3185,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3204,6 +3209,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_completion_fields_generic(&request);
@@ -3235,6 +3241,7 @@ mod tests {
                 "session": {"id": "session-1", "timestamp": 1640995200}
             })
             .into(),
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
