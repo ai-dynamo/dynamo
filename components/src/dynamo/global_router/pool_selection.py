@@ -12,11 +12,34 @@ The config file defines:
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PriorityPoolOverride:
+    """Override pool selection based on request priority from agent hints."""
+
+    min_priority: int  # inclusive lower bound
+    max_priority: int  # inclusive upper bound
+    target_pool: int  # pool index to route to when priority matches
+
+
+def _apply_priority_overrides(
+    base_pool: int,
+    priority: Optional[int],
+    overrides: List[PriorityPoolOverride],
+) -> int:
+    """Apply priority-based pool overrides. First matching rule wins."""
+    if priority is None or not overrides:
+        return base_pool
+    for rule in overrides:
+        if rule.min_priority <= priority <= rule.max_priority:
+            return rule.target_pool
+    return base_pool
 
 
 @dataclass
@@ -30,6 +53,7 @@ class PrefillPoolSelectionStrategy:
     isl_max: int
     isl_resolution: int
     prefill_pool_mapping: List[List[int]]
+    priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
 
     @property
     def ttft_step(self) -> float:
@@ -41,16 +65,23 @@ class PrefillPoolSelectionStrategy:
         """Step size for ISL grid."""
         return (self.isl_max - self.isl_min) / self.isl_resolution
 
-    def select_pool(self, isl: int, ttft_target: Optional[float] = None) -> int:
+    def select_pool(
+        self,
+        isl: int,
+        ttft_target: Optional[float] = None,
+        priority: Optional[int] = None,
+    ) -> int:
         """
-        Select prefill pool based on ISL and TTFT target.
+        Select prefill pool based on ISL, TTFT target, and optional priority.
 
         Args:
             isl: Input sequence length (number of tokens)
             ttft_target: Target time to first token in ms. If None, uses middle of range.
+            priority: Request priority from agent hints. If set and a priority
+                override rule matches, the override takes precedence over the grid.
 
         Returns:
-            Pool index from prefill_pool_mapping
+            Pool index from prefill_pool_mapping or a priority override
         """
         if ttft_target is None:
             ttft_target = (self.ttft_min + self.ttft_max) / 2
@@ -64,9 +95,12 @@ class PrefillPoolSelectionStrategy:
         )
 
         pool_idx = self.prefill_pool_mapping[isl_idx][ttft_idx]
+        pool_idx = _apply_priority_overrides(
+            pool_idx, priority, self.priority_overrides
+        )
         logger.debug(
-            f"Prefill pool selection: ISL={isl}, TTFT={ttft_target} -> "
-            f"grid[{isl_idx}][{ttft_idx}] -> pool {pool_idx}"
+            f"Prefill pool selection: ISL={isl}, TTFT={ttft_target}, "
+            f"priority={priority} -> pool {pool_idx}"
         )
         return pool_idx
 
@@ -87,6 +121,7 @@ class DecodePoolSelectionStrategy:
     context_length_max: int
     context_length_resolution: int
     decode_pool_mapping: List[List[int]]
+    priority_overrides: List[PriorityPoolOverride] = field(default_factory=list)
 
     @property
     def itl_step(self) -> float:
@@ -101,17 +136,22 @@ class DecodePoolSelectionStrategy:
         ) / self.context_length_resolution
 
     def select_pool(
-        self, context_length: int, itl_target: Optional[float] = None
+        self,
+        context_length: int,
+        itl_target: Optional[float] = None,
+        priority: Optional[int] = None,
     ) -> int:
         """
-        Select decode pool based on context length and ITL target.
+        Select decode pool based on context length, ITL target, and optional priority.
 
         Args:
             context_length: Total context length (prompt + generated tokens so far)
             itl_target: Target inter-token latency in ms. If None, uses middle of range.
+            priority: Request priority from agent hints. If set and a priority
+                override rule matches, the override takes precedence over the grid.
 
         Returns:
-            Pool index from decode_pool_mapping
+            Pool index from decode_pool_mapping or a priority override
         """
         if itl_target is None:
             itl_target = (self.itl_min + self.itl_max) / 2
@@ -126,9 +166,12 @@ class DecodePoolSelectionStrategy:
         )
 
         pool_idx = self.decode_pool_mapping[ctx_idx][itl_idx]
+        pool_idx = _apply_priority_overrides(
+            pool_idx, priority, self.priority_overrides
+        )
         logger.debug(
-            f"Decode pool selection: context_length={context_length}, ITL={itl_target} -> "
-            f"grid[{ctx_idx}][{itl_idx}] -> pool {pool_idx}"
+            f"Decode pool selection: context_length={context_length}, ITL={itl_target}, "
+            f"priority={priority} -> pool {pool_idx}"
         )
         return pool_idx
 
@@ -228,6 +271,22 @@ class GlobalRouterConfig:
                         f"(must be 0 to {self.num_prefill_pools - 1})"
                     )
 
+        for i, override in enumerate(prefill_strategy.priority_overrides):
+            if override.min_priority > override.max_priority:
+                raise ValueError(
+                    f"Prefill priority_overrides[{i}]: min_priority "
+                    f"({override.min_priority}) must be <= max_priority "
+                    f"({override.max_priority})"
+                )
+            if (
+                override.target_pool < 0
+                or override.target_pool >= self.num_prefill_pools
+            ):
+                raise ValueError(
+                    f"Prefill priority_overrides[{i}]: invalid target_pool "
+                    f"{override.target_pool} (must be 0 to {self.num_prefill_pools - 1})"
+                )
+
         decode_strategy = self.decode_pool_selection_strategy
         if (
             len(decode_strategy.decode_pool_mapping)
@@ -250,6 +309,22 @@ class GlobalRouterConfig:
                         f"Invalid decode pool index {pool_idx} in mapping "
                         f"(must be 0 to {self.num_decode_pools - 1})"
                     )
+
+        for i, override in enumerate(decode_strategy.priority_overrides):
+            if override.min_priority > override.max_priority:
+                raise ValueError(
+                    f"Decode priority_overrides[{i}]: min_priority "
+                    f"({override.min_priority}) must be <= max_priority "
+                    f"({override.max_priority})"
+                )
+            if (
+                override.target_pool < 0
+                or override.target_pool >= self.num_decode_pools
+            ):
+                raise ValueError(
+                    f"Decode priority_overrides[{i}]: invalid target_pool "
+                    f"{override.target_pool} (must be 0 to {self.num_decode_pools - 1})"
+                )
 
 
 def load_config(config_path: str | Path) -> GlobalRouterConfig:
@@ -277,6 +352,10 @@ def load_config(config_path: str | Path) -> GlobalRouterConfig:
 
     # Parse prefill selection strategy
     prefill_strategy_data = data["prefill_pool_selection_strategy"]
+    prefill_priority_overrides = [
+        PriorityPoolOverride(**rule)
+        for rule in prefill_strategy_data.get("priority_overrides", [])
+    ]
     prefill_strategy = PrefillPoolSelectionStrategy(
         ttft_min=prefill_strategy_data["ttft_min"],
         ttft_max=prefill_strategy_data["ttft_max"],
@@ -285,10 +364,15 @@ def load_config(config_path: str | Path) -> GlobalRouterConfig:
         isl_max=prefill_strategy_data["isl_max"],
         isl_resolution=prefill_strategy_data["isl_resolution"],
         prefill_pool_mapping=prefill_strategy_data["prefill_pool_mapping"],
+        priority_overrides=prefill_priority_overrides,
     )
 
     # Parse decode selection strategy
     decode_strategy_data = data["decode_pool_selection_strategy"]
+    decode_priority_overrides = [
+        PriorityPoolOverride(**rule)
+        for rule in decode_strategy_data.get("priority_overrides", [])
+    ]
     decode_strategy = DecodePoolSelectionStrategy(
         itl_min=decode_strategy_data["itl_min"],
         itl_max=decode_strategy_data["itl_max"],
@@ -297,6 +381,7 @@ def load_config(config_path: str | Path) -> GlobalRouterConfig:
         context_length_max=decode_strategy_data["context_length_max"],
         context_length_resolution=decode_strategy_data["context_length_resolution"],
         decode_pool_mapping=decode_strategy_data["decode_pool_mapping"],
+        priority_overrides=decode_priority_overrides,
     )
 
     config = GlobalRouterConfig(

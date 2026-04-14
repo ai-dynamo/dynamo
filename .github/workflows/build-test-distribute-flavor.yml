@@ -288,7 +288,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -304,7 +304,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.single_gpu_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -362,7 +362,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.multi_gpu_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: amd64
           hf_token: ${{ secrets.HF_TOKEN }}

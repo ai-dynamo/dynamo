@@ -24,19 +24,16 @@ from gpu_memory_service.client.memory_manager import (
 from gpu_memory_service.client.rpc import _GMSRPCTransport
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     GetEventHistoryRequest,
     GetEventHistoryResponse,
     GetRuntimeStateRequest,
     GetRuntimeStateResponse,
 )
-from gpu_memory_service.common.types import (
-    GrantedLockType,
-    RequestedLockType,
-    ServerState,
-)
 from gpu_memory_service.server import allocations as server_allocations
 from gpu_memory_service.server.allocations import GMSAllocationManager
+from gpu_memory_service.server.fsm import ServerState
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 from tests.gms.harness.gms import ServerThread
@@ -44,7 +41,8 @@ from tests.gms.harness.gms import ServerThread
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
-    pytest.mark.gpu_0,
+    pytest.mark.none,
+    pytest.mark.gpu_1,
 ]
 
 
@@ -742,6 +740,55 @@ def test_disconnect_during_allocation_retry_aborts_writer_and_unblocks_next_writ
         next_writer.close()
 
     assert isinstance(result.get("error"), ConnectionError)
+
+
+@pytest.mark.asyncio
+async def test_allocation_manager_caches_exported_fd(monkeypatch):
+    export_calls = 0
+
+    monkeypatch.setattr(server_allocations, "cuda_ensure_initialized", lambda: None)
+    monkeypatch.setattr(
+        server_allocations,
+        "cumem_get_allocation_granularity",
+        lambda device: 4096,
+    )
+    monkeypatch.setattr(
+        server_allocations,
+        "cumem_create_tolerate_oom",
+        lambda size, device: (True, 4242),
+    )
+    monkeypatch.setattr(server_allocations, "cumem_release", lambda handle: None)
+
+    def export_fd(handle: int) -> int:
+        nonlocal export_calls
+        export_calls += 1
+        read_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        return read_fd
+
+    monkeypatch.setattr(
+        server_allocations, "cumem_export_to_shareable_handle", export_fd
+    )
+
+    allocations = GMSAllocationManager(device=0)
+    info = await allocations.allocate(size=4096, tag="weights")
+
+    first_fd = allocations.export_allocation(info.allocation_id)
+    second_fd = allocations.export_allocation(info.allocation_id)
+
+    try:
+        assert export_calls == 1
+        assert info.export_fd >= 0
+        assert first_fd != info.export_fd
+        assert second_fd != info.export_fd
+        assert first_fd != second_fd
+        os.fstat(first_fd)
+        os.fstat(second_fd)
+    finally:
+        os.close(first_fd)
+        os.close(second_fd)
+
+    assert allocations.free_allocation(info.allocation_id)
 
 
 @pytest.mark.asyncio

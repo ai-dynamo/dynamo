@@ -15,6 +15,7 @@ from gpu_memory_service.common.protocol.messages import (
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.none,
     pytest.mark.gpu_0,
 ]
 

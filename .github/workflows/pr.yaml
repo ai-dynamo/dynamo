@@ -7,14 +7,6 @@ on:
   push:
     branches:
       - "pull-request/[0-9]+"
-      # Note: release/* branches are handled by release.yml workflow
-  workflow_dispatch:
-    inputs:
-      run_deploy_operator:
-        description: 'Run deploy operator and deployment tests'
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
@@ -25,15 +17,11 @@ env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
-
   # ============================================================================
   # SETUP & DETECTION JOBS
   # ============================================================================
-
-
   changed-files:
     runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       core: ${{ steps.changes.outputs.core }}
       planner: ${{ steps.changes.outputs.planner }}
@@ -60,10 +48,29 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]  # THIS list determines blocking jobs
+    needs:
+      - changed-files
+      - operator
+      - vllm-build
+      - vllm-dev-build
+      - vllm-test
+      - vllm-multi-gpu-test
+      - vllm-copy-to-acr
+      - sglang-build
+      - sglang-dev-build
+      - sglang-test
+      - sglang-multi-gpu-test
+      - sglang-copy-to-acr
+      - trtllm-build
+      - trtllm-dev-build
+      - trtllm-test
+      - trtllm-multi-gpu-test
+      - trtllm-copy-to-acr
+      - planner-build
+      - planner-test
     if: always()
     steps:
-      - name: "Check all dependent jobs"
+      - name: Check all dependent jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
@@ -72,14 +79,9 @@ jobs:
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     if: always()
     steps:
-      - name: "Check all deploy test jobs"
+      - name: Check all deploy test jobs
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
-
-
-  # ============================================================================
-  # Operator
-  # ============================================================================
 
   operator:
     needs: changed-files
@@ -174,162 +176,348 @@ jobs:
             echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
           done
 
+  # ============================================================================
+  # BUILD PIPELINES
+  # ============================================================================
 
-# ============================================================================
-# FRAMEWORK PIPELINES (Build → Test → Copy)
-# ============================================================================
-  # ============================================================================
-  # PLANNER PIPELINE
-  # ============================================================================
-  planner-pipeline:
-    name: planner
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor.yml
-    with:
-      framework: dynamo
-      builder_flavor: general
-      target: planner
-      platform: 'linux/amd64'
-      cpu_only: true
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 45
-      run_cpu_only_tests: true
-      cpu_only_test_markers: 'pre_merge and planner and gpu_0'
-      cpu_only_test_timeout_minutes: 30
-      run_single_gpu_tests: false
-      run_multi_gpu_tests: false
-      copy_to_acr: false
-    secrets: inherit
-
-  # ============================================================================
-  # VLLM PIPELINE
-  # ============================================================================
-  vllm-pipeline:
-    name: vllm
+  vllm-build:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
+      cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
-      copy_timeout_minutes: 10
-      run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
-      cpu_only_test_markers: 'pre_merge and vllm and gpu_0'
-      run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
-      single_gpu_test_markers: 'pre_merge and vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 35
-      run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' }}
-      multi_gpu_test_markers: 'pre_merge and vllm and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
-  # ============================================================================
-  # SGLANG PIPELINE
-  # ============================================================================
-  sglang-pipeline:
-    name: sglang
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: sglang
-      target: runtime
-      platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 60
-      copy_timeout_minutes: 10
-      run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
-      cpu_only_test_markers: 'pre_merge and sglang and gpu_0'
-      run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
-      single_gpu_test_markers: 'pre_merge and sglang and gpu_1'
-      run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' }}
-      multi_gpu_test_markers: 'pre_merge and sglang and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  # ============================================================================
-  # TRTLLM PIPELINE
-  # ============================================================================
-  trtllm-pipeline:
-    name: trtllm
-    needs: [changed-files]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
-    with:
-      framework: trtllm
-      target: runtime
-      platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["13.1"]'
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 60
-      copy_timeout_minutes: 10
-      run_cpu_only_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
-      cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
-      run_single_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
-      single_gpu_test_markers: 'pre_merge and trtllm and gpu_1'
-      run_multi_gpu_tests: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' }}
-      multi_gpu_test_markers: 'pre_merge and trtllm and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 60
-    secrets: inherit
-
-  # ============================================================================
-  # DEV PIPELINES
-  # ============================================================================
-  vllm-dev-pipeline:
+  vllm-dev-build:
     name: vllm-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/build-flavor.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: dev
+      cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 60
       push_image: false
+      build_timeout_minutes: 60
     secrets: inherit
 
-  sglang-dev-pipeline:
+  sglang-build:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: runtime
+      cuda_version: '["12.9", "13.0"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  sglang-dev-build:
     name: sglang-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
-    uses: ./.github/workflows/build-flavor.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: dev
+      cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 60
       push_image: false
+      build_timeout_minutes: 60
     secrets: inherit
 
-  trtllm-dev-pipeline:
+  trtllm-build:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: runtime
+      cuda_version: '["13.1"]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-dev-build:
     name: trtllm-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/build-flavor.yml
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: dev
+      cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["13.1"]'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      build_timeout_minutes: 60
       push_image: false
+      build_timeout_minutes: 60
     secrets: inherit
 
-   # ============================================================================
-   # DEPLOYMENT JOBS
-   # Deploy operator and run end-to-end tests on Kubernetes cluster
-   # ============================================================================
+  planner-build:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
+    needs: [changed-files]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: planner
+      cuda_version: '[""]'
+      platform: 'linux/amd64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_timeout_minutes: 45
+    secrets: inherit
+
+  # ============================================================================
+  # TEST PIPELINES
+  # ============================================================================
+
+  vllm-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and vllm and gpu_0
+      gpu_test_markers: pre_merge and vllm and gpu_1
+      gpu_test_timeout_minutes: 35
+    secrets: inherit
+
+  vllm-multi-gpu-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  sglang-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and sglang and gpu_0
+      gpu_test_markers: pre_merge and sglang and gpu_1
+    secrets: inherit
+
+  sglang-multi-gpu-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and trtllm and gpu_0
+      gpu_test_markers: pre_merge and trtllm and gpu_1
+    secrets: inherit
+
+  trtllm-multi-gpu-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  planner-test:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
+    needs: [changed-files, planner-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: planner
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
+      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and planner and gpu_0'
+      cpu_only_test_timeout_minutes: 30
+      run_gpu_tests: false
+    secrets: inherit
+
+  # ============================================================================
+  # IMAGE COMPLIANCE PIPELINES
+  # ============================================================================
+
+  vllm-compliance:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: vllm
+      target: runtime
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]'
+    secrets: inherit
+
+  sglang-compliance:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: sglang
+      target: runtime
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]'
+    secrets: inherit
+
+  trtllm-compliance:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [changed-files, trtllm-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: trtllm
+      target: runtime
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+    secrets: inherit
+
+  planner-compliance:
+    name: planner # This name overlaps with other planner jobs to group them in the UI
+    needs: [changed-files, planner-build]
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: dynamo
+      target: planner
+      target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64"]'
+    secrets: inherit
+
+  # ============================================================================
+  # IMAGE COPY PIPELINES
+  # ============================================================================
+
+  vllm-copy-to-acr:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build, vllm-test]
+    if: |
+      always() &&
+      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      needs.vllm-build.result == 'success' &&
+      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  sglang-copy-to-acr:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [changed-files, sglang-build, sglang-test]
+    if: |
+      always() &&
+      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      needs.sglang-build.result == 'success' &&
+      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  trtllm-copy-to-acr:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [changed-files, trtllm-build, trtllm-test]
+    if: |
+      always() &&
+      (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
+      needs.trtllm-build.result == 'success' &&
+      (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
+    uses: ./.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
+      copy_timeout_minutes: 10
+    secrets: inherit
+
+  # ============================================================================
+  # DEPLOY TEST PIPELINES
+  # ============================================================================
 
   deploy-operator:
     if: |
@@ -346,26 +534,25 @@ jobs:
       vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
       operator_tag: ${{ steps.setup.outputs.operator_tag }}
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup vCluster and operator
-      id: setup
-      uses: ./.github/actions/setup-dynamo-operator
-      with:
-        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-        operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
-        hf_token: ${{ secrets.HF_TOKEN }}
-        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - uses: actions/checkout@v4
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.operator.result == 'success' && needs.operator.outputs.operator_default_tag || 'main-operator' }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-test-vllm:
+    name: vllm Deploy Test
+    needs: [changed-files, deploy-operator, vllm-copy-to-acr, vllm-multi-gpu-test]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.vllm-pipeline.result == 'success'
-    needs: [changed-files, deploy-operator, vllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+      (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
@@ -376,13 +563,12 @@ jobs:
     secrets: inherit
 
   deploy-test-sglang:
+    name: sglang Deploy Test
+    needs: [changed-files, deploy-operator, sglang-copy-to-acr, sglang-multi-gpu-test]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.sglang-pipeline.result == 'success'
-    needs: [changed-files, deploy-operator, sglang-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+      (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
@@ -393,13 +579,12 @@ jobs:
     secrets: inherit
 
   deploy-test-trtllm:
+    name: trtllm Deploy Test
+    needs: [changed-files, deploy-operator, trtllm-copy-to-acr, trtllm-multi-gpu-test]
     if: |
       !cancelled() && !failure() &&
-      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
-      needs.deploy-operator.result == 'success' &&
-      needs.trtllm-pipeline.result == 'success'
-    needs: [changed-files, deploy-operator, trtllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+      (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
@@ -414,14 +599,43 @@ jobs:
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
     runs-on: prod-default-small-v2
     steps:
-    - uses: actions/checkout@v4
-    - name: Teardown vCluster
-      if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
-      uses: ./.github/actions/teardown-dynamo-operator
-      with:
-        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-        vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
-        vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - uses: actions/checkout@v4
+      - name: Teardown vCluster
+        if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+
+  clean-k8s-builder:
+    name: Clean K8s builder if exists
+    runs-on: prod-default-small-v2
+    if: always()
+    needs:
+      - changed-files
+      - operator
+      - planner-test
+      - vllm-copy-to-acr
+      - vllm-multi-gpu-test
+      - sglang-copy-to-acr
+      - sglang-multi-gpu-test
+      - trtllm-copy-to-acr
+      - trtllm-multi-gpu-test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Create K8s builders (skip bootstrap)
+        uses: ./.github/actions/bootstrap-buildkit
+        continue-on-error: true
+        with:
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          buildkit_worker_addresses: ''
+          skip_bootstrap: true
+      - name: Builder Cleanup in case of k8s builder
+        shell: bash
+        run: |
+          docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true
 
   # ============================================================================
   # ALLURE REPORT
@@ -429,8 +643,27 @@ jobs:
   # ============================================================================
 
   allure-report:
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    if: ${{ !cancelled() }}
+    needs:
+      - changed-files
+      - operator
+      - vllm-build
+      - vllm-test
+      - vllm-multi-gpu-test
+      - vllm-copy-to-acr
+      - sglang-build
+      - sglang-test
+      - sglang-multi-gpu-test
+      - sglang-copy-to-acr
+      - trtllm-build
+      - trtllm-test
+      - trtllm-multi-gpu-test
+      - trtllm-copy-to-acr
+      - deploy-test-vllm
+      - deploy-test-sglang
+      - deploy-test-trtllm
+    if: false
+    # Disabled: gh-pages branch bloated to ~1GB after 72 commits of Allure reports
+    # if: ${{ !cancelled() }}
     uses: ./.github/workflows/generate-allure-report.yml
     with:
       run_id: ${{ github.run_id }}
@@ -439,28 +672,3 @@ jobs:
     permissions:
       contents: write
       actions: read
-
-  # ============================================================================
-  # CLEANUP JOBS
-  # Clean up ephemeral Kubernetes namespace and resources
-  # ============================================================================
-
-  clean-k8s-builder:
-    name: Clean K8s builder if exists
-    runs-on: prod-default-small-v2
-    if: always()
-    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator, changed-files]
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-    - name: Create K8s builders (skip bootstrap)
-      uses: ./.github/actions/bootstrap-buildkit
-      continue-on-error: true
-      with:
-        builder_name: ${{ needs.changed-files.outputs.builder_name }}
-        buildkit_worker_addresses: '' # k8s builder
-        skip_bootstrap: true
-    - name: Builder Cleanup in case of k8s builder
-      shell: bash
-      run: |
-        docker buildx rm ${{ needs.changed-files.outputs.builder_name }} || true

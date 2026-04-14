@@ -7,7 +7,6 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -19,8 +18,13 @@ from tests.serve.common import (
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
 from tests.serve.lora_utils import MinioLoraConfig
+from tests.serve.multimodal_profiles.vllm import (
+    VLLM_MULTIMODAL_PROFILES,
+    VLLM_TOPOLOGY_SCRIPTS,
+)
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
     cached_tokens_chat_payload,
     chat_payload,
@@ -51,11 +55,13 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
-LOCAL_VIDEO_TEST_PATH = Path(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
-).resolve()
-LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
+# Generated multimodal configs from profile definitions
+_mm_configs: dict[str, VLLMConfig] = {}
+for _profile in VLLM_MULTIMODAL_PROFILES:
+    _mm_configs.update(
+        make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
+    )
 
 # vLLM test configurations
 # NOTE: pytest.mark.gpu_1 tests take ~5.5 minutes total to run sequentially (with models pre-cached)
@@ -64,6 +70,7 @@ LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 # A future collector/launcher can sum profiled_vram_gib values to decide how many tests fit
 # concurrently without exceeding available VRAM.
 vllm_configs = {
+    **_mm_configs,
     "aggregated": VLLMConfig(
         name="aggregated",
         directory=vllm_dir,
@@ -299,6 +306,29 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_same_gpu": VLLMConfig(
+        name="disaggregated_same_gpu",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_023_525_000
+            ),  # KV cache cap (2x safety over min=511_762_432)
+            pytest.mark.timeout(300),  # ~6x observed 50s
+            # post_merge: cumulative sequential test time exceeds 35-min job budget.
+            # Move back to pre_merge once GPU tests run in parallel.
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "deepep": VLLMConfig(
         name="deepep",
         directory=vllm_dir,
@@ -325,44 +355,6 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-        ],
-    ),
-    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements
-    # NOTE: disagg_multimodal_e_pd.sh uses explicit --gpu-memory-utilization via
-    # DYN_ENCODE_GPU_MEM / DYN_PD_GPU_MEM env vars in single-GPU mode.
-    # PD worker honors build_vllm_gpu_mem_args for parallel execution.
-    "multimodal_e_pd_qwen": VLLMConfig(
-        name="multimodal_e_pd_qwen",
-        directory=vllm_dir,
-        script_name="disagg_multimodal_e_pd.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            # No profiled_vram_gib / requested_vllm_kv_cache_bytes: single-GPU mode
-            # uses hardcoded fractions (encode=0.1, PD=0.7) that scale with GPU size.
-            pytest.mark.timeout(340),  # ~5x observed 68.4s; 2B model loads slower on CI
-            pytest.mark.pre_merge,
-        ],
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                # With proper prompt templating, the model actually only returns "green",
-                # verified behavior with native vLLM.
-                expected_response=["green"],
-                temperature=0.0,
-                max_tokens=100,
-            )
         ],
     ),
     "multimodal_agg_frontend_decoding": VLLMConfig(
@@ -403,85 +395,6 @@ vllm_configs = {
                 temperature=0.0,
                 max_tokens=100,
             )
-        ],
-    ),
-    # NOTE: Pack all workers on 1 GPU for lower CI resource requirements.
-    # NOTE: disagg_multimodal_epd.sh uses --kv-cache-memory-bytes=512MB for P/D
-    # workers. Per vLLM CacheConfig, kv_cache_memory_bytes (when not-None) ignores
-    # gpu_memory_utilization (ref: https://docs.vllm.ai/en/stable/api/vllm/config/cache/),
-    # so KV cache overrides have no effect. Regardless of GPU_MEM
-    # fractions (0.1/0.4/0.4), the 3 workers combined consistently use ~17.6 GiB
-    # total on this GPU.
-    # NOTE: disagg_multimodal_epd.sh uses explicit --gpu-memory-utilization via
-    # DYN_ENCODE_GPU_MEM / DYN_PREFILL_GPU_MEM / DYN_DECODE_GPU_MEM env vars.
-    # P/D workers honor build_vllm_gpu_mem_args for parallel execution.
-    "multimodal_disagg_qwen": VLLMConfig(
-        name="multimodal_disagg_qwen",
-        directory=vllm_dir,
-        script_name="disagg_multimodal_epd.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            # No profiled_vram_gib / requested_vllm_kv_cache_bytes: single-GPU mode
-            # uses hardcoded fractions via DYN_*_GPU_MEM that scale with GPU size.
-            pytest.mark.pre_merge,
-        ],
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        timeout=300,
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["green"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    "multimodal_agg_qwen": VLLMConfig(
-        name="multimodal_agg_qwen",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(19.9),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                922_354_000
-            ),  # KV cache cap (2x safety over min=461_176_832)
-            pytest.mark.timeout(
-                360
-            ),  # ~7x observed 50.0s; 7B model loads ~48s on CI (A10G/L4)
-            pytest.mark.post_merge,
-        ],
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
-        delayed_start=0,
-        timeout=360,
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["purple"],
-                max_tokens=100,
-            ),
         ],
     ),
     "multimodal_agg_llava": VLLMConfig(
@@ -528,125 +441,6 @@ vllm_configs = {
             ),
         ],
     ),
-    # Video multimodal tests for CI use the canonical aggregated multimodal launcher.
-    "multimodal_video_agg": VLLMConfig(
-        name="multimodal_video_agg",
-        directory=vllm_dir,
-        script_name="agg_multimodal.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
-        ],  # TODO: profile to get max_vram and timeout
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        delayed_start=60,  # Video models require longer loading time
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
-        timeout=600,  # 10 minutes for video processing overhead
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "Describe the video in detail"},
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["red", "static", "still"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    "multimodal_video_disagg": VLLMConfig(
-        name="multimodal_video_disagg",
-        directory=vllm_dir,
-        script_name="disagg_multimodal_epd.sh",
-        marks=[
-            pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
-        ],  # TODO: profile to get max_vram and timeout
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        delayed_start=60,  # Video models require longer loading time
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct", "--single-gpu"],
-        timeout=600,  # 10 minutes for video processing overhead
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "Describe the video in detail"},
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["red", "static", "still"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    # Audio multimodal tests for nightly CI pipeline
-    # These tests validate audio inference capabilities with Qwen2-Audio model
-    "multimodal_audio_agg": VLLMConfig(
-        name="multimodal_audio_agg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="audio_agg.sh",
-        marks=[
-            pytest.mark.gpu_2,  # encode worker loads Qwen2Audio on GPU (~19 GiB)
-            pytest.mark.nightly,
-            pytest.mark.timeout(600),
-        ],
-        model="Qwen/Qwen2-Audio-7B-Instruct",
-        delayed_start=0,
-        script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "What is recited in the audio?"},
-                    {
-                        "type": "audio_url",
-                        "audio_url": {
-                            "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
-                        },
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["Hester", "Pynne"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
-    "multimodal_audio_disagg": VLLMConfig(
-        name="multimodal_audio_disagg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-        script_name="audio_disagg.sh",
-        marks=[
-            pytest.mark.gpu_4,  # needs 3 GPUs (encode loads Qwen2Audio ~19 GiB + prefill + decode)
-            pytest.mark.nightly,
-            pytest.mark.timeout(600),
-        ],
-        model="Qwen/Qwen2-Audio-7B-Instruct",
-        delayed_start=0,
-        script_args=["--model", "Qwen/Qwen2-Audio-7B-Instruct"],
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "What is recited in the audio?"},
-                    {
-                        "type": "audio_url",
-                        "audio_url": {
-                            "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
-                        },
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["Hester", "Pynne"],
-                temperature=0.0,
-                max_tokens=100,
-            )
-        ],
-    ),
     "aggregated_toolcalling": VLLMConfig(
         name="aggregated_toolcalling",
         directory=vllm_dir,
@@ -655,13 +449,19 @@ vllm_configs = {
             pytest.mark.gpu_1,  # agg_multimodal.sh uses single GPU
             pytest.mark.multimodal,
             pytest.mark.nightly,
+            pytest.mark.profiled_vram_gib(
+                19.9
+            ),  # align with multimodal_agg_qwen (7B VLM)
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
         ],
-        model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=[
             "--model",
-            "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
             "--max-model-len",
-            "10000",
+            "8192",
             "--dyn-tool-call-parser",
             "hermes",
         ],
@@ -709,17 +509,16 @@ vllm_configs = {
                             },
                         }
                     ],
-                    "tool_choice": "auto",
+                    "tool_choice": "required",
                     "max_tokens": 1024,
                 },
                 repeat_count=1,
                 expected_response=[
-                    "green",
                     "purple",
-                    "llm",
-                    "optimize",
-                    "deploy",
-                ],  # OR: pass if any keyword found in tool args
+                    "green",
+                    "lavender",
+                    "violet",
+                ],
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
             )
@@ -857,8 +656,9 @@ def test_serve_deployment(
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.gpu_2
+@pytest.mark.gpu_1
 @pytest.mark.nightly
+@pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
     request,
@@ -871,6 +671,11 @@ def test_multimodal_b64(
 
     This test is separate because it loads the required image at runtime
     (not collection time), ensuring it only fails when actually executed.
+
+    Runs on gpu_1 alongside other single-GPU multimodal tests that use the
+    same model (mm_agg_qwen2.5-vl-7b).  The ``@pytest.mark.model`` mark is
+    kept as a safety net so the model is predownloaded even if no other
+    gpu_1 config collects this model in a given CI job.
     """
     # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
@@ -928,6 +733,10 @@ def test_multimodal_b64_frontend_decoding(
     This exercises the Rust frontend image decode + NIXL RDMA transfer path
     with inline base64 data: URIs (not HTTP URLs). Verifies that the
     strip_inline_data_urls optimization does not break correctness.
+
+    HF predownload: same model is already listed via ``@pytest.mark.model`` on
+    ``test_serve_deployment[multimodal_video_agg]`` (pre_merge + gpu_1), so no
+    extra ``model`` mark is needed here for PR CI.
     """
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
 

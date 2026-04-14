@@ -19,8 +19,8 @@ use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::KvManager;
 use crate::replay::TraceCollector;
 use crate::scheduler::{
-    AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, RouterEventVisibility,
-    capture_router_event_sink,
+    AdmissionEvent, CapturedRouterEventBuffer, EnginePassResult, ForwardPassSnapshot,
+    RouterEventVisibility, build_fpm_snapshot, capture_router_event_sink,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,12 @@ struct ScheduledWork {
     total_tokens: usize,
     prompt_tokens: usize,
     prefix_tokens: usize,
+    /// Full prompt length, captured at schedule time for FPM variance calculation.
+    prompt_len: usize,
+    /// Total sequence length (prompt + generated) at schedule time, used for
+    /// decode KV context in FPM. Captured here because completed requests are
+    /// removed from state before `compute_fpm` runs.
+    sequence_len: usize,
 }
 
 enum ScheduleOutcome {
@@ -380,6 +386,8 @@ impl VllmCore {
         let (decode_time, output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
         let end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
 
+        let fpm = self.compute_fpm(&scheduled, (end_ms - now_ms) / 1000.0);
+
         debug_assert_vllm_scheduler_state(&self.state);
         EnginePassResult {
             end_ms,
@@ -393,6 +401,7 @@ impl VllmCore {
                 .as_ref()
                 .map(CapturedRouterEventBuffer::drain)
                 .unwrap_or_default(),
+            fpm: Some(fpm),
         }
     }
 
@@ -404,6 +413,52 @@ impl VllmCore {
             self.kv_manager.process(&signal);
         }
         self.state.complete(&uuid);
+    }
+
+    /// Compute a forward pass metrics snapshot from the just-completed pass.
+    ///
+    /// `scheduled` contains the work items that were scheduled in this iteration.
+    /// Per-request metadata (prompt_len, sequence_len) is captured in `ScheduledWork`
+    /// at schedule time, so this method does not depend on `self.state.requests` for
+    /// scheduled requests — completed requests may have already been removed.
+    /// Queue metrics are derived from `self.state.waiting` at the moment of the call.
+    fn compute_fpm(
+        &self,
+        scheduled: &FxHashMap<Uuid, ScheduledWork>,
+        wall_time_secs: f64,
+    ) -> ForwardPassSnapshot {
+        let scheduled_prefills = scheduled.values().filter_map(|work| {
+            (work.prompt_tokens > 0).then_some((
+                work.prompt_len as u64,
+                work.prefix_tokens as u64,
+                work.total_tokens as u64,
+            ))
+        });
+
+        let scheduled_decodes = scheduled
+            .values()
+            .filter_map(|work| (work.prompt_tokens == 0).then_some(work.sequence_len as u64));
+
+        let queued_prefills = self.state.waiting.iter().filter_map(|uuid| {
+            let request = self.state.requests.get(uuid)?;
+            matches!(request.status, RequestStatus::Waiting)
+                .then_some(request.sequence.num_input_tokens() as u64)
+        });
+
+        let queued_decodes = self.state.waiting.iter().filter_map(|uuid| {
+            let request = self.state.requests.get(uuid)?;
+            matches!(request.status, RequestStatus::Preempted).then_some(
+                (request.sequence.num_input_tokens() + request.sequence.generated_tokens()) as u64,
+            )
+        });
+
+        build_fpm_snapshot(
+            scheduled_prefills,
+            scheduled_decodes,
+            queued_prefills,
+            queued_decodes,
+            wall_time_secs,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -539,12 +594,20 @@ impl VllmCore {
 
         let prompt_after = actual_computed_after.min(prompt_len);
         let prompt_tokens = prompt_after.saturating_sub(prompt_before);
+        let sequence_len = self
+            .state
+            .requests
+            .get(&uuid)
+            .map(|r| r.sequence.len())
+            .unwrap_or(0);
         scheduled.insert(
             uuid,
             ScheduledWork {
                 total_tokens: tokens_used,
                 prompt_tokens,
                 prefix_tokens: prompt_before,
+                prompt_len,
+                sequence_len,
             },
         );
         if prompt_tokens > 0 && self.args.worker_type != WorkerType::Decode {

@@ -49,8 +49,8 @@ from gpu_memory_service.common.cuda_utils import (
     cumem_set_access,
     cumem_unmap,
 )
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
-from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 
 logger = logging.getLogger(__name__)
 

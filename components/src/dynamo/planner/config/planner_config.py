@@ -15,6 +15,7 @@
 
 import json
 import logging
+import math
 import os
 from enum import Enum
 from pathlib import Path
@@ -54,6 +55,15 @@ class PlannerConfig(BaseModel):
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
+    optimization_target: Literal["throughput", "latency", "sla"] = Field(
+        default="throughput",
+        description=(
+            "Scaling optimization target. "
+            "'throughput' (default) and 'latency' use static thresholds on queue "
+            "depth and KV cache utilization — no SLA targets or profiling needed. "
+            "'sla' uses regression-based scaling that targets specific ttft/itl values."
+        ),
+    )
 
     no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
@@ -97,7 +107,6 @@ class PlannerConfig(BaseModel):
         "frontend", "router"
     ] = SLAPlannerDefaults.throughput_metrics_source
 
-    no_correction: bool = SLAPlannerDefaults.no_correction
     model_name: Optional[str] = None
 
     # Global planner environment
@@ -108,22 +117,74 @@ class PlannerConfig(BaseModel):
     enable_load_scaling: bool = SLAPlannerDefaults.enable_load_scaling
 
     # Load-based scaling settings
-    load_adjustment_interval: int = SLAPlannerDefaults.load_adjustment_interval
-    load_learning_window: int = SLAPlannerDefaults.load_learning_window
+    load_adjustment_interval: int = Field(
+        default=SLAPlannerDefaults.load_adjustment_interval,
+        description=(
+            "Interval in seconds for FPM regression model updates AND load-based "
+            "scaling decisions. Even when only throughput-based scaling is enabled, "
+            "live FPM observations are fed into the regression at this interval to "
+            "keep the performance model accurate. Must be shorter than "
+            "throughput_adjustment_interval."
+        ),
+    )
+    max_num_fpm_samples: int = SLAPlannerDefaults.max_num_fpm_samples
+    fpm_sample_bucket_size: int = SLAPlannerDefaults.fpm_sample_bucket_size
     load_scaling_down_sensitivity: int = (
         SLAPlannerDefaults.load_scaling_down_sensitivity
     )
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
+    # Diagnostics report settings
+    report_interval_hours: Optional[float] = Field(
+        default=None,
+        description=(
+            "Generate an HTML diagnostics report every N hours (simulated time). "
+            "Set to None to disable periodic report generation."
+        ),
+    )
+    report_output_dir: str = Field(
+        default="./planner_reports",
+        description="Directory for HTML diagnostics reports.",
+    )
+
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
-        # global-planner environment requires a namespace
+        if self.report_interval_hours is not None:
+            if (
+                not math.isfinite(self.report_interval_hours)
+                or self.report_interval_hours <= 0
+            ):
+                raise ValueError(
+                    "report_interval_hours must be a positive finite number or None"
+                )
+
+        sqrt = math.isqrt(self.fpm_sample_bucket_size)
+        if sqrt * sqrt != self.fpm_sample_bucket_size:
+            raise ValueError(
+                f"fpm_sample_bucket_size must be a perfect square, "
+                f"got {self.fpm_sample_bucket_size}"
+            )
+
         if self.environment == "global-planner" and not self.global_planner_namespace:
             raise ValueError(
                 "global_planner_namespace is required when environment='global-planner'. "
                 "Please specify the namespace where GlobalPlanner is running."
             )
+
+        # Easy mode: force load scaling on, throughput scaling off
+        if self.optimization_target != "sla":
+            self.enable_load_scaling = True
+            self.enable_throughput_scaling = False
+            if (
+                self.ttft != SLAPlannerDefaults.ttft
+                or self.itl != SLAPlannerDefaults.itl
+            ):
+                logger.warning(
+                    "optimization_target=%s ignores ttft/itl values; "
+                    "set optimization_target='sla' to use SLA-based scaling",
+                    self.optimization_target,
+                )
 
         # At least one scaling mode must be enabled
         if not self.enable_throughput_scaling and not self.enable_load_scaling:
@@ -145,7 +206,6 @@ class PlannerConfig(BaseModel):
                 )
 
         if self.enable_load_scaling:
-            # Load-based interval must be shorter than throughput interval
             if self.enable_throughput_scaling:
                 if self.load_adjustment_interval >= self.throughput_adjustment_interval:
                     raise ValueError(
@@ -154,15 +214,6 @@ class PlannerConfig(BaseModel):
                         "Load-based scaling is the fast reactive loop; throughput-based is the "
                         "slow predictive loop."
                     )
-
-            # Auto-disable correction factor when load-based scaling is enabled
-            if not self.no_correction:
-                logger.warning(
-                    "Correction factor is automatically disabled when load-based "
-                    "scaling is enabled. Load-based scaling already accounts for "
-                    "actual latency conditions."
-                )
-                self.no_correction = True
 
         return self
 

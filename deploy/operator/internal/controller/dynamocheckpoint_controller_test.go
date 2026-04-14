@@ -25,7 +25,6 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
@@ -33,6 +32,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -60,9 +60,7 @@ var testHash = func() string {
 	return hash
 }()
 
-var defaultCheckpointJobName = checkpointjob.DesiredCheckpointJobName(testHash, map[string]string{
-	snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
-})
+var defaultCheckpointJobName = snapshotprotocol.GetCheckpointJobName(testHash, snapshotprotocol.DefaultCheckpointArtifactVersion)
 
 func checkpointTestScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -70,6 +68,7 @@ func checkpointTestScheme() *runtime.Scheme {
 	_ = corev1.AddToScheme(s)
 	_ = batchv1.AddToScheme(s)
 	_ = coordinationv1.AddToScheme(s)
+	_ = rbacv1.AddToScheme(s)
 	return s
 }
 
@@ -140,15 +139,15 @@ func TestBuildCheckpointJob(t *testing.T) {
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
-	job, err := checkpointjob.BuildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
+	job, err := buildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 	podSpec := job.Spec.Template.Spec
 	main := podSpec.Containers[0]
 
 	// Job and pod template labels
-	assert.Equal(t, testHash, job.Labels[consts.KubeLabelCheckpointID])
-	assert.Equal(t, "true", job.Spec.Template.Labels[consts.KubeLabelIsCheckpointSource])
-	assert.Equal(t, testHash, job.Spec.Template.Labels[consts.KubeLabelCheckpointID])
+	assert.Equal(t, testHash, job.Labels[snapshotprotocol.CheckpointIDLabel])
+	assert.Equal(t, "true", job.Spec.Template.Labels[snapshotprotocol.CheckpointSourceLabel])
+	assert.Equal(t, testHash, job.Spec.Template.Labels[snapshotprotocol.CheckpointIDLabel])
 
 	// Env vars (checkpoint-specific + user-provided preserved)
 	envMap := make(map[string]string, len(main.Env))
@@ -180,7 +179,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	require.NotNil(t, podSpec.SecurityContext)
 	require.NotNil(t, podSpec.SecurityContext.SeccompProfile)
 	assert.Equal(t, corev1.SeccompProfileTypeLocalhost, podSpec.SecurityContext.SeccompProfile.Type)
-	assert.Equal(t, consts.SeccompProfilePath, *podSpec.SecurityContext.SeccompProfile.LocalhostProfile)
+	assert.Equal(t, snapshotprotocol.DefaultSeccompLocalhostProfile, *podSpec.SecurityContext.SeccompProfile.LocalhostProfile)
 	require.NotNil(t, podSpec.SecurityContext.RunAsUser)
 	assert.Equal(t, int64(1234), *podSpec.SecurityContext.RunAsUser)
 	require.NotNil(t, podSpec.SecurityContext.FSGroup)
@@ -197,14 +196,14 @@ func TestBuildCheckpointJob(t *testing.T) {
 	for _, v := range podSpec.Volumes {
 		volNames[v.Name] = true
 	}
-	assert.False(t, volNames[consts.CheckpointVolumeName])
+	assert.False(t, volNames[snapshotprotocol.CheckpointVolumeName])
 	assert.True(t, volNames[consts.PodInfoVolumeName])
 
 	mountPaths := make(map[string]string)
 	for _, m := range main.VolumeMounts {
 		mountPaths[m.Name] = m.MountPath
 	}
-	_, hasCheckpointMount := mountPaths[consts.CheckpointVolumeName]
+	_, hasCheckpointMount := mountPaths[snapshotprotocol.CheckpointVolumeName]
 	assert.False(t, hasCheckpointMount)
 	assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	assert.Equal(t, consts.DefaultSharedMemoryMountPath, mountPaths[consts.KubeValueNameSharedMemory])
@@ -237,7 +236,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 	backoff := int32(5)
 	ckpt.Spec.Job.ActiveDeadlineSeconds = &deadline
 	ckpt.Spec.Job.BackoffLimit = &backoff //nolint:staticcheck // Compatibility test: deprecated field must remain ignored by checkpoint Jobs.
-	job, err = checkpointjob.BuildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
+	job, err = buildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 	assert.Equal(t, int64(7200), *job.Spec.ActiveDeadlineSeconds)
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
@@ -248,7 +247,7 @@ func TestBuildCheckpointJob(t *testing.T) {
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 		},
 	}
-	job, err = checkpointjob.BuildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
+	job, err = buildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"cuda-checkpoint"}, job.Spec.Template.Spec.Containers[0].Command)
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
@@ -273,7 +272,7 @@ func TestBuildCheckpointJobInjectsStandardEnvVars(t *testing.T) {
 
 	customShmSize := resource.MustParse("16Gi")
 	ckpt.Spec.Job.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{Size: customShmSize}
-	job, err := checkpointjob.BuildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
+	job, err := buildCheckpointJob(r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 	foundCustomShmVolume := false
 	for _, v := range job.Spec.Template.Spec.Volumes {
@@ -326,7 +325,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhasePending, updated.Status.Phase)
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 		assert.Empty(t, updated.Status.Message)
-		assert.Equal(t, testHash, updated.Labels[consts.KubeLabelCheckpointID])
+		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
 	})
 
 	t.Run("Ready phase is a no-op", func(t *testing.T) {
@@ -352,7 +351,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: friendlyCheckpointName, Namespace: testNamespace}, updated))
-		assert.Equal(t, testHash, updated.Labels[consts.KubeLabelCheckpointID])
+		assert.Equal(t, testHash, updated.Labels[snapshotprotocol.CheckpointIDLabel])
 		assert.Equal(t, testHash, updated.Status.IdentityHash)
 	})
 
@@ -375,7 +374,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
 		ckpt.Status.IdentityHash = testHash
 		ckpt.Status.JobName = defaultCheckpointJobName
-		ckpt.Annotations = map[string]string{consts.KubeAnnotationCheckpointArtifactVersion: "2"}
+		ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "2"}
 		r := makeCheckpointReconciler(s, ckpt)
 
 		_, err := r.Reconcile(ctx, ctrl.Request{
@@ -584,7 +583,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 
 	t.Run("in-flight version changes do not relabel the running job's artifact", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
-		ckpt.Annotations = map[string]string{consts.KubeAnnotationCheckpointArtifactVersion: "2"}
+		ckpt.Annotations = map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "2"}
 		job := &batchv1.Job{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        defaultCheckpointJobName,

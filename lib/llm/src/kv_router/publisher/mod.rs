@@ -34,7 +34,7 @@ mod worker_metrics;
 mod zmq_listener;
 
 #[cfg(test)]
-use event_processor::{BatchingState, run_event_processor_loop};
+use event_processor::{BatchingState, EventDedupFilter, run_event_processor_loop};
 use event_processor::{
     EventPlanePublisher, start_event_processor, start_event_processor_jetstream,
 };
