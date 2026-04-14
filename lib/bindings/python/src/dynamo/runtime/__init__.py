@@ -3,8 +3,9 @@
 
 import asyncio
 import os
+import warnings
 from functools import wraps
-from typing import Any, AsyncGenerator, Callable, Type, Union
+from typing import Any, AsyncGenerator, Callable, Optional, Type, Union
 
 from pydantic import BaseModel, ValidationError
 
@@ -16,10 +17,23 @@ from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
 
 
-def dynamo_worker():
+def dynamo_worker(enable_nats: Optional[bool] = None):
     """
     Decorator that creates a DistributedRuntime and passes it to the worker function.
+
+    Args:
+        enable_nats: Deprecated. NATS enablement is now determined automatically
+            from the event-plane configuration. This parameter is accepted for
+            backwards compatibility but will be removed in a future release.
     """
+    if enable_nats is not None:
+        warnings.warn(
+            "The 'enable_nats' parameter is deprecated and will be removed in a "
+            "future release. NATS enablement is now determined automatically from "
+            "the event-plane configuration.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     def decorator(func):
         @wraps(func)

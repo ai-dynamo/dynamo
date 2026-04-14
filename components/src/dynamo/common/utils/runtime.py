@@ -13,7 +13,8 @@ Provides:
 
 import asyncio
 import os
-from typing import Tuple
+import warnings
+from typing import Optional, Tuple
 
 from dynamo.runtime import DistributedRuntime
 
@@ -46,16 +47,30 @@ def create_runtime(
     discovery_backend: str,
     request_plane: str,
     event_plane: str,
+    use_kv_events: Optional[bool] = None,
 ) -> Tuple[DistributedRuntime, asyncio.AbstractEventLoop]:
     """Create a DistributedRuntime.
+
     Args:
         discovery_backend: Discovery backend type (kubernetes, etcd, file, mem).
         request_plane: Request distribution method (nats, http, tcp).
         event_plane: Event publishing method (nats, zmq).
+        use_kv_events: Deprecated. NATS enablement is now determined automatically
+            from the event-plane configuration. This parameter is accepted for
+            backwards compatibility but will be removed in a future release.
 
     Returns:
         Tuple of (runtime, event_loop).
     """
+    if use_kv_events is not None:
+        warnings.warn(
+            "The 'use_kv_events' parameter is deprecated and will be removed in a "
+            "future release. NATS enablement is now determined automatically from "
+            "the event-plane configuration.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     loop = asyncio.get_running_loop()
 
     os.environ["DYN_EVENT_PLANE"] = event_plane
