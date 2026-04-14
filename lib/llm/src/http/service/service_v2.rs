@@ -151,7 +151,9 @@ impl State {
         }
     }
 
-    /// Create state with full configuration including stateful responses support
+    /// Create state with full configuration including stateful responses support.
+    /// Delegates to [`State::new`] so that newly added fields only need updating
+    /// in one place.
     fn with_options(
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
@@ -159,24 +161,10 @@ impl State {
         response_storage: Arc<dyn ResponseStorage>,
         stateful_responses_enabled: bool,
     ) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-            discovery_client,
-            flags: StateFlags {
-                chat_endpoints_enabled: AtomicBool::new(false),
-                cmpl_endpoints_enabled: AtomicBool::new(false),
-                embeddings_endpoints_enabled: AtomicBool::new(false),
-                images_endpoints_enabled: AtomicBool::new(false),
-                videos_endpoints_enabled: AtomicBool::new(false),
-                audios_endpoints_enabled: AtomicBool::new(false),
-                responses_endpoints_enabled: AtomicBool::new(false),
-                anthropic_endpoints_enabled: AtomicBool::new(false),
-            },
-            cancel_token,
-            response_storage,
-            stateful_responses_enabled,
-        }
+        let mut state = Self::new(manager, discovery_client, cancel_token);
+        state.response_storage = response_storage;
+        state.stateful_responses_enabled = stateful_responses_enabled;
+        state
     }
 
     /// Check if stateful responses features are enabled

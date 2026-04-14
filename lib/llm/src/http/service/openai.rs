@@ -2319,9 +2319,18 @@ async fn get_model_openai(
 /// Handle GET /v1/responses/{id} -- retrieve a stored response
 async fn handler_get_response(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Extension(session): Extension<RequestSession>,
+    session_ext: Option<Extension<RequestSession>>,
     Path(response_id): Path<String>,
 ) -> Result<Response, ErrorResponse> {
+    let session = session_ext
+        .map(|Extension(s)| s)
+        .ok_or_else(|| {
+            ErrorMessage::from_http_error(HttpError {
+                code: 400,
+                message: "Session middleware not available; stateful responses may not be enabled"
+                    .to_string(),
+            })
+        })?;
     let storage = state.response_storage();
 
     match storage
@@ -2371,9 +2380,18 @@ async fn handler_get_response(
 /// Handle DELETE /v1/responses/{id} -- delete a stored response
 async fn handler_delete_response(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Extension(session): Extension<RequestSession>,
+    session_ext: Option<Extension<RequestSession>>,
     Path(response_id): Path<String>,
 ) -> Result<Response, ErrorResponse> {
+    let session = session_ext
+        .map(|Extension(s)| s)
+        .ok_or_else(|| {
+            ErrorMessage::from_http_error(HttpError {
+                code: 400,
+                message: "Session middleware not available; stateful responses may not be enabled"
+                    .to_string(),
+            })
+        })?;
     let storage = state.response_storage();
 
     match storage
@@ -3115,12 +3133,14 @@ mod tests {
         );
     }
 
+    /// Validates that truly unsupported Responses API fields are rejected.
+    /// Note: `previous_response_id` is intentionally absent -- it is supported
+    /// via stateful responses and validated separately.
     #[test]
     fn test_validate_unsupported_fields_detects_flags() {
         #[allow(clippy::type_complexity)]
         let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
             ("background", Box::new(|r| r.background = Some(true))),
-            // previous_response_id is now supported via stateful responses
             (
                 "prompt",
                 Box::new(|r| {
