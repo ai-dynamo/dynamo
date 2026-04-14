@@ -203,12 +203,14 @@ class ImageGenerationHandler(BaseGenerativeHandler):
 
         # Encode media based on what the pipeline returned
         if output.image is not None:
-            # MediaOutput.image is (H, W, C) uint8 since TRT-LLM rc9;
-            image = output.image
+            # MediaOutput.image is (B, H, W, C) uint8 since TRT-LLM rc9;
+            images = output.image
             assert (
-                image.ndim == 3 and image.shape[2] == 3
-            ), f"Expected image shape (H, W, C), got {image.shape}"
-            image_np = image.cpu().numpy()
+                images.ndim == 4 and images.shape[3] == 3
+            ), f"Expected image shape (B, H, W, C), got {images.shape}"
+            # [gluo FIXME] currently only take the first image but the protocol supports multiple images
+            # verify if TRT-LLM will generate multiple images, relax this constraint if that's the case
+            image_np = images[0].cpu().numpy()
             logger.info(
                 f"Request {request_id}: encoding image output "
                 f"(shape={image_np.shape}) to PNG"

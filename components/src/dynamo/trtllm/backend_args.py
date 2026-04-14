@@ -487,6 +487,7 @@ class DynamoTrtllmConfig(ConfigBase):
     default_height: int
     default_width: int
     default_num_frames: int
+    default_num_images_per_prompt: int
     default_num_inference_steps: int
     default_guidance_scale: float
     torch_dtype: str

@@ -81,6 +81,7 @@ async def init_video_diffusion_worker(
         default_height=config.default_height,
         default_width=config.default_width,
         default_num_frames=config.default_num_frames,
+        default_num_images_per_prompt=config.default_num_images_per_prompt,
         default_num_inference_steps=config.default_num_inference_steps,
         default_guidance_scale=config.default_guidance_scale,
         # Pipeline optimization

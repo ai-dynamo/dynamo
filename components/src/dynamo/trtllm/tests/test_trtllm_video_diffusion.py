@@ -177,6 +177,7 @@ class MockDiffusionConfig:
     default_width: int = 832
     default_height: int = 480
     default_num_frames: int = 81
+    default_num_images_per_prompt: int = 1
     default_fps: int = 24
     default_seconds: int = 4
     max_width: int = 4096

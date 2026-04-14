@@ -48,18 +48,17 @@ if [[ -n "$OVERRIDE_JSON" ]]; then
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner --no-curl "Launching Video Diffusion Serving (1 GPU)" "$MODEL_PATH" "$HTTP_PORT" \
+print_launch_banner --no-curl "Launching Image Diffusion Serving (1 GPU)" "$MODEL_PATH" "$HTTP_PORT" \
     "Media URL:   $MEDIA_OUTPUT_FS_URL"
 
 # [gluo WIP] different curl command for image diffusion (endpoint different)
 print_curl_footer <<CURL
-  curl http://localhost:${HTTP_PORT}/v1/videos \\
+  curl http://localhost:${HTTP_PORT}/v1/images/generations \\
     -H 'Content-Type: application/json' \\
     -d '{
       "model": "${SERVED_MODEL_NAME}",
       "prompt": "${EXAMPLE_PROMPT_VISUAL}",
-      "size": "832x480",
-      "seconds": 4,
+      "size": "256x256",
       "nvext": {"num_inference_steps": 10, "seed": 42}
     }'
 CURL

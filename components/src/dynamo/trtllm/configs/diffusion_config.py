@@ -64,6 +64,7 @@ class DiffusionConfig:
     max_height: int = 4096
     max_width: int = 4096
     default_num_frames: int = 81
+    default_num_images_per_prompt: int = 1
     default_fps: int = 24  # Used for both frame count calculation and video encoding
     default_seconds: int = 4  # Default video duration when only fps is specified
     default_num_inference_steps: int = 50
@@ -129,6 +130,7 @@ class DiffusionConfig:
             f"default_height={self.default_height}, "
             f"default_width={self.default_width}, "
             f"default_num_frames={self.default_num_frames}, "
+            f"default_num_images_per_prompt={self.default_num_images_per_prompt}, "
             f"default_num_inference_steps={self.default_num_inference_steps}, "
             f"enable_teacache={self.enable_teacache}, "
             f"attn_backend={self.attn_backend}, "
