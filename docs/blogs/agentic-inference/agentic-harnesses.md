@@ -535,4 +535,6 @@ The architecture from the first post only pays off if the harness-facing layer p
 
 Prompt stability affects KV reuse. Replay fidelity affects whether the next turn can hit cache at all. Stream semantics affect when the harness can act. Metadata fidelity affects whether the client can manage context and model selection correctly. None of that is a thin compatibility shim over the "real" serving stack. For agentic workloads, it is part of the serving stack.
 
+Dynamo is open-sourcing several of these layers as standalone Rust crates: tool call parsing, the HTTP frontend, and tokenizer bindings (coming soon). If you want to build a custom serving pipeline rather than deploy the full stack, you can pull in just the pieces you need. The crates carry the same harness-facing correctness guarantees described above without requiring a Dynamo deployment.
+
 For agentic workloads, protocol fidelity is performance work.
