@@ -308,9 +308,10 @@ impl PrefillRouter {
         }
     }
 
-    /// Check if disaggregated mode is currently active (prefill router activated)
+    /// Check if disaggregated mode is currently active (prefill router activated).
+    /// Uses the same `activated` flag as `can_serve_requests()` for consistency.
     pub fn is_activated(&self) -> bool {
-        self.prefill_router.get().is_some()
+        self.activated.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Whether disaggregated mode is strictly enforced (fail if no prefill workers).

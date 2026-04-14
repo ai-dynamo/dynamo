@@ -46,6 +46,9 @@ pub enum ModelManagerError {
     #[error("Model not found: {0}")]
     ModelNotFound(String),
 
+    #[error("Model unavailable: {0}")]
+    ModelUnavailable(String),
+
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
 }
@@ -711,6 +714,20 @@ impl ModelManager {
                     && pr.is_deactivated()
                 {
                     pr.reactivate();
+                    // Store the endpoint so that if the decode WorkerSet is rebuilt
+                    // (removed and re-added), a subsequent register_prefill_router call
+                    // finds PrefillReady instead of falling back to DecodeWaiting and
+                    // stalling.
+                    let (tx, rx) = oneshot::channel();
+                    tx.send(endpoint).map_err(|_| {
+                        anyhow::anyhow!(
+                            "Failed to send endpoint for prefill model {}:{}",
+                            model_name,
+                            namespace
+                        )
+                    })?;
+                    self.prefill_router_activators
+                        .insert(key, PrefillActivationState::PrefillReady(rx));
                     tracing::info!(
                         model_name = %model_name,
                         namespace = %namespace,
@@ -1125,18 +1142,22 @@ mod tests {
 
     use crate::kv_router::PrefillRouter;
 
-    /// Helper: make a WorkerSet with a PrefillRouter attached.
+    /// Helper: make a WorkerSet with an activated PrefillRouter attached.
+    /// The router is marked as activated to simulate a real deployment where
+    /// the prefill endpoint has already rendezvoused with the decode side.
     fn make_worker_set_with_prefill_router(
         namespace: &str,
         mdcsum: &str,
         enforce_disagg: bool,
     ) -> WorkerSet {
         let mut ws = make_worker_set(namespace, mdcsum);
-        ws.prefill_router = Some(PrefillRouter::disabled(
+        let pr = PrefillRouter::disabled(
             std::sync::Arc::new(ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
-        ));
+        );
+        pr.mark_activated_for_test();
+        ws.prefill_router = Some(pr);
         ws
     }
 

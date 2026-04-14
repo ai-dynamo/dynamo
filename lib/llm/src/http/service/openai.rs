@@ -139,6 +139,29 @@ impl ErrorMessage {
         )
     }
 
+    /// Model exists but is temporarily unable to serve (e.g., prefill not activated,
+    /// no available workers). Returns 503 so clients can retry.
+    pub fn model_unavailable() -> ErrorResponse {
+        let code = StatusCode::SERVICE_UNAVAILABLE;
+        let error_type = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: "Model temporarily unavailable".to_string(),
+                error_type,
+                code: code.as_u16(),
+            }),
+        )
+    }
+
+    /// Convert a ModelManagerError to the appropriate HTTP response.
+    pub fn from_model_error(e: &crate::discovery::ModelManagerError) -> ErrorResponse {
+        match e {
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => Self::model_unavailable(),
+            _ => Self::model_not_found(),
+        }
+    }
+
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
     pub fn _service_unavailable() -> ErrorResponse {
@@ -451,8 +474,8 @@ async fn completions_single(
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            let err_response = ErrorMessage::model_not_found();
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -591,8 +614,8 @@ async fn completions_batch(
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            let err_response = ErrorMessage::model_not_found();
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -772,8 +795,8 @@ async fn embeddings(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
     // todo - error handling should be more robust
-    let engine = state.manager().get_embeddings_engine(model).map_err(|_| {
-        let err_response = ErrorMessage::model_not_found();
+    let engine = state.manager().get_embeddings_engine(model).map_err(|e| {
+        let err_response = ErrorMessage::from_model_error(&e);
         inflight.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
@@ -1182,8 +1205,8 @@ async fn chat_completions(
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            let err_response = ErrorMessage::model_not_found();
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -1594,8 +1617,8 @@ async fn responses(
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            let err_response = ErrorMessage::model_not_found();
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -1975,7 +1998,7 @@ async fn images(
     let engine = state
         .manager()
         .get_images_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
@@ -2093,7 +2116,7 @@ async fn videos(
     let engine = state
         .manager()
         .get_videos_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     // this will increment the inflight gauge for the model
     let mut inflight = state.metrics_clone().create_inflight_guard(
@@ -2166,7 +2189,7 @@ async fn video_stream(
     let engine = state
         .manager()
         .get_videos_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     let mut inflight =
         state
@@ -2342,7 +2365,7 @@ async fn audio_speech(
     let engine = state
         .manager()
         .get_audios_engine(&model)
-        .map_err(|_| ErrorMessage::model_not_found())?;
+        .map_err(|e| ErrorMessage::from_model_error(&e))?;
 
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &model,
@@ -3272,6 +3295,30 @@ mod tests {
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::NotFound
+        );
+    }
+
+    #[test]
+    fn test_extract_error_type_from_response_unavailable() {
+        let response = ErrorMessage::model_unavailable();
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Overload
+        );
+    }
+
+    #[test]
+    fn test_from_model_error_maps_correctly() {
+        let not_found = ModelManagerError::ModelNotFound("x".to_string());
+        assert_eq!(
+            ErrorMessage::from_model_error(&not_found).0,
+            StatusCode::NOT_FOUND
+        );
+
+        let unavailable = ModelManagerError::ModelUnavailable("x".to_string());
+        assert_eq!(
+            ErrorMessage::from_model_error(&unavailable).0,
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 

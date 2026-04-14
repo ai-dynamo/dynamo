@@ -58,6 +58,10 @@ pub struct PrefillRouter {
     /// Set to true when all prefill workers die. Checked in generate() to prevent
     /// routing to dead workers. Cleared on reactivation when workers rejoin.
     deactivated: AtomicBool,
+    /// Set to true when the prefill router has been activated (inner router populated).
+    /// Used by `can_serve_requests()` to gate enforce_disagg readiness so a cold-started
+    /// strict-disagg model isn't listed before the prefill has rendezvoused.
+    activated: AtomicBool,
 }
 
 impl Drop for PrefillRouter {
@@ -277,7 +281,7 @@ mod tests {
     #[test]
     fn test_deactivated_flag_blocks_when_enforce_disagg() {
         let router = make_test_router(true);
-        // prefill_router OnceLock is empty, so enforce_disagg blocks even before deactivation
+        // Not activated, so enforce_disagg blocks even before deactivation
         assert!(
             !router.can_serve_requests(),
             "enforce_disagg must block before prefill activation"
@@ -318,9 +322,9 @@ mod tests {
     }
 
     #[test]
-    fn test_reactivate_clears_deactivated_enforce_needs_inner_router() {
-        // disabled() never populates the OnceLock, so enforce_disagg stays blocked.
-        // In a real deployment, activate() populates the lock before the first
+    fn test_reactivate_clears_deactivated_enforce_needs_activation() {
+        // disabled() never sets the activated flag, so enforce_disagg stays blocked.
+        // In a real deployment, activate() sets the flag before the first
         // deactivate/reactivate cycle, so this only exercises the flag reset.
         let router = make_test_router(true);
         router.deactivate();
@@ -330,7 +334,7 @@ mod tests {
         assert!(!router.is_deactivated());
         assert!(
             !router.can_serve_requests(),
-            "enforce_disagg without inner router still can't serve"
+            "enforce_disagg without activation still can't serve"
         );
     }
 

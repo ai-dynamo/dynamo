@@ -189,41 +189,41 @@ impl Model {
         &self,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.chat_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine(
         &self,
     ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.completions_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
     pub fn get_embeddings_engine(
         &self,
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.embeddings_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_embeddings_engine()))
     }
 
     pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.images_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_images_engine()))
     }
 
     pub fn get_videos_engine(&self) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.videos_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_videos_engine()))
     }
 
     pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.audios_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_audios_engine()))
     }
 
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.tensor_engine.clone())
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_tensor_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -232,7 +232,7 @@ impl Model {
         &self,
     ) -> Result<(OpenAIChatCompletionsStreamingEngine, ParsingOptions), ModelManagerError> {
         self.select_worker_set_with(|ws| ws.chat_engine.clone().map(|e| (e, ws.parsing_options())))
-            .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+            .ok_or_else(|| self.engine_error(self.has_chat_engine()))
     }
 
     pub fn get_completions_engine_with_parsing(
@@ -243,7 +243,7 @@ impl Model {
                 .clone()
                 .map(|e| (e, ws.parsing_options()))
         })
-        .ok_or_else(|| ModelManagerError::ModelNotFound(self.name.clone()))
+        .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --
@@ -283,6 +283,19 @@ impl Model {
             .sum()
     }
 
+    // -- Internal helpers --
+
+    /// Return the appropriate error when no servable WorkerSet was found.
+    /// If the engine exists but no WorkerSet can serve (zero workers, prefill not activated,
+    /// etc.), return ModelUnavailable (maps to 503). Otherwise ModelNotFound (maps to 404).
+    fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
+        if engine_exists {
+            ModelManagerError::ModelUnavailable(self.name.clone())
+        } else {
+            ModelManagerError::ModelNotFound(self.name.clone())
+        }
+    }
+
     // -- Internal selection --
 
     /// Select a WorkerSet and extract a value from it.
@@ -298,8 +311,6 @@ impl Model {
         F: Fn(&WorkerSet) -> Option<T>,
     {
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
-        // TODO: When the single set has 0 workers, this returns None which maps to
-        // ModelNotFound (404). Ideally should be 503 "no available workers" — see follow-up.
         if self.worker_sets.len() == 1 {
             return self.worker_sets.iter().next().and_then(|entry| {
                 let ws = entry.value();

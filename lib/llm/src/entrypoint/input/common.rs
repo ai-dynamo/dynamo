@@ -135,7 +135,26 @@ pub async fn prepare_engine(
 
             let model_service_name = watch_obj.wait_for_chat_model().await;
             tracing::info!("Connected to {model_service_name}");
-            let engine = model_manager.get_chat_completions_engine(&model_service_name)?;
+            // In disaggregated deployments the model may be listed before the prefill
+            // router is fully activated, causing a transient ModelUnavailable. Retry
+            // with a timeout so the startup path doesn't fail during this cold-start
+            // window, but also doesn't hang indefinitely on misconfiguration.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            let engine = loop {
+                match model_manager.get_chat_completions_engine(&model_service_name) {
+                    Ok(engine) => break engine,
+                    Err(crate::discovery::ModelManagerError::ModelUnavailable(_))
+                        if tokio::time::Instant::now() < deadline =>
+                    {
+                        tracing::debug!(
+                            model = %model_service_name,
+                            "Model listed but not yet servable, waiting for prefill activation"
+                        );
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
             Ok(PreparedEngine {
                 service_name: model_service_name,
                 engine,

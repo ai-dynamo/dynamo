@@ -43,6 +43,7 @@ impl PrefillRouter {
             namespace: String::new(),  // Not used for disabled router
             is_eagle: false,
             deactivated: std::sync::atomic::AtomicBool::new(false),
+            activated: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -74,6 +75,7 @@ impl PrefillRouter {
             namespace,
             is_eagle,
             deactivated: std::sync::atomic::AtomicBool::new(false),
+            activated: std::sync::atomic::AtomicBool::new(false),
         });
 
         // Spawn background task to wait for activation
@@ -178,6 +180,7 @@ impl PrefillRouter {
 
         // Set the router (ignore error if already set)
         let _ = self.prefill_router.set(inner_router);
+        self.activated.store(true, Ordering::Release);
 
         tracing::info!(
             router_mode = ?self.router_mode,
@@ -213,6 +216,17 @@ impl PrefillRouter {
 
     /// Reactivate a deactivated router. Called when prefill workers rejoin.
     /// The inner router's Client re-discovers workers via its discovery subscription.
+    ///
+    /// Note: there is a brief race between flipping `deactivated=false` (making
+    /// `can_serve_requests()` return true) and the Client actually rediscovering
+    /// workers. Requests arriving in this window may fail at prefill resolution.
+    /// This is bounded by discovery propagation time (typically sub-second).
+    ///
+    /// Also note: reactivation reuses the existing inner router built from the
+    /// original endpoint. If prefill rejoins under a different endpoint identity
+    /// (e.g., reconfigured deployment), the stale Client would not discover the
+    /// new workers. This is acceptable for normal restart scenarios where the
+    /// endpoint identity is stable.
     pub fn reactivate(&self) {
         self.deactivated.store(false, Ordering::Release);
         tracing::info!(
@@ -240,6 +254,13 @@ impl PrefillRouter {
             return true;
         }
 
-        self.prefill_router.get().is_some()
+        self.activated.load(Ordering::Acquire)
+    }
+
+    /// Mark this router as activated for testing purposes.
+    /// In production, `activate()` sets this flag when the inner router is populated.
+    #[cfg(test)]
+    pub(crate) fn mark_activated_for_test(&self) {
+        self.activated.store(true, Ordering::Release);
     }
 }
