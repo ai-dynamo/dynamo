@@ -186,17 +186,10 @@ impl TcpConnection {
             let response_q = response_queue.clone();
             let notify = writer_notify.clone();
             let healthy = healthy.clone();
-            let inflight = inflight.clone();
             tokio::spawn(async move {
-                if let Err(e) = Self::writer_task(
-                    write_half,
-                    submit_q,
-                    response_q,
-                    notify,
-                    healthy.clone(),
-                    inflight,
-                )
-                .await
+                if let Err(e) =
+                    Self::writer_task(write_half, submit_q, response_q, notify, healthy.clone())
+                        .await
                 {
                     tracing::debug!("Writer task failed for {}: {}", addr, e);
                     healthy.store(false, Ordering::Relaxed);
@@ -307,7 +300,6 @@ impl TcpConnection {
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         notify: Arc<tokio::sync::Notify>,
         healthy: Arc<AtomicBool>,
-        inflight: Arc<AtomicU64>,
     ) -> Result<()> {
         let mut writer = tokio::io::BufWriter::with_capacity(WRITER_BUF_CAPACITY, write_half);
         let trace = latency_trace_enabled();
@@ -364,14 +356,15 @@ impl TcpConnection {
 
                 for data in &encoded_batch {
                     if let Err(e) = writer.write_all(data).await {
-                        inflight.fetch_sub(count as u64, Ordering::Relaxed);
+                        // Don't decrement inflight here — response_txs were already
+                        // pushed to response_queue (Phase 1). drain_pending() will
+                        // send errors, and each caller decrements its own inflight.
                         return Err(e.into());
                     }
                 }
 
                 // Phase 3: Single flush = single write(2) syscall for entire batch
                 if let Err(e) = writer.flush().await {
-                    inflight.fetch_sub(count as u64, Ordering::Relaxed);
                     return Err(e.into());
                 }
 
@@ -973,7 +966,8 @@ impl TcpConnectionPool {
     /// reasonably promptly after expiry.
     fn start_idle_cleanup(self: &Arc<Self>) {
         let pool = Arc::downgrade(self);
-        let interval = Duration::from_millis(self.host_idle_ttl_ms / 2);
+        // Floor at 30s to prevent busy-loop if DYN_TCP_HOST_IDLE_TTL_SECS=0
+        let interval = Duration::from_millis((self.host_idle_ttl_ms / 2).max(30_000));
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
