@@ -6,21 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 
 # Replay Optimize
 
-This directory contains helpers for heuristic offline replay search over dense aggregated and
-disaggregated serving configurations. This README documents one concrete experiment setup: the
-synthetic disaggregated KV-router sweep that we have been using for non-trivial `replay_optimize`
-runs.
-
-For the search logic itself, start with [search.py](search.py). For unit-tested examples, see
-[../../tests/test_replay_optimize.py](../../tests/test_replay_optimize.py).
-
-For adjacent trace tooling, see:
-
-- [Prefix Data Generator](../../../../../../benchmarks/prefix_data_generator/README.md)
-  for Mooncake trace format details plus `datagen analyze` and `datagen synthesize`
-- [KV Router A/B Benchmarking Guide](../../../../../../docs/benchmarks/kv-router-ab-testing.md)
-  for the public toolagent trace URL and benchmark context
-
 ## Experiment Goal
 
 This experiment searches over disaggregated replay states to answer a concrete question:
