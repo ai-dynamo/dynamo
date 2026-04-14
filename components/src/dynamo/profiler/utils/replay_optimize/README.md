@@ -16,9 +16,9 @@ For the search logic itself, start with [search.py](search.py). For unit-tested 
 
 For adjacent trace tooling, see:
 
-- [../../../../../../benchmarks/prefix_data_generator/README.md](../../../../../../benchmarks/prefix_data_generator/README.md)
+- [Prefix Data Generator](../../../../../../benchmarks/prefix_data_generator/README.md)
   for Mooncake trace format details plus `datagen analyze` and `datagen synthesize`
-- [../../../../../../docs/benchmarks/kv-router-ab-testing.md](../../../../../../docs/benchmarks/kv-router-ab-testing.md)
+- [KV Router A/B Benchmarking Guide](../../../../../../docs/benchmarks/kv-router-ab-testing.md)
   for the public toolagent trace URL and benchmark context
 
 ## Experiment Goal
@@ -303,15 +303,18 @@ To broaden or shift the search, vary one axis at a time:
 If you want to compare routing strategies directly, use `router_mode="both"` instead of the default
 KV-router-only search.
 
-If you want trace replay instead of synthetic replay, switch the workload to `TraceReplayWorkload`.
-Keep that as a separate experiment so the search results are not conflated with this synthetic
-setup.
+## Real Traffic Replay
 
-## Using a Real Mooncake Trace
+`replay_optimize` is wired up for trace-driven replay. In
+[evaluate.py](evaluate.py), `TraceReplayWorkload` goes through `run_trace_replay(...)`, while
+`SyntheticReplayWorkload` goes through `run_synthetic_trace_replay(...)`.
 
-To run the same search structure against a public Mooncake trace, use the FAST'25 toolagent trace.
+Use a separate trace-driven experiment when you want to evaluate the same search structure against a
+real Mooncake-style workload instead of the synthetic shared-prefix workload above.
 
-Download it with either `curl` or `wget`:
+### Download a Mooncake Trace
+
+For a public starting point, use the FAST'25 toolagent trace:
 
 ```bash
 curl -sL \
@@ -340,25 +343,48 @@ with open("/tmp/toolagent_trace.jsonl", encoding="utf-8") as src, open(
 PY
 ```
 
-Then replace the synthetic workload with a trace workload:
+### Replace the Synthetic Workload
+
+In the main driver, replace:
+
+```python
+workload=SyntheticReplayWorkload(
+    isl=32768,
+    osl=256,
+    request_count=5000,
+    replay_concurrency=200,
+    shared_prefix_ratio=0.5,
+    num_prefix_groups=50,
+),
+```
+
+with:
 
 ```python
 from dynamo.profiler.utils.replay_optimize import TraceReplayWorkload
 
-workload = TraceReplayWorkload(
+workload=TraceReplayWorkload(
     trace_file="/tmp/toolagent_trace.jsonl",
     arrival_speedup_ratio=1.0,
-)
+),
 ```
 
-or with the rewritten trace:
+or, if you rewrote the timestamps:
 
 ```python
-workload = TraceReplayWorkload(
+workload=TraceReplayWorkload(
     trace_file="/tmp/toolagent_trace_080x.jsonl",
     arrival_speedup_ratio=1.0,
-)
+),
 ```
+
+The main behavioral change is that the workload stops generating requests in memory and instead
+replays request arrivals from the JSONL trace. In this path:
+
+- `trace_file` points at the Mooncake-style JSONL input
+- `arrival_speedup_ratio` compresses or stretches the trace arrival process
+- synthetic-only knobs such as `isl`, `osl`, `request_count`, `replay_concurrency`,
+  `shared_prefix_ratio`, and `num_prefix_groups` no longer apply at the workload level
 
 Important notes for the public toolagent trace:
 
@@ -366,7 +392,7 @@ Important notes for the public toolagent trace:
 - the underlying `run_trace_replay(...)` API defaults `trace_block_size` to `512`
 - the current `TraceReplayWorkload` wrapper does not expose a separate `trace_block_size` field
 - the prefix-data-generator tools in
-  [../../../../../../benchmarks/prefix_data_generator/README.md](../../../../../../benchmarks/prefix_data_generator/README.md)
+  [Prefix Data Generator](../../../../../../benchmarks/prefix_data_generator/README.md)
   are useful if you want to inspect the trace first or synthesize a larger derivative trace before
   running this search
 
