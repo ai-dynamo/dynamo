@@ -433,7 +433,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build, vllm-test]
     if: |
-      always() &&
+      always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.vllm-build.result == 'success' &&
       (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
@@ -449,7 +449,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build, sglang-test]
     if: |
-      always() &&
+      always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.sglang-build.result == 'success' &&
       (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
@@ -465,7 +465,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build, trtllm-test]
     if: |
-      always() &&
+      always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.trtllm-build.result == 'success' &&
       (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
