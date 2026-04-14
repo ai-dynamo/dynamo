@@ -210,6 +210,6 @@ Configure this in `PlannerConfig` (or the equivalent YAML / constructor wiring y
 
 - `report_interval_hours`: interval in **simulated** time between reports (default `24.0` hours); set to `None` to disable.
 - `report_output_dir`: directory where HTML files are written (default `./planner_reports`).
-- `live_dashboard_port`: port for a real-time HTTP dashboard (default `0` = disabled). When set, an aiohttp server starts on the given port and serves the current accumulated snapshot data as an interactive Plotly report at `http://<host>:<port>/`. Unlike periodic reports, the live dashboard does **not** clear snapshots — it always shows all data accumulated since the last periodic report (or since startup if periodic reports are disabled).
+- `live_dashboard_port`: port for a real-time HTTP dashboard (default `8080`). Set to `0` to disable. An aiohttp server starts on the given port and serves the current accumulated snapshot data as an interactive Plotly report at `http://<host>:<port>/`. Unlike periodic reports, the live dashboard does **not** clear snapshots — it always shows all data accumulated since the last periodic report (or since startup if periodic reports are disabled).
 
 Reports aggregate per-tick snapshots and use `TickInput.now_s` for timestamps, so they behave the same in live runs (wall clock) and in **replay** with a simulated clock. Typical charts cover worker counts, observed versus estimated latencies versus SLA targets, request rate, engine capacity, scaling decision timelines, and input/output sequence lengths.

@@ -139,7 +139,7 @@ class PlannerConfig(BaseModel):
         description="Directory for HTML diagnostics reports.",
     )
     live_dashboard_port: int = Field(
-        default=0,
+        default=8080,
         description=(
             "Port for the live diagnostics dashboard HTTP server. "
             "Set to 0 to disable. When enabled, visit http://host:port/ "
