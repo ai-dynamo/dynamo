@@ -11,7 +11,10 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from dynamo.planner.core.types import EngineCapabilities
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
@@ -106,7 +109,7 @@ def _load_aic_perf_config(args: argparse.Namespace):
     )
 
 
-def _engine_caps(args: MockEngineArgs) -> "EngineCapabilities":
+def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
     """Derive EngineCapabilities from MockEngineArgs."""
     from dynamo.planner.core.types import EngineCapabilities
 

@@ -29,7 +29,6 @@ from dynamo.common.forward_pass_metrics import (
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
-    EngineCapabilities,
     FpmObservations,
     PlannerEffects,
     ScheduledTick,
@@ -159,15 +158,19 @@ class ReplayPlannerAdapter:
             # Clear scaling targets once active counts match
             active_p = result["active_prefill_count"]
             active_d = result["active_decode_count"]
-            if self._scaling_target_prefill is not None and active_p == self._scaling_target_prefill:
+            if (
+                self._scaling_target_prefill is not None
+                and active_p == self._scaling_target_prefill
+            ):
                 self._scaling_target_prefill = None
-            if self._scaling_target_decode is not None and active_d == self._scaling_target_decode:
+            if (
+                self._scaling_target_decode is not None
+                and active_d == self._scaling_target_decode
+            ):
                 self._scaling_target_decode = None
 
             if effects.scale_to is not None:
-                self._apply_scaling(
-                    effects, result, tick_input.now_s, scaling_events
-                )
+                self._apply_scaling(effects, result, tick_input.now_s, scaling_events)
 
             if effects.next_tick is None:
                 break
@@ -191,11 +194,6 @@ class ReplayPlannerAdapter:
         """Apply scaling decisions and record events."""
         scale = effects.scale_to
         assert scale is not None
-        reason = (
-            effects.diagnostics.load_decision_reason
-            or effects.diagnostics.throughput_decision_reason
-        )
-
         current_p = result["active_prefill_count"]
         current_d = result["active_decode_count"]
         target_p = scale.num_prefill if scale.num_prefill is not None else current_p
@@ -211,35 +209,59 @@ class ReplayPlannerAdapter:
                 direction = "scale_up" if target_p > current_p else "scale_down"
                 logger.info(
                     "Planner scaling prefill: %d -> %d at t=%.1fs (%s)",
-                    current_p, target_p, now_s, direction,
+                    current_p,
+                    target_p,
+                    now_s,
+                    direction,
                 )
                 self._scaling_target_prefill = target_p
-                scaling_events.append(ScalingEvent(
-                    at_s=now_s, component="prefill",
-                    from_count=current_p, to_count=target_p, reason=direction,
-                ))
+                scaling_events.append(
+                    ScalingEvent(
+                        at_s=now_s,
+                        component="prefill",
+                        from_count=current_p,
+                        to_count=target_p,
+                        reason=direction,
+                    )
+                )
             if scale.num_decode is not None and target_d != current_d:
                 direction = "scale_up" if target_d > current_d else "scale_down"
                 logger.info(
                     "Planner scaling decode: %d -> %d at t=%.1fs (%s)",
-                    current_d, target_d, now_s, direction,
+                    current_d,
+                    target_d,
+                    now_s,
+                    direction,
                 )
                 self._scaling_target_decode = target_d
-                scaling_events.append(ScalingEvent(
-                    at_s=now_s, component="decode",
-                    from_count=current_d, to_count=target_d, reason=direction,
-                ))
+                scaling_events.append(
+                    ScalingEvent(
+                        at_s=now_s,
+                        component="decode",
+                        from_count=current_d,
+                        to_count=target_d,
+                        reason=direction,
+                    )
+                )
         else:
             direction = "scale_up" if target_d > current_d else "scale_down"
             logger.info(
                 "Planner scaling: %d -> %d workers at t=%.1fs (%s)",
-                current_d, target_d, now_s, direction,
+                current_d,
+                target_d,
+                now_s,
+                direction,
             )
             self._scaling_target_decode = target_d
-            scaling_events.append(ScalingEvent(
-                at_s=now_s, component="agg",
-                from_count=current_d, to_count=target_d, reason=direction,
-            ))
+            scaling_events.append(
+                ScalingEvent(
+                    at_s=now_s,
+                    component="agg",
+                    from_count=current_d,
+                    to_count=target_d,
+                    reason=direction,
+                )
+            )
 
     def _feed_all_fpm_to_regression(
         self,
@@ -247,7 +269,7 @@ class ReplayPlannerAdapter:
         prefill_snaps: list[dict[str, Any]],
     ) -> None:
         """Feed every accumulated FPM snapshot to the regression models."""
-        if not hasattr(self._sm, '_is_easy') or self._sm._is_easy:
+        if not hasattr(self._sm, "_is_easy") or self._sm._is_easy:
             return  # easy mode has no regression models
 
         if self._sm._is_agg:
@@ -277,8 +299,16 @@ class ReplayPlannerAdapter:
         if tick.need_worker_states:
             active_p = result["active_prefill_count"]
             active_d = result["active_decode_count"]
-            expected_p = self._scaling_target_prefill if self._scaling_target_prefill is not None else active_p
-            expected_d = self._scaling_target_decode if self._scaling_target_decode is not None else active_d
+            expected_p = (
+                self._scaling_target_prefill
+                if self._scaling_target_prefill is not None
+                else active_p
+            )
+            expected_d = (
+                self._scaling_target_decode
+                if self._scaling_target_decode is not None
+                else active_d
+            )
             worker_counts = WorkerCounts(
                 ready_num_prefill=active_p if self._is_disagg else None,
                 ready_num_decode=active_d,
@@ -291,16 +321,24 @@ class ReplayPlannerAdapter:
             prefill_snaps = result.get("prefill_fpm_snapshots", [])
             decode_snaps = result.get("decode_fpm_snapshots", [])
 
-            _update_fpm_cache(self._prefill_fpm_cache, prefill_snaps, result["active_prefill_count"])
-            _update_fpm_cache(self._decode_fpm_cache, decode_snaps, result["active_decode_count"])
+            _update_fpm_cache(
+                self._prefill_fpm_cache, prefill_snaps, result["active_prefill_count"]
+            )
+            _update_fpm_cache(
+                self._decode_fpm_cache, decode_snaps, result["active_decode_count"]
+            )
 
             # In offline replay, we accumulate many FPM snapshots per tick
             # (one per engine pass). Feed ALL non-idle snapshots directly to
             # the regression models for a representative fit. The last-per-worker
             # cache is only used for the FpmObservations dict (worker count
             # reconciliation), not as the sole regression input.
-            prefill_dict = dict(self._prefill_fpm_cache) if self._prefill_fpm_cache else None
-            decode_dict = dict(self._decode_fpm_cache) if self._decode_fpm_cache else None
+            prefill_dict = (
+                dict(self._prefill_fpm_cache) if self._prefill_fpm_cache else None
+            )
+            decode_dict = (
+                dict(self._decode_fpm_cache) if self._decode_fpm_cache else None
+            )
             self._feed_all_fpm_to_regression(decode_snaps, prefill_snaps)
             fpm_observations = FpmObservations(
                 prefill=prefill_dict,
