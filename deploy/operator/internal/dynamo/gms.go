@@ -24,12 +24,12 @@ import (
 )
 
 const (
-	gmsSharedVolumeName     = "gms-shared"
-	gmsSharedMountPath      = "/shared"
-	gmsDRAClaimName         = "shared-gpu"
-	defaultDeviceClassName  = "gpu.nvidia.com"
-	gmsProcessesPerGPU      = 2
-	gmsStartupProbeTimeout  = 2 * time.Minute
+	gmsSharedVolumeName      = "gms-shared"
+	gmsSharedMountPath       = "/shared"
+	gmsDRAClaimName          = "shared-gpu"
+	defaultDeviceClassName   = "gpu.nvidia.com"
+	gmsProcessesPerGPU       = 2
+	gmsStartupProbeTimeout   = 2 * time.Minute
 	gmsStartupProbePeriodSec = 2
 )
 
