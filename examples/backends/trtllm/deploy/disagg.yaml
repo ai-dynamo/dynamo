@@ -23,10 +23,6 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          securityContext:
-            capabilities:
-              add:
-                - IPC_LOCK
           image: my-registry/tensorrtllm-runtime:my-tag
           workingDir: /workspace/
           command:
@@ -52,10 +48,6 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          securityContext:
-            capabilities:
-              add:
-                - IPC_LOCK
           image: my-registry/tensorrtllm-runtime:my-tag
           workingDir: /workspace/
           command:
