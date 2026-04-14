@@ -127,6 +127,13 @@ struct State {
     /// Maps instance_id -> set of subject UUIDs for batch cancellation
     /// when the discovery plane reports the instance is gone.
     instance_subjects: HashMap<u64, HashSet<String>>,
+    /// Tombstone set of instance IDs that have been removed by the discovery
+    /// plane. Closes the race window where `cancel_instance_streams()` runs
+    /// before `associate_instance()`: if a subject is associated with a
+    /// tombstoned instance, it is immediately cancelled instead of being
+    /// tracked. Cleared by `clear_instance_tombstone()` when the instance
+    /// comes back in the discovery set.
+    removed_instances: HashSet<u64>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -206,8 +213,23 @@ impl TcpStreamServer {
     /// Called by the egress router after `register()` so that when the discovery
     /// plane reports the instance as removed, we can cancel all pending subjects
     /// for that instance in one shot.
+    ///
+    /// If the instance has already been removed (tombstoned by a prior
+    /// `cancel_instance_streams` call), the subject is immediately cancelled
+    /// instead of being tracked. This closes the race window where the
+    /// discovery watcher fires before the request path calls this method.
     pub async fn associate_instance(&self, subject: &str, instance_id: u64) {
         let mut state = self.state.lock().await;
+        if state.removed_instances.contains(&instance_id) {
+            // Instance was already removed -- cancel immediately.
+            tracing::warn!(
+                subject,
+                instance_id,
+                "Cancelling subject immediately: instance already removed (tombstoned)"
+            );
+            state.rx_subjects.remove(subject);
+            return;
+        }
         state
             .subject_instance
             .insert(subject.to_string(), instance_id);
@@ -244,9 +266,15 @@ impl TcpStreamServer {
     /// to resolve with `RecvError`, which is converted to a migratable
     /// `DynamoError(Disconnected)` so the migration layer can retry on another worker.
     ///
+    /// The instance is also tombstoned so that any concurrent
+    /// `associate_instance()` call for the same instance (race with the
+    /// request path) will immediately cancel the late-arriving subject.
+    ///
     /// Returns the number of streams cancelled.
     pub async fn cancel_instance_streams(&self, instance_id: u64) -> usize {
         let mut state = self.state.lock().await;
+        // Tombstone the instance so late associate_instance() calls cancel immediately.
+        state.removed_instances.insert(instance_id);
         let subjects = match state.instance_subjects.remove(&instance_id) {
             Some(subjects) => subjects,
             None => return 0,
@@ -257,6 +285,17 @@ impl TcpStreamServer {
             state.subject_instance.remove(subject);
         }
         count
+    }
+
+    /// Remove an instance from the tombstone set.
+    ///
+    /// Called by the discovery watcher when an instance reappears in the
+    /// discovery set (re-registered after restart). Without this, the
+    /// tombstone would cause every future subject for the instance to be
+    /// immediately cancelled even though the instance is alive again.
+    pub async fn clear_instance_tombstone(&self, instance_id: u64) {
+        let mut state = self.state.lock().await;
+        state.removed_instances.remove(&instance_id);
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -1061,5 +1100,49 @@ mod tests {
                 "into_parts() should disarm the RAII cleanup"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_associate_after_cancel_is_immediately_cancelled() {
+        // Simulates the race: cancel_instance_streams fires before associate_instance.
+        let server = test_server().await;
+
+        // Cancel instance 42 BEFORE any subject is registered for it (tombstone).
+        let cancelled = server.cancel_instance_streams(42).await;
+        assert_eq!(cancelled, 0);
+
+        // Now register a subject and try to associate it with the tombstoned instance.
+        let (subject, provider) = register_and_get_subject(&server).await;
+        server.associate_instance(&subject, 42).await;
+
+        // The provider should resolve with an error because associate_instance
+        // found the tombstone and immediately cancelled the subject.
+        let result = provider.await;
+        assert!(
+            result.is_err(),
+            "Late associate_instance on a tombstoned instance should immediately cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_tombstone_allows_new_associations() {
+        let server = test_server().await;
+
+        // Tombstone instance 42.
+        server.cancel_instance_streams(42).await;
+
+        // Clear the tombstone (simulates instance coming back in discovery).
+        server.clear_instance_tombstone(42).await;
+
+        // Now associate should work normally (subject NOT cancelled).
+        let (subject, _provider) = register_and_get_subject(&server).await;
+        server.associate_instance(&subject, 42).await;
+
+        // Subject should be tracked, not cancelled.
+        let cancelled = server.cancel_instance_streams(42).await;
+        assert_eq!(
+            cancelled, 1,
+            "After clearing tombstone, subjects should be tracked normally"
+        );
     }
 }

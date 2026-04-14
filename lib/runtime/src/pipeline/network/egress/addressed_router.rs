@@ -173,6 +173,15 @@ impl AddressedPushRouter {
             .cancel_instance_streams(instance_id)
             .await
     }
+
+    /// Clear the tombstone for an instance that has come back in the discovery set.
+    ///
+    /// Delegates to [`TcpStreamServer::clear_instance_tombstone`].
+    pub async fn clear_instance_tombstone(&self, instance_id: u64) {
+        self.resp_transport
+            .clear_instance_tombstone(instance_id)
+            .await
+    }
 }
 
 #[async_trait::async_trait]

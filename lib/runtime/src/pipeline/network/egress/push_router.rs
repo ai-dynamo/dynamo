@@ -287,6 +287,7 @@ fn spawn_instance_removal_watcher(
 
             let current_ids: HashSet<u64> = rx.borrow_and_update().iter().map(|i| i.id()).collect();
 
+            // Cancel pending response streams for removed instances.
             for removed_id in prev_ids.difference(&current_ids) {
                 let n = addressed.cancel_instance_streams(*removed_id).await;
                 if n > 0 {
@@ -357,6 +358,16 @@ where
         } else {
             None
         };
+
+        // Even with fault detection disabled (no report_instance_down on errors),
+        // we still need the discovery-driven watcher to cancel pending response-stream
+        // registrations when workers die. Otherwise the bare .await on the oneshot
+        // receiver hangs forever for queued-but-never-started requests.
+        spawn_instance_removal_watcher(
+            client.instance_source.clone(),
+            addressed.clone(),
+            client.endpoint.drt().primary_token(),
+        );
 
         Ok(PushRouter {
             client,
