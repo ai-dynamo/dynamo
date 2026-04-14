@@ -346,6 +346,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
         self.media_io_kwargs.as_ref()
     }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        self.inner.mm_processor_kwargs.as_ref()
+    }
 }
 
 impl OAIChatLikeRequest for NvCreateCompletionRequest {

@@ -277,6 +277,12 @@ class VllmProcessor:
         if mm_data:
             dynamo_preproc["multi_modal_data"] = mm_data
 
+        # Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
+        if request_for_sampling.mm_processor_kwargs is not None:
+            dynamo_preproc[
+                "mm_processor_kwargs"
+            ] = request_for_sampling.mm_processor_kwargs
+
         post = StreamingPostProcessor(
             tokenizer=self.tokenizer,
             request_for_sampling=request_for_sampling,
@@ -310,6 +316,10 @@ class VllmProcessor:
 
         try:
             if self.is_kv_router:
+                extra_args: dict[str, Any] = {}
+                mm_proc_kwargs = dynamo_preproc.get("mm_processor_kwargs")
+                if mm_proc_kwargs is not None:
+                    extra_args["mm_processor_kwargs"] = mm_proc_kwargs
                 dynamo_stream = await self.router.generate(
                     token_ids=tokens,
                     model=dynamo_preproc["model"],
@@ -317,6 +327,7 @@ class VllmProcessor:
                     sampling_options=dynamo_preproc["sampling_options"],
                     output_options=dynamo_preproc["output_options"],
                     multi_modal_data=dynamo_preproc.get("multi_modal_data"),
+                    extra_args=extra_args or None,
                 )
             else:
                 dynamo_stream = await self.router.generate(

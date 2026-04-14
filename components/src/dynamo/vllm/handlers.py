@@ -1179,7 +1179,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         return prompt, sequence_length, embeddings_tensor
 
     async def _extract_multimodal_data(
-        self, request: Dict[str, Any], request_id: str, context
+        self,
+        request: Dict[str, Any],
+        request_id: str,
+        context,
+        mm_processor_kwargs: Dict[str, Any] | None = None,
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
@@ -1253,6 +1257,48 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"Extracted {len(audios)} audio item(s) for multimodal processing"
                 )
 
+        # Extract audio from video URLs when use_audio_in_video is set.
+        # Models (nemotron-omni, Qwen2.5-Omni, Qwen3-Omni) expect 1:1
+        # audio/video pairing in the same order.  We load per-video so a
+        # silent video only logs a warning instead of aborting the batch.
+        if (
+            video_mm_items
+            and mm_processor_kwargs
+            and mm_processor_kwargs.get("use_audio_in_video", False)
+        ):
+            video_audios: list = []
+            for item in video_mm_items:
+                url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
+                if not url:
+                    continue
+                try:
+                    audio = await self.audio_loader.load_audio(url)
+                    video_audios.append(audio)
+                except Exception:
+                    logger.error(
+                        "Failed to extract audio from video %s. "
+                        "use_audio_in_video requires every video to "
+                        "contain an audio stream.",
+                        url[:80],
+                    )
+                    raise
+            if video_audios:
+                existing = vllm_mm_data.get("audio")
+                if existing is not None:
+                    all_audios = (
+                        existing if isinstance(existing, list) else [existing]
+                    ) + video_audios
+                else:
+                    all_audios = video_audios
+                vllm_mm_data["audio"] = (
+                    all_audios[0] if len(all_audios) == 1 else all_audios
+                )
+                logger.debug(
+                    "Extracted %d audio track(s) from video URL(s) "
+                    "(use_audio_in_video=True)",
+                    len(video_audios),
+                )
+
         return vllm_mm_data if vllm_mm_data else None
 
     def _build_prompt_from_request(
@@ -1261,6 +1307,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         request_id: str,
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
+        mm_processor_kwargs: Dict[str, Any] | None = None,
     ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
@@ -1270,6 +1317,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             request_id: Request ID for logging
             multi_modal_data: Optional multimodal data to attach to TokensPrompt
             log_prefix: Prefix for log messages (e.g., "Prefill " for prefill requests)
+            mm_processor_kwargs: Optional multimodal processor kwargs (e.g.
+                use_audio_in_video) forwarded to the vLLM engine.
 
         Returns:
             Tuple of (prompt, embedding_sequence_length, error_dict) where:
@@ -1312,6 +1361,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         if mm_uuids is not None:
             prompt_kwargs["multi_modal_uuids"] = mm_uuids
+        if mm_processor_kwargs is not None:
+            prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
 
         prompt = TokensPrompt(**prompt_kwargs)
         return prompt, embedding_sequence_length, None
@@ -1615,6 +1666,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             "multi_modal_data" in request and request["multi_modal_data"] is not None
         )
 
+        # Extract mm_processor_kwargs (top-level from client router, or
+        # nested in extra_args from KV router).
+        mm_processor_kwargs = request.get("mm_processor_kwargs")
+        if mm_processor_kwargs is None:
+            req_extra_args = request.get("extra_args")
+            if isinstance(req_extra_args, dict):
+                mm_processor_kwargs = req_extra_args.get("mm_processor_kwargs")
+
         multi_modal_data = None
         if is_decode_only:
             # Decode mode: branch on model, not data.
@@ -1649,17 +1708,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 mm = request["multi_modal_data"]
                 if mm.get(VIDEO_URL_KEY) or mm.get(AUDIO_URL_KEY):
                     multi_modal_data = await self._extract_multimodal_data(
-                        request, request_id, context
+                        request,
+                        request_id,
+                        context,
+                        mm_processor_kwargs=mm_processor_kwargs,
                     )
         else:
             # Aggregated mode: load images normally
             multi_modal_data = await self._extract_multimodal_data(
-                request, request_id, context
+                request,
+                request_id,
+                context,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request, request_id, multi_modal_data
+            request,
+            request_id,
+            multi_modal_data,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         if error is not None:
             yield error
@@ -1866,15 +1934,30 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        # Extract mm_processor_kwargs (top-level from client router, or
+        # nested in extra_args from KV router).
+        mm_processor_kwargs = request.get("mm_processor_kwargs")
+        if mm_processor_kwargs is None:
+            req_extra_args = request.get("extra_args")
+            if isinstance(req_extra_args, dict):
+                mm_processor_kwargs = req_extra_args.get("mm_processor_kwargs")
+
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(
-            request, request_id, context
+            request,
+            request_id,
+            context,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         embedding_params = self._build_embedding_params(multi_modal_data or {})
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request, request_id, multi_modal_data, log_prefix="Prefill "
+            request,
+            request_id,
+            multi_modal_data,
+            log_prefix="Prefill ",
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         if error is not None:
             # Prefill errors need disaggregated_params field
