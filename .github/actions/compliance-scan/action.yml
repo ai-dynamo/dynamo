@@ -55,6 +55,7 @@ runs:
       shell: bash
       run: |
         BASE_IMAGE=""
+
         if [ -n "${{ inputs.base_image }}" ]; then
           BASE_IMAGE="${{ inputs.base_image }}"
         elif [ -n "${{ inputs.framework }}" ]; then
