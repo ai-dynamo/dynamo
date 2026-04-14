@@ -48,6 +48,7 @@ pub struct PlannerTickData {
     pub total_decode_count: usize,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum RuntimeKind {
     Agg(AggRuntime),
     Disagg(DisaggRuntime),
@@ -60,6 +61,7 @@ pub struct PlannerReplayHandle {
 
 impl PlannerReplayHandle {
     /// Create a handle for an aggregated trace-file replay.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_trace_file(
         args: MockEngineArgs,
         router_config: Option<KvRouterConfig>,

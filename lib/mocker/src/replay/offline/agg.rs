@@ -579,7 +579,7 @@ impl AggRuntime {
     }
 
     /// Finalize the replay: finish progress bar, return collector and stats.
-    pub(in crate::replay) fn finalize(self) -> (TraceCollector, AggRuntimeStats) {
+    pub(in crate::replay::offline) fn finalize(self) -> (TraceCollector, AggRuntimeStats) {
         self.progress.finish();
         (self.collector, self.stats)
     }
@@ -591,7 +591,7 @@ impl AggRuntime {
     }
 
     /// Run the aggregated offline replay until all arrivals and worker work are exhausted.
-    pub(in crate::replay) fn run(mut self) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
+    pub(in crate::replay::offline) fn run(mut self) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
         self.drain_current_timestamp()?;
 
         while !self.is_done() {
