@@ -35,6 +35,7 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
+    register_embedding_cache_metrics,
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
@@ -302,7 +303,7 @@ async def init_llm_worker(
             module_path, class_name = tokenizer_path.rsplit(".", 1)
             tokenizer_class = getattr(import_module(module_path), class_name)
             tokenizer = tokenizer_class.from_pretrained(
-                arg_map["model"],
+                arg_map.get("tokenizer") or arg_map["model"],
                 trust_remote_code=arg_map.get("trust_remote_code", False),
             )
         except (ValueError, ImportError, AttributeError) as e:
@@ -584,6 +585,16 @@ async def init_llm_worker(
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
+
+                encoder_cache = getattr(handler, "_encoder_cache", None)
+                if encoder_cache is not None:
+                    register_embedding_cache_metrics(
+                        endpoint=endpoint,
+                        cache=encoder_cache,
+                        model_name=model_name_for_metrics,
+                        component_name=config.component,
+                    )
+
                 await endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,
