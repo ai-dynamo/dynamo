@@ -120,6 +120,8 @@ class MultiModalGroup(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
+    video_grid_thw: Optional[List[Any]] = None
+    num_mm_tokens: Optional[int] = None
 
 
 class SglangMultimodalRequest(BaseModel):
