@@ -459,17 +459,17 @@ impl ModelWatcher {
             }
 
             // Now that registration has completed, validate checksum
-            if let Some(model) = self.manager.get_model(&model_name) {
-                if !model.is_checksum_compatible(&ws_key, card.mdcsum()) {
-                    tracing::error!(
-                        model_name = card.name(),
-                        namespace = namespace,
-                        new_checksum = card.mdcsum(),
-                        "Checksum for new worker does not match existing WorkerSet's checksum. \
-                         Drain all old workers in this namespace before deploying a new version."
-                    );
-                    return Ok(());
-                }
+            if let Some(model) = self.manager.get_model(&model_name)
+                && !model.is_checksum_compatible(&ws_key, card.mdcsum())
+            {
+                tracing::error!(
+                    model_name = card.name(),
+                    namespace = namespace,
+                    new_checksum = card.mdcsum(),
+                    "Checksum for new worker does not match existing WorkerSet's checksum. \
+                     Drain all old workers in this namespace before deploying a new version."
+                );
+                return Ok(());
             }
 
             // If the first registration failed or timed out, no WorkerSet exists.
@@ -478,7 +478,7 @@ impl ModelWatcher {
             if self
                 .manager
                 .get_model(&model_name)
-                .map_or(true, |m| !m.has_worker_set(&ws_key))
+                .is_none_or(|m| !m.has_worker_set(&ws_key))
             {
                 tracing::warn!(
                     model_name = card.name(),
