@@ -298,3 +298,53 @@ async def test_build_prompt_excludes_mm_processor_kwargs_when_none():
 
     assert error is None
     assert "mm_processor_kwargs" not in prompt
+
+
+# --- extra_args extraction tests (KV router path) ---
+
+
+@pytest.mark.asyncio
+async def test_extract_audio_from_video_with_mm_kwargs_in_extra_args():
+    """mm_processor_kwargs nested in extra_args (KV router path) triggers
+    audio extraction the same way as top-level mm_processor_kwargs."""
+    handler = _make_handler()
+    video = (
+        np.zeros((2, 4, 4, 3), dtype=np.uint8),
+        {"fps": 2.0, "frames_indices": [0, 1], "total_num_frames": 2},
+    )
+    audio = (np.zeros(16000, dtype=np.float32), 16000.0)
+    handler.video_loader.load_video_batch = AsyncMock(return_value=[video])
+    handler.audio_loader.load_audio = AsyncMock(return_value=audio)
+
+    result = await handler._extract_multimodal_data(
+        {"multi_modal_data": {"video_url": [{"Url": "https://example.com/video.mp4"}]}},
+        "req-extra-1",
+        context=None,
+        mm_processor_kwargs={"use_audio_in_video": True},
+    )
+
+    assert result is not None
+    assert result["audio"] is audio
+
+
+@pytest.mark.asyncio
+async def test_no_audio_extraction_when_extra_args_lacks_mm_kwargs():
+    """Without mm_processor_kwargs (neither top-level nor in extra_args),
+    no audio is extracted from video URLs."""
+    handler = _make_handler()
+    video = (
+        np.zeros((2, 4, 4, 3), dtype=np.uint8),
+        {"fps": 2.0, "frames_indices": [0, 1], "total_num_frames": 2},
+    )
+    handler.video_loader.load_video_batch = AsyncMock(return_value=[video])
+
+    result = await handler._extract_multimodal_data(
+        {"multi_modal_data": {"video_url": [{"Url": "https://example.com/video.mp4"}]}},
+        "req-extra-2",
+        context=None,
+        mm_processor_kwargs=None,
+    )
+
+    assert result is not None
+    assert "audio" not in result
+    handler.audio_loader.load_audio.assert_not_awaited()
