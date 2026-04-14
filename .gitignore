@@ -129,6 +129,7 @@ profiling_results*
 
 # Direnv
 .envrc
+deploy/docker/.env
 
 # Node.js
 node_modules/

@@ -113,8 +113,9 @@ deploy:
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
-  - 'deploy/snapshot/**'
-  - 'tests/deploy/**'
+  - 'deploy/chrek/**'
+  - 'deploy/docker/**'
+  - 'deploy/docker/.*'
 
 planner:
   - 'container/templates/planner.Dockerfile'
