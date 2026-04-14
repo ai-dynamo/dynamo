@@ -25,10 +25,14 @@ pub(super) enum KubeDiscoveryMode {
 }
 
 impl KubeDiscoveryMode {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self> {
         match std::env::var(discovery::DYN_KUBE_DISCOVERY_MODE).as_deref() {
-            Ok("container") => Self::Container,
-            _ => Self::Pod,
+            Ok("container") => Ok(Self::Container),
+            Ok("pod") | Err(_) => Ok(Self::Pod),
+            Ok(other) => anyhow::bail!(
+                "Invalid DYN_KUBE_DISCOVERY_MODE value '{}'. Valid values: 'pod', 'container'",
+                other
+            ),
         }
     }
 }
@@ -176,7 +180,7 @@ impl PodInfo {
                     "default".to_string()
                 });
 
-        let mode = KubeDiscoveryMode::from_env();
+        let mode = KubeDiscoveryMode::from_env()?;
 
         let target = match mode {
             KubeDiscoveryMode::Pod => KubeDiscoveryTarget::Pod(pod_name.clone()),
