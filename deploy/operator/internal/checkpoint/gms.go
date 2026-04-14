@@ -92,12 +92,30 @@ while True:
 `
 
 const gmsSaveCommand = `
+import json
 import os
+import ssl
 import subprocess
 import time
+import urllib.request
 
 import pynvml
 from gpu_memory_service.common.utils import get_socket_path
+
+
+SERVICE_TOKEN = open(
+    "/var/run/secrets/kubernetes.io/serviceaccount/token",
+    encoding="utf-8",
+).read().strip()
+SERVICE_CA = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+POD_API_URL = (
+    "https://"
+    + os.environ["KUBERNETES_SERVICE_HOST"]
+    + ":"
+    + os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS", "443")
+    + f"/api/v1/namespaces/{os.environ['POD_NAMESPACE']}/pods/{os.environ['POD_NAME']}"
+)
+SSL_CONTEXT = ssl.create_default_context(cafile=SERVICE_CA)
 
 
 def devices():
@@ -108,11 +126,33 @@ def devices():
         pynvml.nvmlShutdown()
 
 
-device_ids = devices()
-if not device_ids:
-    raise SystemExit("no nvidia devices found")
+def checkpoint_pod_ready():
+    request = urllib.request.Request(
+        POD_API_URL,
+        headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+    )
+    with urllib.request.urlopen(request, context=SSL_CONTEXT, timeout=5) as response:
+        pod = json.load(response)
+    status = pod.get("status") or {}
+    if str(status.get("phase", "")).strip() != "Running":
+        return False
+    for condition in status.get("conditions") or []:
+        if condition.get("type") == "Ready" and str(condition.get("status", "")).strip() == "True":
+            return True
+    return False
 
-for device in device_ids:
+
+print("Waiting for checkpoint pod Ready=True before GMS save", flush=True)
+while True:
+    try:
+        if checkpoint_pod_ready():
+            break
+    except Exception:
+        pass
+    time.sleep(1)
+print("Checkpoint pod is Ready; starting GMS save", flush=True)
+
+for device in devices():
     socket_path = get_socket_path(device, "weights")
     while not os.path.exists(socket_path):
         time.sleep(1)
