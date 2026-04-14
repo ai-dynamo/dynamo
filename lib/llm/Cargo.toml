@@ -198,6 +198,10 @@ lazy_static = "1.4"
 mockito = "1.7.0"
 dynamo-bench = { path = "../bench" }
 
+[[test]]
+name = "lora_simulation"
+path = "tests/lora_simulation/main.rs"
+
 [[bin]]
 name = "generate-frontend-openapi"
 path = "src/bin/generate_frontend_openapi.rs"
