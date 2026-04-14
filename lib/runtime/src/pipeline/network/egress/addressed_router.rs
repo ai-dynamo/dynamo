@@ -113,15 +113,31 @@ impl<S> Drop for InflightDecStream<S> {
 pub struct AddressedRequest<T> {
     request: T,
     address: String,
+    /// The backend instance ID from the discovery plane. Used to associate
+    /// pending response-stream registrations with a specific worker so they
+    /// can be cancelled when the discovery plane reports the worker as gone.
+    instance_id: Option<u64>,
 }
 
 impl<T> AddressedRequest<T> {
     pub fn new(request: T, address: String) -> Self {
-        Self { request, address }
+        Self {
+            request,
+            address,
+            instance_id: None,
+        }
     }
 
-    pub(crate) fn into_parts(self) -> (T, String) {
-        (self.request, self.address)
+    pub fn with_instance(request: T, address: String, instance_id: u64) -> Self {
+        Self {
+            request,
+            address,
+            instance_id: Some(instance_id),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (T, String, Option<u64>) {
+        (self.request, self.address, self.instance_id)
     }
 }
 
@@ -147,6 +163,16 @@ impl AddressedPushRouter {
             resp_transport,
         }))
     }
+
+    /// Cancel all pending response-stream registrations for a given backend instance.
+    ///
+    /// Delegates to [`TcpStreamServer::cancel_instance_streams`]. Called by the
+    /// discovery-driven watcher when an instance is removed from the service registry.
+    pub async fn cancel_instance_streams(&self, instance_id: u64) -> usize {
+        self.resp_transport
+            .cancel_instance_streams(instance_id)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -162,7 +188,7 @@ where
 
         let request_id = request.context().id().to_string();
         let (addressed_request, context) = request.transfer(());
-        let (request, address) = addressed_request.into_parts();
+        let (request, address, instance_id) = addressed_request.into_parts();
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
 
@@ -189,6 +215,20 @@ where
         // separate out the connection info and the stream provider from the registered stream
         let (connection_info, response_stream_provider) = pending_response_stream.into_parts();
 
+        // Extract the response-plane subject before connection_info is moved into the
+        // control message. Used to cancel the rx_subjects entry on instance removal or
+        // early failure, preventing the HashMap from accumulating dead entries.
+        let recv_subject: Option<String> =
+            serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&connection_info.info)
+                .ok()
+                .map(|ci| ci.subject);
+
+        // Associate the subject with the backend instance so the discovery-driven
+        // watcher can cancel all pending subjects when this instance is removed.
+        if let (Some(subject), Some(iid)) = (&recv_subject, instance_id) {
+            self.resp_transport.associate_instance(subject, iid).await;
+        }
+
         // package up the connection info as part of the "header" component of the two part message
         // used to issue the request on the
         // todo -- this object should be automatically created by the register call, and achieved by to the two into_parts()
@@ -204,8 +244,24 @@ where
         // next build the two part message where we package the connection info and the request into
         // a single Vec<u8> that can be sent over the wire.
         // --- package this up in the WorkQueuePublisher ---
-        let ctrl = serde_json::to_vec(&control_message)?;
-        let data = serde_json::to_vec(&request)?;
+        let ctrl = match serde_json::to_vec(&control_message) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(e.into());
+            }
+        };
+        let data = match serde_json::to_vec(&request) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(e.into());
+            }
+        };
 
         tracing::trace!(
             request_id,
@@ -220,9 +276,14 @@ where
         // or it should take a two part message directly
         // todo - update this
         let codec = TwoPartCodec::default();
-        let buffer = {
-            let _nvtx = dynamo_nvtx_range!("codec.encode");
-            codec.encode_message(msg)?
+        let buffer = match codec.encode_message(msg) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(e.into());
+            }
         };
 
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
@@ -253,19 +314,49 @@ where
 
         // Phase A: Frontend → Backend (network + queue + ack)
         let _nvtx_send = dynamo_nvtx_range!("transport.tcp.send");
-        let _response = self
-            .req_client
-            .send_request(address, buffer, headers)
-            .await?;
+        let send_result = self.req_client.send_request(address, buffer, headers).await;
         drop(_nvtx_send);
+
+        if let Err(e) = send_result {
+            if let Some(subject) = &recv_subject {
+                self.resp_transport.cancel_recv_stream(subject).await;
+            }
+            return Err(e);
+        }
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
         tracing::trace!(request_id, "awaiting transport handshake");
-        let response_stream = response_stream_provider
-            .await
-            .map_err(|_| PipelineError::DetachedStreamReceiver)?
-            .map_err(PipelineError::ConnectionFailed)?;
+
+        // When the discovery-driven watcher calls cancel_instance_streams(),
+        // the oneshot::Sender is dropped, causing this .await to resolve
+        // with RecvError. We convert that to a migratable Disconnected error
+        // so the Migration layer can retry on another worker.
+        let response_stream = match response_stream_provider.await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                // Worker connected on the response plane but inference setup failed
+                // (error prologue). Not migratable -- the worker started the request.
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(PipelineError::ConnectionFailed(e).into());
+            }
+            Err(_recv_err) => {
+                // oneshot sender dropped: either the discovery-driven watcher cancelled
+                // this subject because the instance was removed, or the worker died
+                // mid-handshake. Return Disconnected (migratable) so Migration can retry.
+                if let Some(subject) = &recv_subject {
+                    self.resp_transport.cancel_recv_stream(subject).await;
+                }
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message("Worker disconnected before response stream was established")
+                        .build()
+                ));
+            }
+        };
         drop(_nvtx_wait);
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
