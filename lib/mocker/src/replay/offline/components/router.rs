@@ -310,10 +310,7 @@ impl OfflineReplayRouter {
     }
 
     /// Register a new worker with the router, cloning the config from existing workers.
-    pub(crate) fn add_worker(
-        &mut self,
-        worker_id: usize,
-    ) -> Result<()> {
+    pub(crate) fn add_worker(&mut self, worker_id: usize) -> Result<()> {
         let config = self
             .workers_with_configs
             .values()

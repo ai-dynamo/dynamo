@@ -18,8 +18,7 @@ use super::offline::agg::AggRuntime;
 use super::offline::components::ReplayMode;
 use super::offline::disagg::DisaggRuntime;
 use super::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode,
-    TraceSimulationReport,
+    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceSimulationReport,
 };
 use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
 use crate::loadgen::Trace;
@@ -159,11 +158,7 @@ impl PlannerReplayHandle {
 
     /// Apply a scaling decision with separate prefill and decode targets.
     /// For agg mode, `target_prefill` is ignored.
-    pub fn apply_scaling(
-        &mut self,
-        target_prefill: usize,
-        target_decode: usize,
-    ) -> Result<()> {
+    pub fn apply_scaling(&mut self, target_prefill: usize, target_decode: usize) -> Result<()> {
         match &mut self.runtime {
             RuntimeKind::Agg(rt) => rt.apply_scaling(target_decode),
             RuntimeKind::Disagg(rt) => rt.apply_scaling(target_prefill, target_decode),

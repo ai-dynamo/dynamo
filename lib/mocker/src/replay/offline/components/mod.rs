@@ -13,7 +13,6 @@ pub(crate) use router::OfflineReplayRouter;
 pub(crate) use router::OfflineRouterSnapshot;
 pub(in crate::replay) use types::ReplayMode;
 pub(in crate::replay::offline) use types::{
-    EngineEffects, EnginePassMode, ReadyArrival, ScheduledWorkerCompletion,
-    TrafficAccumulator,
+    EngineEffects, EnginePassMode, ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator,
 };
 pub(crate) use types::{RouterEffects, WorkerAdmission};

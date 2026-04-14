@@ -37,8 +37,7 @@ impl EngineComponent {
         workers: Vec<OfflineWorkerState>,
     ) -> Self {
         let count = workers.len();
-        let map: BTreeMap<usize, OfflineWorkerState> =
-            workers.into_iter().enumerate().collect();
+        let map: BTreeMap<usize, OfflineWorkerState> = workers.into_iter().enumerate().collect();
         Self {
             stage,
             pass_mode,
@@ -172,7 +171,8 @@ impl EngineComponent {
                         .unwrap()
                         .execute_pass(collector, now_ms)
                 }
-                EnginePassMode::Hidden => self.workers
+                EnginePassMode::Hidden => self
+                    .workers
                     .get_mut(&worker_id)
                     .unwrap()
                     .execute_hidden_pass(now_ms),
@@ -205,10 +205,7 @@ impl EngineComponent {
                 return Ok(effects);
             }
 
-            self.workers
-                .get_mut(&worker_id)
-                .unwrap()
-                .mark_busy();
+            self.workers.get_mut(&worker_id).unwrap().mark_busy();
             effects
                 .scheduled_completions
                 .push(ScheduledWorkerCompletion {
@@ -232,22 +229,22 @@ impl EngineComponent {
                 payload.stage
             );
         }
-        let worker = self
-            .workers
-            .get_mut(&payload.worker_idx)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "offline replay completion for unknown worker {}",
-                    payload.worker_idx
-                )
-            })?;
+        let worker = self.workers.get_mut(&payload.worker_idx).ok_or_else(|| {
+            anyhow::anyhow!(
+                "offline replay completion for unknown worker {}",
+                payload.worker_idx
+            )
+        })?;
         worker.mark_idle();
         worker.mark_completed(payload.completed_requests);
         Ok(payload)
     }
 
     pub(in crate::replay::offline) fn in_flight(&self) -> usize {
-        self.workers.values().map(OfflineWorkerState::in_flight).sum()
+        self.workers
+            .values()
+            .map(OfflineWorkerState::in_flight)
+            .sum()
     }
 
     pub(in crate::replay::offline) fn is_drained(&self) -> bool {

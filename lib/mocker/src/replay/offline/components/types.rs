@@ -86,7 +86,11 @@ impl TrafficAccumulator {
     }
 
     /// Record one admitted request.
-    pub(in crate::replay::offline) fn on_request(&mut self, input_tokens: usize, output_tokens: usize) {
+    pub(in crate::replay::offline) fn on_request(
+        &mut self,
+        input_tokens: usize,
+        output_tokens: usize,
+    ) {
         self.num_req += 1;
         self.total_isl += input_tokens;
         self.total_osl += output_tokens;

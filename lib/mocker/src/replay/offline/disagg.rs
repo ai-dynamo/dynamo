@@ -223,7 +223,10 @@ impl DisaggRuntime {
     /// Pick the next active prefill worker in round-robin order.
     fn next_prefill_worker(&mut self) -> usize {
         let active = self.prefill_engine.active_worker_ids();
-        debug_assert!(!active.is_empty(), "no active prefill workers for round-robin");
+        debug_assert!(
+            !active.is_empty(),
+            "no active prefill workers for round-robin"
+        );
         let idx = self.next_prefill_worker_idx % active.len();
         self.next_prefill_worker_idx = idx + 1;
         active[idx]
@@ -232,7 +235,10 @@ impl DisaggRuntime {
     /// Pick the next active decode worker in round-robin order.
     fn next_decode_worker(&mut self) -> usize {
         let active = self.decode_engine.active_worker_ids();
-        debug_assert!(!active.is_empty(), "no active decode workers for round-robin");
+        debug_assert!(
+            !active.is_empty(),
+            "no active decode workers for round-robin"
+        );
         let idx = self.next_decode_worker_idx % active.len();
         self.next_decode_worker_idx = idx + 1;
         active[idx]
