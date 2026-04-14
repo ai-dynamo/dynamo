@@ -21,12 +21,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"time"
 
-	"emperror.dev/errors"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -568,7 +568,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
 	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleLeader)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to generate leader pod template")
+		return nil, fmt.Errorf("failed to generate leader pod template: %w", err)
 	}
 
 	maps.Copy(leaderPodTemplateSpec.Labels, labels)
@@ -586,7 +586,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 	err = checkMainContainer(&leaderPodTemplateSpec.Spec)
 
 	if err != nil {
-		return nil, errors.Wrap(err, "generateLeaderPodTemplateSpec: failed to check main container")
+		return nil, fmt.Errorf("generateLeaderPodTemplateSpec: failed to check main container: %w", err)
 	}
 
 	return leaderPodTemplateSpec, nil
@@ -595,7 +595,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 func checkMainContainer(spec *corev1.PodSpec) error {
 
 	if len(spec.Containers) == 0 {
-		return errors.New("No containers found in pod spec")
+		return errors.New("no containers found in pod spec")
 	}
 
 	mainContainerFound := false
@@ -626,7 +626,7 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx context.Context, opt generateResourceOption, kubeName string, labels map[string]string, instanceID int) (*corev1.PodTemplateSpec, error) {
 	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, opt, dynamo.RoleWorker)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to generate worker pod template")
+		return nil, fmt.Errorf("failed to generate worker pod template: %w", err)
 	}
 
 	maps.Copy(workerPodTemplateSpec.Labels, labels)
@@ -644,7 +644,7 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	err = checkMainContainer(&workerPodTemplateSpec.Spec)
 
 	if err != nil {
-		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
+		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: failed to check LWS worker main container: %w", err)
 	}
 
 	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
@@ -692,7 +692,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, kubeName, leaderPodLabels, instanceID)
 	if err != nil {
-		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate leader pod template")
+		return nil, false, fmt.Errorf("generateLeaderWorkerSet: failed to generate leader pod template: %w", err)
 	}
 
 	workerPodLabels := make(map[string]string)
@@ -701,7 +701,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, kubeName, workerPodLabels, instanceID)
 	if err != nil {
-		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate worker pod template")
+		return nil, false, fmt.Errorf("generateLeaderWorkerSet: failed to generate worker pod template: %w", err)
 	}
 
 	// Each individual LeaderWorkerSet always has exactly 1 replica
@@ -780,7 +780,7 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Co
 	maxRetries := 3
 	for range maxRetries - 1 {
 		if err = r.Get(ctx, req.NamespacedName, dynamoComponentDeployment); err != nil {
-			err = errors.Wrap(err, "Failed to re-fetch DynamoComponentDeployment")
+			err = fmt.Errorf("failed to re-fetch DynamoComponentDeployment: %w", err)
 			return
 		}
 		for _, condition := range conditions {
@@ -797,11 +797,11 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Co
 		}
 	}
 	if err != nil {
-		err = errors.Wrap(err, "Failed to update DynamoComponentDeployment status")
+		err = fmt.Errorf("failed to update DynamoComponentDeployment status: %w", err)
 		return
 	}
 	if err = r.Get(ctx, req.NamespacedName, dynamoComponentDeployment); err != nil {
-		err = errors.Wrap(err, "Failed to re-fetch DynamoComponentDeployment")
+		err = fmt.Errorf("failed to re-fetch DynamoComponentDeployment: %w", err)
 		return
 	}
 	return
@@ -812,7 +812,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteDeployments(
 		return r.generateDeployment(ctx, opt)
 	})
 	if err != nil {
-		return false, nil, errors.Wrap(err, "create or update deployment")
+		return false, nil, fmt.Errorf("create or update deployment: %w", err)
 	}
 	return modified, depl, nil
 }
@@ -1064,14 +1064,14 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
 		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to resolve checkpoint")
+			return nil, fmt.Errorf("failed to resolve checkpoint: %w", err)
 		}
 		checkpointInfo = info
 	}
 
 	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS, checkpointInfo)
 	if err != nil {
-		err = errors.Wrap(err, "failed to generate base pod spec")
+		err = fmt.Errorf("failed to generate base pod spec: %w", err)
 		return nil, err
 	}
 	if r.Config.Checkpoint.Enabled {
@@ -1082,7 +1082,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			podSpec,
 			checkpointInfo,
 		); err != nil {
-			return nil, errors.Wrap(err, "failed to inject checkpoint config")
+			return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
 		}
 	}
 
@@ -1131,7 +1131,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
-			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.dynamoComponentDeployment.Namespace)
+			err = fmt.Errorf("failed to list service accounts in namespace %s: %w", opt.dynamoComponentDeployment.Namespace, err)
 			return
 		}
 		if len(serviceAccounts.Items) > 0 {
