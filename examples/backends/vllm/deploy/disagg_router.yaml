@@ -29,6 +29,10 @@ spec:
             ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
           command:
@@ -53,6 +57,10 @@ spec:
             ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
           command:
