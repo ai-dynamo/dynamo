@@ -185,6 +185,7 @@ where
         lora_name: Option<String>,
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -204,6 +205,7 @@ where
             lora_name,
             priority_jump,
             expected_output_tokens,
+            pinned_worker,
             allowed_worker_ids,
             resp_tx: Some(resp_tx),
         };
@@ -436,6 +438,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -474,6 +477,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                None,
                 None,
                 None,
             )
@@ -516,6 +520,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -533,6 +538,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                     )
@@ -575,6 +581,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -592,6 +599,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                     )
@@ -648,6 +656,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -665,6 +674,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                     )
@@ -720,6 +730,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -737,6 +748,7 @@ mod tests {
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                     )
@@ -788,6 +800,7 @@ mod tests {
                 true,
                 Some("adapter-a".to_string()),
                 0.0,
+                None,
                 None,
                 None,
             )
@@ -890,6 +903,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -982,6 +996,7 @@ mod tests {
                 true,
                 None,
                 0.0,
+                None,
                 None,
                 None,
             )

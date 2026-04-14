@@ -133,21 +133,26 @@ impl<
     /// If queueing is disabled or workers have capacity, schedule immediately.
     /// Otherwise park in the pending heap.
     ///
-    /// When `allowed_worker_ids` is set on the request (external routing), the
-    /// capacity check is skipped.
-    pub async fn enqueue(&self, request: SchedulingRequest) {
+    /// When `allowed_worker_ids` is set on the request without an exact pin
+    /// (external routing), the capacity check is skipped.
+    pub async fn enqueue(&self, mut request: SchedulingRequest) {
+        if let Err(error) = request.validate_worker_constraints() {
+            request.respond(Err(error));
+            return;
+        }
+
         let Some(threshold) = self.threshold_frac else {
             self.schedule(request, Instant::now()).await;
             return;
         };
 
-        if request.allowed_worker_ids.is_some() {
+        if request.bypass_capacity_check() {
             self.schedule(request, Instant::now()).await;
             return;
         }
 
         let decay_now = Instant::now();
-        if self.all_workers_busy(threshold, request.allowed_worker_ids.as_ref(), decay_now) {
+        if self.request_is_busy(threshold, &request, decay_now) {
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = self.policy.enqueue_key(arrival_offset, &request);
@@ -182,10 +187,7 @@ impl<
 
         loop {
             let decay_now = Instant::now();
-            if self.all_workers_busy(threshold, None, decay_now) {
-                break;
-            }
-            let Some(entry) = self.pending.lock().await.pop() else {
+            let Some(entry) = self.pop_schedulable_entry(threshold, decay_now).await else {
                 break;
             };
             self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
@@ -197,6 +199,11 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
     async fn schedule(&self, mut request: SchedulingRequest, decay_now: Instant) {
+        if let Err(error) = request.validate_worker_constraints() {
+            request.respond(Err(error));
+            return;
+        }
+
         let (decode_blocks, prefill_tokens) = self
             .slots
             .potential_blocks_and_tokens_with_prefill_tracking(
@@ -303,8 +310,48 @@ impl<
         self.pending_count.load(AtomicOrdering::Relaxed)
     }
 
+    async fn pop_schedulable_entry(
+        &self,
+        threshold: f64,
+        decay_now: Instant,
+    ) -> Option<QueueEntry<S::Key>> {
+        let mut heap = self.pending.lock().await;
+        let mut blocked = Vec::new();
+        let mut schedulable = None;
+
+        while let Some(entry) = heap.pop() {
+            if self.request_is_busy(threshold, &entry.request, decay_now) {
+                blocked.push(entry);
+                continue;
+            }
+            schedulable = Some(entry);
+            break;
+        }
+
+        for entry in blocked {
+            heap.push(entry);
+        }
+
+        schedulable
+    }
+
+    fn request_is_busy(
+        &self,
+        threshold: f64,
+        request: &SchedulingRequest,
+        decay_now: Instant,
+    ) -> bool {
+        self.all_workers_busy(
+            threshold,
+            request.allowed_worker_ids.as_ref(),
+            request.pinned_worker,
+            decay_now,
+        )
+    }
+
     /// Check if all eligible workers are busy based on threshold.
-    /// When `allowed` is `Some`, only those worker IDs are considered;
+    /// When `pinned_worker` is `Some`, only that exact worker/rank is considered.
+    /// Otherwise when `allowed` is `Some`, only those worker IDs are considered;
     /// otherwise all registered workers are checked.
     /// Returns false when no eligible workers exist so the request falls
     /// through to `schedule`, which returns a proper `NoEndpoints` error.
@@ -312,10 +359,28 @@ impl<
         &self,
         threshold: f64,
         allowed: Option<&HashSet<WorkerId>>,
+        pinned_worker: Option<WorkerWithDpRank>,
         decay_now: Instant,
     ) -> bool {
         let active_tokens = self.slots.active_tokens(decay_now);
         let configs = self.workers_with_configs.borrow();
+
+        if let Some(worker) = pinned_worker {
+            let Some(config) = configs.get(&worker.worker_id) else {
+                return false;
+            };
+            let dp_start_rank = config.data_parallel_start_rank();
+            let dp_end_rank = dp_start_rank + config.data_parallel_size();
+            if !(dp_start_rank..dp_end_rank).contains(&worker.dp_rank) {
+                return false;
+            }
+
+            let max_batched = config
+                .max_num_batched_tokens()
+                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+            return (tokens as f64) > threshold * (max_batched as f64);
+        }
 
         let mut checked_any = false;
         for (&worker_id, config) in configs.iter() {
@@ -353,6 +418,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::OverlapScores;
+    use crate::scheduling::types::KvSchedulerError;
     use crate::selector::DefaultWorkerSelector;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -462,6 +528,7 @@ mod tests {
             lora_name: None,
             priority_jump: 0.0,
             expected_output_tokens: None,
+            pinned_worker: None,
             allowed_worker_ids: None,
             resp_tx: Some(tx),
         };
@@ -809,6 +876,7 @@ mod tests {
             lora_name: None,
             priority_jump: 0.0,
             expected_output_tokens: None,
+            pinned_worker: None,
             allowed_worker_ids: Some(allowed),
             resp_tx: Some(tx),
         };
@@ -826,6 +894,81 @@ mod tests {
             .mark_prefill_completed(&"filter-0".to_string(), decay_now())
             .unwrap();
         slots.free(&"filter-0".to_string(), decay_now()).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pinned_worker_conflict_with_allowed_ids_fails_early() {
+        let (queue, _slots) = make_queue(1, 16, 256, Some(0.0));
+        let (mut req, rx) = make_request("conflict", 256);
+        req.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        req.allowed_worker_ids = Some(HashSet::from([1]));
+
+        queue.enqueue(req).await;
+
+        let resp = rx.await.expect("oneshot dropped");
+        assert!(matches!(
+            resp,
+            Err(KvSchedulerError::PinnedWorkerNotAllowed { worker_id: 0 })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pinned_request_queues_on_busy_target_even_when_other_worker_is_idle() {
+        let (queue, slots) = make_queue(2, 16, 256, Some(0.0));
+
+        let (mut first, first_rx) = make_request("pinned-1", 256);
+        first.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        queue.enqueue(first).await;
+        let first_resp = first_rx.await.unwrap().unwrap();
+        assert_eq!(first_resp.best_worker, WorkerWithDpRank::new(1, 0));
+
+        let (mut second, mut second_rx) = make_request("pinned-2", 256);
+        second.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        queue.enqueue(second).await;
+        assert_eq!(queue.pending_count(), 1);
+        assert!(
+            second_rx.try_recv().is_err(),
+            "request should remain queued"
+        );
+
+        let (occupy_other, occupy_other_rx) = make_request("worker-0", 256);
+        queue.enqueue(occupy_other).await;
+        let occupy_other_resp = occupy_other_rx.await.unwrap().unwrap();
+        assert_eq!(occupy_other_resp.best_worker, WorkerWithDpRank::new(0, 0));
+
+        let (unpinned, mut unpinned_rx) = make_request("unpinned", 256);
+        queue.enqueue(unpinned).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        slots
+            .mark_prefill_completed(&"worker-0".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"worker-0".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        let unpinned_resp = unpinned_rx
+            .try_recv()
+            .expect("unpinned request should have been scheduled");
+        let unpinned_resp = unpinned_resp.expect("scheduling returned error");
+        assert_eq!(unpinned_resp.best_worker, WorkerWithDpRank::new(0, 0));
+        assert_eq!(queue.pending_count(), 1);
+        assert!(
+            second_rx.try_recv().is_err(),
+            "pinned request should still be queued"
+        );
+
+        slots
+            .mark_prefill_completed(&"pinned-1".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"pinned-1".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        let second_resp = second_rx
+            .try_recv()
+            .expect("pinned request should have been scheduled");
+        let second_resp = second_resp.expect("scheduling returned error");
+        assert_eq!(second_resp.best_worker, WorkerWithDpRank::new(1, 0));
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

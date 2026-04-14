@@ -22,6 +22,9 @@ pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
 
+    #[error("pinned worker {worker_id} is not in allowed worker set")]
+    PinnedWorkerNotAllowed { worker_id: WorkerId },
+
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
 
@@ -51,12 +54,40 @@ pub struct SchedulingRequest {
     /// Expected output tokens from agent_hints.osl, forwarded to the slot tracker
     /// for output block decay estimation.
     pub expected_output_tokens: Option<u32>,
+    /// Exact worker/rank pin used by scheduler queueing, WSPT, and selection.
+    pub pinned_worker: Option<WorkerWithDpRank>,
     /// Optional set of allowed worker IDs to restrict routing decisions (EPP).
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
 }
 
 impl SchedulingRequest {
+    pub fn validate_worker_constraints(&self) -> Result<(), KvSchedulerError> {
+        let Some(pinned_worker) = self.pinned_worker else {
+            return Ok(());
+        };
+        let Some(allowed_worker_ids) = self.allowed_worker_ids.as_ref() else {
+            return Ok(());
+        };
+        if allowed_worker_ids.contains(&pinned_worker.worker_id) {
+            return Ok(());
+        }
+
+        Err(KvSchedulerError::PinnedWorkerNotAllowed {
+            worker_id: pinned_worker.worker_id,
+        })
+    }
+
+    pub fn wspt_overlap_blocks(&self) -> u32 {
+        self.pinned_worker
+            .and_then(|worker| self.overlaps.scores.get(&worker).copied())
+            .unwrap_or_else(|| self.overlaps.scores.values().copied().max().unwrap_or(0))
+    }
+
+    pub fn bypass_capacity_check(&self) -> bool {
+        self.pinned_worker.is_none() && self.allowed_worker_ids.is_some()
+    }
+
     pub fn respond(&mut self, result: Result<SchedulingResponse, KvSchedulerError>) {
         let Some(tx) = self.resp_tx.take() else {
             tracing::error!("respond called multiple times on same request");
