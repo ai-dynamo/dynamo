@@ -55,6 +55,7 @@ dynamo/
 ├── tests/                          # End-to-end and cross-component tests
 │   ├── serve/                      # Serve E2E tests (vllm, sglang, trtllm)
 │   ├── kvbm_integration/           # KVBM integration tests
+│   ├── gpu_memory_service/         # GPU Memory Service E2E tests
 │   ├── fault_tolerance/            # Fault tolerance, migration, cancellation
 │   ├── deploy/                     # Deployment tests
 │   ├── frontend/                   # Frontend HTTP/gRPC tests
@@ -83,20 +84,21 @@ dynamo/
 
 **Python tests** (`pytest`):
 
-| Type              | Description                              | Location                                     |
-|-------------------|------------------------------------------|----------------------------------------------|
-| Unit              | Single function/class, isolated          | `components/src/dynamo/<component>/tests/`   |
-| Integration       | Interactions between modules/services    | `components/src/dynamo/<component>/tests/`   |
-| End-to-End        | User workflows, CLI, API                 | `tests/serve/`, `tests/deploy/`, etc.        |
-| KVBM Integration  | KV block manager integration             | `tests/kvbm_integration/`                    |
-| Router            | Router E2E with backends                 | `tests/router/`                              |
-| Planner           | Planner unit + integration tests         | `components/src/dynamo/planner/tests/`       |
-| Frontend          | Frontend HTTP/gRPC tests                 | `tests/frontend/`                            |
-| Profiler          | Profiler unit + integration tests        | `components/src/dynamo/profiler/tests/`      |
-| Global Planner    | Global planner unit tests                | `components/src/dynamo/global_planner/tests/`|
-| Fault Tolerance   | Chaos, migration, cancellation           | `tests/fault_tolerance/`                     |
-| Deployment        | Deployment validation                    | `tests/deploy/`                              |
-| Benchmark         | Performance/load                         | `benchmarks/`                                |
+| Type               | Description                           | Location                                      |
+|--------------------|---------------------------------------|-----------------------------------------------|
+| Unit               | Single function/class, isolated       | `components/src/dynamo/<component>/tests/`    |
+| Integration        | Interactions between modules/services | `components/src/dynamo/<component>/tests/`    |
+| End-to-End         | User workflows, CLI, API              | `tests/serve/`, `tests/deploy/`, etc.         |
+| KVBM Integration   | KV block manager integration          | `tests/kvbm_integration/`                     |
+| GPU Memory Service | GPU Memory Service E2E                | `tests/gpu_memory_service/`                   |
+| Router             | Router E2E with backends              | `tests/router/`                               |
+| Planner            | Planner unit + integration tests      | `components/src/dynamo/planner/tests/`        |
+| Frontend           | Frontend HTTP/gRPC tests              | `tests/frontend/`                             |
+| Profiler           | Profiler unit + integration tests     | `components/src/dynamo/profiler/tests/`       |
+| Global Planner     | Global planner unit tests             | `components/src/dynamo/global_planner/tests/` |
+| Fault Tolerance    | Chaos, migration, cancellation        | `tests/fault_tolerance/`                      |
+| Deployment         | Deployment validation                 | `tests/deploy/`                               |
+| Benchmark          | Performance/load                      | `benchmarks/`                                 |
 
 ---
 

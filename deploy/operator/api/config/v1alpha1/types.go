@@ -311,6 +311,16 @@ const (
 	DiscoveryBackendEtcd DiscoveryBackend = "etcd"
 )
 
+// KubeDiscoveryMode is the kube discovery identity granularity.
+type KubeDiscoveryMode string
+
+const (
+	// KubeDiscoveryModePod is the default: one identity per pod.
+	KubeDiscoveryModePod KubeDiscoveryMode = "pod"
+	// KubeDiscoveryModeContainer: each container registers independently with the discovery plane.
+	KubeDiscoveryModeContainer KubeDiscoveryMode = "container"
+)
+
 // GPUConfiguration holds GPU discovery settings.
 type GPUConfiguration struct {
 	// DiscoveryEnabled indicates whether GPU discovery is enabled
