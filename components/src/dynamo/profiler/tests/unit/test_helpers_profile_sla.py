@@ -77,6 +77,7 @@ def _make_dgdr(**overrides) -> DynamoGraphDeploymentRequestSpec:
 
 def _make_planner(**overrides) -> PlannerConfig:
     base = dict(
+        optimization_target="sla",
         enable_throughput_scaling=True,
         enable_load_scaling=False,
         pre_deployment_sweeping_mode=PlannerPreDeploymentSweepMode.Rapid,
