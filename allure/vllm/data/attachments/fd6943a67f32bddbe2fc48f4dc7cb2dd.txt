@@ -1,0 +1,4 @@
+INFO     dynamo.planner.core.decode:decode.py:56 Decode engine w1:dp0: estimated ITL 833.50ms (sched_kv=5000, queued_kv=3000, avg_decode_len=325.0)
+INFO     dynamo.planner.core.decode:decode.py:56 Decode engine w2:dp0: estimated ITL 733.50ms (sched_kv=4500, queued_kv=2500, avg_decode_len=325.0)
+INFO     dynamo.planner.core.base:base.py:781 Load-based decode ITL: workers=2, sla=5.0ms, estimates=['833.5', '733.5']
+INFO     dynamo.planner.core.base:base.py:787 Load-based decode ITL: ALL engines above SLA (5.0ms), scaling up to 3

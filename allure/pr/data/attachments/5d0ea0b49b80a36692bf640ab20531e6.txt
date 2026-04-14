@@ -1,0 +1,4 @@
+[2m2026-04-14T20:26:55.239636Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Picked config is aggregated (chosen_exp='agg') — skipping interpolation (requires disaggregated config).
+[2m2026-04-14T20:26:55.241205Z[0m [32m INFO[0m [2mprofile_sla._write_final_output[0m[2m:[0m Final DGD config saved to /tmp/pytest_temp/popen-gw5/test_run_profile_skips_interpo0/out/final_config.yaml
+[2m2026-04-14T20:26:55.246711Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
+[2m2026-04-14T20:26:55.247085Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

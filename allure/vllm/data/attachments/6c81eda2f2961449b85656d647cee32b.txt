@@ -1,0 +1,9 @@
+INFO     dynamo.profiler.profile_sla:profile_sla.py:101 Profiler config: model=Qwen/Qwen3-32B, backend=trtllm, system=h200_sxm, total_gpus=64, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=thorough, picking=load_match
+INFO     aiconfigurator.sdk.utils:utils.py:769 Quant inference result: quant_algo=None, kv_cache_quant_algo=None, quant_dynamic=None
+INFO     aiconfigurator.sdk.utils:utils.py:868 Loaded model config for Qwen/Qwen3-32B: architecture=Qwen3ForCausalLM, layers=64, n=64, n_kv=8, d=128, hidden_size=5120, inter_size=25600, vocab=151936, context=40960, topk=0, num_experts=0, moe_inter_size=25600, extra_params={'architecture': 'Qwen3ForCausalLM', 'use_qk_norm': True}
+INFO     dynamo.profiler.profile_sla:profile_sla.py:150 Dry run mode — skipping deployment and benchmarking.
+INFO     dynamo.profiler.profile_sla:profile_sla.py:213 Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1)
+WARNING  dynamo.profiler.profile_sla:profile_sla.py:245 Dry run mode — no DGD config produced (expected).
+INFO     dynamo.profiler.profile_sla:profile_sla.py:472 Performing final cleanup of any remaining deployments...
+INFO     deploy.utils.dynamo_deployment:dynamo_deployment.py:510 No deployments to clean up
+INFO     dynamo.profiler.profile_sla:profile_sla.py:474 Final cleanup completed.

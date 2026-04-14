@@ -1,4 +1,0 @@
-[2m2026-04-09T03:10:45.102156Z[0m [32m INFO[0m [2mstage_router.generate[0m[2m:[0m Router: stage 0 request keys=['request_id', 'prompt']
-[2m2026-04-09T03:10:45.102246Z[0m [32m INFO[0m [2mstage_router.generate[0m[2m:[0m Router: stage 1 request keys=['original_prompt', 'stage_connector_refs', 'request_id']
-[2m2026-04-09T03:10:45.102721Z[0m [32m INFO[0m [2mstage_router.generate[0m[2m:[0m Router: stage 0 request keys=['request_id', 'prompt']
-[2m2026-04-09T03:10:45.102794Z[0m [32m INFO[0m [2mstage_router.generate[0m[2m:[0m Router: stage 1 request keys=['original_prompt', 'stage_connector_refs', 'request_id']

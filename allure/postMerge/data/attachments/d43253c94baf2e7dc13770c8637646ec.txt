@@ -1,0 +1,267 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4268 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4268
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4268
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2438 --advertise-client-urls http://0.0.0.0:2438 --listen-peer-urls http://0.0.0.0:2439 --initial-advertise-peer-urls http://localhost:2439 --initial-cluster default=http://localhost:2439 --data-dir /tmp/etcd_mhi3u2kv in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2438
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2438
+INFO     test_serve_deployment[agg-request-plane-tcp]:common.py:43 Starting agg-request-plane-tcp test_deployment
+INFO     test_serve_deployment[agg-request-plane-tcp]:common.py:49 Using model: Qwen/Qwen3-0.6B
+INFO     test_serve_deployment[agg-request-plane-tcp]:common.py:50 Script: agg_request_planes.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/vllm/launch/agg_request_planes.sh --tcp in /workspace/examples/backends/vllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8094/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /v1/models HTTP/1.1" 200 109
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8094/v1/models (attempt=13, elapsed=21.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1776199159,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8094/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "GET /health HTTP/1.1" 200 690
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8094/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 5522149325112317705,
+      "transport": {
+        "tcp": "10.1.19.213:44531/4ca29d8db7fb9709/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 5522149325112317705,
+      "transport": {
+        "tcp": "10.1.19.213:44531/4ca29d8db7fb9709/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 5522149325112317705,
+      "transport": {
+        "tcp": "10.1.19.213:44531/4ca29d8db7fb9709/get_perf_metrics"
+      }
+    }
+  ]
+}
+INFO     test_serve_deployment[agg-request-plane-tcp]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8094/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "POST /v1/chat/completions HTTP/1.1" 200 3963
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=15.09s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '3963', 'date': 'Tue, 14 Apr 2026 20:39:36 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-f52cb09a-7b67-4753-a305-fdedbf7c6cfc",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "<think>\nOkay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need to incorporate that element.\n\nFirst, the setup. Maybe start with a knock on a door. The person who answers is the AI. Then, the punchline could involve the AI's response. But how to make it engaging? Maybe add some humor related to AI's capabilities.\n\nWait, the user might be looking for something that's light-hearted and not too complex. Let me think of a scenario where the AI is trying to help, but there's a twist. For example, the AI is trying to help a person, but the person is actually a robot. That could work.\n\nI should also consider the tone. It should be funny but not too absurd. Maybe include some technical terms related to AI but keep it ac... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8094/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "POST /v1/chat/completions HTTP/1.1" 200 2421
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=7.13s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '2421', 'date': 'Tue, 14 Apr 2026 20:39:43 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-5926311c-f48b-44fd-b6d4-a4796daff55a",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "<think>\nOkay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need to incorporate that element.\n\nFirst, the setup. Maybe start with a knock on a door. The person who answers is the AI. Then, the punchline could involve the AI's response. But how to make it engaging? Maybe add some humor related to AI's capabilities.\n\nWait, the user might be looking for something that's light-hearted and not too complex. Let me think of some common AI-related puns. Words like \"neural,\" \"algorithm,\" \"intelligence,\" \"code,\" \"data,\" \"machine.\" Maybe use some play on words with \"knock\" and \"code.\"\n\nAlso, the twist could be that the AI is actually a human, but that's a bit clich\u00e9. Alternatively, the AI could have a f... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 5/6 expected keywords: ['AI', 'knock', 'joke', 'think', 'intelligence']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8094/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "POST /v1/chat/completions HTTP/1.1" 200 2415
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=7.31s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '2415', 'date': 'Tue, 14 Apr 2026 20:39:50 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-ff13a470-21c5-4226-aa6d-c6de1f981f21",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "<think>\nOkay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need to incorporate that element.\n\nFirst, the setup. Maybe start with a knock on a door. The person who answers is the AI. Then, the punchline could involve the AI's response. But how to make it engaging? Maybe add some humor related to AI's capabilities.\n\nWait, the user might be looking for something that's light-hearted and not too complex. Let me think of some common AI-related puns. Words like \"neural,\" \"algorithm,\" \"intelligence,\" \"code,\" \"data,\" \"machine.\" Maybe use some play on words with \"knock\" and \"code.\"\n\nAlso, the twist could be that the AI is actually a human, but that's a bit clich\u00e9. Alternatively, the AI could have a f... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 5/6 expected keywords: ['AI', 'knock', 'joke', 'think', 'intelligence']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+INFO     test_serve_deployment[agg-request-plane-tcp]:common.py:124 TESTING: Payload: CompletionPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8094/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "POST /v1/completions HTTP/1.1" 200 4239
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=14.72s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '4239', 'date': 'Tue, 14 Apr 2026 20:40:05 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "cmpl-7ab036fd-211f-415b-9595-4aa19bb31f4d",
+  "choices": [
+    {
+      "text": " \n\nOkay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a different AI. The joke should be in the answers. Let me try to come up with some possibilities.\n\nFirst, maybe the first knock is \"Hello, AI!\" and the answer is \"Hello, AI!\" but that's the same. Not good. Maybe the first knock is \"What's your name?\" and the answer is \"I am an AI.\" Then the second knock is \"What's your name?\" and the answer is \"I am an AI.\" That's not funny. Maybe the first knock is \"What's your name?\" and the answer is \"I am an AI.\" Then the second knock is \"What's your name?\" and the answer is \"I am an AI.\" That's not funny. Maybe the first knock is \"What's your name?\" and the answer is \"I am an AI.\" Then the second knock is \"What's your name?\" and the answer i... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8094/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "POST /v1/completions HTTP/1.1" 200 4238
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=14.66s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '4238', 'date': 'Tue, 14 Apr 2026 20:40:20 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "cmpl-4fa179e2-9c01-44c8-9bbf-6c13d5afac72",
+  "choices": [
+    {
+      "text": " \n\nOkay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a different AI. The joke should be in the answers. Let me try to come up with some possibilities.\n\nFirst, maybe the first knock is \"Hello, AI!\" and the answer is \"Hello, AI!\" but that's the same. Not good. Maybe the first knock is \"What's your name?\" and the answer is \"I am an AI.\" Then the second knock is \"What's your name?\" and the answer is \"I am an AI.\" That's not funny. Maybe the first knock is \"What's your name?\" and the answer is \"I am an AI.\" Then the second knock is \"What's your name?\" and the answer is \"I am an AI.\" That's not funny. Maybe the first knock is \"What's your name?\" and the answer is \"I am an AI.\" Then the second knock is \"What's your name?\" and the answer i... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8094/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8094
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8094 "POST /v1/completions HTTP/1.1" 200 4239
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=14.78s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '4239', 'date': 'Tue, 14 Apr 2026 20:40:35 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "cmpl-3597a6db-8a19-4a9c-b5a1-3b4ab18dd7f7",
+  "choices": [
+    {
+      "text": " \n\nOkay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a different AI. The joke should be in the answers. Let me try to come up with some possibilities.\n\nFirst, maybe the first knock is \"Hello, AI!\" and the answer is \"Hello, AI!\" but that's the same. Not good. Maybe the first knock is \"What's your name?\" and the answer is \"I am an AI.\" Then the second knock is \"What's your name?\" and the answer is \"I am an AI.\" That's not funny. Maybe the first knock is \"What's your name?\" and the answer is \"I am an AI.\" Then the second knock is \"What's your name?\" and the answer is \"I am an AI.\" That's not funny. Maybe the first knock is \"What's your name?\" and the answer is \"I am an AI.\" Then the second knock is \"What's your name?\" and the answer i... (truncated)
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 5957
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 5959 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 5959 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 5958 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 5958 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 5945
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 5946 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 5946 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 5933
+INFO     NatsServer:managed_process.py:31 Terminating PID: 5934 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 5934 sed

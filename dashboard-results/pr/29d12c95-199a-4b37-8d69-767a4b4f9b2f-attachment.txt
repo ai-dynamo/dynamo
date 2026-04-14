@@ -1,1 +1,0 @@
-[2m2026-04-09T16:43:29.999954Z[0m [32m INFO[0m [2mprotocol.apply_dgd_overrides[0m[2m:[0m Ignoring metadata identity field(s) ['name', 'namespace', 'uid'] from overrides.dgd — use the DGD template to set these.

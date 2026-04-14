@@ -1,1 +1,1 @@
-{"id":"62ad33c59d43de03b5844552d9a6fb5d","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_args#test_omni_config_invalid_ring_degree","name":"test_omni_config_invalid_ring_degree[0]","status":"passed","testResultsByEnv":{"default":"9b46b0f61167e8ddbfe1c8e0a489c57e"}}
+{"id":"62ad33c59d43de03b5844552d9a6fb5d","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_args#test_omni_config_invalid_ring_degree","name":"test_omni_config_invalid_ring_degree[0]","status":"passed","testResultsByEnv":{"default":"e8dc46bd9f781cc3dcd35f251b3dc319"}}

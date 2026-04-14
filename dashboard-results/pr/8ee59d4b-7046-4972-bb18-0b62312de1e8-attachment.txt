@@ -1,3 +1,0 @@
-[2m2026-04-09T16:43:29.949503Z[0m [32m INFO[0m [2mscale_handler.__init__[0m[2m:[0m ScaleRequestHandler initialized for namespaces: ['other-ns-model-a', 'my-ns-model-b']
-[2m2026-04-09T16:43:29.949562Z[0m [32m INFO[0m [2mscale_handler.__init__[0m[2m:[0m GPU budget enforcement DISABLED (unlimited)
-[2m2026-04-09T16:43:29.949609Z[0m [33m WARN[0m [2mscale_handler._managed_dgd_names[0m[2m:[0m Managed namespace 'other-ns-model-a' does not start with expected prefix 'my-ns-'; cannot derive DGD name

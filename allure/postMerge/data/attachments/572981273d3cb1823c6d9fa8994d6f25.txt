@@ -1,0 +1,3 @@
+INFO     dynamo.vllm.args:args.py:503 NIXL side-channel host determined via hostname resolution: 10.1.24.250
+INFO     dynamo.vllm.args:args.py:611 Set VLLM_NIXL_SIDE_CHANNEL_HOST to 10.1.24.250 (auto-detected)
+INFO     dynamo.vllm.args:args.py:253 Using kv_events_config for publishing vLLM kv events over zmq: None (use_kv_events=False)

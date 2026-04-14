@@ -1,1 +1,0 @@
-[2m2026-04-09T03:10:19.378414Z[0m [32m INFO[0m [2mhandlers.wake_up[0m[2m:[0m [Wake] Re-registered endpoint to discovery - worker added back to routing pool

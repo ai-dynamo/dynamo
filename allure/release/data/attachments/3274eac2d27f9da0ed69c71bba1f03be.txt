@@ -1,0 +1,130 @@
+[2m2026-04-14T20:53:13.095728Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4294 in /workspace
+[2m2026-04-14T20:53:13.096754Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4294
+[2m2026-04-14T20:53:13.197425Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4294
+[2m2026-04-14T20:53:13.197695Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-14T20:53:13.199559Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-14T20:53:13.200240Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2416 --advertise-client-urls http://0.0.0.0:2416 --listen-peer-urls http://0.0.0.0:2417 --initial-advertise-peer-urls http://localhost:2417 --initial-cluster default=http://localhost:2417 --data-dir /tmp/etcd_egkqp1dp in /workspace
+[2m2026-04-14T20:53:13.201106Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2416
+[2m2026-04-14T20:53:13.301791Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2416
+[2m2026-04-14T20:53:13.307276Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting test_multimodal_b64_frontend_decoding test_deployment
+[2m2026-04-14T20:53:13.307348Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-14T20:53:13.307396Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_multimodal.sh
+[2m2026-04-14T20:53:13.307577Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct --frontend-decoding in /workspace/examples/backends/vllm
+[2m2026-04-14T20:53:13.308794Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8047/v1/models
+[2m2026-04-14T20:53:15.477418Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:53:15.477980Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:53:20.478738Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:53:20.479154Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:53:25.480327Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:53:25.480842Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:53:30.481999Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:53:30.482461Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:53:35.334507Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8047/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-14T20:53:35.483721Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:53:35.484236Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:53:40.485364Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:53:40.485802Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:53:45.486764Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:53:45.487212Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:53:50.488347Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:53:50.488894Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:53:55.356555Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8047/v1/models (attempt=23, elapsed=41.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct",
+      "object": "model",
+      "created": 1776200034,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-14T20:53:55.356704Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8047/health
+[2m2026-04-14T20:53:55.489728Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:53:55.490093Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:53:56.359248Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8047/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2923009390385005065,
+      "transport": {
+        "tcp": "10.1.24.250:34973/28909d8dc5078209/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2923009390385005065,
+      "transport": {
+        "tcp": "10.1.24.250:34973/28909d8dc5078209/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2923009390385005065,
+      "transport": {
+        "tcp": "10.1.24.250:34973/28909d8dc5078209/get_perf_metrics"
+      }
+    }
+  ]
+}
+[2m2026-04-14T20:53:56.359513Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-14T20:53:56.360833Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8047/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What colors are in the following image? Respond only with the colors."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAB88AAARlCAYAAAA3coZHAACAAElEQVR4XqR9bXYcR65lL4WUes6xW2/WMd1t2ZbUfvtfioYRwP1C...<2416136 chars, truncated>"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen3-VL-2B-Instruct"
+}'
+[2m2026-04-14T20:53:58.997190Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=2.64s
+[2m2026-04-14T20:53:58.997489Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['green']
+[2m2026-04-14T20:53:58.997545Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+purple, white, green, black
+[2m2026-04-14T20:53:58.998442Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 10874
+[2m2026-04-14T20:54:00.490568Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:54:00.491009Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:54:04.603798Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 10876 name: tee
+[2m2026-04-14T20:54:04.603952Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 10876 tee
+[2m2026-04-14T20:54:04.604404Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 10875 name: sed
+[2m2026-04-14T20:54:04.604494Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 10875 sed
+[2m2026-04-14T20:54:04.607275Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 10860
+[2m2026-04-14T20:54:04.707895Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 10861 name: sed
+[2m2026-04-14T20:54:04.708000Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 10861 sed
+[2m2026-04-14T20:54:04.708800Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 10848
+[2m2026-04-14T20:54:04.809935Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 10849 name: sed
+[2m2026-04-14T20:54:04.810109Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 10849 sed

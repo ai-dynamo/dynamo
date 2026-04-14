@@ -1,1 +1,1 @@
-{"id":"8df7a4cda66b7bf26439244843466049","fullName":"tests.serve.test_disagg_logprobs_serialization.TestDisaggLogprobsSerializationRoundtrip#test_missing_field_noop","name":"test_missing_field_noop","status":"passed","testResultsByEnv":{"trtllm-amd64":"bee60842c2f8a6e369345b70d5a1a2d0"}}
+{"id":"8df7a4cda66b7bf26439244843466049","fullName":"tests.serve.test_disagg_logprobs_serialization.TestDisaggLogprobsSerializationRoundtrip#test_missing_field_noop","name":"test_missing_field_noop","status":"passed","testResultsByEnv":{"trtllm-amd64":"345a2bce079c92c426926bbaeca6450c"}}

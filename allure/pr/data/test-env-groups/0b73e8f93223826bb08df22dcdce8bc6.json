@@ -1,1 +1,0 @@
-{"id":"0b73e8f93223826bb08df22dcdce8bc6","fullName":"tests.frontend.test_prompt_embeds.TestPromptEmbedsE2E#test_streaming_with_embeddings","name":"test_streaming_with_embeddings","status":"passed","testResultsByEnv":{"vllm-amd64":"f2a6d01048a042f68f88d860ee1eefe2"}}

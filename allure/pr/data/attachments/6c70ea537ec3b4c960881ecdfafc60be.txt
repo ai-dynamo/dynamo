@@ -1,2 +1,0 @@
-[2m2026-04-09T16:43:30.123043Z[0m [32m INFO[0m [2mrapid._run_naive_fallback[0m[2m:[0m Auto backend resolved to 'vllm' for naive fallback.
-[2m2026-04-09T16:43:30.123120Z[0m [32m INFO[0m [2mrapid._run_naive_fallback[0m[2m:[0m AIC does not support this combo — falling back to naive config generation.

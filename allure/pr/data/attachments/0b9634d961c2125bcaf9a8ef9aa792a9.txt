@@ -1,2 +1,0 @@
-INFO     dynamo.vllm.args:args.py:606 Using existing VLLM_NIXL_SIDE_CHANNEL_HOST=10.1.1.194
-INFO     dynamo.vllm.args:args.py:253 Using kv_events_config for publishing vLLM kv events over zmq: None (use_kv_events=False)

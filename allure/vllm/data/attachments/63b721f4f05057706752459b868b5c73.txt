@@ -1,0 +1,2 @@
+[2m2026-04-14T20:26:54.964940Z[0m [32m INFO[0m [2mkubernetes_api.update_service_replicas[0m[2m:[0m DGDSA test-deployment-test-component not found, falling back to DGD update
+[2m2026-04-14T20:26:54.965064Z[0m [32m INFO[0m [2mkubernetes_api._update_dgd_replicas[0m[2m:[0m Updated DGD test-deployment service test-component to 1 replicas

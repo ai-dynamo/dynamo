@@ -1,0 +1,1 @@
+Multi-GPU test: P=1 (expected ~1), D=1 (expected ~1)

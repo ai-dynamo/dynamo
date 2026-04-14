@@ -1,1 +1,0 @@
-{"uuid": "0b9d9c55-1996-490b-915d-42ec67abcdaa", "children": ["62f1b5fb-ff00-4b18-bd36-f894a4440e78"], "befores": [{"name": "minio_lora_service", "status": "passed", "start": 1775753075210, "stop": 1775753078471}], "afters": [{"name": "minio_lora_service::0", "status": "passed", "start": 1775753140294, "stop": 1775753140294}], "start": 1775753075210, "stop": 1775753140294}

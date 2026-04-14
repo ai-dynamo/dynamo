@@ -1,1 +1,0 @@
-[2m2026-04-09T16:43:30.098733Z[0m [32m INFO[0m [2mprofile_sla._write_final_output[0m[2m:[0m Final DGD config saved to /tmp/pytest_temp/popen-gw5/test_normal_config_writes_file0/out/final_config.yaml

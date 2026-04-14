@@ -1,0 +1,1 @@
+ERROR    dynamo.vllm.handlers:handlers.py:1131 Invalid base64 encoding in prompt_embeds: Incorrect padding

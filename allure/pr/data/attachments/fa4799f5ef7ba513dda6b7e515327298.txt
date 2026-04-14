@@ -1,2 +1,0 @@
-[2m2026-04-09T03:10:45.384959Z[0m [32m INFO[0m [2margs.ensure_side_channel_host[0m[2m:[0m Using existing VLLM_NIXL_SIDE_CHANNEL_HOST=10.1.1.194
-[2m2026-04-09T03:10:45.385014Z[0m [32m INFO[0m [2margs.update_engine_config_with_dynamo[0m[2m:[0m Using kv_events_config for publishing vLLM kv events over zmq: None (use_kv_events=False)

@@ -1,6 +1,0 @@
-[2m2026-04-08T21:34:57.651896Z[0m [32m INFO[0m [2mprefill._update_correction_factor[0m[2m:[0m Correction factor (prefill TTFT): 1.000
-[2m2026-04-08T21:34:57.652037Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=1.00, isl=100.00, osl=10.00
-[2m2026-04-08T21:34:57.652107Z[0m [32m INFO[0m [2mprefill._compute_replica_requirements[0m[2m:[0m Prefill calculation: 1.67(p_thpt) / 40000.00(p_engine_cap) = 2(num_p)
-[2m2026-04-08T21:34:57.652152Z[0m [33m WARN[0m [2mdecode._update_correction_factor[0m[2m:[0m No decode workers found for correction factor, skipping correction update
-[2m2026-04-08T21:34:57.652233Z[0m [32m INFO[0m [2mbase.predict_load[0m[2m:[0m Predicted load: num_req=1.00, isl=100.00, osl=10.00
-[2m2026-04-08T21:34:57.652302Z[0m [32m INFO[0m [2mdecode._compute_replica_requirements[0m[2m:[0m Decode calculation: 0.17(d_thpt) / 10000.00(d_engine_cap) = 2(num_d)

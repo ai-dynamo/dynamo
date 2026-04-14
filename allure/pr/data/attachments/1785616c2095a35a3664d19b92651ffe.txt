@@ -1,2 +1,0 @@
-[2m2026-04-09T03:12:58.573116Z[0m [32m INFO[0m [2mstage_router.generate[0m[2m:[0m Router: stage 0 request keys=['request_id', 'prompt']
-[2m2026-04-09T03:12:58.573224Z[0m [32m INFO[0m [2mstage_router.generate[0m[2m:[0m Router: stage 1 request keys=['original_prompt', 'stage_connector_refs', 'request_id']

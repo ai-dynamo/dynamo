@@ -1,1 +1,0 @@
-{"id":"abab79f934e92407b9fb5145f95e368b","fullName":"tests.frontend.test_prompt_embeds.TestPromptEmbedsE2E#test_invalid_tensor_data_rejected","name":"test_invalid_tensor_data_rejected","status":"passed","testResultsByEnv":{"vllm-amd64":"e73d875307211688877164a1a166c57c"}}

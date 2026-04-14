@@ -1,2 +1,0 @@
-[2m2026-04-09T16:43:30.004954Z[0m [32m INFO[0m [2mglobal_planner.set_component_replicas[0m[2m:[0m Delegating scale request to GlobalPlanner: DGD=d, prefill=[1], decode=[]
-[2m2026-04-09T16:43:30.005075Z[0m [31mERROR[0m [2mglobal_planner.set_component_replicas[0m[2m:[0m GlobalPlanner scaling failed: Failed

@@ -1,0 +1,65 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4264 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4264
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4264
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2401 --advertise-client-urls http://0.0.0.0:2401 --listen-peer-urls http://0.0.0.0:2402 --initial-advertise-peer-urls http://localhost:2402 --initial-cluster default=http://localhost:2402 --data-dir /tmp/etcd_8kbhcpsr in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2401
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2401
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:225 Created SGLang worker 0 on GPU 0 (mem_frac=0.4, system_port=8153, kv_port=8101) with endpoint: dyn://test-namespace-ikwswmpdlv.backend.generate
+INFO     tests.router.test_router_e2e_with_sglang:test_router_e2e_with_sglang.py:225 Created SGLang worker 1 on GPU 0 (mem_frac=0.4, system_port=8154, kv_port=8102) with endpoint: dyn://test-namespace-ikwswmpdlv.backend.generate
+INFO     tests.router.e2e_harness:e2e_harness.py:57 [SGLangProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.e2e_harness:e2e_harness.py:64 [SGLangProcess] Starting SGLang worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:79 [SGLangProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8101"} in /workspace
+INFO     tests.router.e2e_harness:e2e_harness.py:85 [SGLangProcess] Worker 0 launched with PID: 1562
+INFO     tests.router.e2e_harness:e2e_harness.py:94 [SGLangProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+INFO     tests.router.e2e_harness:e2e_harness.py:64 [SGLangProcess] Starting SGLang worker 1...
+INFO     tests.router.e2e_harness:e2e_harness.py:79 [SGLangProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8102"} in /workspace
+INFO     tests.router.e2e_harness:e2e_harness.py:85 [SGLangProcess] Worker 1 launched with PID: 1601
+INFO     tests.router.e2e_harness:e2e_harness.py:117 [SGLangProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.e2e_harness:e2e_harness.py:122 [SGLangProcess] Waiting for health checks to complete...
+INFO     tests.router.e2e_harness:e2e_harness.py:127 [SGLangProcess] Checking health for worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:134 [SGLangProcess] Worker 0 health checks passed
+INFO     tests.router.e2e_harness:e2e_harness.py:127 [SGLangProcess] Checking health for worker 1...
+INFO     tests.router.e2e_harness:e2e_harness.py:134 [SGLangProcess] Worker 1 health checks passed
+INFO     tests.router.e2e_harness:e2e_harness.py:144 [SGLangProcess] All workers started successfully and passed health checks!
+INFO     tests.router.helper:helper.py:263 Waiting for workers to be ready
+INFO     tests.router.helper:helper.py:275 Found 2 instance(s): [6395284702719567375, 6395284702719567373]
+INFO     tests.router.helper:helper.py:291 Sending warmup request with 4 tokens
+INFO     tests.router.helper:helper.py:308 All 2 workers are ready
+INFO     tests.router.common:common.py:1637 Workers ready: [6395284702719567373, 6395284702719567375]
+INFO     tests.router.common:common.py:1655 Routing targets: worker_a=(id=6395284702719567373, dp_rank=None), worker_b=(id=6395284702719567375, dp_rank=None)
+INFO     tests.router.common:common.py:1698 Sending request 1/5 with 32 tokens - FORCING worker_id=6395284702719567373
+INFO     tests.router.common:common.py:1716 Request 1 response: prefill_worker_id=6395284702719567373, decode_worker_id=6395284702719567373, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1698 Sending request 2/5 with 48 tokens - FORCING worker_id=6395284702719567373
+INFO     tests.router.common:common.py:1716 Request 2 response: prefill_worker_id=6395284702719567373, decode_worker_id=6395284702719567373, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1698 Sending request 3/5 with 48 tokens - FORCING worker_id=6395284702719567375
+INFO     tests.router.common:common.py:1716 Request 3 response: prefill_worker_id=6395284702719567375, decode_worker_id=6395284702719567375, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1698 Sending request 4/5 with 64 tokens
+INFO     tests.router.common:common.py:1716 Request 4 response: prefill_worker_id=6395284702719567373, decode_worker_id=6395284702719567373, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1698 Sending request 5/5 with 48 tokens
+INFO     tests.router.common:common.py:1716 Request 5 response: prefill_worker_id=6395284702719567375, decode_worker_id=6395284702719567375, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1770 Response routing verified: req4 → worker_a (id=6395284702719567373, dp_rank=None), req5 → worker_b (id=6395284702719567375, dp_rank=None)
+INFO     tests.router.common:common.py:1797 Stored blocks by (worker_id, dp_rank): [((6395284702719567375, 0), 4), ((6395284702719567373, 0), 5)]
+INFO     tests.router.common:common.py:1818 Successfully verified cross-worker routing: worker_a (6395284702719567373, 0) has 5 stored blocks, worker_b (6395284702719567375, 0) has 4 stored blocks
+INFO     tests.router.e2e_harness:e2e_harness.py:152 Stopping SGLang worker 0
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 1562
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1564 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1564 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1563 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1563 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:152 Stopping SGLang worker 1
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 1601
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1603 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1603 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 1602 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 1602 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:155 Waiting for SGLang worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 1550
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1551 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1551 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 1538
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1539 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1539 sed

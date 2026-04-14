@@ -1,0 +1,3 @@
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:71 ScaleRequestHandler initialized (accepting all namespaces)
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:85 GPU budget enforcement DISABLED (unlimited)
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:143 Discovered 2 existing DGDs: ['model-a', 'model-b']

@@ -1,1 +1,1 @@
-{"id":"a7eda63a1e473d6227646f04a161e85f","fullName":"tests.serve.test_vllm#test_lora_aggregated_router","name":"test_lora_aggregated_router[2]","status":"passed","testResultsByEnv":{"vllm-amd64":"3eef360afe8ee4ef34062bbc8411a801"}}
+{"id":"a7eda63a1e473d6227646f04a161e85f","fullName":"tests.serve.test_vllm#test_lora_aggregated_router","name":"test_lora_aggregated_router[2]","status":"passed","testResultsByEnv":{"vllm-amd64":"6b509fba0c062e1b66a81cb9b970eec2"}}

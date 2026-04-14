@@ -1,1 +1,0 @@
-[2m2026-04-08T21:40:53.990777Z[0m [32m INFO[0m [2margs.ensure_side_channel_host[0m[2m:[0m Set VLLM_NIXL_SIDE_CHANNEL_HOST to 10.0.0.5 (auto-detected)

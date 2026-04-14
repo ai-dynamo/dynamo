@@ -1,1 +1,0 @@
-[2m2026-04-08T21:36:23.103936Z[0m [31mERROR[0m [2mhandlers.wake_up[0m[2m:[0m Failed to wake up engine: discovery write timeout

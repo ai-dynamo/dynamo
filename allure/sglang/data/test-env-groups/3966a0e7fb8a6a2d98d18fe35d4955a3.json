@@ -1,1 +1,1 @@
-{"id":"3966a0e7fb8a6a2d98d18fe35d4955a3","fullName":"tests.kvbm_integration.test_chunked_prefill#test_chunked_prefill_offload","name":"test_chunked_prefill_offload[llm_server_kvbm0]","status":"passed","testResultsByEnv":{"vllm-amd64":"2f0bcd704b6201f4764b8e07e0e559b2"}}
+{"id":"3966a0e7fb8a6a2d98d18fe35d4955a3","fullName":"tests.kvbm_integration.test_chunked_prefill#test_chunked_prefill_offload","name":"test_chunked_prefill_offload[llm_server_kvbm0]","status":"passed","testResultsByEnv":{"vllm-amd64":"d6ff06636198f4cd28df1d369327418d"}}

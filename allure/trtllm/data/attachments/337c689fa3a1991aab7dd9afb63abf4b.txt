@@ -1,0 +1,1 @@
+INFO     dynamo.vllm.omni.output_formatter:output_formatter.py:277 Audio encoded for request req-1: 4800 samples, sr=24000, 9644 bytes wav

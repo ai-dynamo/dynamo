@@ -1,1 +1,0 @@
-{"uuid": "a5b45a40-ff85-4c54-9ccc-db30886d97ac", "children": ["b8f392ce-d64c-4afc-a611-aaecace0d98e"], "befores": [{"name": "mock_kube_api_class", "status": "passed", "start": 1775753010023, "stop": 1775753010023}], "start": 1775753010023, "stop": 1775753010026}

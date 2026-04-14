@@ -1,7 +1,0 @@
-[2m2026-04-08T21:34:57.435553Z[0m [33m WARN[0m [2mprotocol._deep_merge_overrides[0m[2m:[0m Service 'GhostService' does not exist in the generated DGD config; overrides for this service will not be applied.
-[2m2026-04-08T21:34:57.435666Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Applied DGD overrides to the picked DGD config.
-[2m2026-04-08T21:34:57.570348Z[0m [33m WARN[0m [2mprofile_sla.run_profile[0m[2m:[0m Could not fetch model max context length.
-[2m2026-04-08T21:34:57.570829Z[0m [33m WARN[0m [2mprotocol._deep_merge_overrides[0m[2m:[0m Service 'GhostService' does not exist in the generated DGD config; overrides for this service will not be applied.
-[2m2026-04-08T21:34:57.570907Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Applied DGD overrides to the final config.
-[2m2026-04-08T21:34:57.570996Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
-[2m2026-04-08T21:34:57.571494Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

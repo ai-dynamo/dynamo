@@ -1,2 +1,0 @@
-[2m2026-04-09T16:43:30.006698Z[0m [32m INFO[0m [2mkubernetes.set_component_replicas[0m[2m:[0m Updating prefill component component1 to desired replica count 3
-[2m2026-04-09T16:43:30.007086Z[0m [32m INFO[0m [2mkubernetes.set_component_replicas[0m[2m:[0m decode component component2 already at desired replica count 2, skipping

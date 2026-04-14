@@ -1,13 +1,0 @@
-[2m2026-04-09T03:12:07.085328Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 3 models needed for collected tests
-Models: {'Qwen/Qwen3-0.6B', 'Qwen/Qwen3-VL-2B-Instruct', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers'}
-[2m2026-04-09T03:12:07.085443Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
-[2m2026-04-09T03:12:07.085492Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:03,  2.81it/s]Fetching 10 files:  70%|███████   | 7/10 [00:03<00:01,  2.05it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  2.97it/s]
-[2m2026-04-09T03:12:10.625637Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
-[2m2026-04-09T03:12:10.625718Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
-Fetching 12 files:   0%|          | 0/12 [00:00<?, ?it/s]Fetching 12 files:   8%|▊         | 1/12 [00:00<00:01,  7.88it/s]Fetching 12 files:  58%|█████▊    | 7/12 [00:04<00:03,  1.53it/s]Fetching 12 files: 100%|██████████| 12/12 [00:04<00:00,  2.72it/s]
-[2m2026-04-09T03:12:15.146719Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct
-[2m2026-04-09T03:12:15.146794Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-Fetching 31 files:   0%|          | 0/31 [00:00<?, ?it/s]Fetching 31 files:   3%|▎         | 1/31 [00:00<00:03,  8.20it/s]Fetching 31 files:  10%|▉         | 3/31 [00:00<00:03,  7.42it/s]Fetching 31 files:  13%|█▎        | 4/31 [00:00<00:04,  6.01it/s]Fetching 31 files:  35%|███▌      | 11/31 [00:00<00:01, 17.18it/s]Fetching 31 files:  35%|███▌      | 11/31 [00:11<00:01, 17.18it/s]Fetching 31 files:  52%|█████▏    | 16/31 [00:31<00:41,  2.78s/it]Fetching 31 files:  61%|██████▏   | 19/31 [00:33<00:26,  2.17s/it]Fetching 31 files:  87%|████████▋ | 27/31 [00:34<00:04,  1.15s/it]Fetching 31 files: 100%|██████████| 31/31 [00:34<00:00,  1.13s/it]
-[2m2026-04-09T03:12:50.207816Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-[2m2026-04-09T03:12:50.208250Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

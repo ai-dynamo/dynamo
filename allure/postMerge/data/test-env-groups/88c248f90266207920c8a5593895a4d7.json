@@ -1,1 +1,1 @@
-{"id":"88c248f90266207920c8a5593895a4d7","fullName":"components.src.dynamo.sglang.tests.test_sglang_image_diffusion_handler.TestImageDiffusionWorkerHandler#test_encode_base64","name":"test_encode_base64","status":"passed","testResultsByEnv":{"default":"cbffc1c31f55e7c80aa1d722d2b07765"}}
+{"id":"88c248f90266207920c8a5593895a4d7","fullName":"components.src.dynamo.sglang.tests.test_sglang_image_diffusion_handler.TestImageDiffusionWorkerHandler#test_encode_base64","name":"test_encode_base64","status":"passed","testResultsByEnv":{"default":"11f4a532837b7a91931b413e3e7a25c9"}}

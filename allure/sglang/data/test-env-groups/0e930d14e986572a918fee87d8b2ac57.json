@@ -1,1 +1,1 @@
-{"id":"0e930d14e986572a918fee87d8b2ac57","fullName":"tests.kvbm_integration.test_kvbm#test_offload_and_onboard","name":"test_offload_and_onboard[llm_server_kvbm0]","status":"passed","testResultsByEnv":{"vllm-amd64":"9ac00d3a866ac813c080bb670aaf7145"}}
+{"id":"0e930d14e986572a918fee87d8b2ac57","fullName":"tests.kvbm_integration.test_kvbm#test_offload_and_onboard","name":"test_offload_and_onboard[llm_server_kvbm0]","status":"passed","testResultsByEnv":{"vllm-amd64":"bc07a407ec38fb29fefa509c3dc4896b"}}

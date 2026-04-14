@@ -1,0 +1,131 @@
+[2m2026-04-14T20:59:10.370487Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4265 in /workspace
+[2m2026-04-14T20:59:10.371523Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4265
+[2m2026-04-14T20:59:10.472217Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4265
+[2m2026-04-14T20:59:10.472442Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-14T20:59:10.474523Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-14T20:59:10.475172Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2471 --advertise-client-urls http://0.0.0.0:2471 --listen-peer-urls http://0.0.0.0:2472 --initial-advertise-peer-urls http://localhost:2472 --initial-cluster default=http://localhost:2472 --data-dir /tmp/etcd_jguft9xc in /workspace
+[2m2026-04-14T20:59:10.476057Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2471
+[2m2026-04-14T20:59:10.576731Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2471
+[2m2026-04-14T20:59:10.580520Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting omni_t2v test_deployment
+[2m2026-04-14T20:59:10.580595Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+[2m2026-04-14T20:59:10.580644Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg_omni_video.sh
+[2m2026-04-14T20:59:10.581121Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg_omni_video.sh --vae-use-slicing --vae-use-tiling --enforce-eager in /workspace/examples/backends/vllm
+[2m2026-04-14T20:59:10.582321Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8009/v1/models
+[2m2026-04-14T20:59:10.594740Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:10.595091Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:59:15.596211Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:15.596570Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:59:20.597704Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:20.598207Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:59:25.598744Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:25.599222Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:59:30.600401Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:30.600881Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:59:32.606138Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8009/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-14T20:59:35.601716Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:35.602091Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:59:40.603252Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:40.603755Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:59:45.605334Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:45.605943Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:59:50.607163Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:50.607847Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T20:59:52.628254Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8009/v1/models (custom check failed) (attempt=23, elapsed=41.0s)
+[2m2026-04-14T20:59:55.609014Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T20:59:55.609773Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:00.614103Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:00.614697Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:05.615933Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:05.616687Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:10.617891Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:10.618643Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:12.651662Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8009/v1/models (custom check failed) (attempt=33, elapsed=61.1s)
+[2m2026-04-14T21:00:15.619831Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:15.620241Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:20.621437Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:20.621998Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:25.623159Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:25.623610Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:30.624788Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:30.625221Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:32.674271Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8009/v1/models (custom check failed) (attempt=43, elapsed=81.1s)
+[2m2026-04-14T21:00:35.626409Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:35.626850Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:40.628064Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:40.628652Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:45.629843Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:45.630600Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:50.631778Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:50.632642Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:00:52.696588Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8009/v1/models (custom check failed) (attempt=53, elapsed=101.1s)
+[2m2026-04-14T21:00:55.633837Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:00:55.634549Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:01:00.635731Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:01:00.636368Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:01:02.708617Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8009/v1/models (attempt=58, elapsed=111.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+      "object": "model",
+      "created": 1776200461,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-14T21:01:02.708831Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8009/health
+[2m2026-04-14T21:01:03.711144Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8009/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 4059042396480675849,
+      "transport": {
+        "tcp": "10.1.24.250:35905/38549d8dca7b2009/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-14T21:01:03.711428Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: VideoGenerationPayload
+[2m2026-04-14T21:01:03.711602Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8009/v1/videos" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Dog running on a beach",
+  "size": "480x272",
+  "response_format": "url",
+  "nvext": {
+    "num_inference_steps": 10,
+    "num_frames": 17
+  },
+  "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
+}'
+[2m2026-04-14T21:01:05.637511Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:01:05.637963Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:01:10.638678Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:01:10.639163Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:01:11.172670Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=7.46s
+[2m2026-04-14T21:01:11.173017Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+file:///tmp/dynamo_media/videos/980fc424-3055-4c34-99c6-ddf615976f49.mp4
+[2m2026-04-14T21:01:11.173949Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12655
+[2m2026-04-14T21:01:15.640280Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-14T21:01:15.640761Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2405"]
+[2m2026-04-14T21:01:18.181948Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12657 name: tee
+[2m2026-04-14T21:01:18.182120Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12657 tee
+[2m2026-04-14T21:01:18.182571Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12656 name: sed
+[2m2026-04-14T21:01:18.182660Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12656 sed
+[2m2026-04-14T21:01:18.185411Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12642
+[2m2026-04-14T21:01:18.286364Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12643 name: sed
+[2m2026-04-14T21:01:18.286569Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12643 sed
+[2m2026-04-14T21:01:18.287480Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 12630
+[2m2026-04-14T21:01:18.388040Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 12631 name: sed
+[2m2026-04-14T21:01:18.388194Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 12631 sed

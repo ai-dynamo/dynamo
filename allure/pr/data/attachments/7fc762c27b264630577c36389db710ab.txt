@@ -1,2 +1,0 @@
-INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:61 Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
-INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:88 Image diffusion request: {'prompt': 'Transform this image', 'model': 'test-model', 'size': '256x256', 'response_format': 'b64_json', 'input_reference': '/tmp/pytest_temp/popen-gw0/test_generate_i2i_passes_image0/test_input.png'}

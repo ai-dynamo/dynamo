@@ -1,0 +1,4 @@
+[2m2026-04-14T20:27:56.901265Z[0m [32m INFO[0m [2m__init__._wrapper[0m[2m:[0m Registered model loader `<class 'gpu_memory_service.integrations.vllm.model_loader.register_gms_loader.<locals>.GMSModelLoader'>` with load format `gms`
+[2m2026-04-14T20:27:56.901372Z[0m [32m INFO[0m [2mpatches.patch_empty_cache[0m[2m:[0m [GMS] Patched torch.cuda.empty_cache
+[2m2026-04-14T20:27:56.901418Z[0m [32m INFO[0m [2mpatches.patch_memory_snapshot[0m[2m:[0m [GMS Patch] Patched MemorySnapshot.measure
+[2m2026-04-14T20:27:56.901456Z[0m [32m INFO[0m [2mworker[0m[2m:[0m [GMS] Worker module loaded - model loader registered, all patches applied

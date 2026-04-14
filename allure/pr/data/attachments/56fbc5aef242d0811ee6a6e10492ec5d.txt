@@ -1,13 +1,0 @@
-[2m2026-04-08T21:18:24.321249Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 3 models needed for collected tests
-Models: {'deepseek-ai/DeepSeek-V2-Lite', 'Qwen/Qwen3-0.6B', 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'}
-[2m2026-04-08T21:18:24.321358Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
-[2m2026-04-08T21:18:24.321409Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: deepseek-ai/DeepSeek-V2-Lite
-Fetching 15 files:   0%|          | 0/15 [00:00<?, ?it/s]Fetching 15 files:   7%|▋         | 1/15 [00:00<00:04,  3.13it/s]Fetching 15 files:  47%|████▋     | 7/15 [00:09<00:10,  1.36s/it]Fetching 15 files:  53%|█████▎    | 8/15 [00:11<00:11,  1.58s/it]Fetching 15 files: 100%|██████████| 15/15 [00:11<00:00,  1.27it/s]
-[2m2026-04-08T21:18:36.305419Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: deepseek-ai/DeepSeek-V2-Lite
-[2m2026-04-08T21:18:36.305504Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  8.07it/s]Fetching 10 files:  70%|███████   | 7/10 [00:02<00:01,  2.81it/s]Fetching 10 files: 100%|██████████| 10/10 [00:02<00:00,  4.13it/s]
-[2m2026-04-08T21:18:38.847220Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
-[2m2026-04-08T21:18:38.847301Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:00,  9.15it/s]Fetching 10 files:  60%|██████    | 6/10 [00:03<00:02,  1.90it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  3.30it/s]
-[2m2026-04-08T21:18:41.985889Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: TinyLlama/TinyLlama-1.1B-Chat-v1.0
-[2m2026-04-08T21:18:41.986335Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

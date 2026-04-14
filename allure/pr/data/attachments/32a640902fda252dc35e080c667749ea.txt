@@ -1,4 +1,0 @@
-[2m2026-04-09T16:43:30.227274Z[0m [33m WARN[0m [2mprofile_sla.run_profile[0m[2m:[0m Could not fetch model max context length.
-[2m2026-04-09T16:43:30.229765Z[0m [32m INFO[0m [2mprofile_sla._write_final_output[0m[2m:[0m Final DGD config saved to /tmp/pytest_temp/popen-gw5/test_run_profile_calls_interpo0/out/final_config.yaml
-[2m2026-04-09T16:43:30.230628Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
-[2m2026-04-09T16:43:30.230896Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

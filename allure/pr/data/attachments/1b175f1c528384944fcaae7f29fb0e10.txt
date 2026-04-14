@@ -1,7 +1,0 @@
-[2m2026-04-09T03:09:30.660788Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 1 models needed for collected tests
-Models: {'Qwen/Qwen3-0.6B'}
-[2m2026-04-09T03:09:30.660892Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
-[2m2026-04-09T03:09:30.660940Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files:  10%|█         | 1/10 [00:00<00:03,  2.84it/s]Fetching 10 files:  70%|███████   | 7/10 [00:03<00:01,  2.02it/s]Fetching 10 files: 100%|██████████| 10/10 [00:03<00:00,  2.92it/s]
-[2m2026-04-09T03:09:34.250161Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
-[2m2026-04-09T03:09:34.250695Z[0m [32m INFO[0m [2mconftest._enable_offline_with_mistral_patch[0m[2m:[0m Enabled HF_HUB_OFFLINE with _patch_mistral_regex workaround (see https://github.com/huggingface/transformers/issues/44843)

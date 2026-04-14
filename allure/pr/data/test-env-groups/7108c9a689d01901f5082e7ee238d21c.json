@@ -1,1 +1,0 @@
-{"id":"7108c9a689d01901f5082e7ee238d21c","fullName":"tests.deploy.test_deploy#test_deployment","name":"test_deployment[vllm-disagg_router]","status":"passed","testResultsByEnv":{"vllm-amd64":"43628ffdf4ac8747b34fe02379be6595","sglang-amd64":"9cbf720ae2cfc0e7c67fccc05444f17b","trtllm-amd64":"ada4c6e7c57cc4ae392ad7f0bc35f735"}}

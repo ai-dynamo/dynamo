@@ -1,0 +1,2 @@
+[2m2026-04-14T20:43:54.804951Z[0m [32m INFO[0m [2mdiffusion_engine.generate[0m[2m:[0m Generating: prompt='a golden retriever...', size=64x64, frames=4, steps=1
+[2m2026-04-14T20:43:54.805187Z[0m [32m INFO[0m [2mdiffusion_engine.generate[0m[2m:[0m Generated video output with shape torch.Size([1, 4, 64, 64, 3])

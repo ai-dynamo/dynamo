@@ -1,2 +1,0 @@
-[2m2026-04-09T03:05:16.275521Z[0m [32m INFO[0m [2mimage_diffusion_handler.__init__[0m[2m:[0m Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
-[2m2026-04-09T03:05:16.280029Z[0m [32m INFO[0m [2mimage_diffusion_handler.generate[0m[2m:[0m Image diffusion request: {'prompt': 'Transform this image', 'model': 'test-model', 'size': '256x256', 'response_format': 'b64_json', 'input_reference': '/tmp/pytest_temp/popen-gw0/test_generate_i2i_passes_image0/test_input.png'}

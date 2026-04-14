@@ -1,2 +1,0 @@
-INFO     dynamo.vllm.args:args.py:327 Decode worker detected (disaggregation_mode=decode): kv_events_config disabled (decode workers don't publish KV events)
-INFO     dynamo.vllm.args:args.py:253 Using kv_events_config for publishing vLLM kv events over zmq: None (use_kv_events=False)

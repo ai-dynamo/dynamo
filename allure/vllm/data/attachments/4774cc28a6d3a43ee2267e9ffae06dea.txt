@@ -1,0 +1,88 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4260 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4260
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4260
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2398 --advertise-client-urls http://0.0.0.0:2398 --listen-peer-urls http://0.0.0.0:2399 --initial-advertise-peer-urls http://localhost:2399 --initial-cluster default=http://localhost:2399 --data-dir /tmp/etcd_m9wlzwp6 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2398
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2398
+INFO     DynamoFrontendProcess:managed_process.py:437 Running command: python -m dynamo.frontend --router-mode round-robin --http-port 8029 --migration-limit 0 in /workspace
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:335 Frontend started successfully
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --disaggregation-mode decode --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9185/health
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:176 Decode worker status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9185/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 436357130
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:344 Decode Worker PID: 1983
+INFO     DynamoWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --served-model-name Qwen/Qwen3-0.6B --page-size 16 --tp 1 --trust-remote-code --disaggregation-mode prefill --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl in /workspace
+INFO     DynamoWorkerProcess:managed_process.py:690 Checking URL http://localhost:9262/health
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:176 Prefill worker status is ready
+INFO     DynamoWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:9262/health (attempt=21, elapsed=20.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 11,
+    "nanos": 607236067
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:353 Prefill Worker PID: 2633
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:359 Testing chat completion stream request cancellation during decode phase...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:219 Sending chat completion request (stream=True) with prompt: 'Tell me a very long and detailed story about the h...' and max_tokens: 16384
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:511 Starting to poll for 'New Request ID: ' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:539 Found pattern 'New Request ID: ' at iteration 1
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:541 Content after pattern: '83f5b97b-33f6-45a1-9ad7-b8bbe1ae682a'
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:511 Starting to poll for 'New Request ID: 83f5b97b-33f6-45a1-9ad7-b8bbe1ae682a' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:539 Found pattern 'New Request ID: 83f5b97b-33f6-45a1-9ad7-b8bbe1ae682a' at iteration 0
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:288 Received streaming response 1: data: {"id":"chatcmpl-83f5b97b-33f6-45a1-9ad7-b8bbe1ae682a","choices":[{"index":0,"delta":{"content"
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:292 Successfully read 1 responses
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:511 Starting to poll for 'New SGLang Request ID: ' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:539 Found pattern 'New SGLang Request ID: ' at iteration 0
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:541 Content after pattern: 'f7960bf57f20455db976353513d2f9c8'
+WARNING  tests.fault_tolerance.cancellation.utils:utils.py:131 Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+WARNING  tests.fault_tolerance.cancellation.utils:utils.py:136 Failed to shutdown socket: [Errno 9] Bad file descriptor
+WARNING  tests.fault_tolerance.cancellation.utils:utils.py:131 Failed to set socket to non-blocking: [Errno 9] Bad file descriptor
+WARNING  tests.fault_tolerance.cancellation.utils:utils.py:136 Failed to shutdown socket: [Errno 9] Bad file descriptor
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:394 Cancelled request ID: 83f5b97b-33f6-45a1-9ad7-b8bbe1ae682a
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:511 Starting to poll for 'Aborted Request ID: 83f5b97b-33f6-45a1-9ad7-b8bbe1ae682a' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:539 Found pattern 'Aborted Request ID: 83f5b97b-33f6-45a1-9ad7-b8bbe1ae682a' at iteration 1
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:511 Starting to poll for 'issued control message Kill to sender' pattern (max 100 iterations)...
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:539 Found pattern 'issued control message Kill to sender' at iteration 0
+INFO     tests.fault_tolerance.cancellation.test_sglang:test_sglang.py:409 Chat completion stream cancellation in decode phase detected successfully
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:422 Frontend cancellation metrics - endpoint=chat_completions, request_type=stream: 1
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:457 Runtime cancellation metrics (component=backend): 1
+INFO     tests.fault_tolerance.cancellation.utils:utils.py:457 Runtime cancellation metrics (component=prefill): 0
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 2633
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 2635 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 2635 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 2634 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 2634 sed
+INFO     DynamoWorkerProcess:managed_process.py:558 Sending SIGTERM to process group: 1983
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 1985 name: tee
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 1985 tee
+INFO     DynamoWorkerProcess:managed_process.py:31 Terminating PID: 1984 name: sed
+INFO     DynamoWorkerProcess:managed_process.py:36 Sending SIGTERM (kill): 1984 sed
+INFO     DynamoFrontendProcess:managed_process.py:558 Sending SIGTERM to process group: 1980
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 1982 name: tee
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 1982 tee
+INFO     DynamoFrontendProcess:managed_process.py:31 Terminating PID: 1981 name: sed
+INFO     DynamoFrontendProcess:managed_process.py:36 Sending SIGTERM (kill): 1981 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 1965
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 1966 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 1966 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 1953
+INFO     NatsServer:managed_process.py:31 Terminating PID: 1954 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 1954 sed

@@ -1,1 +1,0 @@
-[2m2026-04-09T16:43:29.935971Z[0m [32m INFO[0m [2mkubernetes_api.update_service_replicas[0m[2m:[0m Scaled DGDSA test-deployment-frontend to 3 replicas

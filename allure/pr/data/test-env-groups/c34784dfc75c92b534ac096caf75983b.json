@@ -1,1 +1,0 @@
-{"id":"c34784dfc75c92b534ac096caf75983b","fullName":"tests.fault_tolerance.etcd_ha.test_sglang#test_etcd_ha_failover_sglang_aggregated","name":"test_etcd_ha_failover_sglang_aggregated","status":"passed","testResultsByEnv":{"sglang-amd64":"0d15e0d70a28587d9ecc5d6ad408c1a4"}}

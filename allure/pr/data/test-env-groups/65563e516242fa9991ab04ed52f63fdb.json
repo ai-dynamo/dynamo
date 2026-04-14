@@ -1,1 +1,0 @@
-{"id":"65563e516242fa9991ab04ed52f63fdb","fullName":"tests.fault_tolerance.cancellation.test_vllm#test_request_cancellation_vllm_prefill_cancel","name":"test_request_cancellation_vllm_prefill_cancel[nats]","status":"passed","testResultsByEnv":{"vllm-amd64":"9c18a7d12c26248ee5f1a626bb70979e"}}

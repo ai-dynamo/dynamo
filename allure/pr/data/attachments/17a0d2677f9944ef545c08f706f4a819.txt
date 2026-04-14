@@ -1,0 +1,90 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4317 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4317
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4317
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2422 --advertise-client-urls http://0.0.0.0:2422 --listen-peer-urls http://0.0.0.0:2423 --initial-advertise-peer-urls http://localhost:2423 --initial-cluster default=http://localhost:2423 --data-dir /tmp/etcd_vgo6fvqr in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2422
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2422
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:43 Starting multimodal_agg_qwen test_deployment
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:49 Using model: Qwen/Qwen2.5-VL-7B-Instruct
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:50 Script: agg.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/sglang/launch/agg.sh --model-path Qwen/Qwen2.5-VL-7B-Instruct --chat-template qwen2-vl in /workspace/examples/backends/sglang
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8088/v1/models
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8088/v1/models (custom check failed) (attempt=12, elapsed=21.0s)
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8088/v1/models (attempt=22, elapsed=41.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen2.5-VL-7B-Instruct",
+      "object": "model",
+      "created": 1776198889,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8088/health
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8088/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8072031139059865865,
+      "transport": {
+        "tcp": "10.1.59.151:33179/70059d8db38e1909/generate"
+      }
+    }
+  ]
+}
+INFO     test_sglang_deployment[multimodal_agg_qwen-2]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8088/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What is in this image?"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen2.5-VL-7B-Instruct"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=7.83s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/1 expected keywords: ['image']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+The image shows a streetcar or trolleybus parked on a street, with the words "OUT OF SERVICE" displayed prominently on its front electronic sign. The vehicle appears to be stationary, and the street i...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 5371
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 5373 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 5373 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 5372 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 5372 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 5360
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 5361 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 5361 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 5348
+INFO     NatsServer:managed_process.py:31 Terminating PID: 5349 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 5349 sed

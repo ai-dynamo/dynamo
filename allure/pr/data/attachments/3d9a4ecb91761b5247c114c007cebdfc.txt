@@ -1,1 +1,0 @@
-ERROR    dynamo.vllm.omni.output_formatter:output_formatter.py:144 Failed to encode video for request req-1: boom

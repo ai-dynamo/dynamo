@@ -1,0 +1,1 @@
+[2m2026-04-14T20:30:15.934759Z[0m [31mERROR[0m [2moutput_formatter._encode_video[0m[2m:[0m Failed to encode video for request req-1: boom

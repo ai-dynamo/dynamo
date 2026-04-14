@@ -1,1 +1,0 @@
-{"id":"d8b877d70ae97da1b4a936d9a52ded5f","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_disagg_types.TestOmniInterStageRequest#test_roundtrip_empty_refs","name":"test_roundtrip_empty_refs","status":"passed","testResultsByEnv":{"default":"80c08e0196217e144b518f7be965f741"}}

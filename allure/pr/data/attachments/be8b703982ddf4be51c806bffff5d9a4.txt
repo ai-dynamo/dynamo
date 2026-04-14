@@ -1,0 +1,72 @@
+[2m2026-04-14T20:27:09.930646Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4262 in /workspace
+[2m2026-04-14T20:27:09.931915Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4262
+[2m2026-04-14T20:27:10.032628Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4262
+[2m2026-04-14T20:27:10.033328Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-14T20:27:10.035262Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-14T20:27:10.036397Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2400 --advertise-client-urls http://0.0.0.0:2400 --listen-peer-urls http://0.0.0.0:2401 --initial-advertise-peer-urls http://localhost:2401 --initial-cluster default=http://localhost:2401 --data-dir /tmp/etcd_beu1rc2j in /workspace
+[2m2026-04-14T20:27:10.037284Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2400
+[2m2026-04-14T20:27:10.138015Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2400
+[2m2026-04-14T20:27:10.207616Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__init__[0m[2m:[0m Created SGLang worker 0 on GPU 0 (mem_frac=0.4, system_port=8124, kv_port=8114) with endpoint: dyn://test-namespace-tbzdymodhu.backend.generate
+[2m2026-04-14T20:27:10.207769Z[0m [32m INFO[0m [2mtest_router_e2e_with_sglang.__init__[0m[2m:[0m Created SGLang worker 1 on GPU 0 (mem_frac=0.4, system_port=8125, kv_port=8115) with endpoint: dyn://test-namespace-tbzdymodhu.backend.generate
+[2m2026-04-14T20:27:10.207831Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Starting 2 worker processes sequentially...
+[2m2026-04-14T20:27:10.207882Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Starting SGLang worker 0...
+[2m2026-04-14T20:27:10.207979Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Launching process 0 (pid will be assigned)...
+[2m2026-04-14T20:27:10.208037Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8114"} in /workspace
+[2m2026-04-14T20:27:10.209951Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Worker 0 launched with PID: 356
+[2m2026-04-14T20:27:10.210110Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Waiting 5s for worker 0 to initialize before starting next worker...
+[2m2026-04-14T20:27:15.210350Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Starting SGLang worker 1...
+[2m2026-04-14T20:27:15.210567Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Launching process 1 (pid will be assigned)...
+[2m2026-04-14T20:27:15.210644Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.sglang --model-path silence09/DeepSeek-R1-Small-2layers --page-size 16 --disable-cuda-graph --mem-fraction-static 0.4 --context-length 1024 --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:8115"} in /workspace
+[2m2026-04-14T20:27:15.211955Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Worker 1 launched with PID: 393
+[2m2026-04-14T20:27:15.212095Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] All 2 workers launched with sequential initialization.
+[2m2026-04-14T20:27:15.212154Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Waiting for health checks to complete...
+[2m2026-04-14T20:27:15.212201Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Checking health for worker 0...
+[2m2026-04-14T20:27:15.212248Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Worker 0 health checks passed
+[2m2026-04-14T20:27:15.212291Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Checking health for worker 1...
+[2m2026-04-14T20:27:15.212335Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] Worker 1 health checks passed
+[2m2026-04-14T20:27:15.212375Z[0m [32m INFO[0m [2me2e_harness.__enter__[0m[2m:[0m [SGLangProcess] All workers started successfully and passed health checks!
+[2m2026-04-14T20:27:15.213149Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: python3 -m dynamo.frontend --router-mode kv --http-port 8099 --discovery-backend etcd --namespace test-namespace-tbzdymodhu --kv-cache-block-size 16 in /workspace
+[2m2026-04-14T20:27:15.214351Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 8099
+[2m2026-04-14T20:27:15.920107Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 8099
+[2m2026-04-14T20:27:15.920284Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8099/v1/models
+[2m2026-04-14T20:27:15.922016Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8099/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": []
+}
+[2m2026-04-14T20:27:15.922212Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Starting frontend --router-mode kv on port 8099
+[2m2026-04-14T20:27:15.922283Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Waiting for workers to register with frontend...
+[2m2026-04-14T20:27:15.922531Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Waiting for 2 workers to register on HTTP frontend (timeout=180s)...
+[2m2026-04-14T20:27:30.972373Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Workers registered. Found 1 model(s): ['silence09/DeepSeek-R1-Small-2layers']
+[2m2026-04-14T20:27:30.972621Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Waiting for chat completions pipeline to be built...
+[2m2026-04-14T20:28:12.827714Z[0m [32m INFO[0m [2mhelper.wait_for_frontend_ready[0m[2m:[0m Chat completions pipeline ready!
+[2m2026-04-14T20:28:12.828658Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Sending 10 concurrent requests to frontend...
+[2m2026-04-14T20:28:12.828855Z[0m [32m INFO[0m [2mhelper.send_inflight_requests[0m[2m:[0m Sending initial test request to URL 0 (http://localhost:8099/v1/chat/completions) with retry...
+[2m2026-04-14T20:28:16.880008Z[0m [32m INFO[0m [2mhelper.send_inflight_requests[0m[2m:[0m Completed all requests: 10 successful, 0 failed
+[2m2026-04-14T20:28:16.880672Z[0m [32m INFO[0m [2mhelper.send_inflight_requests[0m[2m:[0m All 10 requests completed successfully
+[2m2026-04-14T20:28:16.881303Z[0m [32m INFO[0m [2mcommon._test_router_basic[0m[2m:[0m Successfully completed 10 requests
+[2m2026-04-14T20:28:16.883137Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 396
+[2m2026-04-14T20:28:21.989960Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 398 name: tee
+[2m2026-04-14T20:28:21.990105Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 398 tee
+[2m2026-04-14T20:28:21.991079Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 397 name: sed
+[2m2026-04-14T20:28:21.991181Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 397 sed
+[2m2026-04-14T20:28:21.991335Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping SGLang worker 0
+[2m2026-04-14T20:28:21.992708Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 356
+[2m2026-04-14T20:28:28.399694Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 358 name: tee
+[2m2026-04-14T20:28:28.399858Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 358 tee
+[2m2026-04-14T20:28:28.400407Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 357 name: sed
+[2m2026-04-14T20:28:28.400503Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 357 sed
+[2m2026-04-14T20:28:28.400648Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Stopping SGLang worker 1
+[2m2026-04-14T20:28:28.401178Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 393
+[2m2026-04-14T20:28:34.809495Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 395 name: tee
+[2m2026-04-14T20:28:34.809650Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 395 tee
+[2m2026-04-14T20:28:34.810089Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 394 name: sed
+[2m2026-04-14T20:28:34.810182Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 394 sed
+[2m2026-04-14T20:28:34.810336Z[0m [32m INFO[0m [2me2e_harness.__exit__[0m[2m:[0m Waiting for SGLang worker resources to fully clean up...
+[2m2026-04-14T20:28:36.814237Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 342
+[2m2026-04-14T20:28:36.915365Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 343 name: sed
+[2m2026-04-14T20:28:36.915665Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 343 sed
+[2m2026-04-14T20:28:36.916504Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 329
+[2m2026-04-14T20:28:37.017490Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 330 name: sed
+[2m2026-04-14T20:28:37.017736Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 330 sed

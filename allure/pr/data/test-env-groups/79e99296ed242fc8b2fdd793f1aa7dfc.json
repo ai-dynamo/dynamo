@@ -1,1 +1,0 @@
-{"id":"79e99296ed242fc8b2fdd793f1aa7dfc","fullName":"tests.fault_tolerance.migration.test_vllm#test_request_migration_vllm_aggregated","name":"test_request_migration_vllm_aggregated[migration_enabled-worker_failure-completion-stream-nats]","status":"passed","testResultsByEnv":{"default":"fd0e47ea011b5795999602069dbe7b01","vllm-amd64":"227dc0e739cac05a9b809c487fa3e350"}}

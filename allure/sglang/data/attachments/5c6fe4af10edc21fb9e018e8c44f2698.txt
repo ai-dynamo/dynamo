@@ -1,0 +1,1 @@
+ERROR    dynamo.vllm.handlers:handlers.py:507 Failed to sleep engine: discovery backend down

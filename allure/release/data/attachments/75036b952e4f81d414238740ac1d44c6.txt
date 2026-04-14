@@ -1,0 +1,185 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4298 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4298
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4298
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2386 --advertise-client-urls http://0.0.0.0:2386 --listen-peer-urls http://0.0.0.0:2387 --initial-advertise-peer-urls http://localhost:2387 --initial-cluster default=http://localhost:2387 --data-dir /tmp/etcd_ws54hsrt in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2386
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2386
+INFO     test_serve_deployment[multimodal_video_disagg]:common.py:43 Starting multimodal_video_disagg test_deployment
+INFO     test_serve_deployment[multimodal_video_disagg]:common.py:49 Using model: Qwen/Qwen3-VL-2B-Instruct
+INFO     test_serve_deployment[multimodal_video_disagg]:common.py:50 Script: disagg_multimodal_epd.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/vllm/launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu in /workspace/examples/backends/vllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8073/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8073
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8073 "GET /v1/models HTTP/1.1" 200 119
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8073/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct",
+      "object": "model",
+      "created": 1776199582,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8073/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8073
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8073 "GET /health HTTP/1.1" 200 1529
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8073/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.encode.generate",
+    "dyn://dynamo.prefill.clear_kv_blocks",
+    "dyn://dynamo.prefill.generate",
+    "dyn://dynamo.prefill.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 8603174420285469965,
+      "transport": {
+        "tcp": "10.1.19.213:38107/77649d8dbdd7b50d/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8603174420285469965,
+      "transport": {
+        "tcp": "10.1.19.213:38107/77649d8dbdd7b50d/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 8603174420285469965,
+      "transport": {
+        "tcp": "10.1.19.213:38107/77649d8dbdd7b50d/get_perf_metrics"
+      }
+    },
+    {
+      "component": "encode",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8603174420285469963,
+      "transport": {
+        "tcp": "10.1.19.213:41123/77649d8dbdd7b50b/generate"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 8603174420285469961,
+      "transport": {
+        "tcp": "10.1.19.213:41275/77649d8dbdd7b509/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 8603174420285469961,
+      "transport": {
+        "tcp": "10.1.19.213:41275/77649d8dbdd7b509/generate"
+      }
+    },
+    {
+      "component": "prefill",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 8603174420285469961,
+      "transport": {
+        "tcp": "10.1.19.213:41275/77649d8dbdd7b509/get_perf_metrics"
+      }
+    }
+  ]
+}
+INFO     test_serve_deployment[multimodal_video_disagg]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8073/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe the video in detail"
+        },
+        {
+          "type": "video_url",
+          "video_url": {
+            "url": "file:///workspace/lib/llm/tests/data/media/240p_10.mp4"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen3-VL-2B-Instruct"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8073
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8073 "POST /v1/chat/completions HTTP/1.1" 200 728
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=4.88s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'application/json', 'content-length': '728', 'date': 'Tue, 14 Apr 2026 20:46:29 GMT'}
+DEBUG    tests.utils.client:client.py:133 Response body: {
+  "id": "chatcmpl-46fab285-977a-4c49-afed-a1b4b5fd4b33",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "content": "The video is a simple, static image of a solid red color. There are no visible objects, text, or any other elements in the frame. The entire screen is filled with a uniform red hue, and there is no change in the image or any movement. The video is completely still and does not contain any action or animation.",
+        "role": "assistant",
+        "reasoning_content": null
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "created": 1776199584,
+  "model": "Qwen/Qwen3-VL-2B-Instruct",
+  "object": "chat.completion",
+  "usage": {
+    "prompt_tokens": 453,
+    "completion_tokens": 68,
+    "total_tokens": 521
+  },
+  "nvext": {
+    "timing": {
+      "request_received_ms": 1776199584323,
+      "total_time_ms": 4873.5224180000005
+    }
+  }
+}
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 3/3 expected keywords: ['red', 'static', 'still']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+The video is a simple, static image of a solid red color. There are no visible objects, text, or any other elements in the frame. The entire screen is filled with a uniform red hue, and there is no ch...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 8691
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 8693 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 8693 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 8692 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 8692 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 8678
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 8679 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 8679 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 8665
+INFO     NatsServer:managed_process.py:31 Terminating PID: 8666 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 8666 sed

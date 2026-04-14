@@ -1,1 +1,0 @@
-[2m2026-04-09T03:05:38.284374Z[0m [31mERROR[0m [2mhandlers._generate_token_mode[0m[2m:[0m Request req-1: Prefill did not produce required multimodal embedding metadata (image_grid_thw) for Qwen VL decode. Use --route-to-encoder or the P/D launcher with grid_thw computation support

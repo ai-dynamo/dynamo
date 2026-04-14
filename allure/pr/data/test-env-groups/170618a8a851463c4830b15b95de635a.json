@@ -1,1 +1,0 @@
-{"id":"170618a8a851463c4830b15b95de635a","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_stage_worker#test_build_sampling_params_no_defaults_returns_none","name":"test_build_sampling_params_no_defaults_returns_none","status":"passed","testResultsByEnv":{"default":"4a97ae2d8d36751b74b8c9063606a2ae"}}

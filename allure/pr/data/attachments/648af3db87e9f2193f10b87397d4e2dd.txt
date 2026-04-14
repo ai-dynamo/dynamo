@@ -1,1 +1,0 @@
-[2m2026-04-09T03:06:27.569312Z[0m [32m INFO[0m [2mmultimodal_embedding_cache_manager.__init__[0m[2m:[0m MultimodalEmbeddingCacheManager initialized: capacity=0.00GB

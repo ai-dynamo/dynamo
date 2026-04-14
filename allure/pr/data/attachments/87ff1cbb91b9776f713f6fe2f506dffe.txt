@@ -1,0 +1,290 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4260 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4260
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4260
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2436 --advertise-client-urls http://0.0.0.0:2436 --listen-peer-urls http://0.0.0.0:2437 --initial-advertise-peer-urls http://localhost:2437 --initial-cluster default=http://localhost:2437 --data-dir /tmp/etcd_msv2i9km in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2436
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2436
+INFO     MinioService:lora_utils.py:125 Connecting to MinIO...
+INFO     MinioService:lora_utils.py:129 Connected to existing MinIO instance
+INFO     MinioService:lora_utils.py:223 Creating bucket: my-loras
+INFO     MinioService:lora_utils.py:236 Downloading LoRA codelion/Qwen3-0.6B-accuracy-recovery-lora to /tmp/lora_download_n5nejwj5
+INFO     MinioService:lora_utils.py:273 Uploading LoRA to s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora
+INFO     MinioService:lora_utils.py:294 LoRA upload completed
+INFO     test_lora_aggregated_router[2]:common.py:43 Starting test_lora_aggregated_router test_deployment
+INFO     test_lora_aggregated_router[2]:common.py:49 Using model: Qwen/Qwen3-0.6B
+INFO     test_lora_aggregated_router[2]:common.py:50 Script: lora/agg_lora_router.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/vllm/launch/lora/agg_lora_router.sh in /workspace/examples/backends/vllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8025/v1/models
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8025/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8025/v1/models (attempt=14, elapsed=23.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1776199089,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8025/health
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8025/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.backend.list_loras",
+    "dyn://dynamo.backend.load_lora",
+    "dyn://dynamo.backend.router-discovery",
+    "dyn://dynamo.backend.unload_lora",
+    "dyn://dynamo.backend.worker_kv_indexer_query_dp0"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491593,
+      "transport": {
+        "tcp": "10.1.67.88:34019/21e29d8db6d37709/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491595,
+      "transport": {
+        "tcp": "10.1.67.88:39773/21e29d8db6d3770b/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491593,
+      "transport": {
+        "tcp": "10.1.67.88:34019/21e29d8db6d37709/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491595,
+      "transport": {
+        "tcp": "10.1.67.88:39773/21e29d8db6d3770b/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491593,
+      "transport": {
+        "tcp": "10.1.67.88:34019/21e29d8db6d37709/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491595,
+      "transport": {
+        "tcp": "10.1.67.88:39773/21e29d8db6d3770b/get_perf_metrics"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "list_loras",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491593,
+      "transport": {
+        "tcp": "10.1.67.88:34019/21e29d8db6d37709/list_loras"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "list_loras",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491595,
+      "transport": {
+        "tcp": "10.1.67.88:39773/21e29d8db6d3770b/list_loras"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "load_lora",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491593,
+      "transport": {
+        "tcp": "10.1.67.88:34019/21e29d8db6d37709/load_lora"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "load_lora",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491595,
+      "transport": {
+        "tcp": "10.1.67.88:39773/21e29d8db6d3770b/load_lora"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "router-discovery",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491589,
+      "transport": {
+        "tcp": "10.1.67.88:38833/21e29d8db6d37705/router-discovery"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "unload_lora",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491593,
+      "transport": {
+        "tcp": "10.1.67.88:34019/21e29d8db6d37709/unload_lora"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "unload_lora",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491595,
+      "transport": {
+        "tcp": "10.1.67.88:39773/21e29d8db6d3770b/unload_lora"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491593,
+      "transport": {
+        "tcp": "10.1.67.88:34019/21e29d8db6d37709/worker_kv_indexer_query_dp0"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "worker_kv_indexer_query_dp0",
+      "namespace": "dynamo",
+      "instance_id": 2441687179971491595,
+      "transport": {
+        "tcp": "10.1.67.88:39773/21e29d8db6d3770b/worker_kv_indexer_query_dp0"
+      }
+    }
+  ]
+}
+INFO     test_lora_aggregated_router[2]:common.py:124 TESTING: Payload: LoraTestChatPayload
+INFO     tests.serve.lora_utils:lora_utils.py:317 Loading LoRA adapter: codelion/Qwen3-0.6B-accuracy-recovery-lora from s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora
+INFO     tests.serve.lora_utils:lora_utils.py:325 LoRA adapter loaded successfully: {'status': 'success', 'message': "LoRA adapter 'codelion/Qwen3-0.6B-accuracy-recovery-lora' loaded successfully", 'lora_name': 'codelion/Qwen3-0.6B-accuracy-recovery-lora', 'lora_id': 483623553}
+INFO     tests.utils.payloads:payloads.py:435 Waiting for LoRA model 'codelion/Qwen3-0.6B-accuracy-recovery-lora' to appear in /v1/models...
+INFO     tests.utils.payloads:payloads.py:448 LoRA model 'codelion/Qwen3-0.6B-accuracy-recovery-lora' is now available
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8025/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "model": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is deep learning? Answer in one sentence."
+    }
+  ],
+  "max_tokens": 100,
+  "temperature": 0.0,
+  "stream": false
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=2.80s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/5 expected keywords: ['learning', 'neural', 'network', 'AI']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user is asking for a one-sentence definition of deep learning. Let me start by recalling what I know. Deep learning is a subset of machine learning where algorithms use multiple laye...
+INFO     test_lora_aggregated_router[2]:common.py:124 TESTING: Payload: LoraTestChatPayload
+INFO     tests.serve.lora_utils:lora_utils.py:317 Loading LoRA adapter: codelion/Qwen3-0.6B-accuracy-recovery-lora from s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora
+INFO     tests.serve.lora_utils:lora_utils.py:325 LoRA adapter loaded successfully: {'status': 'success', 'message': "LoRA adapter 'codelion/Qwen3-0.6B-accuracy-recovery-lora' loaded successfully", 'lora_name': 'codelion/Qwen3-0.6B-accuracy-recovery-lora', 'lora_id': 483623553}
+INFO     tests.utils.payloads:payloads.py:435 Waiting for LoRA model 'codelion/Qwen3-0.6B-accuracy-recovery-lora' to appear in /v1/models...
+INFO     tests.utils.payloads:payloads.py:448 LoRA model 'codelion/Qwen3-0.6B-accuracy-recovery-lora' is now available
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8025/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "model": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is deep learning? Answer in one sentence."
+    }
+  ],
+  "max_tokens": 100,
+  "temperature": 0.0,
+  "stream": false
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=9.86s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/5 expected keywords: ['learning', 'neural', 'network', 'AI']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, the user is asking for a one-sentence definition of deep learning. Let me start by recalling what I know about deep learning. It's a subset of machine learning where neural networks are ...
+INFO     test_lora_aggregated_router[2]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8025/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explain machine learning in simple terms."
+    }
+  ],
+  "max_tokens": 150,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "codelion/Qwen3-0.6B-accuracy-recovery-lora"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=8.81s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/5 expected keywords: ['learn', 'data', 'model', 'pattern']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, so I need to explain machine learning in simple terms. Let me start by recalling what I know. Machine learning is a subset of artificial intelligence, right? It's about building models t...
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8025/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explain machine learning in simple terms."
+    }
+  ],
+  "max_tokens": 150,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "codelion/Qwen3-0.6B-accuracy-recovery-lora"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=6.17s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 4/5 expected keywords: ['learn', 'data', 'model', 'pattern']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+<think>
+Okay, so I need to explain machine learning in simple terms. Let me start by recalling what I know. Machine learning is a subset of artificial intelligence, right? It's about building models t...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3250
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3252 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3252 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3251 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3251 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 3171
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3172 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3172 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 3159
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3160 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3160 sed

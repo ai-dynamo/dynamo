@@ -1,0 +1,15 @@
+[2m2026-04-14T20:26:39.643781Z[0m [32m INFO[0m [2mconftest.predownload_models[0m[2m:[0m Downloading 6 models needed for collected tests
+Models: {'Qwen/Qwen2-VL-7B-Instruct', 'Qwen/Qwen3-VL-2B-Instruct', 'Qwen/Qwen3-Embedding-4B', 'Qwen/Qwen2.5-VL-7B-Instruct', 'Qwen/Qwen3-0.6B', 'silence09/DeepSeek-R1-Small-2layers'}
+[2m2026-04-14T20:26:39.643874Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m HF_TOKEN found in environment
+[2m2026-04-14T20:26:39.643922Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2-VL-7B-Instruct
+[2m2026-04-14T20:26:58.715015Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2-VL-7B-Instruct
+[2m2026-04-14T20:26:58.715102Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-14T20:27:03.752517Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-14T20:27:03.752601Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-Embedding-4B
+[2m2026-04-14T20:27:12.637103Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-Embedding-4B
+[2m2026-04-14T20:27:12.637181Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-04-14T20:27:34.148856Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen2.5-VL-7B-Instruct
+[2m2026-04-14T20:27:34.148940Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: Qwen/Qwen3-0.6B
+[2m2026-04-14T20:27:36.772598Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: Qwen/Qwen3-0.6B
+[2m2026-04-14T20:27:36.772695Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Pre-downloading model: silence09/DeepSeek-R1-Small-2layers
+[2m2026-04-14T20:27:42.044487Z[0m [32m INFO[0m [2mconftest.download_models[0m[2m:[0m Successfully pre-downloaded: silence09/DeepSeek-R1-Small-2layers

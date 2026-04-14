@@ -1,1 +1,1 @@
-{"id":"03c791e5579f80e4393841d4061ae7fa","fullName":"tests.router.test_router_e2e_with_vllm#test_vllm_indexers_sync","name":"test_vllm_indexers_sync[nats_core]","status":"passed","testResultsByEnv":{"vllm-amd64":"5af195d033657433d04aabcd306ae791"}}
+{"id":"03c791e5579f80e4393841d4061ae7fa","fullName":"tests.router.test_router_e2e_with_vllm#test_vllm_indexers_sync","name":"test_vllm_indexers_sync[nats_core]","status":"passed","testResultsByEnv":{"vllm-amd64":"612b38662d44c748fd50f0a0eef700b2"}}
