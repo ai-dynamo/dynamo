@@ -62,9 +62,10 @@ func getGPUCount(component *v1alpha1.DynamoComponentDeploymentSharedSpec) (int, 
 }
 
 // getDeviceClassName returns the DRA DeviceClass name for the component.
+// It reads from GPUMemoryServiceSpec.DeviceClassName, falling back to the default.
 func getDeviceClassName(component *v1alpha1.DynamoComponentDeploymentSharedSpec) string {
-	if component.Resources != nil && component.Resources.Limits != nil && component.Resources.Limits.GPUType != "" {
-		return component.Resources.Limits.GPUType
+	if component.GPUMemoryService != nil && component.GPUMemoryService.DeviceClassName != "" {
+		return component.GPUMemoryService.DeviceClassName
 	}
 	return defaultDeviceClassName
 }
@@ -136,8 +137,12 @@ func applyGPUMemoryService(
 // GPU allocation is handled by DRA when GMS is enabled.
 func removeGPUResources(container *corev1.Container) {
 	gpuResource := corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)
-	delete(container.Resources.Limits, gpuResource)
-	delete(container.Resources.Requests, gpuResource)
+	if container.Resources.Limits != nil {
+		delete(container.Resources.Limits, gpuResource)
+	}
+	if container.Resources.Requests != nil {
+		delete(container.Resources.Requests, gpuResource)
+	}
 }
 
 // buildGMSSidecar creates the GMS weight server as a sidecar init container

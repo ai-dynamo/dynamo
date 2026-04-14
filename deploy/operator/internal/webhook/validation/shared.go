@@ -267,6 +267,12 @@ func (v *SharedSpecValidator) validateGPUMemoryService() error {
 		return nil
 	}
 
+	if v.spec.GPUMemoryService.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: mode \"interPod\" is not yet supported",
+			v.fieldPath)
+	}
+
 	isWorker := v.spec.ComponentType == consts.ComponentTypeWorker ||
 		v.spec.ComponentType == consts.ComponentTypePrefill ||
 		v.spec.ComponentType == consts.ComponentTypeDecode

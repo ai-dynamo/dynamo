@@ -227,9 +227,9 @@ func TestGenerateGMSResourceClaimTemplate_Enabled(t *testing.T) {
 	assert.Equal(t, int64(4), req.Exactly.Count)
 }
 
-func TestGenerateGMSResourceClaimTemplate_CustomGPUType(t *testing.T) {
+func TestGenerateGMSResourceClaimTemplate_CustomDeviceClass(t *testing.T) {
 	component := gmsComponent(2)
-	component.Resources.Limits.GPUType = "gpu.intel.com/xe"
+	component.GPUMemoryService.DeviceClassName = "gpu.intel.com/xe"
 	tmpl, toDelete, err := GenerateGMSResourceClaimTemplate(context.Background(), nil, "myapp-worker-gpu", "default", component)
 
 	require.NoError(t, err)
@@ -326,10 +326,10 @@ func TestGetGPUCount(t *testing.T) {
 func TestGetDeviceClassName(t *testing.T) {
 	assert.Equal(t, defaultDeviceClassName, getDeviceClassName(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
 	assert.Equal(t, defaultDeviceClassName, getDeviceClassName(&v1alpha1.DynamoComponentDeploymentSharedSpec{
-		Resources: &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
 	}))
 	assert.Equal(t, "gpu.intel.com/xe", getDeviceClassName(&v1alpha1.DynamoComponentDeploymentSharedSpec{
-		Resources: &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPUType: "gpu.intel.com/xe"}},
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true, DeviceClassName: "gpu.intel.com/xe"},
 	}))
 }
 
