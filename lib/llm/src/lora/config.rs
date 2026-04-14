@@ -5,6 +5,8 @@
 
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 use crate::lora::routing::AllocationAlgorithmType;
 use dynamo_runtime::config::environment_names::llm;
 
@@ -30,6 +32,45 @@ impl FromStr for PredictorType {
     }
 }
 
+/// Configuration for the Min-Cost Flow placement solver.
+///
+/// Read from the `DYN_LORA_MCF_CONFIG` env var as JSON. Omitted fields
+/// fall back to defaults via `#[serde(default)]`.
+///
+/// Example: `{"candidate_m":16,"gamma_load":2000,"beta_keep":500}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McfConfig {
+    /// Number of HRW top-M candidates per LoRA.
+    pub candidate_m: usize,
+    /// Preference weight for HRW rank ordering.
+    pub alpha_pref: i64,
+    /// Penalty weight for loading a new LoRA on a worker.
+    pub gamma_load: i64,
+    /// Reward weight for keeping a LoRA on its prior worker.
+    pub beta_keep: i64,
+    /// Cost assigned to the overflow dummy worker.
+    pub overflow_cost: i64,
+    /// Whether to allow overflow (soft infeasibility) or fail hard.
+    pub allow_overflow: bool,
+    /// Default churn weight per LoRA (uniform=1; can be per-adapter later).
+    pub churn_weight_default: i64,
+}
+
+impl Default for McfConfig {
+    fn default() -> Self {
+        Self {
+            candidate_m: 16,
+            alpha_pref: 1,
+            gamma_load: 1000,
+            beta_keep: 250,
+            overflow_cost: 1_000_000_000_000,
+            allow_overflow: true,
+            churn_weight_default: 1,
+        }
+    }
+}
+
 /// Configuration for the LoRA allocation controller.
 #[derive(Debug, Clone)]
 pub struct LoraAllocationConfig {
@@ -46,6 +87,8 @@ pub struct LoraAllocationConfig {
     pub predictor_type: PredictorType,
     /// EMA smoothing factor (alpha). Range [0.0, 1.0].
     pub ema_alpha: f64,
+    /// MCF-specific configuration (only used when algorithm = MinCostFlow).
+    pub mcf: McfConfig,
 }
 
 /// Minimum rate window (seconds).
@@ -62,6 +105,7 @@ impl Default for LoraAllocationConfig {
             buckets_per_second: 1,
             predictor_type: PredictorType::Ema,
             ema_alpha: 0.3,
+            mcf: McfConfig::default(),
         }
     }
 }
@@ -134,6 +178,20 @@ impl LoraAllocationConfig {
             .map(|a| a.clamp(0.0, 1.0))
             .unwrap_or(defaults.ema_alpha);
 
+        let mcf = std::env::var(llm::DYN_LORA_MCF_CONFIG)
+            .ok()
+            .and_then(|v| {
+                serde_json::from_str(&v)
+                    .map_err(|e| {
+                        tracing::warn!(
+                            "Failed to parse DYN_LORA_MCF_CONFIG JSON, using defaults: {e}"
+                        );
+                        e
+                    })
+                    .ok()
+            })
+            .unwrap_or_default();
+
         Self {
             enabled,
             algorithm,
@@ -143,6 +201,7 @@ impl LoraAllocationConfig {
             buckets_per_second,
             predictor_type,
             ema_alpha,
+            mcf,
         }
     }
 }
@@ -171,6 +230,39 @@ mod tests {
     fn test_effective_rate_window_uses_multiplier() {
         let config = LoraAllocationConfig::new(true, "hrw", 10, 2, 5).unwrap();
         assert_eq!(config.effective_rate_window_secs(), 50);
+    }
+
+    #[test]
+    fn test_mcf_config_defaults() {
+        let mcf = McfConfig::default();
+        assert_eq!(mcf.candidate_m, 16);
+        assert_eq!(mcf.alpha_pref, 1);
+        assert_eq!(mcf.gamma_load, 1000);
+        assert_eq!(mcf.beta_keep, 250);
+        assert!(mcf.allow_overflow);
+    }
+
+    #[test]
+    fn test_mcf_config_partial_json() {
+        let json = r#"{"candidate_m":32,"gamma_load":2000}"#;
+        let mcf: McfConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(mcf.candidate_m, 32);
+        assert_eq!(mcf.gamma_load, 2000);
+        // Omitted fields use defaults
+        assert_eq!(mcf.beta_keep, 250);
+        assert_eq!(mcf.alpha_pref, 1);
+    }
+
+    #[test]
+    fn test_mcf_algorithm_type_parsing() {
+        assert_eq!(
+            AllocationAlgorithmType::from_str("mcf").unwrap(),
+            AllocationAlgorithmType::MinCostFlow
+        );
+        assert_eq!(
+            AllocationAlgorithmType::from_str("min_cost_flow").unwrap(),
+            AllocationAlgorithmType::MinCostFlow
+        );
     }
 
     #[test]

@@ -167,6 +167,7 @@ where
         worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
@@ -203,6 +204,7 @@ where
             &kv_router_config,
             prefill_load_estimator.clone(),
             worker_type,
+            lora_filter,
         )
         .await?;
 
@@ -304,7 +306,7 @@ where
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
-            anyhow::bail!("context_id must be provided when update_states is true");
+            anyhow::bail!("context_id must be provided if update_states is true");
         }
 
         let isl_tokens = tokens.len();

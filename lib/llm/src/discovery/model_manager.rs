@@ -20,6 +20,7 @@ use dynamo_runtime::{
 use crate::{
     kv_router::{KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector},
     local_model::runtime_config::DisaggregatedEndpoint,
+    lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
     model_card::ModelDeploymentCard,
     types::{
         generic::tensor::TensorStreamingEngine,
@@ -68,6 +69,12 @@ pub struct ModelManager {
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
+
+    // LoRA allocation state (always created; only the controller is gated on DYN_LORA_ENABLED)
+    lora_routing_table: LoraRoutingTable,
+    lora_state_tracker: LoraStateTracker,
+    lora_load_estimator: Arc<LoadEstimator>,
+    lora_filter: Arc<LoraFilter>,
 }
 
 impl Default for ModelManager {
@@ -78,11 +85,22 @@ impl Default for ModelManager {
 
 impl ModelManager {
     pub fn new() -> Self {
+        let lora_routing_table = LoraRoutingTable::new();
+        let lora_state_tracker = LoraStateTracker::new();
+        let lora_filter = Arc::new(LoraFilter::new(
+            lora_routing_table.clone(),
+            lora_state_tracker.clone(),
+        ));
+
         Self {
             models: DashMap::new(),
             cards: DashMap::new(),
             prefill_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
+            lora_routing_table,
+            lora_state_tracker,
+            lora_load_estimator: Arc::new(LoadEstimator::new()),
+            lora_filter,
         }
     }
 
@@ -144,6 +162,10 @@ impl ModelManager {
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
+    pub fn get_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
+        self.cards.get(key).map(|r| r.value().clone())
+    }
+
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
         self.cards.remove(key).map(|(_, v)| v)
     }
@@ -610,6 +632,7 @@ impl ModelManager {
             worker_type,
             model_name,
             is_eagle,
+            self.lora_filter(),
         )
         .await?;
         Ok(Arc::new(chooser))
@@ -623,6 +646,54 @@ impl ModelManager {
     /// and registration guards.
     pub(crate) fn model_namespace_key(model_name: &str, namespace: &str) -> String {
         format!("{}:{}", model_name, namespace)
+    }
+
+    // ── LoRA allocation accessors ───────────────────────────────────────
+
+    pub fn lora_routing_table(&self) -> &LoraRoutingTable {
+        &self.lora_routing_table
+    }
+
+    pub fn lora_state_tracker(&self) -> &LoraStateTracker {
+        &self.lora_state_tracker
+    }
+
+    pub fn lora_load_estimator(&self) -> &Arc<LoadEstimator> {
+        &self.lora_load_estimator
+    }
+
+    pub fn lora_filter(&self) -> Option<Arc<LoraFilter>> {
+        Some(self.lora_filter.clone())
+    }
+
+    /// Start the LoRA allocation controller background loop.
+    pub fn start_lora_controller(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let config = crate::lora::LoraAllocationConfig::from_env();
+
+        let rate_window_secs = config.effective_rate_window_secs();
+        self.lora_load_estimator
+            .set_rate_window(std::time::Duration::from_secs(rate_window_secs));
+
+        tracing::info!(
+            enabled = config.enabled,
+            algorithm = ?config.algorithm,
+            timestep_secs = config.timestep_secs,
+            rate_window_secs = rate_window_secs,
+            rate_window_multiplier = config.rate_window_multiplier,
+            buckets_per_second = config.buckets_per_second,
+            predictor_type = ?config.predictor_type,
+            "Starting LoRA allocation controller"
+        );
+        crate::lora::LoraController::start(
+            config,
+            self.lora_routing_table.clone(),
+            self.lora_state_tracker.clone(),
+            self.lora_load_estimator.clone(),
+            cancel_token,
+        )
     }
 
     /// Register a prefill router for a decode WorkerSet. Returns a receiver that will be

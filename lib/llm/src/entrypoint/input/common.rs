@@ -13,6 +13,7 @@ use crate::{
     kv_router::{
         DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
     },
+    lora::LoraFilteredRouter,
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
@@ -330,12 +331,26 @@ where
         RouterMode::Direct => {
             ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
         }
-        RouterMode::Random
-        | RouterMode::RoundRobin
-        | RouterMode::PowerOfTwoChoices
+        RouterMode::Random | RouterMode::RoundRobin => {
+            // Non-KV routing: wrap PushRouter with LoraFilteredRouter for 2-stage routing.
+            // When no LoRAs are registered, the filter is a no-op pass-through.
+            let lora_filter = model_manager
+                .lora_filter()
+                .expect("lora_filter() always returns Some");
+            let filtered = LoraFilteredRouter::new(
+                router,
+                lora_filter,
+                model_manager.lora_load_estimator().clone(),
+                router_mode,
+            );
+            ServiceBackend::from_engine(Arc::new(filtered))
+        }
+        RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => ServiceBackend::from_engine(Arc::new(router)),
         RouterMode::KV => {
+            // KV routing: LoRA filter is injected into KvScheduler via
+            // KvRouter::new() — see model_manager.rs kv_chooser_for().
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };

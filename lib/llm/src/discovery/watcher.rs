@@ -241,6 +241,15 @@ impl ModelWatcher {
                         continue;
                     }
 
+                    // Feed LoRA state tracker for every worker registration
+                    if let Some(ref lora_info) = card.lora {
+                        use crate::kv_router::protocols::WorkerWithDpRank;
+                        let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+                        self.manager
+                            .lora_state_tracker()
+                            .handle_mdc_update(worker, lora_info);
+                    }
+
                     match self.handle_put(&mcid, &mut card).await {
                         Ok(()) => {
                             tracing::info!(
@@ -271,6 +280,21 @@ impl ModelWatcher {
                             continue;
                         }
                     };
+
+                    // Feed LoRA state tracker for worker removal
+                    {
+                        let key = model_card_instance_id.to_path();
+                        if let Some(card) = self.manager.get_model_card(&key)
+                            && let Some(ref lora_info) = card.lora
+                        {
+                            use crate::kv_router::protocols::WorkerWithDpRank;
+                            let worker =
+                                WorkerWithDpRank::new(model_card_instance_id.instance_id, 0);
+                            self.manager
+                                .lora_state_tracker()
+                                .handle_mdc_removal(worker, &lora_info.name);
+                        }
+                    }
 
                     match self
                         .handle_delete(model_card_instance_id, &namespace_filter)

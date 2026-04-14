@@ -381,6 +381,17 @@ impl LoadEstimator {
         }
     }
 
+    /// Remove all tracking data for a LoRA. After this call the LoRA will no
+    /// longer appear in [`get_current_load`] results. Useful when a LoRA is
+    /// permanently unloaded and its stale rate-counter / predictor entries
+    /// should be purged.
+    pub fn remove_lora(&self, lora_name: &str) {
+        self.data.remove(lora_name);
+        if let Ok(mut predictors) = self.predictors.lock() {
+            predictors.remove(lora_name);
+        }
+    }
+
     fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
         let now = Instant::now();
         let cfg = self.config.read();
