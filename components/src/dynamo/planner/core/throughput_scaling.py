@@ -22,10 +22,19 @@ logger = logging.getLogger(__name__)
 class ThroughputScalingMixin:
     """Traffic-driven throughput-based scaling decisions."""
 
+    # Scratch fields owned by PlannerStateMachine, declared here for mypy
+    _diag_predicted_num_req: Optional[float]
+    _diag_predicted_isl: Optional[float]
+    _diag_predicted_osl: Optional[float]
+    _diag_engine_rps_prefill: Optional[float]
+    _diag_engine_rps_decode: Optional[float]
+    _diag_throughput_reason: Optional[str]
+
     def _advance_throughput(
         self, traffic: TrafficObservation
     ) -> Optional[ScalingDecision]:
         if not self._config.enable_throughput_scaling:
+            self._diag_throughput_reason = "disabled"
             return None
 
         next_num_req, next_isl, next_osl = self._predict_load()
@@ -34,6 +43,7 @@ class ThroughputScalingMixin:
 
         if traffic.duration_s <= 0:
             logger.warning("Traffic observation has non-positive duration, skipping")
+            self._diag_throughput_reason = "no_traffic_data"
             return None
         demand_rps = next_num_req / traffic.duration_s
         mode = self._config.mode
@@ -52,9 +62,13 @@ class ThroughputScalingMixin:
             logger.info(
                 f"Predicted load: num_req={nr:.2f}, isl={isl:.2f}, osl={osl:.2f}"
             )
+            self._diag_predicted_num_req = nr
+            self._diag_predicted_isl = isl
+            self._diag_predicted_osl = osl
             return nr, isl, osl
         except Exception as e:
             logger.error(f"Failed to predict load: {e}")
+            self._diag_throughput_reason = "predict_failed"
             return None, None, None
 
     def _throughput_single(
@@ -74,9 +88,11 @@ class ThroughputScalingMixin:
             else:
                 self._throughput_lower_bound_d = desired
             logger.info(f"Throughput lower bound set to {desired} for {component}")
+            self._diag_throughput_reason = "set_lower_bound"
             return None
 
         desired = self._apply_single_budget(desired, component)
+        self._diag_throughput_reason = "scale"
         return (
             ScalingDecision(num_prefill=desired)
             if component == "prefill"
@@ -95,9 +111,11 @@ class ThroughputScalingMixin:
             self._throughput_lower_bound_p = num_p
             self._throughput_lower_bound_d = num_d
             logger.info(f"Throughput lower bounds set: prefill={num_p}, decode={num_d}")
+            self._diag_throughput_reason = "set_lower_bound"
             return None
 
         num_p, num_d = self._apply_global_budget(num_p, num_d)
+        self._diag_throughput_reason = "scale"
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
 
     def _throughput_agg(
@@ -109,6 +127,7 @@ class ThroughputScalingMixin:
             logger.warning(
                 "max_num_batched_tokens not available, skipping agg throughput"
             )
+            self._diag_throughput_reason = "model_not_ready"
             return None
 
         (
@@ -124,11 +143,15 @@ class ThroughputScalingMixin:
         )
         if engine_rps <= 0:
             logger.warning("Agg perf model not ready, skipping throughput scaling")
+            self._diag_throughput_reason = "model_not_ready"
             return None
         if actual_ttft > self._config.ttft or actual_itl > self._config.itl:
             logger.warning(
                 f"Agg SLA not fully met: TTFT={actual_ttft:.1f}ms, ITL={actual_itl:.1f}ms"
             )
+
+        self._diag_engine_rps_prefill = engine_rps
+        self._diag_engine_rps_decode = engine_rps
 
         desired = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
         logger.info(
@@ -138,9 +161,11 @@ class ThroughputScalingMixin:
         if self._config.enable_load_scaling:
             self._throughput_lower_bound_d = desired
             logger.info(f"Agg throughput lower bound set to {desired}")
+            self._diag_throughput_reason = "set_lower_bound"
             return None
 
         desired = self._apply_single_budget(desired, "decode")
+        self._diag_throughput_reason = "scale"
         return ScalingDecision(num_decode=desired)
 
     def _compute_prefill_replicas(
@@ -151,11 +176,15 @@ class ThroughputScalingMixin:
         )
         if engine_rps <= 0:
             logger.warning("Prefill perf model not ready, skipping throughput scaling")
+            self._diag_throughput_reason = "model_not_ready"
             return None
         if ttft_ms > self._config.ttft:
             logger.warning(
                 f"Prefill TTFT SLA not met: {ttft_ms:.1f}ms > {self._config.ttft:.1f}ms"
             )
+
+        self._diag_engine_rps_prefill = engine_rps
+
         result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
         logger.info(
             f"Prefill: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, est_ttft={ttft_ms:.1f}ms"
@@ -172,11 +201,15 @@ class ThroughputScalingMixin:
         )
         if engine_rps <= 0:
             logger.warning("Decode perf model not ready, skipping throughput scaling")
+            self._diag_throughput_reason = "model_not_ready"
             return None
         if itl_ms > self._config.itl:
             logger.warning(
                 f"Decode ITL SLA not met: {itl_ms:.1f}ms > {self._config.itl:.1f}ms"
             )
+
+        self._diag_engine_rps_decode = engine_rps
+
         result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
         logger.info(
             f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, est_itl={itl_ms:.1f}ms"

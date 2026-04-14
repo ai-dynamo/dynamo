@@ -554,6 +554,14 @@ The profiler automatically detects the engine type and uses the appropriate bina
 
 **Requirement (TRT-LLM):** The launch script must honor `_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS` (and optionally `_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES`). This is handled by `build_trtllm_override_args_with_mem` in `gpu_utils.sh` (returns JSON for `--override-engine-args`). Note: this is a separate function from `build_vllm_gpu_mem_args` / `build_sglang_gpu_mem_args` because TRT-LLM requires JSON merging.
 
+**Requirement (all engines):** Do not hardcode `CUDA_VISIBLE_DEVICES` in launch scripts. The profiler and parallel test runner set `CUDA_VISIBLE_DEVICES` to pin each test to a specific GPU. A script that overrides this (e.g. `CUDA_VISIBLE_DEVICES=0`) will ignore the assignment and land on the wrong GPU. Instead, inherit from the environment with a default:
+
+```bash
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+```
+
+Then pass the variable to each worker: `CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES python3 -m dynamo.vllm ...`. For multi-GPU scripts that assign distinct GPUs per worker, use named env vars with defaults (e.g. `PREFILL_CUDA_VISIBLE_DEVICES="${PREFILL_CUDA_VISIBLE_DEVICES:-0}"`).
+
 ### Engine-specific mapping
 
 Launch scripts call engine-specific functions from `examples/common/gpu_utils.sh` which check env var overrides and return the appropriate CLI flags:

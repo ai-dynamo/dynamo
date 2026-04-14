@@ -27,15 +27,17 @@ class PlannerProfileDataResult(Protocol):
 def resolve_planner_profile_data(
     planner_profile_data: Path | None,
 ) -> PlannerProfileDataResult:
+    if planner_profile_data is None:
+        return SimpleNamespace(npz_path=None)
+
+    if planner_profile_data.suffix == ".npz":
+        return SimpleNamespace(npz_path=planner_profile_data)
+
     try:
         module = importlib.import_module("dynamo.mocker.args")
     except ImportError:
-        if planner_profile_data is None:
-            return SimpleNamespace(npz_path=None)
         return SimpleNamespace(
-            npz_path=planner_profile_data
-            if planner_profile_data.suffix == ".npz"
-            else None
+            npz_path=None,
         )
     return module.resolve_planner_profile_data(planner_profile_data)
 
@@ -62,13 +64,16 @@ def _load_engine_args(raw_args: str | None):
                 "worker_type must be one of 'aggregated', 'prefill', or 'decode'"
             )
     if "planner_profile_data" in raw:
-        profile_data_result = resolve_planner_profile_data(
-            Path(raw["planner_profile_data"])
-        )
-        if profile_data_result.npz_path is not None:
-            raw["planner_profile_data"] = str(profile_data_result.npz_path)
-        else:
+        if raw["planner_profile_data"] is None:
             del raw["planner_profile_data"]
+        else:
+            profile_data_result = resolve_planner_profile_data(
+                Path(raw["planner_profile_data"])
+            )
+            if profile_data_result.npz_path is not None:
+                raw["planner_profile_data"] = str(profile_data_result.npz_path)
+            else:
+                del raw["planner_profile_data"]
     return MockEngineArgs.from_json(json.dumps(raw))
 
 

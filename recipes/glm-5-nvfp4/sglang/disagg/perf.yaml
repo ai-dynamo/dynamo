@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: glm5-disagg-bench
+  namespace: <your-namespace>
+spec:
+  backoffLimit: 1
+  completions: 1
+  parallelism: 1
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: bench
+        image: python:3.12-slim
+        securityContext:
+          allowPrivilegeEscalation: false
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: TARGET_MODEL
+          value: nvidia/GLM-5-NVFP4
+        - name: ENDPOINT
+          value: glm5-sglang-frontend:8000
+        - name: ISL
+          value: "1000"
+        - name: OSL
+          value: "8192"
+        # Concurrency = CONCURRENCY_PER_GPU * num_decode_gpus
+        # Default: 32 req/GPU * 16 GPUs (4 nodes x 4 GPUs) = 512
+        - name: CONCURRENCY
+          value: "512"
+        - name: ARTIFACT_DIR
+          value: /model-store/perf/glm5-disagg-isl1k-osl8k
+        - name: TOKENIZER
+          value: nvidia/GLM-5-NVFP4
+        - name: HF_HOME
+          value: /model-store
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: COLUMNS
+          value: "200"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          apt-get update -qq && apt-get install -y -qq curl jq && apt-get clean
+          pip install -q aiperf transformers tokenizers
+
+          echo "Waiting for model at http://$ENDPOINT/v1/models..."
+          while ! curl -sf "http://$ENDPOINT/v1/models" | jq -e --arg m "$TARGET_MODEL" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
+            echo "[$(date '+%H:%M:%S')] not ready, retrying in 10s..."
+            sleep 10
+          done
+          echo "Model ready!"
+
+          mkdir -p "$ARTIFACT_DIR"
+
+          aiperf profile \
+            --artifact-dir "$ARTIFACT_DIR" \
+            --model "$TARGET_MODEL" \
+            --tokenizer "$TOKENIZER" \
+            --tokenizer-trust-remote-code \
+            --endpoint-type chat \
+            --endpoint /v1/chat/completions \
+            --streaming \
+            --url "http://$ENDPOINT" \
+            --synthetic-input-tokens-mean $ISL \
+            --synthetic-input-tokens-stddev 0 \
+            --output-tokens-mean $OSL \
+            --output-tokens-stddev 0 \
+            --extra-inputs "max_tokens:$OSL" \
+            --extra-inputs "min_tokens:$OSL" \
+            --extra-inputs "ignore_eos:true" \
+            --concurrency $CONCURRENCY \
+            --request-count $((CONCURRENCY * 3)) \
+            --warmup-request-count 16 \
+            --num-dataset-entries 12800 \
+            --random-seed 100 \
+            --ui simple
+
+          echo "Done. Results in $ARTIFACT_DIR"
+          ls -la "$ARTIFACT_DIR"
+        volumeMounts:
+        - name: model-cache
+          mountPath: /model-store
+        workingDir: /workspace
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache

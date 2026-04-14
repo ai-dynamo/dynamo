@@ -35,11 +35,13 @@ from dynamo.planner.core.types import (
     FpmObservations,
     PlannerEffects,
     ScheduledTick,
+    TickDiagnostics,
     TickInput,
     TrafficObservation,
     WorkerCapabilities,
     WorkerCounts,
 )
+from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClient
 from dynamo.planner.monitoring.worker_info import WorkerInfo, resolve_worker_info
@@ -75,6 +77,7 @@ def _engine_caps(
         else None,
         max_num_seqs=worker_info.max_num_seqs if worker_info else None,
         context_length=worker_info.context_length if worker_info else None,
+        max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
     )
 
 
@@ -170,6 +173,9 @@ class NativePlannerBase:
         # Shared metrics state
         self._last_metrics = Metrics()
         self._cumulative_gpu_hours: float = 0.0
+
+        # Diagnostics recorder
+        self._recorder = DiagnosticsRecorder(config=config)
 
         # State machine (created after WorkerInfo is resolved)
         self._state_machine: Optional[PlannerStateMachine] = None
@@ -393,8 +399,8 @@ class NativePlannerBase:
         num_p, num_d, _ = await self._get_worker_counts_raw()
 
         if self.prometheus_port != 0:
-            self.prometheus_metrics.num_p_workers.set(num_p)
-            self.prometheus_metrics.num_d_workers.set(num_d)
+            self.prometheus_metrics.num_prefill_replicas.set(num_p)
+            self.prometheus_metrics.num_decode_replicas.set(num_d)
             gpu_hours = (
                 (
                     num_p * (self.config.prefill_engine_num_gpu or 0)
@@ -439,14 +445,16 @@ class NativePlannerBase:
         )
 
         if self.prometheus_port != 0:
-            self.prometheus_metrics.observed_ttft.set(m.ttft)
-            self.prometheus_metrics.observed_itl.set(m.itl)
-            self.prometheus_metrics.observed_request_rate.set(
+            self.prometheus_metrics.observed_ttft_ms.set(m.ttft)
+            self.prometheus_metrics.observed_itl_ms.set(m.itl)
+            self.prometheus_metrics.observed_requests_per_second.set(
                 m.num_req / self.config.throughput_adjustment_interval
             )
-            self.prometheus_metrics.observed_request_duration.set(m.request_duration)
-            self.prometheus_metrics.observed_isl.set(m.isl)
-            self.prometheus_metrics.observed_osl.set(m.osl)
+            self.prometheus_metrics.observed_request_duration_seconds.set(
+                m.request_duration
+            )
+            self.prometheus_metrics.observed_input_sequence_tokens.set(m.isl)
+            self.prometheus_metrics.observed_output_sequence_tokens.set(m.osl)
 
         if not m.is_valid():
             logger.info("Metrics contain None or NaN values, skipping")
@@ -477,7 +485,37 @@ class NativePlannerBase:
                     _log_fpm(wid, dp, fpm, "decode")
                 decode_stats = stats
 
+        if self.prometheus_port != 0:
+            self._emit_per_engine_fpm(prefill_stats, decode_stats)
+
         return FpmObservations(prefill=prefill_stats, decode=decode_stats)
+
+    def _emit_per_engine_fpm(
+        self,
+        prefill_stats: Optional[dict] = None,
+        decode_stats: Optional[dict] = None,
+    ) -> None:
+        pm = self.prometheus_metrics
+        pm.engine_queued_prefill_tokens.clear()
+        pm.engine_queued_decode_kv_tokens.clear()
+        pm.engine_inflight_decode_kv_tokens.clear()
+
+        if prefill_stats:
+            for (wid, dp), fpm in prefill_stats.items():
+                labels = dict(worker_id=wid, dp_rank=str(dp))
+                pm.engine_queued_prefill_tokens.labels(**labels).set(
+                    fpm.queued_requests.sum_prefill_tokens
+                )
+
+        if decode_stats:
+            for (wid, dp), fpm in decode_stats.items():
+                labels = dict(worker_id=wid, dp_rank=str(dp))
+                pm.engine_queued_decode_kv_tokens.labels(**labels).set(
+                    fpm.queued_requests.sum_decode_kv_tokens
+                )
+                pm.engine_inflight_decode_kv_tokens.labels(**labels).set(
+                    fpm.scheduled_requests.sum_decode_kv_tokens
+                )
 
     async def _collect_worker_counts(self) -> WorkerCounts:
         num_p, num_d, is_stable = await self._get_worker_counts_raw()
@@ -533,6 +571,33 @@ class NativePlannerBase:
         await self.connector.set_component_replicas(targets, blocking=blocking)
 
     # ------------------------------------------------------------------
+    # Diagnostics reporting (shared across all adapters)
+    # ------------------------------------------------------------------
+
+    def _report_diagnostics(self, diag: TickDiagnostics) -> None:
+        if self.prometheus_port == 0:
+            return
+        pm = self.prometheus_metrics
+        interval = self.config.throughput_adjustment_interval
+
+        pm.estimated_ttft_ms.set(diag.estimated_ttft_ms or 0)
+        pm.estimated_itl_ms.set(diag.estimated_itl_ms or 0)
+
+        pm.predicted_requests_per_second.set(
+            diag.predicted_num_req / interval
+            if diag.predicted_num_req is not None and interval > 0
+            else 0
+        )
+        pm.predicted_input_sequence_tokens.set(diag.predicted_isl or 0)
+        pm.predicted_output_sequence_tokens.set(diag.predicted_osl or 0)
+
+        pm.engine_prefill_capacity_requests_per_second.set(diag.engine_rps_prefill or 0)
+        pm.engine_decode_capacity_requests_per_second.set(diag.engine_rps_decode or 0)
+
+        pm.load_scaling_decision.state(diag.load_decision_reason or "unset")
+        pm.throughput_scaling_decision.state(diag.throughput_decision_reason or "unset")
+
+    # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
 
@@ -549,6 +614,21 @@ class NativePlannerBase:
             tick_input = await self._gather_tick_input(next_tick)
             effects = self.state_machine.on_tick(next_tick, tick_input)
             await self._apply_effects(effects)
+            self._report_diagnostics(effects.diagnostics)
+
+            if self._recorder.enabled:
+                try:
+                    self._recorder.record(
+                        tick_input,
+                        effects,
+                        self._last_metrics,
+                        self._cumulative_gpu_hours,
+                    )
+                    if self._recorder.should_generate_report(tick_input.now_s):
+                        self._recorder.generate_report()
+                except Exception as e:
+                    logger.error(f"Diagnostics report failed: {e}")
+
             assert effects.next_tick is not None
             next_tick = effects.next_tick
 

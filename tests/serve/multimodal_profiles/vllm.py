@@ -85,9 +85,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         topologies={
             "agg": TopologyConfig(
                 marks=[
-                    pytest.mark.skip(
-                        reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2604"
-                    ),
                     pytest.mark.post_merge,
                 ],
                 timeout_s=600,
@@ -95,6 +92,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
         },
         request_payloads=[make_audio_payload(["Hester", "Pynne"])],
+        extra_vllm_args=["--max-model-len", "7232"],
     ),
     MultimodalModelProfile(
         name="google/gemma-3-4b-it",
