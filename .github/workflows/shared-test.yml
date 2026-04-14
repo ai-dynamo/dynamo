@@ -79,15 +79,15 @@ on:
         default: 120
     secrets:
       AWS_DEFAULT_REGION:
-        required: false
+        required: true
       AWS_ACCOUNT_ID:
-        required: false
+        required: true
       AZURE_ACR_HOSTNAME:
-        required: false
+        required: true
       AZURE_ACR_USER:
-        required: false
+        required: true
       AZURE_ACR_PASSWORD:
-        required: false
+        required: true
       HF_TOKEN:
         required: false
 
@@ -137,51 +137,51 @@ jobs:
           TEST_IMAGE=${ECR_REPOSITORY}:${IMAGE_TAG}-test
           echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
           echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
-      #- name: Docker Login
-      #  uses: ./.github/actions/docker-login
-      #  with:
-      #    aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #    aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #    azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #    azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #    azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      #- name: Pull relevant images
-      #  shell: bash
-      #  run: |
-      #    source ./.github/scripts/retry_docker.sh
-      #    start_time=$(date +%s)
-      #    if [[ "${{ matrix.version_selector }}" == "cpu" ]]; then
-      #      retry_pull ${{ steps.calculate-target-tag.outputs.cpu_runtime_image }}
-      #      retry_pull ${{ steps.calculate-target-tag.outputs.cpu_test_image }}
-      #    elif [[ "${{ matrix.platform }}" == "amd64" && "${{ matrix.version_selector }}" == "xpu" ]]; then
-      #      retry_pull ${{ steps.calculate-target-tag.outputs.xpu_runtime_image }}
-      #      retry_pull ${{ steps.calculate-target-tag.outputs.xpu_test_image }}
-      #    else
-      #      retry_pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
-      #      retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
-      #    fi
-      #    retry_pull quay.io/minio/minio
-      #    end_time=$(date +%s)
-      #    duration=$((end_time - start_time))
-      #    echo "⏱️ Image pull duration: ${duration}s"
-      #- name: Run Sanity Check on Runtime Image
-      #  if: ${{ inputs.run_sanity_check }}
-      #  shell: bash
-      #  run: |
-      #    echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.runtime_image }}"
-#
-      #    export WORKSPACE=/workspace
-#
-      #    set +e
-      #    docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
-      #    SANITY_CHECK_EXIT_CODE=$?
-      #    set -e
-      #    if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-      #      echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-      #      exit ${SANITY_CHECK_EXIT_CODE}
-      #    else
-      #      echo "✅ Sanity check passed"
-      #    fi
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull relevant images
+        shell: bash
+        run: |
+          source ./.github/scripts/retry_docker.sh
+          start_time=$(date +%s)
+          if [[ "${{ matrix.version_selector }}" == "cpu" ]]; then
+            retry_pull ${{ steps.calculate-target-tag.outputs.cpu_runtime_image }}
+            retry_pull ${{ steps.calculate-target-tag.outputs.cpu_test_image }}
+          elif [[ "${{ matrix.platform }}" == "amd64" && "${{ matrix.version_selector }}" == "xpu" ]]; then
+            retry_pull ${{ steps.calculate-target-tag.outputs.xpu_runtime_image }}
+            retry_pull ${{ steps.calculate-target-tag.outputs.xpu_test_image }}
+          else
+            retry_pull ${{ steps.calculate-target-tag.outputs.runtime_image }}
+            retry_pull ${{ steps.calculate-target-tag.outputs.test_image }}
+          fi
+          retry_pull quay.io/minio/minio
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "⏱️ Image pull duration: ${duration}s"
+      - name: Run Sanity Check on Runtime Image
+        if: ${{ inputs.run_sanity_check }}
+        shell: bash
+        run: |
+          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.runtime_image }}"
+
+          export WORKSPACE=/workspace
+
+          set +e
+          docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          set -e
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
       - name: Run CPU-only tests (parallelized)
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}

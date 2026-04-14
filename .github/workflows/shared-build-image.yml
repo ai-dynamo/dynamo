@@ -84,15 +84,15 @@ on:
         default: ''
     secrets:
       AWS_DEFAULT_REGION:
-        required: false
+        required: true
       AWS_ACCOUNT_ID:
-        required: false
+        required: true
       AZURE_ACR_HOSTNAME:
-        required: false
+        required: true
       AZURE_ACR_USER:
-        required: false
+        required: true
       AZURE_ACR_PASSWORD:
-        required: false
+        required: true
       SCCACHE_S3_BUCKET:
         required: false
       AWS_ACCESS_KEY_ID:
@@ -112,7 +112,7 @@ jobs:
       fail-fast: false
       matrix:
         version_selector: ${{ fromJson(inputs.version_selector) }}
-    runs-on: ${{ matrix.version_selector == 'xpu' && 'xpu' || 'prod-builder-v3' }}
+    runs-on: prod-builder-v3
     # version_selector not empty -- name: cuda12, linux/amd64
     # version_selector cpu/empty -- name: cpu, linux/amd64
     name: Build multi-arch ${{ matrix.version_selector == 'xpu' && 'xpu' || (matrix.version_selector == '' || matrix.version_selector == 'cpu') && 'cpu' || format('cuda{0}', matrix.version_selector) }}
@@ -124,14 +124,14 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           lfs: true
-      #- name: Docker Login
-      #  uses: ./.github/actions/docker-login
-      #  with:
-      #    aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #    aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #    azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #    azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #    azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
@@ -296,7 +296,6 @@ jobs:
 
           docker buildx build \
             --progress=plain \
-            --builder "${BUILDX_BUILDER_NAME:-default}" \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
             --platform ${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }} \
