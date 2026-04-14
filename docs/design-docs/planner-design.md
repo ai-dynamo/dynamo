@@ -165,30 +165,41 @@ After the delay:
 - **Interpolation accuracy vs profiling cost**: Higher `prefillInterpolationGranularity` and `decodeInterpolationGranularity` in the profiling sweep produce more accurate interpolation but increase profiling time linearly. Default granularity (16 prefill, 6 decode) balances accuracy with profiling duration.
 - **Predictor warm-up period**: All predictors need observation history before making reliable forecasts. ARIMA and Prophet need multiple adjustment intervals of data. Kalman starts forecasting after `--kalman-min-points` observations. During warm-up, the planner uses the constant predictor as fallback.
 
-## Load-Based Scaling (Experimental)
+## Load-Based Scaling
 
-The load-based mode uses real-time per-worker metrics from the router to make SLA-aware scaling decisions without requiring profiling data.
+The load-based mode uses ForwardPassMetrics (FPM) from the Dynamo event plane to make SLA-aware scaling decisions without requiring profiling data or the KV Router.
 
 ### Metrics
 
-The planner pulls per-worker load metrics directly from the frontend's `/metrics` endpoint:
-- **Active prefill tokens**: pending prefill tokens per worker
-- **Active decode blocks**: active KV blocks per worker
-- **Last TTFT, ITL, ISL**: most recent observed latencies per worker
+Each engine emits per-iteration `ForwardPassMetrics` via ZMQ -> FpmEventRelay -> event plane. The planner subscribes via `FpmEventSubscriber` with automatic engine discovery and MDC-based lifecycle tracking. Key fields used:
+- **wall_time**: per-iteration execution time (regression target)
+- **scheduled_requests.sum_prefill_tokens**: prefill regression input
+- **scheduled_requests.sum_decode_kv_tokens**: decode regression input
+- **queued_requests**: queued prefill/decode load for TTFT/ITL simulation
+- Idle heartbeats (wall_time=0) are skipped
 
-### Regression Model
+### Diagnostics
 
-A sliding-window linear regression maps load to latency:
-- Prefill: `(active_prefill_tokens + ISL)` -> `TTFT`
-- Decode: `active_decode_blocks` -> `ITL`
+Each tick, the scaling state machine fills `TickDiagnostics` with intermediate decision data—estimated latencies, predicted load, per-engine RPS, and decision reasons—via internal `_diag_*` fields. The adapter layer reads this from `PlannerEffects.diagnostics` and:
 
-Given a TTFT/ITL SLA target, the model reverse-solves for the maximum load that satisfies the SLA.
+- Sets Prometheus gauges (e.g. `dynamo_planner_estimated_ttft_ms` and related estimates)
+- Records enum metrics for load-scaling decision reasons (`dynamo_planner_load_scaling_decision`)
+- Feeds `DiagnosticsRecorder`, which accumulates per-tick snapshots and emits Plotly-based HTML reports on a schedule
+
+Per-engine FPM queue depths from `_collect_fpm()` are exported as labeled Prometheus gauges.
+
+### Regression Models
+
+Three specialized regression models (`fpm_regression.py`):
+- **PrefillRegressionModel**: 1D regression `sum_prefill_tokens -> wall_time`. Estimates TTFT by simulating chunked prefill scheduling (chunks of `max_num_batched_tokens`).
+- **DecodeRegressionModel**: 1D regression `sum_decode_kv_tokens -> wall_time`. Estimates ITL for total decode load (scheduled + queued + avg decode length).
+- **AggRegressionModel**: 2D regression `(sum_prefill_tokens, sum_decode_kv_tokens) -> wall_time`. Estimates both TTFT (simulated prefill with piggybacked decode) and ITL (decode with average piggybacked prefill).
 
 ### Scaling Decisions
 
-- **Scale up**: if ALL workers' recent load exceeds the regression-derived target
-- **Scale down**: if ALL workers' recent load is below the target adjusted by `(num_workers - 1) / num_workers * sensitivity / 100`
-- Only scales by +/-1 per interval (blocking)
+- **Prefill/Decode**: Scale up if ALL engines' estimated TTFT/ITL > SLA; scale down if ALL < SLA * sensitivity
+- **Agg**: Scale up if (ALL TTFT > SLA) OR (ALL ITL > SLA); scale down if (ALL TTFT < SLA * sensitivity) AND (ALL ITL < SLA * sensitivity)
+- Only scales by +/-1 per interval (non-blocking with pending-desired guard: metrics continue to be observed while scaling is in progress, but no new scaling action is issued until the previous one completes)
 
 ### Co-existence with Throughput-Based Scaling
 

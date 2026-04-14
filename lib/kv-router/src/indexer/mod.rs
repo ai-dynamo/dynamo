@@ -34,12 +34,12 @@
 mod kv_indexer;
 mod local;
 mod metrics;
-mod sharded;
 mod thread_pool;
 mod traits;
 mod types;
 
 pub mod concurrent_radix_tree;
+pub mod concurrent_radix_tree_compressed;
 pub mod positional;
 pub mod pruning;
 pub mod radix_tree;
@@ -51,7 +51,6 @@ mod tests;
 pub use kv_indexer::*;
 pub use local::*;
 pub use metrics::*;
-pub use sharded::*;
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;

@@ -265,7 +265,7 @@ _Appears in:_
 | `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.<br />When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components. |  | Optional: \{\} <br /> |
 | `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Minimum: 1 <br />Optional: \{\} <br /> |
 | `backoffLimit` _integer_ | Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 | Minimum: 0 <br />Optional: \{\} <br /> |
+| `ttlSecondsAfterFinished` _integer_ | Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed<br />300 second TTL. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
 #### DynamoCheckpointPhase
@@ -284,7 +284,7 @@ _Appears in:_
 | --- | --- |
 | `Pending` | DynamoCheckpointPhasePending indicates the checkpoint CR has been created but the Job has not started<br /> |
 | `Creating` | DynamoCheckpointPhaseCreating indicates the checkpoint Job is running<br /> |
-| `Ready` | DynamoCheckpointPhaseReady indicates the checkpoint tar file is available on the PVC<br /> |
+| `Ready` | DynamoCheckpointPhaseReady indicates the checkpoint artifact is available<br /> |
 | `Failed` | DynamoCheckpointPhaseFailed indicates the checkpoint creation failed<br /> |
 
 
@@ -320,10 +320,10 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br />Optional: \{\} <br /> |
 | `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />This hash is used to identify equivalent checkpoints |  | Optional: \{\} <br /> |
-| `location` _string_ | Location is the full URI/path to the checkpoint in the storage backend<br />For PVC: same as TarPath (e.g., /checkpoints/\{hash\}.tar)<br />For S3: s3://bucket/prefix/\{hash\}.tar<br />For OCI: oci://registry/repo:\{hash\} |  | Optional: \{\} <br /> |
-| `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | StorageType indicates the storage backend type used for this checkpoint |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
+| `location` _string_ | Deprecated: Location is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Optional: \{\} <br /> |
+| `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | Deprecated: StorageType is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
 | `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
-| `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint tar was created |  | Optional: \{\} <br /> |
+| `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint became ready |  | Optional: \{\} <br /> |
 | `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
 
@@ -332,7 +332,9 @@ _Appears in:_
 
 _Underlying type:_ _string_
 
-DynamoCheckpointStorageType defines the supported storage backends for checkpoints
+Deprecated: StorageType is retained for compatibility with older
+DynamoCheckpoint status consumers. The current checkpoint flow publishes
+PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
 
 _Validation:_
 - Enum: [pvc s3 oci]
@@ -399,6 +401,8 @@ _Appears in:_
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
+| `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
+| `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -440,6 +444,8 @@ _Appears in:_
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
+| `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
+| `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -641,6 +647,7 @@ _Appears in:_
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
+| `topologyConstraint` _[SpecTopologyConstraint](#spectopologyconstraint)_ | TopologyConstraint is the deployment-level topology constraint.<br />When set, topologyProfile is required and names the ClusterTopology CR to use.<br />packDomain is optional here — it can be omitted when only services carry constraints.<br />Services without their own topologyConstraint inherit from this value. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus
@@ -814,6 +821,45 @@ _Appears in:_
 | `args` _string array_ | Args overrides the default frontend arguments. When specified, these replace<br />the default ["-m", "dynamo.frontend"] entirely.<br />For example, ["-m", "dynamo.frontend", "--router-mode", "direct"] for GAIE deployments. |  | Optional: \{\} <br /> |
 | `envFromSecret` _string_ | EnvFromSecret references a Secret whose key/value pairs will be exposed as<br />environment variables in the frontend sidecar container. |  | Optional: \{\} <br /> |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables for the frontend sidecar.<br />These are merged with (and can override) the auto-generated Dynamo env vars. |  | Optional: \{\} <br /> |
+
+
+#### GPUMemoryServiceMode
+
+_Underlying type:_ _string_
+
+GPUMemoryServiceMode selects the GMS deployment topology.
+
+
+
+_Appears in:_
+- [GPUMemoryServiceSpec](#gpumemoryservicespec)
+
+| Field | Description |
+| --- | --- |
+| `intraPod` | GMSModeIntraPod runs GMS as a sidecar within the same pod.<br /> |
+| `interPod` | GMSModeInterPod runs GMS as a separate pod (not yet supported).<br /> |
+
+
+#### GPUMemoryServiceSpec
+
+
+
+GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
+When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
+via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
+(weights + kv_cache) and communicates with the main container over UDS sockets.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled activates the GMS sidecar. GPU resources on the main container<br />are replaced with a DRA ResourceClaim for shared GPU access. |  |  |
+| `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the GMS deployment topology. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
+| `deviceClassName` _string_ | DeviceClassName is the DRA DeviceClass to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
 
 
 #### IngressSpec
@@ -1221,6 +1267,63 @@ _Appears in:_
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  |  |
 
 
+#### SpecTopologyConstraint
+
+
+
+SpecTopologyConstraint defines deployment-level topology placement requirements.
+It carries both the topology profile (which ClusterTopology CR to use) and an
+optional default pack domain that services without their own constraint inherit.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `topologyProfile` _string_ | TopologyProfile is the name of the ClusterTopology CR that defines the<br />topology hierarchy for this deployment. |  | MinLength: 1 <br /> |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | PackDomain is the default topology domain to pack pods within.<br />Optional — omit when only services carry constraints. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+
+
+#### TopologyConstraint
+
+
+
+TopologyConstraint defines service-level topology placement requirements.
+The topology profile is inherited from the deployment-level SpecTopologyConstraint;
+only the pack domain is specified here.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | PackDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+
+
+#### TopologyDomain
+
+_Underlying type:_ _string_
+
+TopologyDomain is a free-form topology level identifier.
+Domain names are defined by the cluster admin in the ClusterTopology CR.
+Common examples: "region", "zone", "datacenter", "block", "rack", "host", "numa".
+Must match `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` (lowercase alphanumeric,
+may contain hyphens but must not start or end with one).
+
+_Validation:_
+- Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+
+_Appears in:_
+- [SpecTopologyConstraint](#spectopologyconstraint)
+- [TopologyConstraint](#topologyconstraint)
+
+
+
 #### VolumeMount
 
 
@@ -1402,7 +1505,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner is the raw SLA planner configuration passed to the planner service.<br />Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.<br />Go treats this as opaque bytes; the Planner service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
+| `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner is the raw SLA planner configuration passed to the planner service.<br />Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.<br />Go treats this as opaque bytes; the Planner service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
 | `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
 
 
@@ -1656,14 +1759,15 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
 | `readyForCheckpointFilePath` _string_ | ReadyForCheckpointFilePath signals model readiness for checkpoint jobs | /tmp/ready-for-checkpoint |  |
-| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage holds storage backend configuration |  |  |
+| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Deprecated: Storage is retained for compatibility and ignored by the<br />current snapshot flow. Snapshot storage is discovered from the<br />snapshot-agent DaemonSet instead. |  |  |
 
 
 #### CheckpointOCIConfig
 
 
 
-CheckpointOCIConfig holds OCI registry storage configuration.
+Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
+the current snapshot flow.
 
 
 
@@ -1672,15 +1776,16 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `uri` _string_ | URI is the OCI URI (oci://registry/repository) |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the name of the docker config secret |  |  |
+| `uri` _string_ | URI is the legacy OCI URI (oci://registry/repository). |  |  |
+| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy docker config secret name. |  |  |
 
 
 #### CheckpointPVCConfig
 
 
 
-CheckpointPVCConfig holds PVC storage configuration.
+Deprecated: CheckpointPVCConfig is retained for compatibility and ignored by
+the current snapshot flow.
 
 
 
@@ -1689,15 +1794,16 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the name of the PVC | snapshot-pvc |  |
-| `basePath` _string_ | BasePath is the base directory within the PVC | /checkpoints |  |
+| `pvcName` _string_ | PVCName is the legacy PVC name. |  |  |
+| `basePath` _string_ | BasePath is the legacy base directory within the PVC. |  |  |
 
 
 #### CheckpointS3Config
 
 
 
-CheckpointS3Config holds S3 storage configuration.
+Deprecated: CheckpointS3Config is retained for compatibility and ignored by
+the current snapshot flow.
 
 
 
@@ -1706,15 +1812,16 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `uri` _string_ | URI is the S3 URI (s3://[endpoint/]bucket/prefix) |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the name of the credentials secret |  |  |
+| `uri` _string_ | URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix). |  |  |
+| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy credentials secret name. |  |  |
 
 
 #### CheckpointStorageConfiguration
 
 
 
-CheckpointStorageConfiguration holds storage backend configuration for checkpoints.
+Deprecated: CheckpointStorageConfiguration is retained for compatibility and
+ignored by the current snapshot flow.
 
 
 
@@ -1723,10 +1830,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _string_ | Type is the storage backend type: pvc, s3, or oci | pvc |  |
-| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration (used when Type=pvc) |  |  |
-| `s3` _[CheckpointS3Config](#checkpoints3config)_ | S3 configuration (used when Type=s3) |  |  |
-| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration (used when Type=oci) |  |  |
+| `type` _string_ | Type is the legacy storage backend type: pvc, s3, or oci. |  |  |
+| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for legacy pvc-based settings. |  |  |
+| `s3` _[CheckpointS3Config](#checkpoints3config)_ | S3 configuration for legacy s3-based settings. |  |  |
+| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration for legacy oci-based settings. |  |  |
 
 
 #### DiscoveryBackend
@@ -1849,6 +1956,8 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled overrides auto-detection. nil = auto-detect. |  |  |
 
 
+
+
 #### LWSConfiguration
 
 
@@ -1948,15 +2057,16 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restricted` _string_ | Restricted is the namespace to restrict to. Empty = cluster-wide mode. |  |  |
-| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Scope holds namespace scope lease settings (namespace-restricted mode only) |  |  |
+| `restricted` _string_ | Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.<br />Use cluster-wide mode (leave Restricted empty) instead. |  |  |
+| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Deprecated: Scope is only used in namespace-restricted mode, which is deprecated. |  |  |
 
 
 #### NamespaceScopeConfiguration
 
 
 
-NamespaceScopeConfiguration holds lease settings for namespace-restricted mode.
+Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
+mode and will be removed in a future release.
 
 
 

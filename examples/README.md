@@ -26,9 +26,9 @@ This directory contains practical examples demonstrating how to deploy and use D
 
 Learn fundamental Dynamo concepts through these introductory examples:
 
-- **[Quickstart](/examples/basics/quickstart/README.md)** - Simple aggregated serving example with vLLM backend
-- **[Disaggregated Serving](/examples/basics/disaggregated_serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
-- **[Multi-node](/examples/basics/multinode/README.md)** - Distributed inference across multiple nodes and GPUs
+- **[Quickstart](/docs/getting-started/quickstart.md)** - Simple local Dynamo setup across supported backends
+- **[Disaggregated Serving](/docs/features/disaggregated-serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
+- **[Multi-node TensorRT-LLM](/docs/backends/trtllm/multinode/trtllm-multinode-examples.md)** - Distributed inference across multiple nodes and GPUs
 
 ## Framework Support
 
@@ -56,7 +56,7 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 
 ## Getting Started
 
-1. **Choose your deployment pattern**: Start with the [Quickstart](/examples/basics/quickstart/README.md) for a simple local deployment, or explore [Disaggregated Serving](/examples/basics/disaggregated_serving/README.md) for advanced architectures.
+1. **Choose your deployment pattern**: Start with the [Quickstart](/docs/getting-started/quickstart.md) for a simple local deployment, or explore [Disaggregated Serving](/docs/features/disaggregated-serving/README.md) for advanced architectures.
 
 2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
    ```bash

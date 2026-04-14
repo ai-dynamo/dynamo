@@ -9,14 +9,14 @@ There are two model weight variants, each with its own model download and deploy
 | Variant | Model | Status | Modality | Deploy Configs | Notes |
 |---------|-------|--------|----------|---------------|-------|
 | **baseten** | `baseten-admin/Kimi-2.5-text-nvfp4-v3` | Functional | Text only | [`deploy.yaml`](trtllm/agg/baseten/deploy.yaml) | Works with the stock image, not yet performance-optimized |
-| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml) | Requires a [patched image](trtllm/agg/nvidia/patch/). Vision input is not yet functional — the patch loads the text backbone only. |
+| **nvidia** | `nvidia/Kimi-K2.5-NVFP4` | Experimental | Text only | [`deploy.yaml`](trtllm/agg/nvidia/deploy.yaml), [`deploy-kvbm.yaml`](trtllm/agg/nvidia/deploy-kvbm.yaml), and [`deploy-specdec.yaml`](trtllm/agg/nvidia/deploy-specdec.yaml) | Requires a [patched image](trtllm/agg/nvidia/patch/) for `deploy.yaml` and `deploy-kvbm.yaml`, while `deploy-specdec.yaml` works with a current top-of-tree Dynamo TRT-LLM image. Vision input is not yet functional |
 
 All configurations use TP8, EP8, aggregated mode with KV-aware routing.
 
 ## Prerequisites
 
 1. **Dynamo Platform installed** — See [Kubernetes Deployment Guide](../../docs/kubernetes/README.md)
-2. **GPU cluster** with B200 GPUs (8x per worker)
+2. **GPU cluster** with B200 GPUs (8x per worker) or GB200 GPUs (4 workers, 2x4 per worker)
 3. **HuggingFace token** with access to the model
 
 ## Hardware Requirements
@@ -24,6 +24,7 @@ All configurations use TP8, EP8, aggregated mode with KV-aware routing.
 | Configuration | GPUs |
 |--------------|------|
 | Aggregated | 8x B200 |
+| Aggregated Speculative Decoding | 8x4 GB200 (4 workers, each worker spanning 2 nodes) |
 
 ---
 
@@ -78,28 +79,26 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## nvidia/Kimi-K2.5-NVFP4
 
-**Status:** Experimental | **Modality:** Text only upstream support
+**Status:** Functional | **Modality:** Text only upstream support
 
-> **Experimental:** Upstream TensorRT-LLM does not yet include native support for Kimi K2.5.
-> This recipe works around that limitation by directly patching the container image with an
-> append-only patch that registers `KimiK25ForConditionalGeneration` on the DeepSeek-V3 code path.
-> See [`trtllm/agg/nvidia/patch/`](trtllm/agg/nvidia/patch/) for the patch script and full instructions.
+> **Experimental for standard and KVBM deployments**: Upstream TensorRT-LLM does not yet include native support for Kimi K2.5. This recipe works around that limitation by directly patching the container image with an append-only patch that registers `KimiK25ForConditionalGeneration` on the DeepSeek-V3 code path. See [`trtllm/agg/nvidia/patch/`](trtllm/agg/nvidia/patch) for the patch script and full instructions.
 
-> **Text only:** The patch loads the DeepSeek-V3 text backbone from the Kimi K2.5 config
-> (`text_config`). The vision encoder is not loaded, so image inputs are not processed.
-> Full multimodal support requires native upstream TRT-LLM support for Kimi K2.5.
+> **Functional**: [Speculative Decoding recipe](trtllm/agg/nvidia/deploy-specdec.yaml) doesn't need the patch and is optimized for performance.
 
-The nvidia variant supports text inference with reasoning parsing (`--dyn-reasoning-parser kimi_k25`) and tool calling (`--dyn-tool-call-parser kimi_k2`). It also has a KVBM (KV Block Manager) deploy that enables CPU-offloaded KV cache via `deploy-kvbm.yaml`.
+> **Text only:** Current upstream TensorRT-LLM supports Kimi-K2.5 models by loading the DeepSeek-V3
+> text backbone (`text_config`) only. The vision encoder is not loaded, so image inputs are not
+> processed. Full multimodal support requires native upstream TRT-LLM support for Kimi K2.5.
+
+The nvidia variant supports text inference with reasoning parsing (`--dyn-reasoning-parser kimi_k25`) and tool calling (`--dyn-tool-call-parser kimi_k2`). It also has a KVBM (KV Block Manager) deploy that enables CPU-offloaded KV cache via `deploy-kvbm.yaml`. The standard and KVBM deployments still require the Kimi patched TRT-LLM image, while the speculative decoding deployment in `deploy-specdec.yaml` works with a current top-of-tree Dynamo TRT-LLM image.
 
 ### Quick Start
 
-The nvidia deploy manifests (`deploy.yaml`, `deploy-kvbm.yaml`) ship with a placeholder image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag`.
-Before deploying, you must:
+The nvidia deploy manifests use two image flows:
 
-1. Build a patched image via `docker build` with the `trtllm/agg/nvidia/patch/` context and `BASE_IMAGE` build-arg (see command below).
-2. Update the `image:` fields in the deploy YAML to reference the patched image.
+- `deploy.yaml` and `deploy-kvbm.yaml` use the placeholder patched image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched`
+- `deploy-specdec.yaml` uses the placeholder top-of-tree image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag`
 
-See [`trtllm/agg/nvidia/patch/`](trtllm/agg/nvidia/patch/) for details on what the patch does.
+Before deploying, update the `image:` fields in the manifest you plan to use.
 
 ```bash
 # Set namespace
@@ -116,11 +115,12 @@ kubectl apply -f model-cache/nvidia/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 
 # Patch the container image (required for nvidia weights)
+# Skip this step for Speculative Decoding recipe `deploy-specdec.yaml`
 docker build --build-arg BASE_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag \
   -t nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched \
   trtllm/agg/nvidia/patch/
 
-# Update the image in the deploy manifest to use the patched tag
+# Update the image in the deploy manifest to use the container tag (or the patched tag)
 
 # Deploy
 kubectl apply -f trtllm/agg/nvidia/deploy.yaml -n ${NAMESPACE}
@@ -252,4 +252,4 @@ If `tool_calls` is missing with raw `<|tool_calls_section_begin|>` tokens in `co
 ## Notes
 
 - Update `storageClassName` in `model-cache/model-cache.yaml` before deploying
-- The nvidia variant requires a [patched TensorRT-LLM image](trtllm/agg/nvidia/patch/) until Kimi K2.5 support lands upstream in TensorRT-LLM
+- The two basic recipes in the nvidia variant requires a [patched TensorRT-LLM image](trtllm/agg/nvidia/patch/) until Kimi K2.5 support lands upstream in TensorRT-LLM

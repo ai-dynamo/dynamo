@@ -7,11 +7,12 @@ use common::*;
 
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::{
-    KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded,
-};
+use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
-use dynamo_kv_router::{ConcurrentRadixTree, PositionalIndexer, ThreadPoolIndexer};
+use dynamo_kv_router::{
+    ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
+};
+use dynamo_mocker::loadgen::Trace;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
@@ -22,13 +23,6 @@ use tokio_util::sync::CancellationToken;
 enum IndexerArgs {
     /// Single-threaded radix tree indexer.
     RadixTree {},
-
-    /// Sharded radix tree indexer that partitions workers across independent shards.
-    RadixTreeSharded {
-        /// Number of independent shards to split workers across.
-        #[clap(long, default_value = "4")]
-        num_shards: usize,
-    },
 
     /// Position-based nested map indexer with jump search.
     NestedMap {
@@ -47,6 +41,13 @@ enum IndexerArgs {
         #[clap(long, default_value = "16")]
         num_event_workers: usize,
     },
+
+    /// Compressed concurrent radix tree indexer (compressed edges).
+    ConcurrentRadixTreeCompressed {
+        /// Number of OS threads that consume and apply KV cache events.
+        #[clap(long, default_value = "16")]
+        num_event_workers: usize,
+    },
 }
 
 impl IndexerArgs {
@@ -58,12 +59,6 @@ impl IndexerArgs {
             IndexerArgs::RadixTree {} => {
                 Arc::new(KvIndexer::new(cancel_token, block_size, metrics))
             }
-            IndexerArgs::RadixTreeSharded { num_shards } => Arc::new(KvIndexerSharded::new(
-                cancel_token,
-                num_shards,
-                block_size,
-                metrics,
-            )),
             IndexerArgs::NestedMap {
                 jump_size,
                 num_event_workers,
@@ -75,6 +70,13 @@ impl IndexerArgs {
             IndexerArgs::ConcurrentRadixTree { num_event_workers } => Arc::new(
                 ThreadPoolIndexer::new(ConcurrentRadixTree::new(), num_event_workers, block_size),
             ),
+            IndexerArgs::ConcurrentRadixTreeCompressed { num_event_workers } => {
+                Arc::new(ThreadPoolIndexer::new(
+                    ConcurrentRadixTreeCompressed::new(),
+                    num_event_workers,
+                    block_size,
+                ))
+            }
         }
     }
 
@@ -83,7 +85,10 @@ impl IndexerArgs {
     }
 
     fn is_multi_threaded(name: &str) -> bool {
-        matches!(name, "nested-map" | "concurrent-radix-tree")
+        matches!(
+            name,
+            "nested-map" | "concurrent-radix-tree" | "concurrent-radix-tree-compressed"
+        )
     }
 
     /// Construct an indexer from a short name string.
@@ -95,7 +100,6 @@ impl IndexerArgs {
         let nw = num_event_workers;
         let indexer_args = match name {
             "radix-tree" => IndexerArgs::RadixTree {},
-            "radix-tree-sharded" => IndexerArgs::RadixTreeSharded { num_shards: 4 },
             "nested-map" => IndexerArgs::NestedMap {
                 jump_size: 8,
                 num_event_workers: nw,
@@ -103,9 +107,12 @@ impl IndexerArgs {
             "concurrent-radix-tree" => IndexerArgs::ConcurrentRadixTree {
                 num_event_workers: nw,
             },
+            "concurrent-radix-tree-compressed" => IndexerArgs::ConcurrentRadixTreeCompressed {
+                num_event_workers: nw,
+            },
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, radix-tree-sharded, \
-                 nested-map, concurrent-radix-tree",
+                "Unknown indexer '{}'. Valid names: radix-tree, \
+                 nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed",
                 name
             ),
         };
@@ -125,13 +132,15 @@ struct Args {
 
     /// Comma-separated list of indexer names to benchmark and compare on the
     /// same plot. Overrides the subcommand indexer when present. Valid names:
-    /// radix-tree, radix-tree-sharded, nested-map, concurrent-radix-tree.
+    /// radix-tree, nested-map, concurrent-radix-tree,
+    /// concurrent-radix-tree-compressed.
     #[clap(long, value_delimiter = ',')]
     compare: Vec<String>,
 
     /// Number of OS threads for event processing in compare mode. Applies to
-    /// indexers that use a thread pool (nested-map, concurrent-radix-tree).
-    /// Ignored by radix-tree and radix-tree-sharded.
+    /// indexers that use a thread pool (nested-map, concurrent-radix-tree,
+    /// concurrent-radix-tree-compressed).
+    /// Ignored by radix-tree.
     #[clap(long, default_value = "16")]
     num_event_workers: usize,
 
@@ -171,68 +180,33 @@ struct WorkerTrace {
 /// Timestamps are rescaled from the original trace / simulation durations
 /// into the benchmark duration (microseconds).
 fn prepare_worker_traces(
-    traces: Vec<Vec<MooncakeRequest>>,
-    events: Vec<Vec<(KvCacheEvent, Instant)>>,
-    block_size: u32,
+    artifacts: Vec<WorkerReplayArtifacts>,
     benchmark_duration_ms: u64,
-    trace_simulation_duration_ms: u64,
 ) -> Vec<Vec<WorkerTrace>> {
-    assert!(traces.len() == events.len());
-
-    let scaled_request_traces: Vec<_> = traces
+    artifacts
         .into_iter()
-        .map(|trace| {
-            let Some(first) = trace.first() else {
-                return Vec::new();
-            };
-            let first_ts = first.timestamp;
-            let trace_duration_ms = trace.last().unwrap().timestamp - first_ts;
-            trace
+        .map(|artifact| {
+            let mut merged = artifact
+                .requests
                 .into_iter()
                 .map(|request| WorkerTrace {
-                    timestamp_us: if trace_duration_ms == 0 {
-                        0
-                    } else {
-                        (request.timestamp - first_ts) * 1000 * benchmark_duration_ms
-                            / trace_duration_ms
-                    },
-                    entry: WorkerTraceEntry::Request(
-                        request
-                            .hash_ids
-                            .iter()
-                            .map(|id| local_block_hash_from_id(*id, block_size))
-                            .collect(),
-                    ),
+                    timestamp_us: request.timestamp_us,
+                    entry: WorkerTraceEntry::Request(request.replay_hashes.local_block_hashes),
                 })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    let scaled_event_traces: Vec<_> = events
-        .into_iter()
-        .map(|worker_events| {
-            let Some(&(_, start_instant)) = worker_events.first() else {
-                return Vec::new();
-            };
-            worker_events
-                .into_iter()
-                .map(|(event, timestamp)| WorkerTrace {
-                    timestamp_us: (timestamp - start_instant).as_micros() as u64
-                        * benchmark_duration_ms
-                        / trace_simulation_duration_ms,
-                    entry: WorkerTraceEntry::Event(event),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    scaled_request_traces
-        .into_iter()
-        .zip(scaled_event_traces)
-        .map(|(request_trace, event_trace)| {
-            let mut merged: Vec<WorkerTrace> =
-                request_trace.into_iter().chain(event_trace).collect();
+                .chain(artifact.kv_events.into_iter().map(|event| WorkerTrace {
+                    timestamp_us: event.timestamp_us,
+                    entry: WorkerTraceEntry::Event(event.event),
+                }))
+                .collect::<Vec<_>>();
             merged.sort_by_key(|entry| entry.timestamp_us);
+            let max_timestamp_us = merged.last().map(|entry| entry.timestamp_us).unwrap_or(0);
+            for entry in &mut merged {
+                entry.timestamp_us = if max_timestamp_us == 0 {
+                    0
+                } else {
+                    entry.timestamp_us * benchmark_duration_ms * 1000 / max_timestamp_us
+                };
+            }
             merged
         })
         .collect()
@@ -253,19 +227,12 @@ struct SweepStepResult {
 /// flushed and latency percentiles / throughput stats are printed.
 async fn run_benchmark(
     indexer: Arc<dyn KvIndexerInterface + Send + Sync>,
-    traces: Vec<Vec<MooncakeRequest>>,
-    events: Vec<Vec<(KvCacheEvent, Instant)>>,
+    artifacts: Vec<WorkerReplayArtifacts>,
     args: &Args,
     benchmark_duration_ms: u64,
     count_events: bool,
 ) -> anyhow::Result<BenchmarkResults> {
-    let worker_traces = prepare_worker_traces(
-        traces,
-        events,
-        args.common.block_size,
-        benchmark_duration_ms,
-        args.common.trace_simulation_duration_ms,
-    );
+    let worker_traces = prepare_worker_traces(artifacts, benchmark_duration_ms);
     let worker_traces = worker_traces.into_iter().map(Arc::new).collect::<Vec<_>>();
 
     let progress = make_progress_bar(Some(
@@ -437,7 +404,7 @@ async fn run_benchmark(
     })
 }
 
-fn run_tests() -> anyhow::Result<()> {
+async fn run_tests() -> anyhow::Result<()> {
     use std::collections::HashSet;
     use std::fs::File;
     use std::io::Write;
@@ -456,6 +423,7 @@ fn run_tests() -> anyhow::Result<()> {
                 "{}",
                 serde_json::json!({
                     "timestamp": i as u64,
+                    "input_length": hash_ids.len(),
                     "hash_ids": hash_ids,
                     "output_length": output_length,
                 })
@@ -463,12 +431,13 @@ fn run_tests() -> anyhow::Result<()> {
         }
     }
 
-    let traces = process_mooncake_trace(path.to_str().unwrap(), 2, 2, 2, 42)?;
+    let traces = process_mooncake_trace(path.to_str().unwrap(), 512, 2, 2, 2, 42)?;
     std::fs::remove_file(&path).ok();
 
     let mut all_hashes: Vec<Vec<u64>> = traces
         .into_iter()
-        .flat_map(|w| w.into_iter().map(|r| r.hash_ids))
+        .flat_map(|worker| worker.sessions.into_iter())
+        .flat_map(|session| session.turns.into_iter().map(|turn| turn.hash_ids))
         .collect();
     all_hashes.sort();
 
@@ -496,6 +465,43 @@ fn run_tests() -> anyhow::Result<()> {
     let set1: HashSet<u64> = copy1.iter().flat_map(|h| h.iter().copied()).collect();
     assert!(set0.is_disjoint(&set1), "copies are not hash-disjoint");
 
+    let replay_trace = Trace {
+        block_size: 2,
+        sessions: vec![dynamo_mocker::loadgen::SessionTrace {
+            session_id: "session-a".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![
+                dynamo_mocker::loadgen::TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 2,
+                    hash_ids: vec![1, 2],
+                    delay_after_previous_ms: 0.0,
+                },
+                dynamo_mocker::loadgen::TurnTrace {
+                    input_length: 4,
+                    max_output_tokens: 2,
+                    hash_ids: vec![3, 4],
+                    delay_after_previous_ms: 5.0,
+                },
+            ],
+        }],
+    };
+    let artifacts = generate_replay_artifacts(&[replay_trace], 1024, 2, 5).await?;
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].requests.len(), 2);
+    let first_uuid = artifacts[0].requests[0].uuid;
+    let first_completion_ms = artifacts[0]
+        .output_signals
+        .iter()
+        .find(|signal| signal.signal.uuid == first_uuid && signal.signal.completed)
+        .expect("first request must complete")
+        .timestamp_us as f64
+        / 1000.0;
+    assert!(
+        artifacts[0].requests[1].scheduled_ready_at_ms + 0.1 >= first_completion_ms + 5.0,
+        "expected second request to wait for completion plus delay"
+    );
+
     println!("All tests passed.");
     Ok(())
 }
@@ -505,7 +511,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     if args.common.test {
-        return run_tests();
+        return run_tests().await;
     }
 
     let path = match args.common.mooncake_trace_path.as_deref() {
@@ -517,12 +523,13 @@ async fn main() -> anyhow::Result<()> {
     };
     let traces = process_mooncake_trace(
         path,
+        args.common.block_size,
         args.common.trace_length_factor,
         args.common.trace_duplication_factor,
         args.common.num_unique_inference_workers,
         args.common.seed,
     )?;
-    let events = generate_kv_events(
+    let artifacts = generate_replay_artifacts(
         &traces,
         args.common.num_gpu_blocks,
         args.common.block_size,
@@ -533,9 +540,9 @@ async fn main() -> anyhow::Result<()> {
     let indexer_names: Vec<String> = if args.compare.is_empty() {
         let name = match args.get_indexer() {
             IndexerArgs::RadixTree {} => "radix-tree",
-            IndexerArgs::RadixTreeSharded { .. } => "radix-tree-sharded",
             IndexerArgs::NestedMap { .. } => "nested-map",
             IndexerArgs::ConcurrentRadixTree { .. } => "concurrent-radix-tree",
+            IndexerArgs::ConcurrentRadixTreeCompressed { .. } => "concurrent-radix-tree-compressed",
         };
         vec![name.to_string()]
     } else {
@@ -575,15 +582,8 @@ async fn main() -> anyhow::Result<()> {
                     IndexerArgs::from_name(name, args.common.block_size, args.num_event_workers)?
                 };
                 let count_events = IndexerArgs::supports_remove(name);
-                let result = run_benchmark(
-                    indexer,
-                    traces.clone(),
-                    events.clone(),
-                    &args,
-                    dur_ms,
-                    count_events,
-                )
-                .await?;
+                let result =
+                    run_benchmark(indexer, artifacts.clone(), &args, dur_ms, count_events).await?;
 
                 if multi_threaded {
                     if result.block_throughput >= result.offered_block_throughput * 0.95 {
@@ -650,8 +650,7 @@ async fn main() -> anyhow::Result<()> {
             let count_events = IndexerArgs::supports_remove(name);
             run_benchmark(
                 indexer,
-                traces.clone(),
-                events.clone(),
+                artifacts.clone(),
                 &args,
                 args.common.benchmark_duration_ms,
                 count_events,

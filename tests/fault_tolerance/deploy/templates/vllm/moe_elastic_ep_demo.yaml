@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Elastic EP Scaling Demo Deployment
+#
+# Demonstrates dynamic expert parallelism scaling via the /scale_elastic_ep API.
+# Pod requests 4 GPUs up front. Starts with data-parallel-size=2 (2 active DP workers,
+# 2 GPUs used). Scale up to dp=4 activates the remaining 2 GPUs without pod restart.
+#
+# Requirements:
+#   - 4 GPUs available on a single node (tp=1 per DP rank, no cross-node needed)
+#   - data-parallel-backend=ray (required for elastic EP)
+#   - Model: deepseek-ai/DeepSeek-V2-Lite (small MoE, ~16B, fits in 4×A100/H100)
+#
+# Scaling endpoint: POST /scale_elastic_ep {"new_data_parallel_size": <int>}
+#   - Scale up:   {"new_data_parallel_size": 4}
+#   - Scale down: {"new_data_parallel_size": 2}
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-elastic-ep-demo
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          # Update tag to match VllmDecodeWorker image below
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      # Single pod with 4 GPUs — elastic EP scales DP workers within this pod via Ray
+      replicas: 1
+      resources:
+        requests:
+          memory: "60Gi"
+          # Reserve all 4 GPUs upfront so scale-up can activate them without rescheduling
+          gpu: "4"
+        limits:
+          memory: "120Gi"
+          gpu: "4"
+      envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        # allgather_reducescatter: no PPLX infrastructure required, works for demo
+        # Switch to "pplx" for production MoE workloads with PPLX cluster
+        - name: VLLM_ALL2ALL_BACKEND
+          value: "allgather_reducescatter"
+        - name: VLLM_USE_ELASTIC_EP
+          value: "1"
+        - name: VLLM_USE_V1
+          value: "1"
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: "spawn"
+        # Expose all 4 GPUs to the process — Ray will schedule DP workers on them
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1,2,3"
+        - name: VLLM_LOGGING_LEVEL
+          value: "INFO"
+        # Speed up HF downloads and improve 429 rate-limit resilience
+        - name: HF_HUB_ENABLE_HF_TRANSFER
+          value: "1"
+        # Point HF cache to the PVC so the model is loaded from local storage
+        - name: HF_HOME
+          value: "/model-cache"
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          imagePullPolicy: Always
+          workingDir: /workspace/examples/backends/vllm
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - deepseek-ai/DeepSeek-V2-Lite
+            - --trust-remote-code
+            # tp=1: each DP rank uses 1 GPU. With dp=2 → 2 GPUs active at start.
+            # After scale to dp=4 → all 4 GPUs active.
+            - --tensor-parallel-size
+            - "1"
+            # Initial DP size = 2. Scale up to 4 via /scale_elastic_ep API.
+            - --data-parallel-size
+            - "2"
+            # REQUIRED for elastic EP — Ray backend manages dynamic worker lifecycle
+            - --data-parallel-backend
+            - ray
+            - --gpu-memory-utilization
+            - "0.8"
+            - --max-model-len
+            - "4096"
+            - --enable-expert-parallel
+            - --enable-elastic-ep
+            - --enable-eplb
+            # 0 redundant experts: keeps expert count divisible across dp ranks
+            - --eplb-config.num_redundant_experts
+            - "0"
+            - --no-enable-prefix-caching
+            - --enforce-eager

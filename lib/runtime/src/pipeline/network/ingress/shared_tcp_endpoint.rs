@@ -186,6 +186,20 @@ impl SharedTcpServer {
             "TCP worker processing request"
         );
 
+        // Compute network transit time from the transport header stamped right
+        // before the TCP write on the frontend side.
+        if let Some(t1_str) = work_item.headers.get("x-frontend-send-ts-ns")
+            && let Ok(t1_ns) = t1_str.parse::<u64>()
+        {
+            let t2_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let transit_ns = t2_ns.saturating_sub(t1_ns);
+            crate::metrics::work_handler_perf::WORK_HANDLER_NETWORK_TRANSIT_SECONDS
+                .observe(transit_ns as f64 / 1_000_000_000.0);
+        }
+
         // Create span with trace context from headers
         let span = crate::logging::make_handle_payload_span_from_tcp_headers(
             &work_item.headers,
@@ -195,9 +209,15 @@ impl SharedTcpServer {
             work_item.instance_id,
         );
 
+        let request_id = work_item
+            .headers
+            .get("request-id")
+            .or_else(|| work_item.headers.get("x-dynamo-request-id"))
+            .cloned();
+
         let result = work_item
             .service_handler
-            .handle_payload(work_item.payload)
+            .handle_payload(work_item.payload, request_id)
             .instrument(span)
             .await;
 
@@ -643,7 +663,11 @@ mod tests {
 
     #[async_trait]
     impl PushWorkHandler for SlowMockHandler {
-        async fn handle_payload(&self, _payload: Bytes) -> Result<(), PipelineError> {
+        async fn handle_payload(
+            &self,
+            _payload: Bytes,
+            _request_id: Option<String>,
+        ) -> Result<(), PipelineError> {
             self.request_in_flight.store(true, Ordering::SeqCst);
             self.request_started.notify_one();
 
@@ -724,7 +748,7 @@ mod tests {
             let handler = handler.clone();
             async move {
                 let payload = Bytes::from("test payload");
-                handler.handle_payload(payload).await
+                handler.handle_payload(payload, None).await
             }
         });
 
@@ -847,7 +871,11 @@ mod tests {
 
     #[async_trait]
     impl PushWorkHandler for ConcurrencyTrackingHandler {
-        async fn handle_payload(&self, _payload: Bytes) -> Result<(), PipelineError> {
+        async fn handle_payload(
+            &self,
+            _payload: Bytes,
+            _request_id: Option<String>,
+        ) -> Result<(), PipelineError> {
             // Increment concurrent count
             let current = self.concurrent_count.fetch_add(1, Ordering::SeqCst) + 1;
 

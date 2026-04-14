@@ -61,31 +61,42 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-/// Metric name prefixes used across the metrics system
+/// Metric name prefixes used across the metrics system.
 pub mod name_prefix {
-    /// Prefix for all Prometheus metric names.
+    /// Prefix for component-scoped metrics, auto-labeled with namespace/endpoint.
     pub const COMPONENT: &str = "dynamo_component";
 
-    /// Prefix for frontend service metrics
+    /// Prefix for frontend HTTP service metrics (requests, TTFT, ITL, disconnects).
     pub const FRONTEND: &str = "dynamo_frontend";
 
-    /// Prefix for KV router metrics (used with router_id label)
+    /// Prefix for KV router instance metrics (carries `router_id` label).
     pub const ROUTER: &str = "dynamo_router";
 
-    /// Prefix for tokio runtime metrics
-    pub const TOKIO: &str = "dynamo_tokio";
+    // Note: REQUEST_PLANE vs TRANSPORT: REQUEST_PLANE measures *what requests do* (latency,
+    // concurrency) and is transport-agnostic. TRANSPORT measures *how the wire behaves*
+    // (bytes transferred, protocol errors) and is protocol-specific (TCP/NATS).
 
     /// Prefix for standalone KV indexer metrics
     pub const KVINDEXER: &str = "dynamo_kvindexer";
 
-    /// Prefix for request-plane metrics at AddressedPushRouter
+    /// Prefix for request-plane metrics at AddressedPushRouter.
+    /// Transport-agnostic: measures request lifecycle latency and concurrency
+    /// (queue → send → roundtrip TTFT, inflight gauge).
     pub const REQUEST_PLANE: &str = "dynamo_request_plane";
 
-    /// Prefix for transport-layer metrics (TCP / NATS)
+    /// Prefix for transport-layer metrics (TCP / NATS).
+    /// Protocol-specific: measures wire-level health (bytes sent/received, error counts).
     pub const TRANSPORT: &str = "dynamo_transport";
 
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
+
+    /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
+    pub const TOKIO: &str = "dynamo_tokio";
+
+    /// Prefix for per-phase routing overhead latency (hashing, scheduling).
+    /// Raw Prometheus, not component-scoped.
+    pub const ROUTING_OVERHEAD: &str = "dynamo_routing_overhead";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
@@ -181,6 +192,9 @@ pub mod frontend_service {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
 
+    /// Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
+    pub const KV_TRANSFER_ESTIMATED_LATENCY_SECONDS: &str = "kv_transfer_estimated_latency_seconds";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
@@ -220,6 +234,17 @@ pub mod frontend_service {
 
     /// Total number of request migrations due to worker unavailability
     pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
+
+    /// Total number of times migration was disabled because the sequence length
+    /// exceeded the configured max_seq_len limit
+    pub const MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL: &str =
+        "model_migration_max_seq_len_exceeded_total";
+
+    /// Total number of request cancellations
+    pub const MODEL_CANCELLATION_TOTAL: &str = "model_cancellation_total";
+
+    /// Total number of requests rejected due to resource exhaustion
+    pub const MODEL_REJECTION_TOTAL: &str = "model_rejection_total";
 
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
@@ -306,6 +331,9 @@ pub mod frontend_service {
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
 
+        /// Backend accepted the request but stopped responding (response inactivity timeout)
+        pub const RESPONSE_TIMEOUT: &str = "response_timeout";
+
         /// Internal server error (500 and other unexpected errors)
         pub const INTERNAL: &str = "internal";
 
@@ -334,6 +362,9 @@ pub mod work_handler {
 
     /// Total number of errors in work handler processing
     pub const ERRORS_TOTAL: &str = "errors_total";
+
+    /// Total number of requests cancelled by work handler (client stop/kill or disconnect)
+    pub const CANCELLATION_TOTAL: &str = "cancellation_total";
 
     /// Network transit: frontend send to backend receive (wall-clock, cross-process)
     pub const NETWORK_TRANSIT_SECONDS: &str = "network_transit_seconds";
@@ -486,6 +517,14 @@ pub mod router {
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 
+    /// Total number of remote indexer overlap queries that failed
+    pub const REMOTE_INDEXER_QUERY_FAILURES_TOTAL: &str =
+        "router_remote_indexer_query_failures_total";
+
+    /// Total number of remote indexer routing-decision writes that failed
+    pub const REMOTE_INDEXER_WRITE_FAILURES_TOTAL: &str =
+        "router_remote_indexer_write_failures_total";
+
     /// Time to first token observed at the router (seconds)
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";
 
@@ -507,8 +546,10 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
-    /// Per-token detokenization cost (microseconds)
-    pub const DETOKENIZE_PER_TOKEN_US: &str = "detokenize_per_token_us";
+    /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
+    pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
+    /// Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
+    pub const DETOKENIZE_TOKEN_COUNT: &str = "detokenize_token_count";
     /// Event loop delay canary (sleep 10ms, measure drift)
     pub const EVENT_LOOP_DELAY_SECONDS: &str = "event_loop_delay_seconds";
     /// Count of event loop stalls (delay > 5ms)

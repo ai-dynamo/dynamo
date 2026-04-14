@@ -21,21 +21,20 @@ import (
 	"context"
 	"fmt"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type CheckpointInfo struct {
-	Enabled        bool
-	Exists         bool
-	Identity       *nvidiacomv1alpha1.DynamoCheckpointIdentity
-	Hash           string
-	Location       string
-	StorageType    nvidiacomv1alpha1.DynamoCheckpointStorageType
-	CheckpointName string
-	Ready          bool
+	Enabled         bool
+	Exists          bool
+	Identity        *nvidiacomv1alpha1.DynamoCheckpointIdentity
+	Hash            string
+	ArtifactVersion string
+	CheckpointName  string
+	Ready           bool
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
@@ -45,15 +44,21 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 	}
 
 	return &CheckpointInfo{
-		Enabled:        true,
-		Exists:         true,
-		Identity:       &ckpt.Spec.Identity,
-		Hash:           hash,
-		Location:       ckpt.Status.Location,
-		StorageType:    ckpt.Status.StorageType,
-		CheckpointName: ckpt.Name,
-		Ready:          ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		Enabled:         true,
+		Exists:          true,
+		Identity:        &ckpt.Spec.Identity,
+		Hash:            hash,
+		ArtifactVersion: checkpointArtifactVersion(ckpt),
+		CheckpointName:  ckpt.Name,
+		Ready:           ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 	}, nil
+}
+
+func checkpointArtifactVersion(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) string {
+	if ckpt == nil {
+		return snapshotprotocol.DefaultCheckpointArtifactVersion
+	}
+	return snapshotprotocol.ArtifactVersion(ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
 }
 
 func ResolveCheckpointForService(
@@ -102,32 +107,4 @@ func ResolveCheckpointForService(
 	}
 	info.Identity = config.Identity
 	return info, nil
-}
-
-func ResolveCheckpointStorage(
-	hash string,
-	config *configv1alpha1.CheckpointConfiguration,
-) (string, nvidiacomv1alpha1.DynamoCheckpointStorageType, error) {
-	storageType := configv1alpha1.CheckpointStorageTypePVC
-	if config != nil && config.Storage.Type != "" {
-		storageType = config.Storage.Type
-	}
-
-	switch storageType {
-	case configv1alpha1.CheckpointStorageTypeS3:
-		if config == nil || config.Storage.S3.URI == "" {
-			return "", "", fmt.Errorf("S3 storage type selected but no S3 URI configured (set checkpoint.storage.s3.uri)")
-		}
-		return fmt.Sprintf("%s/%s.tar", config.Storage.S3.URI, hash), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
-	case configv1alpha1.CheckpointStorageTypeOCI:
-		if config == nil || config.Storage.OCI.URI == "" {
-			return "", "", fmt.Errorf("OCI storage type selected but no OCI URI configured (set checkpoint.storage.oci.uri)")
-		}
-		return fmt.Sprintf("%s:%s", config.Storage.OCI.URI, hash), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
-	default:
-		if config == nil || config.Storage.PVC.BasePath == "" {
-			return "", "", fmt.Errorf("PVC storage type selected but no PVC base path configured (set checkpoint.storage.pvc.basePath)")
-		}
-		return fmt.Sprintf("%s/%s", config.Storage.PVC.BasePath, hash), nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType), nil
-	}
 }

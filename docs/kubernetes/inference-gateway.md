@@ -10,12 +10,17 @@ title: Inference Gateway (GAIE)
 
 Integrate Dynamo with the Gateway API Inference Extension for intelligent KV-aware request routing at the gateway layer.
 
-EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+## Features
 
-Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. The epp config is the same for both. If no prefill workers found the service degrades gracefully to perform aggregated serving.
-If you want to use LoRA deploy Dynamo without the Inference Gateway.
+- EPP's default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model's tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml), following the checked-in GAIE/EPP configuration layout used by this repository.
 
-Currently, these setups are only supported with the kGateway based Inference Gateway.
+- Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving. A request only exercises disaggregated routing when the EPP config defines a `prefill` profile and prefill workers are available. The standalone [`epp-config-dynamo.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/standalone/helm/dynamo-gaie/epp-config-dynamo.yaml) currently only defines a `decode` profile, while the recipe examples use separate aggregated and disaggregated configs under `recipes/llama-3-70b/vllm/agg/gaie/` and `recipes/llama-3-70b/vllm/disagg-single-node/gaie/`. Unless `DYN_ENFORCE_DISAGG=true`, deployments without a `prefill` profile or prefill workers fall back to aggregated serving.
+
+- GAIE integration supports Data Parallelism.
+
+- If you want to use LoRA deploy Dynamo without the Inference Gateway.
+
+- Currently, these setups are only tested with the kGateway Inference Gateway.
 
 ## Prerequisites
 
@@ -27,6 +32,7 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 ### 1. Install Dynamo Platform ###
 
 [See Quickstart Guide](./README.md) to install Dynamo Kubernetes Platform.
+If you are installing from the source tree rather than a release chart, follow [Path B: Custom Build from Source](./installation-guide.md#path-b-custom-build-from-source) and run `helm dep build ./platform/` before `helm install` so the vendored subcharts match the local chart contents.
 
 ### 2. Deploy Inference Gateway ###
 
@@ -121,7 +127,11 @@ For the HttpRoute service make sure to specify the namespace where your gateway 
 ```bash
 cd <dynamo-source-root>
 # kubectl get httproutes -n my-model # Make sure you do not have an incompatible HttpRoute running, delete if so.
+# Choose disagg or agg example
+kubectl apply -f examples/backends/vllm/deploy/gaie/disagg.yaml -n my-model
+# or
 kubectl apply -f examples/backends/vllm/deploy/gaie/agg.yaml -n my-model
+# make sure to apply the route
 kubectl apply -f examples/backends/vllm/deploy/gaie/http-route.yaml -n my-model
 ```
 
@@ -233,7 +243,6 @@ KV-aware routing uses live KV cache block events from workers so the EPP can rou
    - **vLLM:** Pass `--enable-prefix-caching` and `--kv-events-config '{"enable_kv_cache_events":true}'`.
    - **SGLang:** Pass `--kv-events-config` with the appropriate endpoint.
    - **TRT-LLM:** Pass `--publish-events-and-metrics`.
-   - **Disaggregated vLLM (prefill/decode separation):** Do **not** pass `--disaggregation-mode decode` on decode workers — this flag hardcodes KV event publishing to off. Instead, omit the flag (defaults to aggregated mode) so decode workers also publish their cache state.
 2. **EPP — leave `DYN_USE_KV_EVENTS` at its default (`true`).** The EPP subscribes to worker KV events via event plane (NATS/ZMQ) and uses them for prefix-overlap scoring.
 3. **Block size — must be consistent.** The `--block-size` on all workers must match `DYN_KV_CACHE_BLOCK_SIZE` on the EPP (default: 128). Mismatched block sizes cause incorrect block hash computation.
 
@@ -246,7 +255,9 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 3. **Optionally** set `DYN_OVERLAP_SCORE_WEIGHT=0` on the EPP to skip prefix-overlap scoring altogether, making the router select workers based on load only.
 
 - Set `DYN_BUSY_THRESHOLD` to configure the upper bound on how "full" a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYN_ENFORCE_DISAGG=true` to strictly enforce disaggregated mode. When enabled, requests fail if prefill workers have not registered yet. Without this, requests arriving before prefill workers are discovered fall through to decode-only routing. Prefill errors always fail requests regardless of this setting.
+- Set `DYN_ENFORCE_DISAGG=true` (default: `false`) to control per-request behavior when prefill workers are unavailable:
+  - **`true` (recommended for disaggregated serving):** Requests fail with an error if prefill workers are not available. Use this when disaggregated serving is required and aggregated fallback is not acceptable.
+  - **`false` (default):** Requests gracefully fall back to aggregated mode (skip prefill, route directly to decode) when prefill workers are not available. When prefill workers appear later, subsequent requests automatically use disaggregated routing.
 - Set `DYN_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes. (default: 1)
 - Set `DYN_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
 - `DYN_ROUTER_TEMPERATURE` — Temperature for worker sampling via softmax (default: 0.0)

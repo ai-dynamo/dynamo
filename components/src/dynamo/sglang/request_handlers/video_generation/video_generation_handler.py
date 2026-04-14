@@ -13,6 +13,7 @@ import torch
 
 from dynamo._core import Context
 from dynamo.common.storage import upload_to_fs
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     CreateVideoRequest,
@@ -89,7 +90,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         start_time = time.time()
 
         # Get trace header for distributed tracing (for logging/observability)
-        trace_header = self._get_trace_header(context)
+        trace_header = build_trace_headers(context) if self.enable_trace else None
         if trace_header:
             logger.debug(f"Video generation request with trace: {trace_header}")
 

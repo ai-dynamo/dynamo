@@ -8,9 +8,15 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+# Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
+# This remains as a compatibility fallback for older callers that still encode
+# an unresolved data-parallel rank in-band instead of omitting the field.
+_DP_RANK_UNSET = 2**32 - 1
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -81,6 +87,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
+                **self._get_guided_decoding_params(
+                    sampling_opts.get("guided_decoding")
+                ),
             }
             sampling_params = {
                 k: v for k, v in sampling_params.items() if v is not None
@@ -129,9 +138,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
-        priority = (inner_request.get("routing") or {}).get("priority")
+        routing = inner_request.get("routing") or {}
+        priority = routing.get("priority")
+        dp_rank = routing.get("dp_rank")
 
-        trace_header = self._get_trace_header(context) if self.enable_trace else None
+        if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
+            dp_rank = None
+
+        trace_header = build_trace_headers(context) if self.enable_trace else None
 
         results = await self.engine.async_generate(
             **input_param,
@@ -142,6 +156,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
+            data_parallel_rank=dp_rank,
+            **self._session_kwargs(inner_request),
             **self._priority_kwargs(priority),
         )
 

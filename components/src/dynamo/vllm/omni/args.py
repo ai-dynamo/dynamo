@@ -7,7 +7,7 @@ import argparse
 import logging
 from typing import Optional
 
-from vllm_omni.engine.arg_utils import AsyncOmniEngineArgs
+from vllm_omni.engine.arg_utils import OmniEngineArgs
 
 try:
     from vllm.utils import FlexibleArgumentParser
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 class OmniArgGroup(ArgGroup):
     """Diffusion pipeline kwargs passed through to AsyncOmni() constructor.
 
-    These are NOT part of AsyncOmniEngineArgs (which handles vLLM engine-level
+    These are NOT part of OmniEngineArgs (which handles vLLM engine-level
     args like model, tp, max_model_len). Instead they are direct constructor
     kwargs for AsyncOmni and need Dynamo-side env-var (DYN_OMNI_*) support,
     so we define them here rather than relying on the upstream arg parser.
@@ -158,6 +158,52 @@ class OmniArgGroup(ArgGroup):
             help="Disable torch.compile and force eager execution for diffusion models.",
         )
 
+        # TTS parameters
+        tts_g = parser.add_argument_group(
+            "Omni TTS Options",
+            "TTS/audio-specific parameters for vLLM-Omni speech generation.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-max-instructions-length",
+            env_var="DYN_OMNI_TTS_MAX_INSTRUCTIONS_LENGTH",
+            default=500,
+            arg_type=int,
+            help="Maximum character length for TTS voice instructions.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-max-new-tokens-min",
+            env_var="DYN_OMNI_TTS_MAX_NEW_TOKENS_MIN",
+            default=1,
+            arg_type=int,
+            help="Minimum allowed value for max_new_tokens in TTS requests.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-max-new-tokens-max",
+            env_var="DYN_OMNI_TTS_MAX_NEW_TOKENS_MAX",
+            default=4096,
+            arg_type=int,
+            help="Maximum allowed value for max_new_tokens in TTS requests.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-ref-audio-timeout",
+            env_var="DYN_OMNI_TTS_REF_AUDIO_TIMEOUT",
+            default=15,
+            arg_type=int,
+            help="Timeout in seconds for downloading reference audio URLs.",
+        )
+        add_argument(
+            tts_g,
+            flag_name="--tts-ref-audio-max-bytes",
+            env_var="DYN_OMNI_TTS_REF_AUDIO_MAX_BYTES",
+            default=50 * 1024 * 1024,
+            arg_type=int,
+            help="Maximum size in bytes for reference audio files (default: 50MB).",
+        )
+
         # Diffusion parallel configuration
         add_argument(
             g,
@@ -185,6 +231,31 @@ class OmniArgGroup(ArgGroup):
             help="Number of GPUs used for classifier free guidance parallelism.",
         )
 
+        # Disaggregated stage worker flags
+        add_argument(
+            g,
+            flag_name="--stage-id",
+            env_var="DYN_OMNI_STAGE_ID",
+            default=None,
+            arg_type=int,
+            help=(
+                "Stage ID for disaggregated omni mode. "
+                "Run a single stage as an independent Dynamo worker. "
+                "Requires --stage-configs-path."
+            ),
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--omni-router",
+            env_var="DYN_OMNI_ROUTER",
+            default=False,
+            help=(
+                "Run as the stage router, orchestrating the multi-stage DAG. "
+                "Requires --stage-configs-path. Mutually exclusive with --stage-id."
+            ),
+        )
+
 
 class OmniConfig(DynamoRuntimeConfig):
     """Configuration for Dynamo vLLM-Omni worker."""
@@ -197,7 +268,7 @@ class OmniConfig(DynamoRuntimeConfig):
     served_model_name: Optional[str] = None
 
     # vLLM-Omni engine args
-    engine_args: AsyncOmniEngineArgs
+    engine_args: OmniEngineArgs
 
     # OmniArgGroup fields (populated by from_cli_args)
     stage_configs_path: Optional[str] = None
@@ -217,6 +288,17 @@ class OmniConfig(DynamoRuntimeConfig):
     ring_degree: int = 1
     cfg_parallel_size: int = 1
 
+    # TTS parameters
+    tts_max_instructions_length: int = 500
+    tts_max_new_tokens_min: int = 1
+    tts_max_new_tokens_max: int = 4096
+    tts_ref_audio_timeout: int = 15
+    tts_ref_audio_max_bytes: int = 50 * 1024 * 1024
+
+    # Disaggregated stage worker fields
+    stage_id: Optional[int] = None
+    omni_router: bool = False
+
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         if self.default_video_fps <= 0:
@@ -227,6 +309,15 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--ring-degree must be > 0")
         if not (0 < self.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
+        if self.stage_configs_path is None:
+            if self.stage_id is not None:
+                raise ValueError("--stage-id requires --stage-configs-path")
+            if self.omni_router:
+                raise ValueError("--omni-router requires --stage-configs-path")
+        if self.stage_id is not None and self.stage_id < 0:
+            raise ValueError("--stage-id must be >= 0")
+        if self.stage_id is not None and self.omni_router:
+            raise ValueError("--stage-id and --omni-router are mutually exclusive")
 
 
 def parse_omni_args() -> OmniConfig:
@@ -248,7 +339,7 @@ def parse_omni_args() -> OmniConfig:
         "vLLM-Omni Engine Options. Please refer to vLLM-Omni documentation for more details."
     )
     vllm_parser = FlexibleArgumentParser(add_help=False)
-    AsyncOmniEngineArgs.add_cli_args(vllm_parser, async_args_only=False)
+    OmniEngineArgs.add_cli_args(vllm_parser)
 
     for action in vllm_parser._actions:
         if not action.option_strings:
@@ -265,7 +356,7 @@ def parse_omni_args() -> OmniConfig:
     vllm_args = vllm_parser.parse_args(unknown)
     config.model = vllm_args.model
 
-    engine_args = AsyncOmniEngineArgs.from_cli_args(vllm_args)
+    engine_args = OmniEngineArgs.from_cli_args(vllm_args)
 
     if getattr(engine_args, "served_model_name", None) is not None:
         served = engine_args.served_model_name

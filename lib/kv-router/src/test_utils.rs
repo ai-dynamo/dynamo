@@ -117,7 +117,7 @@ impl SequencePublisher for NoopSequencePublisher {
 }
 
 /// Minimal [`WorkerConfigLike`] for scheduler/queue tests and benchmarks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleWorkerConfig {
     pub data_parallel_start_rank: u32,
     pub data_parallel_size: u32,

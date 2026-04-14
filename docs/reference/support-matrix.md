@@ -29,7 +29,7 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **SGLang** | **TensorRT-LLM** | **vLLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.5.9` | `1.3.0rc8` | `0.17.1` | `0.10.1` |
+| **main (ToT)** | `0.5.10.post1` | `1.3.0rc11` | `0.19.0` | `0.10.1` |
 | **v1.1.0-dev.1** *(experimental)* | `0.5.9` | `1.3.0rc5.post1` | `0.17.1` | `0.10.1` |
 | **v1.0.1** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
 | **v1.0.0** | `0.5.9` | `1.3.0rc5.post1` | `0.16.0` | `0.10.1` |
@@ -193,7 +193,7 @@ For version-specific artifact details, installation commands, and release histor
 - **Rust Crates**:
   - [dynamo-runtime](https://crates.io/crates/dynamo-runtime/)
   - [dynamo-llm](https://crates.io/crates/dynamo-llm/)
-  - [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai/)
+  - [dynamo-protocols](https://crates.io/crates/dynamo-protocols/)
   - [dynamo-parsers](https://crates.io/crates/dynamo-parsers/)
   - [dynamo-config](https://crates.io/crates/dynamo-config/) *(New in v0.8.0)*
   - [dynamo-memory](https://crates.io/crates/dynamo-memory/) *(New in v0.8.0)*

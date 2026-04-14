@@ -14,7 +14,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import GENERATION_TASKS
@@ -37,7 +37,7 @@ from dynamo.llm import (
 from dynamo.runtime import Client, DistributedRuntime
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
-from .utils import random_uuid
+from .utils import extract_mm_urls, random_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ class VllmProcessor:
         output_processor: OutputProcessor,
         tool_parser_class: type[ToolParser] | None,
         reasoning_parser_class: type[ReasoningParser] | None,
+        enable_auto_tool_choice: bool = False,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -85,6 +86,8 @@ class VllmProcessor:
         self.output_processor = output_processor
         self.tool_parser_class = tool_parser_class
         self.reasoning_parser_class = reasoning_parser_class
+        self.exclude_tools_when_tool_choice_none = True
+        self.enable_auto_tool_choice = enable_auto_tool_choice
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -120,11 +123,30 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
+        # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
+        # The Rust HTTP layer accepts None/missing, so normalize before validation.
+        messages = request.get("messages") or []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image_url":
+                    img_url = part.get("image_url")
+                    if isinstance(img_url, dict) and img_url.get("detail") is None:
+                        img_url["detail"] = "auto"
+
         pre = await preprocess_chat_request(
             request,
             tokenizer=self.tokenizer,
             renderer=self.input_processor.renderer,
             tool_parser_class=self.tool_parser_class,
+            exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
+            enable_auto_tool_choice=self.enable_auto_tool_choice,
         )
 
         request_for_sampling = pre.request_for_sampling
@@ -247,7 +269,13 @@ class VllmProcessor:
             },
             "eos_token_ids": self._get_eos_token_ids(),
             "annotations": [],
+            "routing": request.get("routing"),
         }
+
+        # Forward multimodal URLs so the backend handler can load the media.
+        mm_data = extract_mm_urls(request.get("messages") or [])
+        if mm_data:
+            dynamo_preproc["multi_modal_data"] = mm_data
 
         post = StreamingPostProcessor(
             tokenizer=self.tokenizer,
@@ -288,6 +316,7 @@ class VllmProcessor:
                     stop_conditions=dynamo_preproc["stop_conditions"],
                     sampling_options=dynamo_preproc["sampling_options"],
                     output_options=dynamo_preproc["output_options"],
+                    multi_modal_data=dynamo_preproc.get("multi_modal_data"),
                 )
             else:
                 dynamo_stream = await self.router.generate(
@@ -408,11 +437,14 @@ class EngineFactory:
         tokenizer_mode = getattr(self.flags, "tokenizer_mode", None) or "auto"
         config_format = getattr(self.flags, "config_format", None) or "auto"
         load_format = getattr(self.flags, "load_format", None) or "dummy"
+        trust_remote_code = getattr(self.flags, "trust_remote_code", False)
+        enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
 
         model_config = ModelConfig(
             model=source_path,
             tokenizer_mode=tokenizer_mode,
             config_format=config_format,
+            trust_remote_code=trust_remote_code,
         )
         vllm_config = VllmConfig(
             model_config=model_config,
@@ -471,6 +503,10 @@ class EngineFactory:
             output_processor,
             tool_parser_class,
             reasoning_parser_class,
+            enable_auto_tool_choice=enable_auto_tool_choice,
+        )
+        gen.exclude_tools_when_tool_choice_none = (
+            self.config.exclude_tools_when_tool_choice_none
         )
 
         return PythonAsyncEngine(gen.generator, loop)

@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 pub use super::FinishReason;
 pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
-use dynamo_async_openai::types::CompletionUsage;
-use dynamo_async_openai::types::StopReason;
+use dynamo_protocols::types::CompletionUsage;
+use dynamo_protocols::types::StopReason;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 

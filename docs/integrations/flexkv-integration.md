@@ -98,7 +98,6 @@ python -m dynamo.frontend &
 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # Terminal 3: Prefill worker (with FlexKV)
-DYN_VLLM_KV_EVENT_PORT=20081 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 DYNAMO_USE_FLEXKV=1 \
 FLEXKV_CPU_CACHE_GB=32 \
@@ -106,7 +105,8 @@ CUDA_VISIBLE_DEVICES=1 \
   python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
   --disaggregation-mode prefill \
-  --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
+  --kv-transfer-config '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}' \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
 ```
 
 ## Configuration
@@ -203,4 +203,3 @@ curl localhost:8000/v1/chat/completions \
 
 - [FlexKV GitHub Repository](https://github.com/taco-project/FlexKV)
 - [FlexKV vLLM Adapter Documentation](https://github.com/taco-project/FlexKV/blob/main/docs/vllm_adapter/README_en.md)
-

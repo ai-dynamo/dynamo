@@ -72,6 +72,14 @@ impl Block {
             block_hash: Some(block_hash),
         }
     }
+
+    #[inline]
+    fn drop_worker(&mut self, worker: WorkerWithDpRank) {
+        self.workers.remove(&worker);
+        if self.workers.is_empty() {
+            self.children.clear();
+        }
+    }
 }
 
 /// Thread-safe radix tree for concurrent KV cache lookups.
@@ -345,10 +353,13 @@ impl ConcurrentRadixTree {
 
         let mut needs_worker_insert = false;
 
-        let num_blocks_added = op.blocks.len();
+        let mut num_blocks_added = 0;
 
         // In each iteration, we lock the parent block and insert the worker into it from
         // the previous iteration. This avoids locking a block twice.
+        //
+        // Track tree size from worker_lookup insertions so it matches the single-threaded
+        // radix tree's `lookup.len()` semantics and naturally includes the tail block.
         for block_data in op.blocks {
             let child = {
                 let mut parent_guard = current.write();
@@ -364,7 +375,6 @@ impl ConcurrentRadixTree {
                 // parent_guard is dropped at the end of this block
                 match parent_guard.children.get(&block_data.tokens_hash) {
                     Some(existing) => {
-                        // Verify our simplifying assumption: block_hash is uniform across workers
                         {
                             let existing_guard = existing.read();
                             if existing_guard.block_hash != Some(block_data.block_hash) {
@@ -395,9 +405,20 @@ impl ConcurrentRadixTree {
             };
 
             // Update lookup
-            worker_lookup.insert(block_data.block_hash, child.clone());
+            if worker_lookup
+                .insert(block_data.block_hash, child.clone())
+                .is_none()
+            {
+                num_blocks_added += 1;
+            }
 
             current = child;
+        }
+
+        // Insert worker into the last child (not yet handled since there is
+        // no subsequent iteration to pick it up).
+        if needs_worker_insert {
+            current.write().workers.insert(worker);
         }
 
         match self.tree_sizes.get(&worker) {
@@ -408,12 +429,6 @@ impl ConcurrentRadixTree {
                 self.tree_sizes
                     .insert(worker, AtomicUsize::new(num_blocks_added));
             }
-        }
-
-        // Insert worker into the last child (not yet handled since there is
-        // no subsequent iteration to pick it up).
-        if needs_worker_insert {
-            current.write().workers.insert(worker);
         }
 
         Ok(())
@@ -451,12 +466,7 @@ impl ConcurrentRadixTree {
                 continue;
             };
 
-            // Remove the worker from this block's worker set.
-            let mut guard = block.write();
-            guard.workers.remove(&worker);
-            if guard.workers.is_empty() {
-                guard.children.clear();
-            }
+            block.write().drop_worker(worker);
 
             num_removed += 1;
         }
@@ -492,11 +502,7 @@ impl ConcurrentRadixTree {
         for worker in workers {
             if let Some(worker_lookup) = lookup.remove(&worker) {
                 for (_, block) in worker_lookup.into_iter() {
-                    let mut guard = block.write();
-                    guard.workers.remove(&worker);
-                    if guard.workers.is_empty() {
-                        guard.children.clear();
-                    }
+                    block.write().drop_worker(worker);
                 }
 
                 if keep_worker {
@@ -524,11 +530,7 @@ impl ConcurrentRadixTree {
         let key = WorkerWithDpRank { worker_id, dp_rank };
         if let Some(worker_lookup) = lookup.remove(&key) {
             for (_, block) in worker_lookup.into_iter() {
-                let mut guard = block.write();
-                guard.workers.remove(&key);
-                if guard.workers.is_empty() {
-                    guard.children.clear();
-                }
+                block.write().drop_worker(key);
             }
             self.tree_sizes.remove(&key);
         }
@@ -569,7 +571,6 @@ impl ConcurrentRadixTree {
         // Queue entries: (current_block, parent_hash, tokens_hash)
         let mut queue = VecDeque::new();
 
-        // Process root's children first
         {
             let root_guard = self.root.read();
             for (tokens_hash, child_block) in &root_guard.children {

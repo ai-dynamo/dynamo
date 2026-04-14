@@ -7,8 +7,10 @@
 //! chat completions, processed by the existing engine, and responses/streams
 //! are converted back to Anthropic format.
 
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
@@ -20,7 +22,7 @@ use axum::{
         IntoResponse, Response,
         sse::{KeepAlive, Sse},
     },
-    routing::post,
+    routing::{get, post},
 };
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
@@ -30,10 +32,9 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    metrics::{Endpoint, process_response_and_observe_metrics},
+    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
     service_v2,
 };
-use crate::preprocessor::OpenAIPreprocessor;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
@@ -41,9 +42,10 @@ use crate::protocols::anthropic::types::{
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
-    NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
+    NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
+    aggregator::ChatCompletionAggregator,
 };
+use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
 
@@ -71,6 +73,27 @@ pub fn anthropic_messages_router(
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
     (vec![doc, count_doc], router)
+}
+
+/// Creates the router for model listing and retrieval.
+///
+/// When the `anthropic-version` header is present, returns the Anthropic model
+/// format (with `context_window`, `display_name`, etc.). Otherwise returns the
+/// standard OpenAI format. This keeps Anthropic-specific content negotiation
+/// out of the OpenAI handler.
+pub fn anthropic_models_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let models_path = path.unwrap_or("/v1/models".to_string());
+    let retrieve_path = format!("{}/{{*model_id}}", models_path);
+    let list_doc = RouteDoc::new(axum::http::Method::GET, &models_path);
+    let retrieve_doc = RouteDoc::new(axum::http::Method::GET, &retrieve_path);
+    let router = Router::new()
+        .route(&models_path, get(list_models))
+        .route(&retrieve_path, get(get_model))
+        .with_state(state);
+    (vec![list_doc, retrieve_doc], router)
 }
 
 // ---------------------------------------------------------------------------
@@ -124,13 +147,23 @@ async fn handler_anthropic_messages(
     }
 
     // Create request context
-    let request_id = get_or_create_request_id(None, &headers);
+    let request_id = get_or_create_request_id(&headers);
+    let streaming = request.stream;
+    let cancellation_labels = CancellationLabels {
+        model: request.model.clone(),
+        endpoint: Endpoint::AnthropicMessages.to_string(),
+        request_type: if streaming { "stream" } else { "unary" }.to_string(),
+    };
     let request = Context::with_id(request, request_id);
     let context = request.context();
 
     // Create connection handles
-    let (mut connection_handle, stream_handle) =
-        create_connection_monitor(context.clone(), Some(state.metrics_clone())).await;
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
 
     let response =
         tokio::spawn(anthropic_messages(state, template, request, stream_handle).in_current_span())
@@ -182,36 +215,8 @@ async fn anthropic_messages(
 
     tracing::trace!("Received Anthropic messages request: {:?}", &*request);
 
-    let (orig_request, context) = request.into_parts();
-    let model_for_resp = orig_request.model.clone();
-
-    // Check if the Anthropic request explicitly enabled thinking. When thinking
-    // is enabled, reasoning-capable models' chat templates typically inject
-    // `<think>` into the prompt, so the completion starts mid-reasoning.
-    let thinking_enabled = orig_request
-        .thinking
-        .as_ref()
-        .is_some_and(|t| t.thinking_type == "enabled");
-
-    // Convert Anthropic request -> Chat Completion request
-    let chat_request: NvCreateChatCompletionRequest =
-        orig_request.try_into().map_err(|e: anyhow::Error| {
-            tracing::error!(
-                request_id,
-                error = %e,
-                "Failed to convert AnthropicCreateMessageRequest to NvCreateChatCompletionRequest",
-            );
-            anthropic_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                &format!("Failed to convert request: {}", e),
-            )
-        })?;
-
-    let request = context.map(|_req| chat_request);
-
-    tracing::trace!("Getting chat completions engine for model: {}", model);
-
+    // Look up engine and parsing options early so we know whether a reasoning
+    // parser is configured before converting the request.
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
@@ -223,11 +228,108 @@ async fn anthropic_messages(
             )
         })?;
 
+    let (orig_request, context) = request.into_parts();
+    let model_for_resp = orig_request.model.clone();
+
+    // Check if the Anthropic request explicitly disabled thinking.
+    let thinking_explicitly_disabled = orig_request
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type == "disabled");
+
+    // Estimate input tokens before consuming the request via try_into().
+    // Only used in the streaming path to populate message_start.
+    let estimated_input_tokens = if streaming {
+        estimate_input_tokens(&orig_request)
+    } else {
+        0
+    };
+
+    // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
+    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
+        tracing::error!(
+            request_id,
+            error = %e,
+            "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
+        );
+        anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &format!("Failed to convert request: {}", e),
+        )
+    })?;
+
+    // Extract the API context before consuming the UnifiedRequest — this
+    // carries Anthropic-specific fields (thinking config, cache breakpoints,
+    // etc.) that the stream converter needs for faithful response reconstruction.
+    let anthropic_ctx = unified_request.anthropic_context().cloned();
+    let mut chat_request = unified_request.into_inner();
+
+    // When a reasoning parser is configured and the client hasn't explicitly
+    // disabled thinking, assume the model's chat template will inject `<think>`.
+    //
+    // Two things must be aligned:
+    //   1. chat_template_args must include enable_thinking=true so the backend's
+    //      template actually injects `<think>` into the prompt. For the
+    //      ModelInput::Text path (SGLang without --skip-tokenizer-init), the
+    //      backend applies the template — without explicit enable_thinking the
+    //      result depends on the template's default which varies by model.
+    //   2. prompt_injected_reasoning must be true so the parser starts in
+    //      reasoning mode with stripped_think_start=true, which is critical for
+    //      correct `</think>` boundary detection in the streaming path.
+    //
+    // The OpenAI path handles this in the preprocessor: it renders the template,
+    // inspects the formatted prompt for a trailing `<think>`, and sets
+    // prompt_injected_reasoning accordingly. The Anthropic path bypasses the
+    // preprocessor, so we infer prompt injection from the reasoning parser config.
+    let prompt_injected_reasoning =
+        parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled;
+
+    if prompt_injected_reasoning {
+        let args = chat_request
+            .chat_template_args
+            .get_or_insert_with(Default::default);
+        args.entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(true));
+        // Preserve reasoning from prior turns. Some templates (Nemotron)
+        // strip historical <think> content by default to save context.
+        // For agentic flows the model needs to see why it made prior decisions.
+        // Ref: NVIDIA's SWE training config also sets this to false:
+        // https://github.com/NVIDIA-NeMo/Nemotron/blob/main/src/nemotron/recipes/super3/stage2_rl/stage2_swe2/config/default.yaml#L287
+        args.entry("truncate_history_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+    }
+
+    let request = context.map(|_req| chat_request);
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
+    // Create inflight_guard early to ensure all errors are counted
+    let mut inflight_guard = state.metrics_clone().create_inflight_guard(
+        &model,
+        Endpoint::AnthropicMessages,
+        streaming,
+        request.id(),
+    );
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+        }
+        // Check for cancelled request (client disconnected before response was sent)
+        if super::metrics::request_was_cancelled(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
+            return anthropic_error(
+                StatusCode::from_u16(499).unwrap(),
+                "request_cancelled",
+                &format!("Request cancelled: {}", e),
+            );
+        }
+        inflight_guard.mark_error(super::metrics::ErrorType::Internal);
         anthropic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "api_error",
@@ -237,39 +339,37 @@ async fn anthropic_messages(
 
     let ctx = engine_stream.context();
 
-    // Apply reasoning parser to the engine stream if configured.
-    // The preprocessor (which normally handles this for the OpenAI path) is
-    // bypassed by the Anthropic endpoint, so we apply the same stream
-    // transform here.  This populates `delta.reasoning_content` which the
-    // AnthropicStreamConverter translates into thinking content blocks.
+    // NOTE: We intentionally do NOT apply a reasoning parser here.
     //
-    // When thinking is enabled, the model's chat template likely injected
-    // `<think>` into the prompt (e.g., Qwen3.5), so the parser must start
-    // in reasoning mode — the completion begins mid-reasoning without an
-    // explicit `<think>` tag.
+    // For ModelInput::Tokens backends (skip_tokenizer_init=True), the engine
+    // pipeline includes the OpenAI preprocessor which already applies reasoning
+    // parsing in its backward edge (postprocessor_parsing_stream). The stream
+    // arriving here already has reasoning_content and content correctly split.
+    // Applying a second parser would re-classify post-think content chunks
+    // (where reasoning_content=None, content=Some) as reasoning, because the
+    // </think> boundary was consumed by the first parser and doesn't appear
+    // in the detokenized text.
+    //
+    // For ModelInput::Text backends (PushRouter, no preprocessor), reasoning
+    // parsing is NOT handled in the streaming path — the backend puts raw text
+    // (including <think> tags) in delta.content with reasoning_content=None.
+    // This is a known gap that affects all streaming handlers (OpenAI, Anthropic,
+    // Responses API) equally.
     let engine_stream: Pin<
         Box<dyn futures::Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
-    > = if let Some(ref reasoning_parser_name) = parsing_options.reasoning_parser {
-        Box::pin(OpenAIPreprocessor::parse_reasoning_content_from_stream(
-            engine_stream,
-            reasoning_parser_name.clone(),
-            thinking_enabled,
-        ))
-    } else {
-        Box::pin(engine_stream)
-    };
-
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(&model, Endpoint::AnthropicMessages, streaming);
+    > = Box::pin(engine_stream);
 
     if streaming {
         stream_handle.arm();
 
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let mut converter = AnthropicStreamConverter::new(model_for_resp);
+        let mut converter = match anthropic_ctx {
+            Some(ctx) => {
+                AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx)
+            }
+            None => AnthropicStreamConverter::new(model_for_resp, estimated_input_tokens),
+        };
         let start_events = converter.emit_start_events();
 
         let converter = std::sync::Arc::new(std::sync::Mutex::new(converter));
@@ -366,7 +466,11 @@ async fn anthropic_messages(
                     )
                 })?;
 
-        let response = chat_completion_to_anthropic_response(chat_response, &model_for_resp);
+        let response = chat_completion_to_anthropic_response(
+            chat_response,
+            &model_for_resp,
+            anthropic_ctx.as_ref(),
+        );
 
         inflight_guard.mark_ok();
 
@@ -395,6 +499,195 @@ async fn handler_count_tokens(
 }
 
 // ---------------------------------------------------------------------------
+// Model listing / retrieval (content-negotiating)
+// ---------------------------------------------------------------------------
+
+/// Build a lookup of model display_name -> context_length from model cards.
+fn build_model_context_map(state: &service_v2::State) -> std::collections::HashMap<String, u32> {
+    state
+        .manager()
+        .get_model_cards()
+        .iter()
+        .map(|c| (c.display_name.clone(), c.context_length))
+        .collect()
+}
+
+/// Read optional env var overrides for context window and max output tokens.
+fn model_env_overrides() -> (Option<u64>, Option<u64>) {
+    let context_window = match std::env::var("DYN_CONTEXT_WINDOW") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_CONTEXT_WINDOW value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let max_output_tokens = match std::env::var("DYN_MAX_OUTPUT_TOKENS") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(val) => Some(val),
+            Err(_) => {
+                tracing::warn!("Invalid DYN_MAX_OUTPUT_TOKENS value '{}', ignoring", v);
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    (context_window, max_output_tokens)
+}
+
+/// Resolve context_window for a model: env override takes precedence over MDC.
+fn resolve_context_window(
+    model_name: &str,
+    card_map: &std::collections::HashMap<String, u32>,
+    env_override: Option<u64>,
+) -> Option<u64> {
+    env_override.or_else(|| card_map.get(model_name).map(|&cl| cl as u64))
+}
+
+/// List all models. Returns Anthropic format when `anthropic-version` header
+/// is present, otherwise OpenAI format.
+async fn list_models(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+) -> Result<Response, super::openai::ErrorResponse> {
+    super::openai::check_ready(&state)?;
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let models: HashSet<String> = state.manager().model_display_names();
+    let card_map = build_model_context_map(&state);
+    let (cw_override, mot_override) = model_env_overrides();
+
+    if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let data: Vec<serde_json::Value> = models
+            .iter()
+            .map(|name| {
+                let mut obj = serde_json::json!({
+                    "id": name,
+                    "display_name": name,
+                    "type": "model",
+                    "created_at": created_at,
+                });
+                if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+                    obj["max_input_tokens"] = serde_json::json!(cw);
+                }
+                if let Some(mot) = mot_override {
+                    obj["max_tokens"] = serde_json::json!(mot);
+                }
+                obj
+            })
+            .collect();
+        let first_id = data
+            .first()
+            .and_then(|d| d["id"].as_str().map(String::from));
+        let last_id = data.last().and_then(|d| d["id"].as_str().map(String::from));
+        return Ok(Json(serde_json::json!({
+            "data": data,
+            "has_more": false,
+            "first_id": first_id,
+            "last_id": last_id,
+        }))
+        .into_response());
+    }
+
+    // OpenAI format fallback
+    let data: Vec<serde_json::Value> = models
+        .iter()
+        .map(|name| {
+            let mut obj = serde_json::json!({
+                "id": name,
+                "object": "model",
+                "created": created,
+                "owned_by": "nvidia",
+            });
+            if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+                obj["context_window"] = serde_json::json!(cw);
+            }
+            if let Some(mot) = mot_override {
+                obj["max_output_tokens"] = serde_json::json!(mot);
+            }
+            obj
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+    }))
+    .into_response())
+}
+
+/// Retrieve a single model by ID. Returns Anthropic format when
+/// `anthropic-version` header is present, otherwise OpenAI format.
+///
+/// The model ID may contain slashes (e.g. `Qwen/Qwen3.5-35B-A3B-FP8`),
+/// which is why this uses a wildcard `/{*model_id}` path parameter.
+async fn get_model(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    axum::extract::Path(model_id): axum::extract::Path<String>,
+) -> Result<Response, super::openai::ErrorResponse> {
+    super::openai::check_ready(&state)?;
+
+    // Strip leading slash from wildcard capture (axum `/{*key}` includes it).
+    let model_id = model_id.strip_prefix('/').unwrap_or(&model_id);
+
+    let models: HashSet<String> = state.manager().model_display_names();
+    if !models.contains(model_id) {
+        return Err(super::openai::ErrorMessage::model_not_found());
+    }
+
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let card_map = build_model_context_map(&state);
+    let (cw_override, mot_override) = model_env_overrides();
+    let context_window = resolve_context_window(model_id, &card_map, cw_override);
+
+    if headers.contains_key("anthropic-version") {
+        let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let mut obj = serde_json::json!({
+            "id": model_id,
+            "display_name": model_id,
+            "type": "model",
+            "created_at": created_at,
+        });
+        if let Some(cw) = context_window {
+            obj["max_input_tokens"] = serde_json::json!(cw);
+        }
+        if let Some(mot) = mot_override {
+            obj["max_tokens"] = serde_json::json!(mot);
+        }
+        Ok(Json(obj).into_response())
+    } else {
+        let mut obj = serde_json::json!({
+            "id": model_id,
+            "object": "model",
+            "created": created,
+            "owned_by": "nvidia",
+        });
+        if let Some(cw) = context_window {
+            obj["context_window"] = serde_json::json!(cw);
+        }
+        if let Some(mot) = mot_override {
+            obj["max_output_tokens"] = serde_json::json!(mot);
+        }
+        Ok(Json(obj).into_response())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -412,6 +705,23 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
             content.text = trimmed[newline_pos + 1..].to_string();
         }
     }
+}
+
+/// Estimate input token count for an Anthropic request.
+///
+/// Uses the same heuristic as `AnthropicCountTokensRequest::estimate_tokens()`
+/// (sum character lengths / 3). This populates `input_tokens` in the streaming
+/// `message_start` event, since the engine only reports prompt token counts on
+/// the final chunk.
+fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
+    // Build a temporary count-tokens request to reuse the existing estimator.
+    let count_req = AnthropicCountTokensRequest {
+        model: req.model.clone(),
+        messages: req.messages.clone(),
+        system: req.system.clone(),
+        tools: req.tools.clone(),
+    };
+    count_req.estimate_tokens()
 }
 
 /// Build an Anthropic-formatted error response.

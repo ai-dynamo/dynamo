@@ -22,7 +22,7 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
-from tensorrt_llm.llmapi.llm_args import KvCacheConnectorConfig
+from tensorrt_llm.llmapi.llm_args import TOKENIZER_ALIASES, KvCacheConnectorConfig
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
@@ -35,6 +35,7 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
+    register_embedding_cache_metrics,
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
@@ -107,6 +108,23 @@ def build_kv_connector_config(config: Config):
             logging.error(f"Invalid connector: {config.connector[0]}")
             sys.exit(1)
     return None
+
+
+def _warn_override_collisions(target: dict, source: dict, path: str = "") -> None:
+    """Log warnings for keys in *source* that will overwrite existing values in *target*."""
+    for key, new_val in source.items():
+        full_key = f"{path}.{key}" if path else key
+        if key in target:
+            old_val = target[key]
+            if isinstance(new_val, dict) and isinstance(old_val, dict):
+                _warn_override_collisions(old_val, new_val, full_key)
+            elif old_val != new_val:
+                logging.warning(
+                    "override_engine_args will replace %s: %r -> %r",
+                    full_key,
+                    old_val,
+                    new_val,
+                )
 
 
 async def init_llm_worker(
@@ -206,6 +224,7 @@ async def init_llm_worker(
             overrides = json.loads(config.override_engine_args)
             logging.info(f"Applying engine arg overrides: {overrides}")
 
+            _warn_override_collisions(arg_map, overrides)
             deep_update(arg_map, overrides)
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
@@ -275,7 +294,27 @@ async def init_llm_worker(
     engine_args = arg_map
 
     # Populate default sampling params from the model
-    tokenizer = tokenizer_factory(arg_map["model"])
+    custom_tokenizer = arg_map.get("custom_tokenizer")
+    if custom_tokenizer:
+        from importlib import import_module
+
+        try:
+            tokenizer_path = TOKENIZER_ALIASES.get(custom_tokenizer, custom_tokenizer)
+            module_path, class_name = tokenizer_path.rsplit(".", 1)
+            tokenizer_class = getattr(import_module(module_path), class_name)
+            tokenizer = tokenizer_class.from_pretrained(
+                arg_map.get("tokenizer") or arg_map["model"],
+                trust_remote_code=arg_map.get("trust_remote_code", False),
+            )
+        except (ValueError, ImportError, AttributeError) as e:
+            raise ValueError(
+                f"Failed to load custom tokenizer '{custom_tokenizer}': {e}. "
+                "Expected format: 'module.path.ClassName' or a recognized alias in TensorRT-LLM LLM API."
+            ) from e
+    else:
+        tokenizer = tokenizer_factory(
+            arg_map["model"], trust_remote_code=arg_map.get("trust_remote_code", False)
+        )
     default_sampling_params = SamplingParams()
 
     # Enable perf metrics so prompt_tokens_details can be returned
@@ -372,6 +411,9 @@ async def init_llm_worker(
         runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
+        runtime_config.exclude_tools_when_tool_choice_none = (
+            config.exclude_tools_when_tool_choice_none
+        )
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer
@@ -475,6 +517,8 @@ async def init_llm_worker(
             encoder_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
             disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
+            max_seq_len=config.max_seq_len,
+            disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
 
         # Register the model with runtime config
@@ -541,6 +585,16 @@ async def init_llm_worker(
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
+
+                encoder_cache = getattr(handler, "_encoder_cache", None)
+                if encoder_cache is not None:
+                    register_embedding_cache_metrics(
+                        endpoint=endpoint,
+                        cache=encoder_cache,
+                        model_name=model_name_for_metrics,
+                        component_name=config.component,
+                    )
+
                 await endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,

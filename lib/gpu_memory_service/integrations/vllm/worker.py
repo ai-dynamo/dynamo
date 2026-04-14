@@ -12,32 +12,43 @@ Usage:
 
 from __future__ import annotations
 
+import gc
 import logging
+import sys
 from contextlib import nullcontext
 from typing import List, Optional
 
 import torch
-from gpu_memory_service import (
+from gpu_memory_service.client.memory_manager import StaleMemoryLayoutError
+from gpu_memory_service.client.torch.allocator import (
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
 )
-from gpu_memory_service.common.types import RequestedLockType
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common import patch_empty_cache
-from gpu_memory_service.integrations.common.utils import get_gms_lock_mode
+from gpu_memory_service.integrations.common.utils import GMS_TAGS, get_gms_lock_mode
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
-from gpu_memory_service.integrations.vllm.patches import patch_memory_snapshot
+from gpu_memory_service.integrations.vllm.patches import (
+    apply_shadow_mode_patches,
+    patch_memory_snapshot,
+)
+from gpu_memory_service.integrations.vllm.utils import is_shadow_mode
 
 logger = logging.getLogger(__name__)
 
 # Trigger model loader registration and utility patches on import
 register_gms_loader()
+
+# Apply core utility patches (always needed for GMS)
 patch_empty_cache()
 patch_memory_snapshot()
 
-logger.info(
-    "[GMS] Worker module loaded - model loader registered, utility patches applied"
-)
+# Apply shadow mode patches if shadow mode is enabled
+apply_shadow_mode_patches()
+
+logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
@@ -59,20 +70,113 @@ class GMSWorker(Worker):
         current_platform.set_device(torch.device(f"cuda:{device}"))
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes).
-        # Fetch extra config from vLLM load_config to determine RW/RO lock mode.
+        # Lock type is determined by model_loader_extra_config, set upstream by
+        # configure_gms_lock_mode() in main.py.
         extra = (
             getattr(self.vllm_config.load_config, "model_loader_extra_config", {}) or {}
         )
-        socket_path = get_socket_path(device)
+        mode = get_gms_lock_mode(extra)
         get_or_create_gms_client_memory_manager(
-            socket_path,
+            get_socket_path(device, "weights"),
             device,
-            mode=get_gms_lock_mode(extra),
+            mode=mode,
             tag="weights",
         )
-
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
+
+        # __class__ swap: preserves object identity so vLLM's internal
+        # references see our overrides.
+        if is_shadow_mode() and hasattr(self, "model_runner"):
+            from gpu_memory_service.integrations.vllm.model_runner import (
+                GMSShadowModelRunner,
+            )
+
+            self.model_runner.__class__ = GMSShadowModelRunner
+            self.model_runner.enter_shadow_init()
+            logger.info("[GMS] Injected GMSShadowModelRunner via __class__ swap")
+
+    def determine_available_memory(self) -> int:
+        """
+        Determine actual available memory for the engine.
+
+        During a failover scenario, this function may be called while there is an active engine colocated on the same device.
+        We want our assessment to ignore the kv cache allocation of the active engine if there is one.
+        """
+        if not is_shadow_mode():
+            return super().determine_available_memory()
+
+        torch.cuda.reset_peak_memory_stats()
+        self.model_runner.profile_run()
+        torch.cuda.synchronize()
+        torch_peak = torch.cuda.max_memory_allocated()
+
+        # GMS weights mapped via cuMemMap are invisible to PyTorch's memory
+        # stats on RO engines. Add them explicitly. On RW engines, torch_peak
+        # already includes weights so skip to avoid double-counting.
+        weights_memory = int(getattr(self.model_runner, "model_memory_usage", 0))
+        if torch_peak < weights_memory:
+            non_kv_cache_memory = torch_peak + weights_memory
+        else:
+            non_kv_cache_memory = torch_peak
+
+        projected_available = self.requested_memory - non_kv_cache_memory
+
+        msg = (
+            "[GMS] Shadow mode: projected available memory "
+            "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
+            "torch_peak=%.2f GiB, weights=%.2f GiB)"
+            % (
+                projected_available / (1 << 30),
+                self.requested_memory / (1 << 30),
+                non_kv_cache_memory / (1 << 30),
+                torch_peak / (1 << 30),
+                weights_memory / (1 << 30),
+            )
+        )
+        logger.info(msg)
+        print(msg, flush=True)
+
+        return int(projected_available)
+
+    def initialize_from_config(self, kv_cache_config) -> None:
+        """Allocate KV cache with a dedicated RW-only GMS tag.
+
+        Also validates cudagraph mode for shadow mode compatibility.
+        """
+        from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+
+        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+
+        if is_shadow_mode():
+            # GMS client for kv cache is deferred to wake for shadow mode
+            # GMSShadowModelRunner.initialize_kv_cache intercepts and stores config without creating an allocation
+            self.model_runner.initialize_kv_cache(kv_cache_config)
+        elif self.vllm_config.model_config.enable_sleep_mode:
+            # Normal sleep/wake: create kv_cache GMS tag now for unmap/remap
+            device = self.local_rank
+            get_or_create_gms_client_memory_manager(
+                get_socket_path(device, "kv_cache"),
+                device,
+                mode=RequestedLockType.RW,
+                tag="kv_cache",
+            )
+            with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
+                self.model_runner.initialize_kv_cache(kv_cache_config)
+        else:
+            # No sleep mode: plain KV cache init
+            self.model_runner.initialize_kv_cache(kv_cache_config)
+
+        # Validate cudagraph mode for shadow mode compatibility
+        if is_shadow_mode():
+            from vllm.config import CUDAGraphMode
+
+            mode = self.model_runner.compilation_config.cudagraph_mode
+            if mode not in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE):
+                raise RuntimeError(
+                    f"Shadow mode requires PIECEWISE cudagraph mode after resolution, "
+                    f"but got {mode.name}. vLLM's config resolution overrode it."
+                )
 
     def load_model(self, *args, **kwargs) -> None:
         """Load model with corrected memory accounting.
@@ -109,24 +213,37 @@ class GMSWorker(Worker):
         """
         vLLM sleep implementation with GMS integration.
 
-        NOTE: `level` is a no-op here: weights are only unmapped (but remain in GPU memory).
         NOTE: We do NOT call super().sleep() because it tries to copy GPU buffers to CPU,
               which segfaults on already-unmapped GMS memory.
+
+        Handles two cases for KV cache:
+        1. Normal: KV cache was allocated via GMS, unmap + abort
+        2. Shadow: KV cache was skipped at startup, manager has no allocations
+           (unmap_all_vas is a no-op, abort disconnects)
         """
         free_bytes_before = torch.cuda.mem_get_info()[0]
 
         # Unmap GMS weights: synchronize + unmap all VAs + disconnect
-        manager = get_gms_client_memory_manager()
-        assert manager is not None, "GMS client is not initialized"
-        assert not manager.is_unmapped, "GMS weights are already unmapped"
-        manager.unmap_all_vas()
-        manager.disconnect()
+        weights_manager = get_gms_client_memory_manager("weights")
+        assert weights_manager is not None, "GMS weights client is not initialized"
+        assert not weights_manager.is_unmapped, "GMS weights are already unmapped"
+        weights_manager.unmap_all_vas()
+        weights_manager.abort()
 
-        # Sleep KV cache via CuMemAllocator
-        from vllm.device_allocator.cumem import CuMemAllocator
+        # Unmap GMS KV cache: unmap all VAs + disconnect
+        # In shadow mode, kv_cache manager is deferred to wake — nothing to unmap.
+        kv_cache_manager = get_gms_client_memory_manager("kv_cache")
+        if kv_cache_manager is not None:
+            assert not kv_cache_manager.is_unmapped, "GMS KV cache is already unmapped"
+            kv_cache_manager.unmap_all_vas()
+            kv_cache_manager.abort()
+        else:
+            logger.info(
+                "[GMS] No kv_cache manager (shadow mode), skipping kv_cache sleep"
+            )
 
-        allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=tuple())
+        gc.collect()
+        torch.cuda.empty_cache()
 
         free_bytes_after, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after - free_bytes_before
@@ -138,22 +255,75 @@ class GMSWorker(Worker):
         )
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
-        """vLLM wake implementation with GMS integration."""
+        """vLLM wake implementation with GMS integration.
+
+        Handles two cases for KV cache:
+        1. Normal: KV cache was allocated at startup, reconnect + reallocate + remap
+        2. Shadow: KV cache was skipped at startup, allocate via allocate_kv_cache_on_wake()
+        """
+        if (
+            hasattr(self.model_runner, "exit_shadow_init")
+            and self.model_runner.in_shadow_init
+        ):
+            self.model_runner.exit_shadow_init()
+
         if tags is None:
-            tags = ["weights", "kv_cache"]
+            tags = list(GMS_TAGS)
 
         if "weights" in tags:
-            manager = get_gms_client_memory_manager()
-            assert manager is not None, "GMS client is not initialized"
-            assert manager.is_unmapped, "GMS weights are not unmapped"
-            manager.connect(RequestedLockType.RO)
-            manager.remap_all_vas()
+            weights_manager = get_gms_client_memory_manager("weights")
+            assert weights_manager is not None, "GMS weights client is not initialized"
+            assert weights_manager.is_unmapped, "GMS weights are not unmapped"
+
+            # These errors are fatal and unrecoverable in a worker subprocess:
+            # the worker cannot serve requests without weights. sys.exit(1)
+            # ensures clean termination so the orchestrator (K8s) can restart.
+            try:
+                weights_manager.connect(RequestedLockType.RO, timeout_ms=30_000)
+                weights_manager.remap_all_vas()
+            except TimeoutError:
+                logger.error(
+                    "Fatal: timed out waiting for GMS RO lock during remap "
+                    "(GMS may be down or RW lock held indefinitely)"
+                )
+                sys.exit(1)
+            except StaleMemoryLayoutError as e:
+                logger.error(
+                    "Fatal: weight layout changed while unmapped, cannot remap: %s", e
+                )
+                sys.exit(1)
+            except ConnectionError as e:
+                logger.error("Fatal: cannot connect to GMS during remap: %s", e)
+                sys.exit(1)
 
         if "kv_cache" in tags:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            allocator = CuMemAllocator.get_instance()
-            allocator.wake_up(tags=["kv_cache"])
+            # Check if KV cache was skipped at startup (shadow engine mode)
+            kv_caches = getattr(self.model_runner, "kv_caches", None)
+            if not kv_caches:
+                # Shadow mode: create kv_cache manager now (deferred from init
+                # to avoid RW lock contention between concurrent engines).
+                logger.info("[GMS] KV cache not allocated - allocating on wake")
+                get_or_create_gms_client_memory_manager(
+                    get_socket_path(self.local_rank, "kv_cache"),
+                    self.local_rank,
+                    mode=RequestedLockType.RW,
+                    tag="kv_cache",
+                )
+                with gms_use_mem_pool(
+                    "kv_cache", torch.device("cuda", self.local_rank)
+                ):
+                    self.model_runner.allocate_kv_cache_on_wake()
+                logger.info("[GMS] Successfully allocated KV cache on wake")
+            else:
+                # Normal case: KV cache was allocated via GMS, reconnect + reallocate + remap
+                kv_cache_manager = get_gms_client_memory_manager("kv_cache")
+                assert (
+                    kv_cache_manager is not None
+                ), "GMS KV cache client is not initialized"
+                assert kv_cache_manager.is_unmapped, "GMS KV cache is not unmapped"
+                kv_cache_manager.connect(RequestedLockType.RW)
+                kv_cache_manager.reallocate_all_handles(tag="kv_cache")
+                kv_cache_manager.remap_all_vas()
 
             # Reinitialize FP8 KV scales if needed
             if self.cache_config.cache_dtype.startswith("fp8") and hasattr(
@@ -162,12 +332,18 @@ class GMSWorker(Worker):
                 self.model_runner.init_fp8_kv_scales()
 
     def _maybe_get_memory_pool_context(self, tag: str):
-        """Skip CuMemAllocator for weights when using GMS.
+        """Route tag-scoped runtime allocations to the right allocator.
 
-        GMS manages its own memory pool for weights, so we don't want vLLM's
-        CuMemAllocator to interfere.
+        Weight tensors are allocated explicitly in the GMS model-loader path,
+        not through vLLM's tagged runtime allocator hook. For `weights` we
+        therefore only suppress CuMemAllocator here so it does not interfere
+        with the loader-managed GMS allocations. `kv_cache` is the tag that
+        actually allocates through this hook, so it uses the dedicated GMS
+        mempool.
         """
         if tag == "weights":
             logger.debug("[GMS] Skipping CuMemAllocator for weights")
             return nullcontext()
+        if tag == "kv_cache":
+            return gms_use_mem_pool("kv_cache", torch.device("cuda", self.local_rank))
         return super()._maybe_get_memory_pool_context(tag)

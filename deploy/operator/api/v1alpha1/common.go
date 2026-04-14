@@ -71,7 +71,7 @@ type Autoscaling struct {
 	Metrics []autoscalingv2.MetricSpec `json:"metrics,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!(self.disabled && has(self.size))",message="sharedMemory.size must not be set when sharedMemory.disabled is true"
+// +kubebuilder:validation:XValidation:rule="!(has(self.disabled) && self.disabled && has(self.size))",message="sharedMemory.size must not be set when sharedMemory.disabled is true"
 type SharedMemorySpec struct {
 	Disabled bool              `json:"disabled,omitempty"`
 	Size     resource.Quantity `json:"size,omitempty"`
@@ -153,6 +153,35 @@ func (e ExtraPodSpec) MarshalJSON() ([]byte, error) {
 	aux.MainContainer = e.MainContainer
 
 	return json.Marshal(aux)
+}
+
+// GPUMemoryServiceMode selects the GMS deployment topology.
+type GPUMemoryServiceMode string
+
+const (
+	// GMSModeIntraPod runs GMS as a sidecar within the same pod.
+	GMSModeIntraPod GPUMemoryServiceMode = "intraPod"
+	// GMSModeInterPod runs GMS as a separate pod (not yet supported).
+	GMSModeInterPod GPUMemoryServiceMode = "interPod"
+)
+
+// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
+// When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
+// via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
+// (weights + kv_cache) and communicates with the main container over UDS sockets.
+type GPUMemoryServiceSpec struct {
+	// Enabled activates the GMS sidecar. GPU resources on the main container
+	// are replaced with a DRA ResourceClaim for shared GPU access.
+	Enabled bool `json:"enabled"`
+	// Mode selects the GMS deployment topology.
+	// +kubebuilder:default=intraPod
+	// +kubebuilder:validation:Enum=intraPod;interPod
+	// +optional
+	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
+	// DeviceClassName is the DRA DeviceClass to request GPUs from.
+	// +kubebuilder:default="gpu.nvidia.com"
+	// +optional
+	DeviceClassName string `json:"deviceClassName,omitempty"`
 }
 
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter

@@ -22,7 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,7 +55,7 @@ func FindCheckpointByIdentityHash(
 		ctx,
 		checkpoints,
 		client.InNamespace(namespace),
-		client.MatchingLabels{consts.KubeLabelCheckpointHash: hash},
+		client.MatchingLabels{snapshotprotocol.CheckpointIDLabel: hash},
 	); err != nil {
 		return nil, fmt.Errorf("failed to list checkpoints by hash label: %w", err)
 	}
@@ -118,7 +118,10 @@ func CreateOrGetAutoCheckpoint(
 			Name:      fmt.Sprintf("checkpoint-%s", hash),
 			Namespace: namespace,
 			Labels: map[string]string{
-				consts.KubeLabelCheckpointHash: hash,
+				snapshotprotocol.CheckpointIDLabel: hash,
+			},
+			Annotations: map[string]string{
+				snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{

@@ -266,11 +266,10 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
         if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
     fi
 
-# Install runtime dependencies (common + planner + benchmarks).
+# Install runtime dependencies (common + benchmarks).
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 # --no-cache is intentional: mixed indexes (PyPI + PyTorch CUDA wheels) risk serving stale/wrong-variant cached wheels
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
-    --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
@@ -278,7 +277,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.common.txt \
-        --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
         cupy-cuda13x && \
     # nvidia-cutlass-dsl-libs-base==4.4.1 (transitive dep) ships a stub cute/experimental/__init__.py
@@ -286,12 +284,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
     # (pinned by TRT-LLM) works without cute/experimental/. Remove the stub to fix the NotImplementedError.
     rm -rf ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia_cutlass_dsl/python_packages/cutlass/cute/experimental/
 
-# Copy tests, deploy and components for CI with correct ownership
+# Copy tests, deploy, and the trtllm/common/mocker component subtrees for CI.
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
-COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/trtllm /workspace/components/src/dynamo/trtllm
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 
 # Setup launch banner in common directory accessible to all users

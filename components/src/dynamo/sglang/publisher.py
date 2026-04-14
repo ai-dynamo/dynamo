@@ -5,16 +5,17 @@ import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import sglang as sgl
 import zmq
 import zmq.asyncio
 from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
-from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
+
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_zmq_socket
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
-    from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -28,8 +29,7 @@ from dynamo.sglang.args import Config
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     """Format ZMQ endpoint by replacing wildcard with IP address.
 
-    Properly handles IPv6 addresses by wrapping them in square brackets.
-    Uses SGLang's maybe_wrap_ipv6_address for consistent formatting.
+    Properly handles IPv6 addresses using SGLang's NetworkAddress utility.
 
     Args:
         endpoint_template: ZMQ endpoint template with wildcard (e.g., "tcp://*:5557")
@@ -44,9 +44,12 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
         >>> format_zmq_endpoint("tcp://*:5557", "2a02:6b8:c46:2b4:0:74c1:75b0:0")
         'tcp://[2a02:6b8:c46:2b4:0:74c1:75b0:0]:5557'
     """
-    # Use SGLang's utility to wrap IPv6 addresses in brackets
-    formatted_ip = maybe_wrap_ipv6_address(ip_address)
-    return endpoint_template.replace("*", formatted_ip)
+    parsed = urlparse(endpoint_template)
+    if parsed.scheme != "tcp" or parsed.port is None:
+        raise ValueError(
+            f"Expected tcp://host:port endpoint, got {endpoint_template!r}"
+        )
+    return NetworkAddress(ip_address, parsed.port).to_tcp()
 
 
 # Note: We use SGLang's ZmqEventPublisher.offset_endpoint_port() directly
@@ -127,16 +130,17 @@ class DynamoSglangPublisher:
         while self._running:
             try:
                 # Receive KvMetrics object from SGLang scheduler via ZMQ
-                # KvMetrics class: sglang/srt/managers/scheduler_metrics_mixin.py lines 45-54
-                # Sent from: sglang/srt/managers/scheduler_metrics_mixin.py lines 482-499 (_emit_kv_metrics)
-                kv_metrics: KvMetrics = await self._sock.recv_pyobj()
+                # KvMetrics class: sglang/srt/observability/scheduler_metrics_mixin.py
+                kv_metrics = await self._sock.recv_pyobj()
                 dp_rank = (
                     kv_metrics.data_parallel_rank
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
                 active_decode_blocks = kv_metrics.kv_active_blocks
-                self.metrics_publisher.publish(dp_rank, active_decode_blocks)
+                self.metrics_publisher.publish(
+                    dp_rank, kv_used_blocks=active_decode_blocks
+                )
                 dp_rank_str = str(dp_rank)
                 # Publish total blocks (always available in KvMetrics)
                 self.component_gauges.set_total_blocks(
@@ -181,7 +185,7 @@ class DynamoSglangPublisher:
     def init_engine_metrics_publish(self) -> None:
         """Publish initial dummy metrics to bootstrap the metrics endpoint."""
         logging.info("Sending dummy metrics to initialize")
-        self.metrics_publisher.publish(self.dp_rank, 0)
+        self.metrics_publisher.publish(self.dp_rank, kv_used_blocks=0)
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, 0)
         self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)

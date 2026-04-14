@@ -18,7 +18,6 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
         "greed_sampling": true,
         "extra_fields": ["worker_id", "timing"],
         "agent_hints": {
-            "latency_sensitivity": 5.0,
             "osl": 1024,
             "priority": 5
         }
@@ -40,7 +39,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
-| `cache_control` | object | `None` | Router | KV cache pinning hint with TTL. See [Cache Control](#cache-control). |
+| `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
 ### Header Overrides
 
@@ -57,20 +56,21 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `latency_sensitivity` | `f64` | `None` | Priority scheduling hint in seconds. Shifts the request's effective arrival time earlier in the router queue. Requires `--router-queue-threshold`. |
+| `priority` | `i32` | `None` | Unified request priority. Higher values mean higher priority at the Dynamo API level. Used for router queue ordering and backend scheduling/eviction. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
-| `priority` | `i32` | `None` | Backend engine scheduling priority. Forwarded to the engine's generate call for queue ordering, preemption, and KV cache eviction. |
 
-### `latency_sensitivity`
+### `priority`
 
-When `--router-queue-threshold` is set and the queue is active, this value shifts the request's effective arrival time earlier in the queue, giving it priority over requests with lower (or no) `latency_sensitivity`. A value of `5.0` means the request is treated as if it arrived 5 seconds earlier than it actually did. A recommended default is `1.2` for latency-sensitive agentic requests. Has no effect when queueing is disabled.
+`priority` is the single user-facing scheduling hint. Higher values mean "more important" across Dynamo.
+
+When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
 
 ```json
 {
     "nvext": {
         "agent_hints": {
-            "latency_sensitivity": 5.0
+            "priority": 5
         }
     }
 }
@@ -114,16 +114,11 @@ How it works:
 }
 ```
 
-### `priority`
+Backend details:
 
-Backend engine scheduling priority forwarded to the engine's `generate` call. Influences queue ordering, KV cache eviction under memory pressure, and preemption of running requests.
-
-The semantics of the priority value differ between backends:
-
-- **SGLang**: By default, larger values = higher priority. This can be inverted with `--schedule-low-priority-values-first` to match vLLM's convention. Requires `--enable-priority-scheduling` on the engine.
-- **vLLM**: Smaller values = higher priority. A request with `priority: 0` is scheduled before `priority: 10`. Ties are broken by arrival time. Requires `--scheduling-policy priority` on the engine.
-
-When omitted, SGLang defaults to `None` (engine default); vLLM defaults to `0`. TensorRT-LLM does not currently support per-request priority.
+- **SGLang**: Requires `--enable-priority-scheduling` for queue ordering and `--radix-eviction-policy priority` for priority-based eviction.
+- **vLLM**: Requires `--scheduling-policy priority`.
+- **TensorRT-LLM**: Does not currently support per-request priority.
 
 ```json
 {
@@ -135,30 +130,30 @@ When omitted, SGLang defaults to `None` (engine default); vLLM defaults to `0`. 
 }
 ```
 
-## Cache Control
+## Session Control
 
-> [!WARNING]
-> Cache control is experimental and available on development branches only. The API may change.
-
-The `cache_control` object enables explicit KV cache pinning with a TTL. When set, the router fires a `pin_prefix` call to the backend worker after generation completes, protecting the conversation's KV cache from eviction for the specified duration.
+`session_control` enables subagent KV isolation with sticky routing. The router uses `session_id` to keep a session on the same worker and can issue `open` / `close` lifecycle RPCs around streaming sessions.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `cache_control.type` | `string` | — | Cache control type. Currently only `"ephemeral"` is supported. |
-| `cache_control.ttl` | `string` | `"300"` | TTL as integer seconds (`"600"`) or shorthand (`"5m"`, `"1h"`). Clamped to [300, 3600] seconds. |
+| `session_control.session_id` | `string` | — | Unique session identifier. Present on every turn. |
+| `session_control.action` | `string` | omitted | Optional lifecycle action: `"open"` or `"close"`. |
+| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Only used with `action: "open"`. |
 
 ```json
 {
     "nvext": {
-        "cache_control": {
-            "type": "ephemeral",
-            "ttl": "1h"
+        "session_control": {
+            "session_id": "subagent-1",
+            "action": "open",
+            "timeout": 300
         }
     }
 }
 ```
 
-Requires `--enable-cache-control` and `--router-mode=kv` on the frontend. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md#cache-pinning-experimental) for full setup and usage details.
+Requires `--router-mode=kv` on the frontend. Session control activates automatically when requests carry `nvext.session_control`. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for backend setup details.
+
 
 ## Response Extensions
 
@@ -194,5 +189,5 @@ When the client requests response metadata via `extra_fields`, the response incl
 | Document | Description |
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
-| [Router Guide](../router/router-guide.md) | Full router configuration and CLI arguments |
-| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and cache pinning |
+| [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |

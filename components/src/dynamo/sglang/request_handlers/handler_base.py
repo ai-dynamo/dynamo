@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import dataclasses
+import importlib
 import inspect
+import json
 import logging
 import random
-import socket
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import (
@@ -20,12 +22,13 @@ from typing import (
 )
 
 import sglang as sgl
-from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
@@ -33,7 +36,6 @@ from dynamo.sglang.publisher import DynamoSglangPublisher
 class SGLangEngineQuiesceController:
     def __init__(self, engine: sgl.Engine):
         self._engine = engine
-        self._quiesced_tags: Optional[list[str]] = None
         self._is_quiesced = False
 
     @property
@@ -54,7 +56,6 @@ class SGLangEngineQuiesceController:
             ReleaseMemoryOccupationReqInput(tags=tags),
             None,
         )
-        self._quiesced_tags = None if tags is None else list(tags)
         self._is_quiesced = True
         return True
 
@@ -67,9 +68,8 @@ class SGLangEngineQuiesceController:
             ResumeMemoryOccupationReqInput,
         )
 
-        request_tags = self._quiesced_tags if tags is None else list(tags)
         await self._engine.tokenizer_manager.resume_memory_occupation(
-            ResumeMemoryOccupationReqInput(tags=request_tags),
+            ResumeMemoryOccupationReqInput(tags=tags),
             None,
         )
         await self._engine.tokenizer_manager.continue_generation(
@@ -78,7 +78,6 @@ class SGLangEngineQuiesceController:
         return True
 
     def mark_resumed(self) -> None:
-        self._quiesced_tags = None
         self._is_quiesced = False
 
 
@@ -107,6 +106,7 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
             publisher: Optional metrics publisher for the worker.
         """
         self.config = config
+        self.enable_trace = config.server_args.enable_trace
 
         # Set up metrics and KV publishers
         self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
@@ -132,23 +132,107 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
         """Cleanup resources. Override in subclasses as needed."""
         pass
 
-    def _get_trace_header(self, context: Context) -> Optional[Dict[str, str]]:
-        """Get trace header dict for passing to generation functions.
+
+class RLMixin:
+    """Mixin providing generic tokenizer_manager passthrough for RL training.
+
+    Requires the host class to have ``self.engine`` with a
+    ``tokenizer_manager`` attribute.
+    """
+
+    engine: sgl.Engine  # provided by BaseWorkerHandler
+
+    def _resolve_arg(self, arg: Any) -> Any:
+        """Resolve a single argument from the generic call body.
+
+        If ``arg`` is a dict with exactly one key starting with ``"io_struct."``,
+        treat it as a typed constructor: import the class from
+        ``sglang.srt.managers.io_struct`` and construct it with the nested kwargs.
+        Otherwise return the value as-is.
+        """
+        if isinstance(arg, dict) and len(arg) == 1:
+            key = next(iter(arg))
+            if isinstance(key, str) and key.startswith("io_struct."):
+                class_name = key[len("io_struct.") :]
+                module = importlib.import_module("sglang.srt.managers.io_struct")
+                cls = getattr(module, class_name)
+                return cls(**arg[key])
+        return arg
+
+    def _normalize_result(self, result: Any) -> dict:
+        """Convert a tokenizer_manager method return value to a JSON-safe dict."""
+        if result is None:
+            return {"status": "ok"}
+        if isinstance(result, tuple):
+            if len(result) == 2:
+                return {"success": result[0], "message": result[1]}
+            if len(result) == 3:
+                return {
+                    "success": result[0],
+                    "message": result[1],
+                    "num_paused_requests": result[2],
+                }
+        if isinstance(result, list):
+            return {
+                "result": [
+                    dataclasses.asdict(item)
+                    if dataclasses.is_dataclass(item) and not isinstance(item, type)
+                    else item
+                    for item in result
+                ]
+            }
+        if dataclasses.is_dataclass(result) and not isinstance(result, type):
+            return dataclasses.asdict(result)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, (str, int, float, bool)):
+            return {"result": result}
+        return {"result": str(result)}
+
+    async def call_tokenizer_manager(self, body: dict) -> dict:
+        """Generic passthrough to any tokenizer_manager method.
+
+        Body format::
+
+            {
+                "method": "method_name",
+                "args": [arg1, arg2, ...],
+                "kwargs": {"key": value, ...}
+            }
+
+        Each element in args/kwargs is either a plain value or a typed
+        constructor ``{"io_struct.ClassName": {kwargs}}``.
+        """
+        method_name = body["method"]
+        raw_args = body.get("args", [])
+        raw_kwargs = body.get("kwargs", {})
+
+        args = [self._resolve_arg(a) for a in raw_args]
+        kwargs = {k: self._resolve_arg(v) for k, v in raw_kwargs.items()}
+
+        tm = self.engine.tokenizer_manager
+        # Ensure the handle_loop task is running so communicator responses
+        # are received.  Several tokenizer_manager methods call this
+        # internally, but not all of them (e.g. flush_cache does not).
+        if hasattr(tm, "auto_create_handle_loop"):
+            tm.auto_create_handle_loop()
+
+        method = getattr(tm, method_name)
+        result = await method(*args, **kwargs)
+        return self._normalize_result(result)
+
+    def register_rl_engine_routes(self, runtime) -> None:
+        """Register RL-specific engine routes.
 
         Args:
-            context: Dynamo Context object containing trace information.
-
-        Returns:
-            Dict with traceparent header if trace context available, None otherwise.
+            runtime: The DistributedRuntime instance to register routes on.
         """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
+        runtime.register_engine_route(
+            "call_tokenizer_manager", self.call_tokenizer_manager
+        )
 
 
-class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
+class BaseWorkerHandler(RLMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     """Abstract base class for SGLang LLM worker handlers.
 
     Extends BaseGenerativeHandler with LLM-specific functionality:
@@ -187,13 +271,13 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
         self.serving_mode = config.serving_mode
-        self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
+        self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
         self.enable_trace = config.server_args.enable_trace
 
         if engine is not None:
             self.input_param_manager = InputParamManager(
                 self.engine.tokenizer_manager.tokenizer
-                if not self.skip_tokenizer_init
+                if self.use_sglang_tokenizer
                 else None
             )
             self._engine_supports_priority = (
@@ -211,7 +295,12 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
 
     def _priority_kwargs(self, priority: Any) -> Dict[str, Any]:
         if priority is not None and self._engine_supports_priority:
-            return {"priority": priority}
+            normalized = int(priority)
+            if getattr(
+                self.config.server_args, "schedule_low_priority_values_first", False
+            ):
+                normalized = -normalized
+            return {"priority": normalized}
         return {}
 
     async def release_memory_occupation(self, body: dict) -> dict:
@@ -389,43 +478,74 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             "new_version": req.new_version,
         }
 
-    async def pin_prefix(self, body: dict) -> dict:
-        """Pin a prefix by token_ids to resist eviction.
+    async def open_session(self, body: dict) -> dict:
+        """Open a streaming session for subagent KV isolation.
 
         Args:
-            body: Dict with "token_ids" list of token IDs and optional
-                  "ttl_seconds" (default 300).
+            body: Dict with "session_id", optional "timeout" (default 120),
+                  and optional "capacity_of_str_len" (default 65536).
         """
-        token_ids = body.get("token_ids", [])
-        ttl_seconds = body.get("ttl_seconds", 300)
-        if not token_ids:
-            return {"status": "error", "message": "token_ids required"}
+        from sglang.srt.managers.io_struct import OpenSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        timeout = body.get("timeout", 120)
+        capacity = body.get("capacity_of_str_len", 65536)
         try:
-            result = await self.engine.tokenizer_manager.pin_prefix(
-                token_ids, ttl_seconds
+            obj = OpenSessionReqInput(
+                capacity_of_str_len=capacity,
+                session_id=session_id,
+                streaming=True,
+                timeout=float(timeout),
             )
-            return {
-                "status": "ok" if result.success else "error",
-                "nodes_pinned": result.nodes_pinned,
-                "message": result.message,
-            }
+            result = await self.engine.tokenizer_manager.open_session(obj, None)
+            if result is None:
+                return {
+                    "status": "ok",
+                    "session_id": session_id,
+                    "message": "Session already exists",
+                }
+            return {"status": "ok", "session_id": result}
         except Exception as e:
-            logging.error(f"Failed to pin prefix: {e}")
+            logging.error(f"Failed to open session {session_id}: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def cache_control(self, request, context=None):
-        """Service mesh endpoint for cache control operations.
+    async def close_session(self, body: dict) -> dict:
+        """Close a streaming session and release its KV resources.
 
         Args:
-            request: Dict with "action" key and action-specific parameters.
+            body: Dict with "session_id".
+        """
+        from sglang.srt.managers.io_struct import CloseSessionReqInput
+
+        session_id = body.get("session_id")
+        if not session_id:
+            return {"status": "error", "message": "session_id required"}
+        try:
+            obj = CloseSessionReqInput(session_id=session_id)
+            await self.engine.tokenizer_manager.close_session(obj, None)
+            return {"status": "ok", "session_id": session_id}
+        except Exception as e:
+            logging.error(f"Failed to close session {session_id}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def session_control(self, request, context=None):
+        """Service mesh endpoint for session lifecycle operations.
+
+        Args:
+            request: Dict with "action" key ("open_session" or "close_session")
+                     and action-specific parameters.
             context: Optional Dynamo context (unused but required by protocol).
 
         Yields:
             Single dict with operation result.
         """
         action = request.get("action")
-        if action == "pin_prefix":
-            result = await self.pin_prefix(request)
+        if action == "open_session":
+            result = await self.open_session(request)
+        elif action == "close_session":
+            result = await self.close_session(request)
         else:
             result = {"status": "error", "message": f"Unknown action: {action}"}
         yield result
@@ -444,7 +564,6 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         runtime.register_engine_route(
             "resume_memory_occupation", self.resume_memory_occupation
         )
-        runtime.register_engine_route("pin_prefix", self.pin_prefix)
         runtime.register_engine_route(
             "update_weights_from_disk", self.update_weights_from_disk
         )
@@ -460,6 +579,13 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         runtime.register_engine_route(
             "update_weight_version", self.update_weight_version
         )
+        if getattr(self.config, "dynamo_args", None) and getattr(
+            self.config.dynamo_args, "enable_rl", False
+        ):
+            self.register_rl_engine_routes(runtime)
+        # session_control is served as a discoverable service endpoint
+        # (not an engine route) so the router can find it via
+        # component.endpoint("session_control"). See init_llm.py.
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -481,12 +607,35 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         request_input = self.input_param_manager.get_input_param(
-            request, use_tokenizer=not self.skip_tokenizer_init
+            request, use_tokenizer=self.use_sglang_tokenizer
         )
 
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+
+    def _session_kwargs(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        if not getattr(self.config.server_args, "enable_streaming_session", False):
+            return {}
+        routing = request.get("routing") or {}
+        session_control = routing.get("session_control") or {}
+        session_id = session_control.get("session_id")
+        if not session_id:
+            return {}
+
+        # Streaming sessions only need the session identifier on each turn.
+        return {"session_params": {"id": session_id}}
+
+    @staticmethod
+    def _get_guided_decoding_params(
+        guided_decoding: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Extract guided decoding params (e.g. json_schema) for SGLang sampling_params."""
+        if isinstance(guided_decoding, dict):
+            json_schema = guided_decoding.get("json")
+            if json_schema is not None:
+                return {"json_schema": json.dumps(json_schema)}
+        return {}
 
     @staticmethod
     def _generate_bootstrap_room() -> int:
@@ -511,40 +660,18 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
 
         if inner_tm.server_args.dist_init_addr:
-            # IPv6-ready host extraction and resolution:
-            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
-            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
-            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
-            addr = inner_tm.server_args.dist_init_addr.strip()
-            if addr.startswith("["):
-                end = addr.find("]")
-                host_core = addr[1:end] if end != -1 else addr.strip("[]")
-            else:
-                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
-                if addr.count(":") == 1:
-                    host_candidate, maybe_port = addr.rsplit(":", 1)
-                    host_core = host_candidate if maybe_port.isdigit() else addr
-                else:
-                    host_core = addr
-            try:
-                infos = socket.getaddrinfo(
-                    host_core,
-                    None,
-                    family=socket.AF_UNSPEC,
-                    type=socket.SOCK_STREAM,
-                )
-                resolved = infos[0][4][0]  # let OS policy pick v4/v6
-                bootstrap_host = resolved
-            except socket.gaierror:
-                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
-                bootstrap_host = host_core
+            dist_init = NetworkAddress.parse(inner_tm.server_args.dist_init_addr)
+            bootstrap_host = (
+                NetworkAddress(dist_init.resolved().host, bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
         else:
-            bootstrap_host = get_local_ip_auto()
-
-        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
-        assert isinstance(bootstrap_host, str)
-        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
-            bootstrap_host = f"[{bootstrap_host}]"
+            bootstrap_host = (
+                NetworkAddress(get_local_ip_auto(), bootstrap_port)
+                .to_host_port_str()
+                .rsplit(":", 1)[0]
+            )
 
         return bootstrap_host, bootstrap_port
 
@@ -559,7 +686,7 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
             context: Context object for cancellation handling.
 
         Raises:
-            GeneratorExit: If shutdown event was triggered.
+            EngineShutdown: If shutdown event was triggered.
         """
         try:
             logging.debug(f"Cancellation monitor started for Context: {context.id()}")
@@ -618,9 +745,9 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
                     f"SGLang tokenizer_manager not found for abort request: {context.id()}"
                 )
 
-            # Check which event triggered and raise GeneratorExit if shutdown
+            # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during token generation")
+                raise EngineShutdown("Engine was shut down during token generation")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes
@@ -644,7 +771,7 @@ class BaseWorkerHandler(BaseGenerativeHandler[RequestT, ResponseT]):
         Automatically creates a background task to monitor for cancellation and
         shutdown events, cleaning it up when the context exits.
 
-        If shutdown event was triggered, raises GeneratorExit on exit.
+        If shutdown event was triggered, raises EngineShutdown on exit.
 
         Args:
             request_id_future: Future that will be set with the SGLang request ID

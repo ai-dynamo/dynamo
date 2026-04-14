@@ -25,7 +25,12 @@ import pytest
 
 from dynamo.llm import RadixTree, compute_block_hash_for_seq
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.parallel,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+]
 
 # Constants for testing
 DEFAULT_BLOCK_SIZE = 32

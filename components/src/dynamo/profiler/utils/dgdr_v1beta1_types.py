@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, model_validator
 
 # Import canonical planner types - do NOT redefine them here.
-from dynamo.planner.utils.planner_config import (  # noqa: F401 (re-exported)
+from dynamo.planner.config.planner_config import (  # noqa: F401 (re-exported)
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
 )
@@ -185,7 +185,7 @@ class FeaturesSpec(BaseModel):
 
     planner: Optional[PlannerConfig] = Field(
         default=None,
-        description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig. Go treats this as opaque bytes; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
+        description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. Go treats this as opaque bytes; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,

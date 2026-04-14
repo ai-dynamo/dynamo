@@ -4,6 +4,29 @@ Dynamo's SGLang backend wraps SGLang's inference engine (`sgl.Engine`) and diffu
 generator (`DiffGenerator`) behind Dynamo's distributed runtime. It handles model
 registration, request routing, metrics, and disaggregated serving.
 
+## SGLang Backwards Compatibility
+
+SGLang is pre-1.0 and regularly moves/renames internal APIs between releases. We
+support the current version plus 1 version back (N and N-1). The pattern:
+
+1. **All SGLang imports that have broken (or may break) across versions go through
+   `_compat.py`**, never directly from `sglang.*` in component code.
+2. `_compat.py` uses try/except ImportError: new path first, old path fallback.
+3. When SGLang introduces a new class/function that doesn't exist in older versions
+   (e.g., `NetworkAddress`), add a minimal polyfill in the except branch -- just
+   enough surface area to cover what Dynamo actually calls.
+4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
+   version it supports and when it can be removed, e.g.:
+   `# Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+`
+5. When a new SGLang version is released and the old N-1 falls outside the support
+   window, delete the corresponding fallback branches and polyfills from `_compat.py`.
+   If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
+
+**When you encounter a new SGLang API breakage**: add the affected imports to
+`_compat.py` following the existing pattern. Do not scatter try/except blocks across
+component files. Do not version-check with `sglang.__version__` -- import probing is
+more reliable since SGLang's internal layout doesn't always match the version string.
+
 ## Entry Point
 
 `__main__.py` -> `main.py:main()` -> `main.py:worker()`
@@ -18,7 +41,6 @@ Worker dispatch (main.py:60-132):
   --image-diffusion-worker    -> init_diffusion.init_image_diffusion()
   --video-generation-worker   -> init_diffusion.init_video_diffusion()
   --embedding-worker          -> init_embedding.init_embedding()
-  --multimodal-processor      -> init_multimodal.init_multimodal_processor()
   --multimodal-encode-worker  -> init_multimodal.init_multimodal_encode_worker()
   --multimodal-worker         -> init_multimodal.init_multimodal_worker() or _prefill_worker()
   --dllm-algorithm <algo>     -> init_diffusion.init_llm_diffusion()
@@ -43,7 +65,7 @@ Worker dispatch (main.py:60-132):
 
 **DynamoConfig** combines `DynamoRuntimeConfig` (common flags like `--namespace`,
 `--output-modalities`, `--media-output-fs-url`) with `DynamoSGLangConfig` (sglang-specific
-flags like `--multimodal-processor`, `--embedding-worker`).
+flags like `--multimodal-encode-worker`, `--embedding-worker`).
 
 Key gotcha: `--output-modalities` defaults to `["text"]` globally. Image/video diffusion
 workers override this in their init functions to `["image"]`/`["video"]` to ensure correct
@@ -63,6 +85,7 @@ BaseGenerativeHandler (handler_base.py)
 
     DecodeWorkerHandler (llm/decode_handler.py)
       Aggregated + disaggregated decode. Token/text streaming.
+      Logprob passthrough via _build_logprob_kwargs() + _extract_logprobs().
 
       DiffusionWorkerHandler (llm/diffusion_handler.py)
         LLM diffusion (DLLM). Simplified decode without disagg.
@@ -80,11 +103,10 @@ BaseGenerativeHandler (handler_base.py)
     MultimodalPrefillWorkerHandler (multimodal/worker_handler.py)
       Multimodal prefill phase. Yields bootstrap info.
 
-    MultimodalProcessorHandler (multimodal/processor_handler.py)
-      Front-facing. No engine. Routes to encode worker.
-
     MultimodalEncodeWorkerHandler (multimodal/encode_worker_handler.py)
-      No engine. Uses MMEncoder from SGLang. NIXL for embeddings transfer.
+      Front-facing. No engine. Uses MMEncoder from SGLang. Receives
+      pre-tokenized requests (ModelInput.Tokens) from Rust frontend,
+      encodes images, NIXL for embeddings transfer.
 ```
 
 ## Engine Types by Worker
@@ -93,8 +115,7 @@ BaseGenerativeHandler (handler_base.py)
 |--------|--------|-------|
 | decode, prefill, dllm, embedding | `sgl.Engine` | Full SGLang inference engine |
 | multimodal-worker, multimodal-prefill | `sgl.Engine` | Plus EmbeddingsProcessor |
-| multimodal-processor | None | Tokenizer only, routes to encoder |
-| multimodal-encode-worker | None | `MMEncoder` from SGLang |
+| multimodal-encode-worker | None | `MMEncoder` from SGLang, pre-tokenized input |
 | image-diffusion-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 | video-generation-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 
@@ -165,12 +186,13 @@ capture SGLang's internal signal registrations and defer them. On SIGTERM/SIGINT
 
 ```
 Frontend (Rust, lib/llm/)
-  -> Preprocessor (tokenizes, builds PreprocessedRequest with token_ids + sampling + stop)
+  -> Preprocessor (tokenizes, builds PreprocessedRequest with token_ids + sampling + stop + output_options)
   -> Dynamo RPC to endpoint (dyn://{namespace}.{component}.{endpoint})
   -> Python handler.generate(request_dict, context)
        handler._build_sampling_params(request) -> SGLang-native params
-       engine.async_generate(**params) -> async iterator of dicts
-       handler yields {token_ids, text, finish_reason, ...} back to frontend
+       handler._build_logprob_kwargs(request) -> {return_logprob, top_logprobs_num, logprob_start_len}
+       engine.async_generate(**params, **logprob_kwargs) -> async iterator of dicts
+       handler yields {token_ids, text, finish_reason, log_probs, top_logprobs, ...} back to frontend
   -> Frontend postprocesses into OpenAI-compatible response
 ```
 
@@ -183,6 +205,36 @@ Two request formats depending on `--skip-tokenizer-init`:
 Image/video diffusion handlers receive the full OpenAI-format request dict directly
 (not preprocessed), since the frontend passes through diffusion requests without
 tokenization.
+
+## Logprobs
+
+`DecodeWorkerHandler` supports logprob passthrough, matching the vLLM and TRT-LLM backends.
+Controlled by `output_options` in the preprocessed request (from Rust `OutputOptions` struct
+in `lib/llm/src/protocols/common.rs`).
+
+**Mapping from OutputOptions to SGLang kwargs** (`_build_logprob_kwargs`):
+
+| OutputOptions field | SGLang kwarg | Notes |
+|---------------------|-------------|-------|
+| `logprobs: N` | `return_logprob=True, top_logprobs_num=N` | N top logprobs per output token |
+| `prompt_logprobs: M` | `return_logprob=True, logprob_start_len=0` | Compute from prompt start |
+| Both set | `top_logprobs_num=max(N, M)` | SGLang has a single top_logprobs_num for both |
+
+`logprob_start_len` is SGLang-internal, not exposed in OutputOptions. It controls the
+absolute sequence position where logprob computation starts: `-1` (default) = output tokens
+only (`len(prompt) - 1`), `0` = from prompt start. We set it to 0 when `prompt_logprobs`
+is requested.
+
+**Streaming behavior** (`_extract_logprobs`):
+
+Dynamo forces `stream_output=True` (args.py:374), making `output_ids` disjoint per chunk.
+However, SGLang's `meta_info["output_token_logprobs"]` and `meta_info["output_top_logprobs"]`
+are always **cumulative** — they grow with each chunk. The handler tracks
+`num_output_logprobs_so_far` to slice out only new entries per chunk.
+
+SGLang logprob format: `(logprob, token_id, text_or_None)` tuples.
+Dynamo output format: `log_probs` = list of floats, `top_logprobs` = list of lists of
+`{rank, token_id, token, logprob}` dicts (same as vLLM/TRT-LLM).
 
 ## Health Checks
 
@@ -218,16 +270,27 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 
 - **SimpleNamespace vs ServerArgs**: Image/video diffusion workers use SimpleNamespace
   stubs. Always use `getattr(server_args, field, default)` for fields that may not exist.
-- **engine=None**: Multimodal processor and encode worker pass `engine=None` to
+- **engine=None**: Multimodal encode worker passes `engine=None` to
   BaseWorkerHandler. Any code in the base class that touches engine must guard with
   `if engine is not None`.
-- **GenerationResult is a dataclass**: SGLang 0.5.9 changed `DiffGenerator.generate()`
-  to return `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
+- **GenerationResult is a dataclass**: SGLang `DiffGenerator.generate()`
+  returns `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
 - **output_modalities default**: Global default is `["text"]`. Image/video diffusion
   workers must override to `["image"]`/`["video"]` or the Rust registration path tries
   to load `config.json` (which doesn't exist for diffusers models).
+- **Cumulative logprobs in streaming**: SGLang's `output_token_logprobs`/`output_top_logprobs`
+  in `meta_info` are cumulative even though `output_ids` are disjoint (stream_output=True).
+  Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
+- **Session control graceful degradation**: Session control is request-driven --
+  the router's `AgentController` and `StickySessionRouter` are always created but
+  activate lazily. If no worker has `--enable-streaming-session`, the router warns
+  once and ignores `session_control` in requests. On the handler side,
+  `_session_kwargs()` checks `enable_streaming_session` before injecting
+  `session_params` into SGLang calls. Both layers must agree: the router skips
+  lifecycle RPCs, and the handler skips session params. Without both guards,
+  SGLang errors with "session id does not exist".
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.
@@ -264,7 +327,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 - **Check nvidia-smi**: If a launch OOMs, check for orphaned GPU processes from prior runs.
 - **SimpleNamespace stubs**: When touching args.py or code that reads server_args, always
   use `getattr(server_args, field, default)` -- image/video workers don't have full ServerArgs.
-- **engine can be None**: Encode-only workers (multimodal-processor, multimodal-encode-worker)
+- **engine can be None**: Encode-only workers (multimodal-encode-worker)
   pass engine=None. Guard any engine access in shared base class code.
 - **Rebuild after Rust changes**: If changing registration (register.py interacts with Rust
   bindings), rebuild: `cd lib/bindings/python && maturin develop --uv && cd <root> && uv pip install -e .`
@@ -275,13 +338,14 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 
 ```
 sglang/
+  _compat.py               # SGLang version compat shim (network imports + NetworkAddress polyfill)
   __main__.py              # Entry point
   main.py                  # Worker dispatch
   args.py                  # Config parsing (ServerArgs vs SimpleNamespace)
   backend_args.py          # Dynamo-specific SGLang CLI flags
   init_llm.py              # init_decode(), init_prefill()
   init_diffusion.py        # init_llm_diffusion(), init_image_diffusion(), init_video_diffusion()
-  init_multimodal.py       # init_multimodal_{processor,encode_worker,worker,prefill_worker}()
+  init_multimodal.py       # init_multimodal_{encode_worker,worker,prefill_worker}()
   init_embedding.py        # init_embedding()
   register.py              # Model registration (LLM, image, video)
   publisher.py             # Metrics + KV event publishing
@@ -301,7 +365,6 @@ sglang/
     video_generation/
       video_generation_handler.py # VideoGenerationWorkerHandler (DiffGenerator)
     multimodal/
-      processor_handler.py       # MultimodalProcessorHandler (no engine)
-      encode_worker_handler.py   # MultimodalEncodeWorkerHandler (MMEncoder)
+      encode_worker_handler.py   # MultimodalEncodeWorkerHandler (MMEncoder, front-facing)
       worker_handler.py          # MultimodalWorkerHandler + PrefillWorkerHandler
 ```

@@ -240,10 +240,11 @@ class DynamoDeploymentClient:
             self.deployment_spec is not None
         ), "Failed to load deployment specification"
 
-        # Extract component names
-        self.components = [
-            svc.lower() for svc in self.deployment_spec["spec"]["services"].keys()
-        ]
+        # Extract component names (original case for label queries, lowercase for directories)
+        self._original_components = list(
+            self.deployment_spec["spec"]["services"].keys()
+        )
+        self.components = [svc.lower() for svc in self._original_components]
 
         # Ensure name and namespace are set correctly
         self.deployment_spec["metadata"]["name"] = self.deployment_name
@@ -450,14 +451,17 @@ class DynamoDeploymentClient:
         base_dir = self.base_log_dir / self.deployment_name
         base_dir.mkdir(parents=True, exist_ok=True)
 
-        for component in self.components:
+        for component, original_name in zip(self.components, self._original_components):
             component_dir = base_dir / component
             component_dir.mkdir(exist_ok=True)
 
-            # List pods for this component using the selector label
-            # nvidia.com/selector: deployment-name-component
+            # Use DGD name + component name labels which are consistent across
+            # both Grove (PodCliqueSet) and non-Grove (DCD) deployment pathways.
+            # The previous nvidia.com/selector label includes a worker hash suffix
+            # on the DCD pathway, causing a mismatch with the expected base name.
             label_selector = (
-                f"nvidia.com/selector={self.deployment_name}-{component.lower()}"
+                f"nvidia.com/dynamo-graph-deployment-name={self.deployment_name},"
+                f"nvidia.com/dynamo-component={original_name}"
             )
 
             pods = await self.core_api.list_namespaced_pod(

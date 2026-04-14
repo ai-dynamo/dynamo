@@ -41,13 +41,17 @@ const (
 // DynamoGraphDeploymentHandler is a handler for validating DynamoGraphDeployment resources.
 // It is a thin wrapper around DynamoGraphDeploymentValidator.
 type DynamoGraphDeploymentHandler struct {
-	mgr manager.Manager
+	mgr               manager.Manager
+	operatorPrincipal string
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
-func NewDynamoGraphDeploymentHandler(mgr manager.Manager) *DynamoGraphDeploymentHandler {
+// operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
+// replica changes on scaling-adapter-enabled services (#7656).
+func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
-		mgr: mgr,
+		mgr:               mgr,
+		operatorPrincipal: operatorPrincipal,
 	}
 }
 
@@ -89,10 +93,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 		return nil, err
 	}
 
-	// Create validator with manager for API group detection and perform validation
+	// Create validator with manager for API group detection and perform validation.
 	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr)
-
-	// Validate stateless rules
 	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err
@@ -109,7 +111,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Validate stateful rules (immutability + replicas protection)
-	updateWarnings, err := validator.ValidateUpdate(oldDeployment, userInfo)
+	updateWarnings, err := validator.ValidateUpdate(oldDeployment, userInfo, h.operatorPrincipal)
 	if err != nil {
 		username := "<unknown>"
 		if userInfo != nil {

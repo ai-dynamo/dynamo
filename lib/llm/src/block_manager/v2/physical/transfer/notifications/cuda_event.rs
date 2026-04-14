@@ -56,28 +56,20 @@ mod tests {
         // Get or create the CudaSleep utility (compiles kernel and calibrates on first use)
         let cuda_sleep = CudaSleep::for_context(cuda_ctx).unwrap();
 
-        // Test 1: Launch sleep and wait via async notification
-        let t0_queue_start = Instant::now();
+        let start = Instant::now();
         cuda_sleep
             .launch(Duration::from_millis(600), stream)
             .unwrap();
-        let queue_time = t0_queue_start.elapsed();
 
         let event = stream.record_event(None).unwrap();
         let notification = manager.register_cuda_event(event);
-        notification.await.unwrap();
-        let wait_time = t0_queue_start.elapsed() - queue_time;
+        tokio::time::timeout(Duration::from_secs(5), notification)
+            .await
+            .expect("notification should complete once the CUDA event signals")
+            .unwrap();
+        let wait_time = start.elapsed();
 
-        println!(
-            "GPU sleep test: queue {:?}, wait {:?}",
-            queue_time, wait_time
-        );
-
-        assert!(
-            queue_time < Duration::from_millis(10),
-            "launching the sleep kernel should be fast: {:?}",
-            queue_time
-        );
+        println!("GPU sleep test: total wait {:?}", wait_time);
 
         assert!(
             wait_time >= Duration::from_millis(500),

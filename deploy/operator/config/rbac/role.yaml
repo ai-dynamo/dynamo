@@ -41,6 +41,14 @@ rules:
 - apiGroups:
   - apps
   resources:
+  - daemonsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
   - deployments
   verbs:
   - create
@@ -117,6 +125,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - grove.io
+  resources:
+  - clustertopologies
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - grove.io
@@ -228,6 +244,26 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - resource.k8s.io
+  resources:
+  - deviceclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - resource.k8s.io
+  resources:
+  - resourceclaimtemplates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - scheduling.run.ai
   resources:

@@ -329,14 +329,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="Disable torch.compile optimization.",
         )
-        add_argument(
-            diffusion_group,
-            flag_name="--torch-compile-mode",
-            env_var="DYN_TRTLLM_TORCH_COMPILE_MODE",
-            default="default",
-            choices=["default", "reduce-overhead", "max-autotune"],
-            help="torch.compile mode.",
-        )
         add_negatable_bool_argument(
             diffusion_group,
             flag_name="--enable-fullgraph",
@@ -365,13 +357,12 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="Enable per-layer NVTX markers for profiling with Nsight Systems.",
         )
-        add_argument(
+        add_negatable_bool_argument(
             diffusion_group,
-            flag_name="--warmup-steps",
-            env_var="DYN_TRTLLM_WARMUP_STEPS",
-            default=1,
-            arg_type=int,
-            help="Number of denoising steps to run during warmup (0 to disable).",
+            flag_name="--skip-warmup",
+            env_var="DYN_TRTLLM_SKIP_WARMUP",
+            default=False,
+            help="Skip warmup inference during initialization.",
         )
         add_argument(
             diffusion_group,
@@ -484,12 +475,11 @@ class DynamoTrtllmConfig(ConfigBase):
     quant_algo: Optional[str]
     quant_dynamic: bool
     disable_torch_compile: bool
-    torch_compile_mode: str
     enable_fullgraph: bool
     fuse_qkv: bool
     enable_cuda_graph: bool
     enable_layerwise_nvtx_marker: bool
-    warmup_steps: int
+    skip_warmup: bool
     dit_dp_size: int
     dit_tp_size: int
     dit_ulysses_size: int

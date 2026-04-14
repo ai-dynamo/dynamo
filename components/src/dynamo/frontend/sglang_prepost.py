@@ -94,12 +94,29 @@ def create_parsers(
     return tool_call_parser, reasoning_parser
 
 
+def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
+    if isinstance(prompt_token_ids, list):
+        return prompt_token_ids
+
+    input_ids = getattr(prompt_token_ids, "input_ids", None)
+    if input_ids is not None and not isinstance(input_ids, str):
+        return list(input_ids)
+
+    if isinstance(prompt_token_ids, dict):
+        dict_input_ids = prompt_token_ids.get("input_ids")
+        if dict_input_ids is not None and not isinstance(dict_input_ids, str):
+            return list(dict_input_ids)
+
+    return list(prompt_token_ids)
+
+
 def preprocess_chat_request(
     request: dict[str, Any],
     *,
     tokenizer,
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
+    exclude_tools_when_tool_choice_none: bool = True,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -115,12 +132,17 @@ def preprocess_chat_request(
         "add_generation_prompt": True,
         "tokenize": True,
     }
-    if sglang_tools:
+    # Strip tools from template when tool_choice=none so the model doesn't
+    # see them and generate raw XML tool calls in its response.
+    tool_choice = request.get("tool_choice", "auto")
+    if sglang_tools and not (
+        exclude_tools_when_tool_choice_none and tool_choice == "none"
+    ):
         template_kwargs["tools"] = [t.model_dump() for t in sglang_tools]
 
-    prompt_token_ids = tokenizer.apply_chat_template(messages, **template_kwargs)
-    if not isinstance(prompt_token_ids, list):
-        prompt_token_ids = list(prompt_token_ids)
+    prompt_token_ids = _normalize_prompt_token_ids(
+        tokenizer.apply_chat_template(messages, **template_kwargs)
+    )
 
     tool_call_parser, reasoning_parser = create_parsers(
         request,

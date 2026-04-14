@@ -6,15 +6,16 @@ pub mod listener;
 pub mod metrics;
 pub mod recovery;
 pub mod registry;
-#[cfg(feature = "indexer-runtime")]
-pub mod runtime;
 pub mod server;
+mod zmq;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::min_initial_workers_from_env;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
 
@@ -28,18 +29,40 @@ pub struct IndexerConfig {
     pub peers: Option<String>,
 }
 
-#[cfg(feature = "indexer-runtime")]
-pub struct RuntimeConfig {
-    pub namespace: String,
-    pub component_name: String,
-    pub worker_component: String,
-}
-
 pub(super) fn validate_zmq_endpoint(endpoint: &str) -> anyhow::Result<()> {
-    endpoint
-        .parse::<zeromq::Endpoint>()
-        .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: {error}"))
+    let (scheme, address) = endpoint
+        .split_once("://")
+        .ok_or_else(|| anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: missing scheme"))?;
+
+    if address.is_empty() {
+        anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing address");
+    }
+
+    match scheme {
+        "tcp" => {
+            let (host, port) = address.rsplit_once(':').ok_or_else(|| {
+                anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: missing TCP port")
+            })?;
+            if host.is_empty() {
+                anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing TCP host");
+            }
+            if host.starts_with('[') {
+                if !host.ends_with(']') {
+                    anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing closing `]`");
+                }
+            } else if host.contains(':') {
+                anyhow::bail!("invalid ZMQ endpoint `{endpoint}`: missing TCP port");
+            }
+            port.parse::<u16>().map_err(|error| {
+                anyhow::anyhow!("invalid ZMQ endpoint `{endpoint}`: invalid TCP port: {error}")
+            })?;
+            Ok(())
+        }
+        "ipc" | "inproc" => Ok(()),
+        other => Err(anyhow::anyhow!(
+            "invalid ZMQ endpoint `{endpoint}`: unsupported scheme `{other}`"
+        )),
+    }
 }
 
 pub(super) fn validate_listener_endpoints(
@@ -123,79 +146,31 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
     run_common(&config, &registry, cancel_token).await
 }
 
-#[cfg(feature = "indexer-runtime")]
-pub async fn run_with_runtime(
-    runtime: dynamo_runtime::Runtime,
-    config: IndexerConfig,
-    runtime_config: RuntimeConfig,
+async fn wait_for_min_initial_workers(
+    registry: &WorkerRegistry,
+    cancel_token: &CancellationToken,
 ) -> anyhow::Result<()> {
-    use dynamo_runtime::{
-        DistributedRuntime,
-        pipeline::{ManyOut, SingleIn, network::Ingress},
-    };
+    let min_initial_workers = min_initial_workers_from_env()?;
+    if min_initial_workers == 0 {
+        return Ok(());
+    }
 
-    use crate::indexer::{IndexerQueryRequest, IndexerQueryResponse, KV_INDEXER_QUERY_ENDPOINT};
-
-    let distributed_runtime = DistributedRuntime::from_settings(runtime).await?;
-    let cancel_token = distributed_runtime.primary_token();
-    let component = distributed_runtime
-        .namespace(&runtime_config.namespace)?
-        .component(&runtime_config.component_name)?;
-
-    tracing::info!(
-        namespace = %runtime_config.namespace,
-        component = %runtime_config.component_name,
-        block_size = ?config.block_size,
-        port = config.port,
-        threads = config.threads,
-        model_name = %config.model_name,
-        tenant_id = %config.tenant_id,
-        worker_component = %runtime_config.worker_component,
-        num_peers = config.peers.as_ref().map(|p| p.split(',').count()).unwrap_or(0),
-        "Starting standalone KV cache indexer (Dynamo runtime mode)"
-    );
-
-    let registry = Arc::new(WorkerRegistry::new(config.threads));
-    let engine = Arc::new(runtime::query_engine::IndexerQueryEngine {
-        registry: registry.clone(),
-    });
-    let ingress =
-        Ingress::<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>>::for_engine(
-            engine,
-        )?;
-    let query_endpoint = component
-        .endpoint(KV_INDEXER_QUERY_ENDPOINT)
-        .endpoint_builder()
-        .handler(ingress)
-        .graceful_shutdown(true);
-
-    distributed_runtime.runtime().secondary().spawn(async move {
-        if let Err(err) = query_endpoint.start().await {
-            tracing::error!(error = %err, "Query endpoint failed");
+    loop {
+        let registered_workers = registry.list().len();
+        if registered_workers >= min_initial_workers {
+            return Ok(());
         }
-    });
 
-    tracing::info!(
-        endpoint = KV_INDEXER_QUERY_ENDPOINT,
-        "Query endpoint registered"
-    );
-
-    runtime::discovery::spawn_discovery_watcher(
-        &distributed_runtime,
-        registry.clone(),
-        cancel_token.clone(),
-    )
-    .await?;
-    runtime::subscriber::spawn_event_subscriber(
-        &distributed_runtime,
-        &runtime_config.namespace,
-        &runtime_config.worker_component,
-        registry.clone(),
-        cancel_token.clone(),
-    )
-    .await?;
-
-    run_common(&config, &registry, cancel_token).await
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                anyhow::bail!(
+                    "shutdown triggered before {} indexer workers appeared",
+                    min_initial_workers
+                );
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+    }
 }
 
 async fn run_common(
@@ -245,6 +220,7 @@ async fn run_common(
         }
     }
 
+    wait_for_min_initial_workers(registry, &cancel_token).await?;
     registry.signal_ready();
 
     #[cfg(feature = "metrics")]
@@ -295,5 +271,21 @@ mod tests {
     fn test_parse_workers_invalid_entry() {
         let error = parse_workers("1").unwrap_err().to_string();
         assert!(error.contains("invalid worker entry"));
+    }
+
+    #[test]
+    fn test_validate_zmq_endpoint_allows_wildcard_tcp_bind() {
+        validate_zmq_endpoint("tcp://*:5558").unwrap();
+        validate_zmq_endpoint("tcp://127.0.0.1:0").unwrap();
+        validate_zmq_endpoint("inproc://listener").unwrap();
+        validate_zmq_endpoint("ipc:///tmp/dynamo.sock").unwrap();
+    }
+
+    #[test]
+    fn test_validate_zmq_endpoint_rejects_invalid_values() {
+        assert!(validate_zmq_endpoint("tcp://host").is_err());
+        assert!(validate_zmq_endpoint("tcp://:5558").is_err());
+        assert!(validate_zmq_endpoint("udp://host:5558").is_err());
+        assert!(validate_zmq_endpoint("not-an-endpoint").is_err());
     }
 }

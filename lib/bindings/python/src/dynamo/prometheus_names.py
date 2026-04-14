@@ -51,8 +51,10 @@ class frontend_perf:
     TOKENIZE_SECONDS = "tokenize_seconds"
     # Template application time in preprocessor
     TEMPLATE_SECONDS = "template_seconds"
-    # Per-token detokenization cost (microseconds)
-    DETOKENIZE_PER_TOKEN_US = "detokenize_per_token_us"
+    # Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
+    DETOKENIZE_TOTAL_US = "detokenize_total_us"
+    # Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
+    DETOKENIZE_TOKEN_COUNT = "detokenize_token_count"
     # Event loop delay canary (sleep 10ms, measure drift)
     EVENT_LOOP_DELAY_SECONDS = "event_loop_delay_seconds"
     # Count of event loop stalls (delay > 5ms)
@@ -81,6 +83,8 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "kv_hit_rate"
+    # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
+    KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -108,6 +112,10 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Total number of request cancellations
+    MODEL_CANCELLATION_TOTAL = "model_cancellation_total"
+    # Total number of requests rejected due to resource exhaustion
+    MODEL_REJECTION_TOTAL = "model_rejection_total"
     # Active decode blocks (KV cache blocks) per worker
     # Gauge metric tracking current KV cache block utilization for each worker
     WORKER_ACTIVE_DECODE_BLOCKS = "worker_active_decode_blocks"
@@ -237,24 +245,30 @@ class model_info:
 
 
 class name_prefix:
-    """Metric name prefixes used across the metrics system"""
+    """Metric name prefixes used across the metrics system."""
 
-    # Prefix for all Prometheus metric names.
+    # Prefix for component-scoped metrics, auto-labeled with namespace/endpoint.
     COMPONENT = "dynamo_component"
-    # Prefix for frontend service metrics
+    # Prefix for frontend HTTP service metrics (requests, TTFT, ITL, disconnects).
     FRONTEND = "dynamo_frontend"
-    # Prefix for KV router metrics (used with router_id label)
+    # Prefix for KV router instance metrics (carries `router_id` label).
     ROUTER = "dynamo_router"
-    # Prefix for tokio runtime metrics
-    TOKIO = "dynamo_tokio"
     # Prefix for standalone KV indexer metrics
     KVINDEXER = "dynamo_kvindexer"
-    # Prefix for request-plane metrics at AddressedPushRouter
+    # Prefix for request-plane metrics at AddressedPushRouter.
+    # Transport-agnostic: measures request lifecycle latency and concurrency
+    # (queue → send → roundtrip TTFT, inflight gauge).
     REQUEST_PLANE = "dynamo_request_plane"
-    # Prefix for transport-layer metrics (TCP / NATS)
+    # Prefix for transport-layer metrics (TCP / NATS).
+    # Protocol-specific: measures wire-level health (bytes sent/received, error counts).
     TRANSPORT = "dynamo_transport"
     # Prefix for work-handler transport breakdown metrics (backend side)
     WORK_HANDLER = "dynamo_work_handler"
+    # Prefix for tokio runtime metrics (poll times, queue depths, stalls).
+    TOKIO = "dynamo_tokio"
+    # Prefix for per-phase routing overhead latency (hashing, scheduling).
+    # Raw Prometheus, not component-scoped.
+    ROUTING_OVERHEAD = "dynamo_routing_overhead"
 
 
 class request_plane:
@@ -275,6 +289,10 @@ class router:
 
     # Total number of requests processed by the router
     REQUESTS_TOTAL = "router_requests_total"
+    # Total number of remote indexer overlap queries that failed
+    REMOTE_INDEXER_QUERY_FAILURES_TOTAL = "router_remote_indexer_query_failures_total"
+    # Total number of remote indexer routing-decision writes that failed
+    REMOTE_INDEXER_WRITE_FAILURES_TOTAL = "router_remote_indexer_write_failures_total"
     # Time to first token observed at the router (seconds)
     TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
     # Average inter-token latency observed at the router (seconds)
@@ -397,6 +415,8 @@ class work_handler:
     REQUEST_DURATION_SECONDS = "request_duration_seconds"
     # Total number of errors in work handler processing
     ERRORS_TOTAL = "errors_total"
+    # Total number of requests cancelled by work handler (client stop/kill or disconnect)
+    CANCELLATION_TOTAL = "cancellation_total"
     # Network transit: frontend send to backend receive (wall-clock, cross-process)
     NETWORK_TRANSIT_SECONDS = "network_transit_seconds"
     # Backend processing: handle_payload entry to first response sent

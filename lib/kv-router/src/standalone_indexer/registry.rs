@@ -298,6 +298,7 @@ impl ListenerRecord {
         }
     }
 
+    #[allow(dead_code)]
     fn status(&self) -> ListenerStatus {
         self.runtime.lock().status
     }
@@ -313,8 +314,6 @@ pub struct WorkerRegistry {
     indexers: DashMap<IndexerKey, IndexerEntry>,
     peers: DashMap<String, ()>,
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
-    #[cfg(feature = "indexer-runtime")]
-    discovered_workers: DashMap<WorkerId, IndexerKey>,
     num_threads: usize,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
@@ -328,8 +327,6 @@ impl WorkerRegistry {
             indexers: DashMap::new(),
             peers: DashMap::new(),
             watermarks: DashMap::new(),
-            #[cfg(feature = "indexer-runtime")]
-            discovered_workers: DashMap::new(),
             num_threads,
             ready_tx,
             ready_rx,
@@ -359,11 +356,7 @@ impl WorkerRegistry {
     #[cfg(feature = "metrics")]
     pub fn refresh_metrics(&self) {
         let models = self.indexers.len();
-        let mut workers = self.workers.len();
-        #[cfg(feature = "indexer-runtime")]
-        {
-            workers += self.discovered_workers.len();
-        }
+        let workers = self.workers.len();
 
         let mut listener_counts = [0_i64; 4];
         for entry in self.workers.iter() {
@@ -386,14 +379,6 @@ impl WorkerRegistry {
         block_size: u32,
         replay_endpoint: Option<String>,
     ) -> Result<()> {
-        #[cfg(feature = "indexer-runtime")]
-        if self.discovered_workers.contains_key(&instance_id) {
-            bail!(
-                "instance {instance_id} is already registered via discovery; \
-                 use the Dynamo runtime to manage it"
-            );
-        }
-
         let key = IndexerKey {
             model_name,
             tenant_id,
@@ -490,20 +475,6 @@ impl WorkerRegistry {
                 );
             }
         } else {
-            #[cfg(feature = "indexer-runtime")]
-            if let Some(discovered_key) = self.discovered_workers.get(&instance_id) {
-                if discovered_key.value() != &key {
-                    bail!(
-                        "instance {instance_id} is registered for model={} tenant={}",
-                        discovered_key.value().model_name,
-                        discovered_key.value().tenant_id
-                    );
-                }
-            } else {
-                bail!("instance {instance_id} not found");
-            }
-
-            #[cfg(not(feature = "indexer-runtime"))]
             bail!("instance {instance_id} not found");
         }
 
@@ -513,10 +484,8 @@ impl WorkerRegistry {
                     cancel_token.cancel();
                 }
             }
-        } else {
-            #[cfg(feature = "indexer-runtime")]
-            {
-                self.discovered_workers.remove(&instance_id);
+            for &dp_rank in entry.listeners.keys() {
+                self.watermarks.remove(&(instance_id, dp_rank));
             }
         }
 
@@ -563,6 +532,7 @@ impl WorkerRegistry {
         if let Some(cancel_token) = record.take_cancel() {
             cancel_token.cancel();
         }
+        self.watermarks.remove(&(instance_id, dp_rank));
 
         if remove_worker {
             self.workers.remove(&instance_id);
@@ -592,21 +562,6 @@ impl WorkerRegistry {
             }
             entry.key.clone()
         } else {
-            #[cfg(feature = "indexer-runtime")]
-            if let Some(discovered_key) = self.discovered_workers.get(&instance_id) {
-                if discovered_key.value().model_name != model_name {
-                    bail!(
-                        "instance {instance_id} is registered for model={} tenant={}",
-                        discovered_key.value().model_name,
-                        discovered_key.value().tenant_id
-                    );
-                }
-                discovered_key.value().clone()
-            } else {
-                bail!("instance {instance_id} not found");
-            }
-
-            #[cfg(not(feature = "indexer-runtime"))]
             bail!("instance {instance_id} not found");
         };
 
@@ -616,10 +571,8 @@ impl WorkerRegistry {
                     cancel_token.cancel();
                 }
             }
-        } else {
-            #[cfg(feature = "indexer-runtime")]
-            {
-                self.discovered_workers.remove(&instance_id);
+            for &dp_rank in entry.listeners.keys() {
+                self.watermarks.remove(&(instance_id, dp_rank));
             }
         }
 
@@ -643,11 +596,6 @@ impl WorkerRegistry {
                 },
             )?
         } else {
-            #[cfg(feature = "indexer-runtime")]
-            if self.discovered_workers.contains_key(&instance_id) {
-                return Err(ListenerControlError::DiscoveryManaged { instance_id });
-            }
-
             return Err(ListenerControlError::WorkerNotFound { instance_id });
         };
 
@@ -670,11 +618,6 @@ impl WorkerRegistry {
                 },
             )?
         } else {
-            #[cfg(feature = "indexer-runtime")]
-            if self.discovered_workers.contains_key(&instance_id) {
-                return Err(ListenerControlError::DiscoveryManaged { instance_id });
-            }
-
             return Err(ListenerControlError::WorkerNotFound { instance_id });
         };
 
@@ -710,21 +653,6 @@ impl WorkerRegistry {
                 }
             })
             .collect();
-
-        #[cfg(feature = "indexer-runtime")]
-        for entry in self.discovered_workers.iter() {
-            let worker_id = *entry.key();
-            if self.workers.contains_key(&worker_id) {
-                continue;
-            }
-            result.push(WorkerInfo {
-                instance_id: worker_id,
-                source: WorkerSource::Discovery,
-                status: ListenerStatus::Active,
-                endpoints: HashMap::new(),
-                listeners: HashMap::new(),
-            });
-        }
 
         result
     }
@@ -771,97 +699,6 @@ impl WorkerRegistry {
             .collect()
     }
 
-    #[cfg(feature = "indexer-runtime")]
-    pub fn add_worker_from_discovery(
-        &self,
-        instance_id: WorkerId,
-        model_name: String,
-        tenant_id: String,
-        block_size: u32,
-    ) -> Result<()> {
-        if self.workers.contains_key(&instance_id) {
-            bail!(
-                "instance {instance_id} is already manually registered; \
-                 cannot add via discovery"
-            );
-        }
-
-        let key = IndexerKey {
-            model_name,
-            tenant_id,
-        };
-
-        if let Some(existing) = self.discovered_workers.get(&instance_id) {
-            if existing.value() != &key {
-                bail!(
-                    "instance {instance_id} is already registered for model={} tenant={}",
-                    existing.value().model_name,
-                    existing.value().tenant_id
-                );
-            }
-            return Ok(());
-        }
-
-        let indexer_entry = self.indexers.entry(key.clone()).or_insert_with(|| {
-            tracing::info!(
-                model_name = %key.model_name,
-                tenant_id = %key.tenant_id,
-                block_size,
-                "Creating new indexer (discovery)"
-            );
-            IndexerEntry {
-                indexer: create_indexer(block_size, self.num_threads),
-                block_size,
-            }
-        });
-
-        if indexer_entry.block_size != block_size {
-            bail!(
-                "block_size mismatch for model={} tenant={}: existing={}, requested={}",
-                key.model_name,
-                key.tenant_id,
-                indexer_entry.block_size,
-                block_size
-            );
-        }
-        drop(indexer_entry);
-
-        self.discovered_workers.insert(instance_id, key);
-        Ok(())
-    }
-
-    #[cfg(feature = "indexer-runtime")]
-    pub async fn remove_worker_from_discovery(&self, instance_id: WorkerId) {
-        if let Some((_, key)) = self.discovered_workers.remove(&instance_id) {
-            if let Some(ie) = self.indexers.get(&key) {
-                ie.indexer.remove_worker(instance_id).await;
-            }
-            self.maybe_remove_indexer(&key);
-        } else {
-            tracing::debug!(
-                instance_id,
-                "remove_worker_from_discovery: worker not in discovered_workers map"
-            );
-        }
-    }
-
-    #[cfg(feature = "indexer-runtime")]
-    pub fn get_indexer_for_worker(&self, worker_id: WorkerId) -> Option<Indexer> {
-        if let Some(key) = self.discovered_workers.get(&worker_id)
-            && let Some(ie) = self.indexers.get(key.value())
-        {
-            return Some(ie.indexer.clone());
-        }
-
-        if let Some(entry) = self.workers.get(&worker_id)
-            && let Some(ie) = self.indexers.get(&entry.key)
-        {
-            return Some(ie.indexer.clone());
-        }
-
-        None
-    }
-
     fn spawn_listener(
         &self,
         instance_id: WorkerId,
@@ -884,15 +721,179 @@ impl WorkerRegistry {
             return;
         }
 
-        #[cfg(feature = "indexer-runtime")]
-        if self
-            .discovered_workers
-            .iter()
-            .any(|entry| entry.value() == key)
-        {
-            return;
+        self.indexers.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn test_registry() -> WorkerRegistry {
+        WorkerRegistry::new(1)
+    }
+
+    #[tokio::test]
+    async fn deregister_removes_watermark() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15557".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(registry.watermarks.contains_key(&(1, 0)));
+
+        registry
+            .deregister(1, "test-model", "default")
+            .await
+            .unwrap();
+
+        assert!(
+            !registry.watermarks.contains_key(&(1, 0)),
+            "watermark should be removed after deregister"
+        );
+    }
+
+    #[tokio::test]
+    async fn deregister_dp_rank_removes_watermark() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15558".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15559".to_string(),
+                1,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(registry.watermarks.contains_key(&(1, 0)));
+        assert!(registry.watermarks.contains_key(&(1, 1)));
+
+        registry
+            .deregister_dp_rank(1, 1, "test-model", "default")
+            .await
+            .unwrap();
+
+        assert!(
+            registry.watermarks.contains_key(&(1, 0)),
+            "watermark for dp_rank 0 should remain"
+        );
+        assert!(
+            !registry.watermarks.contains_key(&(1, 1)),
+            "watermark for dp_rank 1 should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_register_gets_fresh_watermark() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15560".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Simulate that the listener advanced the watermark.
+        if let Some(wm) = registry.watermarks.get(&(1, 0)) {
+            wm.store(42, Ordering::Release);
         }
 
-        self.indexers.remove(key);
+        registry
+            .deregister(1, "test-model", "default")
+            .await
+            .unwrap();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15561".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let wm = registry
+            .watermarks
+            .get(&(1, 0))
+            .expect("watermark should exist after re-register");
+        assert_eq!(
+            wm.load(Ordering::Acquire),
+            u64::MAX,
+            "re-registered watermark should be fresh (u64::MAX)"
+        );
+    }
+
+    #[tokio::test]
+    async fn deregister_all_tenants_removes_watermarks() {
+        let registry = test_registry();
+        registry.signal_ready();
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15562".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(registry.watermarks.contains_key(&(1, 0)));
+
+        registry
+            .deregister_all_tenants(1, "test-model")
+            .await
+            .unwrap();
+
+        assert!(
+            !registry.watermarks.contains_key(&(1, 0)),
+            "watermark should be removed after deregister_all_tenants"
+        );
     }
 }

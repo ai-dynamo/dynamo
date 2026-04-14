@@ -13,8 +13,11 @@ DYNAMIC_FLAG_PREFIX = "--trtllm."
 def infer_type(value: str) -> Any:
     """Infer the Python type of a CLI value string.
 
-    Tries int, float, bool, then falls back to string.
+    Tries None, int, float, bool, then falls back to string.
     """
+    # none / null
+    if value.lower() in ("none", "null"):
+        return None
     # int
     try:
         return int(value)

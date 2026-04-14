@@ -91,7 +91,7 @@ jobs:
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
-          all_arch: 'true'
+          arch: 'linux/amd64,linux/arm64'
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -156,6 +156,7 @@ jobs:
           echo "extra_tags: ${{ steps.calculate-target-tag.outputs.azure_target_image_uri }}"
           echo "epp_image_uri: ${{ steps.calculate-target-tag.outputs.epp_image_uri }}"
           echo "push_image: true"
+
 
       - name: Build Frontend Container
         id: build-image

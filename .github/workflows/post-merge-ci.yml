@@ -25,7 +25,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
@@ -36,8 +36,8 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
+      single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -50,7 +50,7 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
@@ -61,8 +61,8 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
+      single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -75,7 +75,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
@@ -86,8 +86,8 @@ jobs:
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
       single_gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
       multi_gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
-      cpu_only_test_timeout_minutes: 60
-      single_gpu_test_timeout_minutes: 60
+      cpu_only_test_timeout_minutes: 10
+      single_gpu_test_timeout_minutes: 120
       multi_gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -96,11 +96,11 @@ jobs:
   # ============================================================================
   vllm-dev-pipeline:
     name: vllm-dev
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: vllm
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
@@ -111,11 +111,11 @@ jobs:
 
   sglang-dev-pipeline:
     name: sglang-dev
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: sglang
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
@@ -126,11 +126,11 @@ jobs:
 
   trtllm-dev-pipeline:
     name: trtllm-dev
-    uses: ./.github/workflows/build-flavor-matrix.yml
+    uses: ./.github/workflows/build-flavor.yml
     with:
       framework: trtllm
       target: dev
-      platforms: '["amd64", "arm64"]'
+      platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
@@ -150,7 +150,7 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platforms: '["amd64"]'
+      platform: 'linux/amd64'
       cuda_versions: '["12.9"]'
       make_efa: true
       extra_tags: |
@@ -174,7 +174,7 @@ jobs:
     with:
       framework: trtllm
       target: runtime
-      platforms: '["amd64"]'
+      platform: 'linux/amd64'
       cuda_versions: '["13.1"]'
       make_efa: true
       extra_tags: |
@@ -191,105 +191,65 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # FRONTEND IMAGE BUILD
+  # ============================================================================
+  frontend-image:
+    name: Frontend Image
+    uses: ./.github/workflows/build-frontend-image.yaml
+    with:
+      skip_change_detection: true
+    secrets: inherit
+
+  # ============================================================================
   # Operator
   # ============================================================================
 
   operator:
     name: Operator
     runs-on: prod-default-v2
-    env:
-      IMAGE_REGISTRY: ai-dynamo
-      IMAGE_REPOSITORY: dynamo
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     outputs:
-      operator_default_tag: ${{ steps.build-and-push-image.outputs.operator_default_tag }}
+      operator_default_tag: ${{ steps.build.outputs.image_tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
+      - name: Build and push operator
+        id: build
+        uses: ./.github/actions/build-deploy-component
         with:
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-          flavor: general
-          all_arch: 'true'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
+          component: operator
+          image_tag: ${{ github.sha }}-operator
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Linter
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Tester
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Set up Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
+
+# ============================================================================
+# Snapshot Agent
+# ============================================================================
+
+  snapshot-agent:
+    name: Snapshot Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
         with:
-          go-version: '1.25'
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install Python dependencies for operator codegen
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "pydantic>=2,<3" "black==23.1.0" "pyyaml>=6.0"
-      - name: Check for uncommitted changes
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          make check
-      - name: Build and push Container
-        id: build-and-push-image
-        shell: bash
-        working-directory: ./deploy/operator
-        env:
-          NO_CACHE_FLAG: '' # placeholder for future logic to add no cache flag if needed
-        run: |
-          ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          IMAGE_URIS=(
-            "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-          )
-
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            IMAGE_URIS+=(
-              "${ECR_DEFAULT_IMAGE_BASE}:main-operator"
-              "${ACR_IMAGE_BASE}:main-operator"
-            )
-          fi
-
-          echo "operator_default_tag=${DEFAULT_TAG}" >> $GITHUB_OUTPUT
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          echo "flags for docker buildx: ${TAGGING_FLAGS}"
-
-          if [[ "$NO_CACHE_FLAG" == "true" ]]; then
-            NO_CACHE_FLAG="--no-cache"
-          fi
-          docker buildx build --push ${NO_CACHE_FLAG} \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              ${TAGGING_FLAGS} -f Dockerfile .
-
-          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
 
   # ============================================================================
   # DEPLOYMENT JOBS
@@ -297,170 +257,147 @@ jobs:
   # ============================================================================
 
   deploy-operator:
-    runs-on: prod-default-small-v2
     needs: [operator]
+    runs-on: prod-default-small-v2
     outputs:
-      NAMESPACE: ${{ steps.namespace.outputs.namespace }}
-      OPERATOR_TAG: ${{ steps.operator-tag.outputs.tag }}
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
     steps:
     - uses: actions/checkout@v4
-    - name: Determine operator tag
-      id: operator-tag
-      run: |
-        if [ "${{ needs.operator.result }}" == "success" ]; then
-          TAG="${{ needs.operator.outputs.operator_default_tag }}"
-        else
-          TAG="main-operator"
-        fi
-        echo "tag=${TAG}" >> $GITHUB_OUTPUT
-        echo "Using operator tag: ${TAG}"
-    - name: Generate namespace name
-      id: namespace
-      env:
-        BRANCH: ${{ github.ref_name }}
-      run: |
-        # Sanitize branch name for k8s namespace
-        # Invalid patterns: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/
-        BRANCH_SANITIZED="${BRANCH//\//-}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
-        BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
-        NAMESPACE="gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt"
-        echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
-    - name: Setup namespace and operator
-      uses: ./.github/actions/setup-deploy-namespace
+    - name: Setup vCluster and operator
+      id: setup
+      uses: ./.github/actions/setup-dynamo-operator
       with:
         kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-        namespace: ${{ steps.namespace.outputs.namespace }}
         registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-        operator_tag: ${{ steps.operator-tag.outputs.tag }}
+        operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
         hf_token: ${{ secrets.HF_TOKEN }}
         dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
-  # ============================================================================
-  # End-to-end tests for each framework with various deployment profiles
-  # ============================================================================
-
   deploy-test-vllm:
-    runs-on: prod-default-small-v2
     needs: [deploy-operator, vllm-pipeline]
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        profile:
-          - agg
-          - agg_router
-          - disagg
-          - disagg_router
-    name: deploy-test-vllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: vllm
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-          framework: ${{ env.FRAMEWORK }}
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
-          platform_arch: amd64
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: vllm
+      profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
+      image_suffix: vllm-runtime-cuda12
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
 
   deploy-test-sglang:
-    runs-on: prod-default-small-v2
     needs: [deploy-operator, sglang-pipeline]
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        profile:
-          - agg
-          - agg_router
-    name: deploy-test-sglang (${{ matrix.profile }})
-    env:
-      FRAMEWORK: sglang
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
-          hf_token: ${{ secrets.HF_TOKEN }}
-          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-          framework: ${{ env.FRAMEWORK }}
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime-cuda12-amd64
-          platform_arch: amd64
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: sglang
+      profiles: '["agg", "agg_router"]'
+      image_suffix: sglang-runtime-cuda12
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
 
   deploy-test-trtllm:
-    runs-on: prod-default-small-v2
     needs: [deploy-operator, trtllm-pipeline]
-    timeout-minutes: 25
+    uses: ./.github/workflows/shared-deploy-test.yml
+    with:
+      framework: trtllm
+      profiles: '["agg", "agg_router"]'
+      image_suffix: trtllm-runtime-cuda13
+      namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  deploy-cleanup:
+    if: always()
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    runs-on: prod-default-small-v2
+    steps:
+    - uses: actions/checkout@v4
+    - name: Teardown vCluster
+      if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
+      uses: ./.github/actions/teardown-dynamo-operator
+      with:
+        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+        vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+        vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+
+  # ============================================================================
+  # GAIE DEPLOY TEST
+  # ============================================================================
+  deploy-test-gaie:
+    name: GAIE Deploy Test
+    runs-on: prod-default-small-v2
+    needs: [deploy-operator, frontend-image, vllm-pipeline]
+    timeout-minutes: 30
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        profile:
-          - agg
-          - agg_router
-          # Disabled: trtllm disagg profiles consistently timeout (~32 min) with 0% success rate.
-          # Re-enable once the underlying disagg deployment issue is resolved.
-          # - disagg
-          # - disagg_router
-    name: deploy-test-trtllm (${{ matrix.profile }})
-    env:
-      FRAMEWORK: trtllm
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
         with:
           kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: ${{ needs.deploy-operator.outputs.OPERATOR_TAG }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-          framework: ${{ env.FRAMEWORK }}
-          profile: ${{ matrix.profile }}
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime-cuda13-amd64
-          platform_arch: amd64
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Install GAIE prerequisites (Gateway API, kgateway, Inference Extension CRDs)
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
+          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
+          export NAMESPACE=default
+          bash deploy/inference-gateway/scripts/install_gaie_crd_kgateway.sh
+          rm -f ${{ github.workspace }}/.kubeconfig_gaie
+      - name: Run GAIE Deploy Test
+        id: deploy-test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          test_name: gaie
+          extra_pytest_args: >-
+            -m framework_with_gaie
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
+    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
     if: always()
     steps:
       - name: "Check all deploy test jobs"
         run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
 
   # ============================================================================
   # CLEANUP JOBS
@@ -470,7 +407,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator]
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -486,27 +423,12 @@ jobs:
       run: |
         docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
 
-  cleanup:
-    name: Cleanup AKS resources
-    runs-on: prod-default-small-v2
-    if: always()
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm]
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-    - name: Teardown namespace
-      if: needs.deploy-operator.outputs.NAMESPACE != ''
-      uses: ./.github/actions/teardown-deploy-namespace
-      with:
-        kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-        namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm ]
+    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:
       contents: read
     steps:

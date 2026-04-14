@@ -21,8 +21,8 @@ import os
 import yaml
 
 from deploy.utils.dynamo_deployment import DynamoDeploymentClient
-from dynamo.planner.defaults import SubComponentType
-from dynamo.planner.utils.planner_config import PlannerPreDeploymentSweepMode
+from dynamo.planner.config.defaults import SubComponentType
+from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.config import Config, get_service_name_by_type
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (

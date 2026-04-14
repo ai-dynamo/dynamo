@@ -43,13 +43,6 @@ class DynamoSGLangArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
-            flag_name="--multimodal-processor",
-            env_var="DYN_SGL_MULTIMODAL_PROCESSOR",
-            default=False,
-            help="Run as multimodal processor component for handling multimodal requests.",
-        )
-        add_negatable_bool_argument(
-            g,
             flag_name="--multimodal-encode-worker",
             env_var="DYN_SGL_MULTIMODAL_ENCODE_WORKER",
             default=False,
@@ -108,13 +101,19 @@ class DynamoSGLangArgGroup(ArgGroup):
             default=False,
             help="Run as video generation worker for video generation (T2V/I2V).",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-rl",
+            env_var="DYN_SGL_ENABLE_RL",
+            default=False,
+            help="Enable RL training support. Registers the call_tokenizer_manager engine route for generic tokenizer_manager passthrough.",
+        )
 
 
 class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
     use_sglang_tokenizer: bool
-    multimodal_processor: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
     embedding_transfer_mode: EmbeddingTransferMode
@@ -125,6 +124,7 @@ class DynamoSGLangConfig(ConfigBase):
     disagg_config_key: Optional[str] = None
 
     video_generation_worker: bool
+    enable_rl: bool
 
     def validate(self) -> None:
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):

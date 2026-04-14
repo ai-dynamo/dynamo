@@ -480,11 +480,9 @@ spec:
           type: string
         - jsonPath: .status.conditions[?(@.type=="Succeeded")].reason
           name: Reason
-          priority: 1
           type: string
         - jsonPath: .status.conditions[?(@.type=="Succeeded")].message
           name: Message
-          priority: 1
           type: string
         - jsonPath: .status.dgdName
           name: DGD
@@ -566,7 +564,7 @@ spec:
                     planner:
                       description: |-
                         Planner is the raw SLA planner configuration passed to the planner service.
-                        Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.
+                        Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
                         Go treats this as opaque bytes; the Planner service validates it at startup.
                         The presence of this field (non-null) enables the planner in the generated DGD.
                       type: object

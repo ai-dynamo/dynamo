@@ -4,7 +4,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{config::KvRouterConfig, protocols::WorkerId};
+use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig, protocols::WorkerId};
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
@@ -24,6 +24,7 @@ use crate::{
     types::{
         generic::tensor::TensorStreamingEngine,
         openai::{
+            audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
@@ -45,17 +46,11 @@ pub enum ModelManagerError {
     #[error("Model not found: {0}")]
     ModelNotFound(String),
 
+    #[error("Model unavailable: {0}")]
+    ModelUnavailable(String),
+
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
-
-    #[error(
-        "Checksum mismatch for model {model}: expected {expected}, got {got}. All WorkerSets of a model must share the same checksum. Drain all old workers before deploying a new version."
-    )]
-    ChecksumMismatch {
-        model: String,
-        expected: String,
-        got: String,
-    },
 }
 
 /// Central manager for model engines, routing, and configuration.
@@ -124,15 +119,9 @@ impl ModelManager {
     }
 
     /// Add a WorkerSet to a Model. Creates the Model if it doesn't exist.
-    /// Returns `Err` if the WorkerSet's checksum doesn't match the model's canonical checksum.
-    pub fn add_worker_set(
-        &self,
-        model_name: &str,
-        namespace: &str,
-        worker_set: WorkerSet,
-    ) -> Result<(), ModelManagerError> {
+    pub fn add_worker_set(&self, model_name: &str, namespace: &str, worker_set: WorkerSet) {
         let model = self.get_or_create_model(model_name);
-        model.add_worker_set(namespace.to_string(), Arc::new(worker_set))
+        model.add_worker_set(namespace.to_string(), Arc::new(worker_set));
     }
 
     /// Remove a WorkerSet from a Model. Removes the Model if it becomes empty.
@@ -142,16 +131,6 @@ impl ModelManager {
         drop(model);
         self.remove_model_if_empty(model_name);
         removed
-    }
-
-    // -- Checksum validation --
-
-    /// Check if a candidate checksum is valid for a model.
-    /// Returns `Some(true)` if it matches the model's canonical checksum, `Some(false)` if it
-    /// doesn't match, or `None` if the model doesn't exist or has no canonical checksum yet.
-    pub fn is_valid_checksum(&self, model_name: &str, candidate_checksum: &str) -> Option<bool> {
-        let model = self.models.get(model_name)?;
-        model.is_valid_checksum(candidate_checksum)
     }
 
     // -- Model cards --
@@ -315,6 +294,16 @@ impl ModelManager {
             .get_videos_engine()
     }
 
+    pub fn get_audios_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_audios_engine()
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -372,7 +361,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.chat_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -393,7 +382,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.completions_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -414,7 +403,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.embeddings_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -435,7 +424,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.tensor_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -456,7 +445,7 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.images_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -477,7 +466,28 @@ impl ModelManager {
             ModelDeploymentCard::default(),
         );
         ws.videos_engine = Some(engine);
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
+    pub fn add_audios_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIAudiosStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_audios_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_audios_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            ModelDeploymentCard::default(),
+        );
+        ws.audios_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -496,7 +506,7 @@ impl ModelManager {
             card_checksum.to_string(),
             ModelDeploymentCard::default(),
         );
-        model_entry.add_worker_set(namespace, Arc::new(ws))?;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
 
@@ -555,13 +565,16 @@ impl ModelManager {
 
     // -- KV Router creation --
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
         &self,
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_type: &'static str,
         model_name: Option<String>,
+        is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let client = endpoint.client().await?;
 
@@ -580,6 +593,7 @@ impl ModelManager {
             component: router_endpoint_id.component.clone(),
             endpoint: router_endpoint_id.name.clone(),
             transport,
+            device_type: None,
         };
 
         discovery.register(discovery_spec).await?;
@@ -587,19 +601,18 @@ impl ModelManager {
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
-        let selector = Box::new(DefaultWorkerSelector::new(
-            kv_router_config.clone(),
-            worker_type,
-        ));
+        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), worker_type);
         let chooser = KvRouter::new(
             endpoint.clone(),
             client,
             workers_with_configs,
             kv_cache_block_size,
-            Some(selector),
+            selector,
             kv_router_config,
+            prefill_load_estimator,
             worker_type,
             model_name,
+            is_eagle,
         )
         .await?;
         Ok(Arc::new(chooser))
@@ -693,6 +706,39 @@ impl ModelManager {
                 );
             }
             None => {
+                // Try to reactivate an existing deactivated router first.
+                // This handles prefill rejoin after a transient failure: the decode
+                // WorkerSet's PrefillRouter already exists but is deactivated.
+                if let Some(model) = self.get_model(model_name)
+                    && let Some(ws) = model.get_worker_set(namespace)
+                    && let Some(ref pr) = ws.prefill_router
+                    && pr.is_deactivated()
+                {
+                    pr.reactivate();
+                    // Store the endpoint so that if the decode WorkerSet is rebuilt
+                    // (removed and re-added), a subsequent register_prefill_router call
+                    // finds PrefillReady instead of falling back to DecodeWaiting and
+                    // stalling.
+                    let (tx, rx) = oneshot::channel();
+                    tx.send(endpoint).map_err(|_| {
+                        anyhow::anyhow!(
+                            "Failed to send endpoint for prefill model {}:{}",
+                            model_name,
+                            namespace
+                        )
+                    })?;
+                    self.prefill_router_activators
+                        .insert(key, PrefillActivationState::PrefillReady(rx));
+                    tracing::info!(
+                        model_name = %model_name,
+                        namespace = %namespace,
+                        "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
+                    );
+                    return Ok(());
+                }
+
+                // No existing deactivated router -- store endpoint for a future decode
+                // registration.
                 let (tx, rx) = oneshot::channel();
                 tx.send(endpoint).map_err(|_| {
                     anyhow::anyhow!(
@@ -710,6 +756,18 @@ impl ModelManager {
                 );
                 Ok(())
             }
+        }
+    }
+
+    /// Deactivate the prefill router on the decode WorkerSet for the given model/namespace.
+    /// Called by the watcher when all prefill workers in a namespace are removed.
+    /// After deactivation, requests fall back to aggregated mode (or fail if enforce_disagg).
+    pub fn deactivate_prefill_router_for_decode(&self, model_name: &str, namespace: &str) {
+        if let Some(model) = self.get_model(model_name)
+            && let Some(ws) = model.get_worker_set(namespace)
+            && let Some(ref pr) = ws.prefill_router
+        {
+            pr.deactivate();
         }
     }
 
@@ -821,7 +879,7 @@ mod tests {
     fn test_add_and_get_worker_set() {
         let mm = ModelManager::new();
         let ws = make_worker_set("ns1", "abc");
-        mm.add_worker_set("llama", "ns1", ws).unwrap();
+        mm.add_worker_set("llama", "ns1", ws);
 
         let model = mm.get_model("llama");
         assert!(model.is_some());
@@ -835,16 +893,14 @@ mod tests {
         let mm = ModelManager::new();
         assert!(mm.get_model("llama").is_none());
 
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.get_model("llama").is_some());
     }
 
     #[test]
     fn test_remove_worker_set_removes_empty_model() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.get_model("llama").is_some());
 
         let removed = mm.remove_worker_set("llama", "ns1");
@@ -858,10 +914,8 @@ mod tests {
     #[test]
     fn test_remove_worker_set_keeps_model_with_remaining() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
-        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc"));
 
         mm.remove_worker_set("llama", "ns1");
 
@@ -881,8 +935,7 @@ mod tests {
     #[test]
     fn test_remove_worker_set_nonexistent_namespace() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.remove_worker_set("llama", "ns2").is_none());
 
         // Model should still exist (ns1 still there)
@@ -892,8 +945,7 @@ mod tests {
     #[test]
     fn test_remove_model_if_empty_noop_when_not_empty() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
 
         mm.remove_model_if_empty("llama");
         assert!(mm.get_model("llama").is_some()); // Still has ns1
@@ -908,10 +960,8 @@ mod tests {
     #[test]
     fn test_remove_model() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
-        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc"));
 
         let removed = mm.remove_model("llama");
         assert!(removed.is_some());
@@ -927,56 +977,6 @@ mod tests {
         assert!(Arc::ptr_eq(&m1, &m2));
     }
 
-    // -- Checksum validation tests --
-
-    #[test]
-    fn test_is_valid_checksum_match() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc123"))
-            .unwrap();
-
-        assert_eq!(mm.is_valid_checksum("llama", "abc123"), Some(true));
-    }
-
-    #[test]
-    fn test_is_valid_checksum_mismatch() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc123"))
-            .unwrap();
-
-        assert_eq!(mm.is_valid_checksum("llama", "wrong"), Some(false));
-    }
-
-    #[test]
-    fn test_is_valid_checksum_no_canonical_yet() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc123"))
-            .unwrap();
-
-        // Canonical is set, so even for a "new namespace" scenario the checksum is checked
-        assert_eq!(mm.is_valid_checksum("llama", "abc123"), Some(true));
-        assert_eq!(mm.is_valid_checksum("llama", "xyz"), Some(false));
-    }
-
-    #[test]
-    fn test_is_valid_checksum_missing_model() {
-        let mm = ModelManager::new();
-        assert_eq!(mm.is_valid_checksum("nonexistent", "abc"), None);
-    }
-
-    #[test]
-    fn test_is_valid_checksum_cross_namespace_enforcement() {
-        let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "checksum_a"))
-            .unwrap();
-
-        // A different namespace with a different checksum should be rejected at the model level
-        assert_eq!(mm.is_valid_checksum("llama", "checksum_b"), Some(false));
-
-        // Same checksum is accepted
-        assert_eq!(mm.is_valid_checksum("llama", "checksum_a"), Some(true));
-    }
-
     // -- Model listing and filtering tests --
 
     #[test]
@@ -987,8 +987,7 @@ mod tests {
         assert!(!mm.has_decode_model("llama"));
 
         // Prefill-only set (no engines) → false
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(!mm.has_decode_model("llama"));
     }
 
@@ -997,8 +996,7 @@ mod tests {
         let mm = ModelManager::new();
 
         // Prefill set = no engines
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.has_prefill_model("llama"));
     }
 
@@ -1007,16 +1005,14 @@ mod tests {
         let mm = ModelManager::new();
         assert!(!mm.has_model_any("llama"));
 
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
         assert!(mm.has_model_any("llama")); // has prefill
     }
 
     #[test]
     fn test_model_display_names_includes_prefill() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
 
         let names = mm.model_display_names();
         assert!(names.contains("llama"));
@@ -1031,10 +1027,8 @@ mod tests {
     #[test]
     fn test_list_prefill_models() {
         let mm = ModelManager::new();
-        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"))
-            .unwrap();
-        mm.add_worker_set("gpt", "ns1", make_worker_set("ns1", "def"))
-            .unwrap();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.add_worker_set("gpt", "ns1", make_worker_set("ns1", "def"));
 
         let prefill = mm.list_prefill_models();
         assert_eq!(prefill.len(), 2);
@@ -1142,6 +1136,164 @@ mod tests {
         assert_eq!(
             ModelManager::model_namespace_key("gpt-4", "default-abc"),
             "gpt-4:default-abc"
+        );
+    }
+
+    // -- deactivate_prefill_router_for_decode tests --
+
+    use crate::kv_router::PrefillRouter;
+
+    /// Helper: make a WorkerSet with an activated PrefillRouter attached.
+    /// The router is marked as activated to simulate a real deployment where
+    /// the prefill endpoint has already rendezvoused with the decode side.
+    fn make_worker_set_with_prefill_router(
+        namespace: &str,
+        mdcsum: &str,
+        enforce_disagg: bool,
+    ) -> WorkerSet {
+        let mut ws = make_worker_set(namespace, mdcsum);
+        let pr = PrefillRouter::disabled(
+            std::sync::Arc::new(ModelManager::new()),
+            dynamo_runtime::pipeline::RouterMode::RoundRobin,
+            enforce_disagg,
+        );
+        pr.mark_activated_for_test();
+        ws.prefill_router = Some(pr);
+        ws
+    }
+
+    /// Calling deactivate on a non-existent model must not panic.
+    #[test]
+    fn test_deactivate_prefill_router_for_decode_noop_missing_model() {
+        let mm = ModelManager::new();
+        mm.deactivate_prefill_router_for_decode("nonexistent", "ns1");
+    }
+
+    /// Calling deactivate on a WorkerSet without a prefill_router must not panic.
+    #[test]
+    fn test_deactivate_prefill_router_for_decode_noop_no_router() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc"));
+        mm.deactivate_prefill_router_for_decode("llama", "ns1");
+    }
+
+    /// Full pipeline test: deactivate finds the WorkerSet, calls deactivate() on its
+    /// PrefillRouter, and the model is hidden from model_display_names() when
+    /// enforce_disagg=true.
+    #[test]
+    fn test_deactivate_prefill_router_for_decode_hides_model() {
+        let mm = ModelManager::new();
+        mm.add_worker_set(
+            "llama",
+            "ns1",
+            make_worker_set_with_prefill_router("ns1", "abc", true),
+        );
+
+        // Model is visible before deactivation.
+        assert!(mm.model_display_names().contains("llama"));
+
+        mm.deactivate_prefill_router_for_decode("llama", "ns1");
+
+        // Model must be hidden after deactivation with enforce_disagg=true.
+        assert!(
+            !mm.model_display_names().contains("llama"),
+            "model must be hidden after prefill deactivation with enforce_disagg=true"
+        );
+
+        // Idempotent: calling again must not panic.
+        mm.deactivate_prefill_router_for_decode("llama", "ns1");
+        assert!(!mm.model_display_names().contains("llama"));
+    }
+
+    /// Full disagg lifecycle with enforce_disagg=true:
+    /// decode registers -> prefill registers -> prefill dies -> model hidden.
+    #[test]
+    fn test_disagg_lifecycle_prefill_death_hides_model() {
+        let mm = ModelManager::new();
+
+        // Step 1: Decode WorkerSet with a PrefillRouter (not yet deactivated).
+        mm.add_worker_set(
+            "llama",
+            "decode-ns",
+            make_worker_set_with_prefill_router("decode-ns", "abc", true),
+        );
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 1: model must be visible with active prefill router"
+        );
+
+        // Step 2: Prefill WorkerSet registers (same model, different namespace key).
+        mm.add_worker_set("llama", "prefill-ns", make_worker_set("prefill-ns", "abc"));
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "step 2: model must be visible with both decode and prefill"
+        );
+
+        // Step 3: Prefill WorkerSet removed (engine dies).
+        mm.remove_worker_set("llama", "prefill-ns");
+
+        // Step 4: Deactivate the prefill router on the decode side.
+        mm.deactivate_prefill_router_for_decode("llama", "decode-ns");
+        assert!(
+            !mm.model_display_names().contains("llama"),
+            "step 4: model must be hidden after prefill death with enforce_disagg=true"
+        );
+    }
+
+    /// Full disagg lifecycle with enforce_disagg=false (fallback allowed).
+    #[test]
+    fn test_disagg_lifecycle_prefill_death_keeps_model_no_enforce() {
+        let mm = ModelManager::new();
+
+        mm.add_worker_set(
+            "llama",
+            "decode-ns",
+            make_worker_set_with_prefill_router("decode-ns", "abc", false),
+        );
+        assert!(mm.model_display_names().contains("llama"));
+
+        // Deactivate -- model stays visible (enforce_disagg=false, fallback allowed).
+        mm.deactivate_prefill_router_for_decode("llama", "decode-ns");
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "model must remain visible (enforce_disagg=false, fallback allowed)"
+        );
+    }
+
+    /// Full disagg lifecycle including prefill rejoin after transient failure.
+    /// decode registers -> prefill dies -> model hidden -> prefill rejoins -> model visible.
+    #[test]
+    fn test_disagg_lifecycle_prefill_rejoin_restores_model() {
+        let mm = ModelManager::new();
+
+        // Decode WorkerSet with enforce_disagg=true.
+        mm.add_worker_set(
+            "llama",
+            "decode-ns",
+            make_worker_set_with_prefill_router("decode-ns", "abc", true),
+        );
+        assert!(mm.model_display_names().contains("llama"));
+
+        // Prefill dies -> deactivate.
+        mm.deactivate_prefill_router_for_decode("llama", "decode-ns");
+        assert!(
+            !mm.model_display_names().contains("llama"),
+            "model must be hidden after prefill death"
+        );
+
+        // Prefill rejoins -> reactivate via the WorkerSet's PrefillRouter.
+        if let Some(model) = mm.get_model("llama")
+            && let Some(ws) = model.get_worker_set("decode-ns")
+            && let Some(ref pr) = ws.prefill_router
+        {
+            pr.reactivate();
+        } else {
+            panic!("decode WorkerSet or prefill_router not found");
+        }
+
+        assert!(
+            mm.model_display_names().contains("llama"),
+            "model must be visible again after prefill rejoin"
         );
     }
 }

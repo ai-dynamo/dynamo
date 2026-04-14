@@ -23,8 +23,10 @@ import (
 	"sort"
 	"strings"
 
+	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
@@ -33,6 +35,7 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -85,9 +88,13 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
+// +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -143,6 +150,8 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if err == nil {
 			dynamoDeployment.Status.ObservedGeneration = dynamoDeployment.Generation
 		}
+		// Propagate topology condition from framework (e.g., Grove PCS) to DGD status
+		r.propagateTopologyCondition(ctx, dynamoDeployment)
 
 		updateErr := r.Status().Update(ctx, dynamoDeployment)
 		if updateErr != nil {
@@ -320,6 +329,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile EPP resources: %w", err)
 	}
 
+	// Reconcile the wait-for-leader ConfigMap for multinode mp deployments
+	err = r.reconcileWaitLeaderConfigMap(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile wait-leader ConfigMap")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile wait-leader ConfigMap: %w", err)
+	}
+
 	// Determine if any service is multinode
 	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
 
@@ -418,6 +434,75 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 	return updatedInProgress
 }
 
+// propagateTopologyCondition reads the PCS topology condition from Grove and maps it
+// to a TopologyLevelsAvailable condition on the DGD. This is a no-op when no
+// topology constraints are set or when the Grove pathway is not in use.
+func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+	if !dgd.HasAnyTopologyConstraint() || !r.isGrovePathway(dgd) {
+		return
+	}
+	logger := log.FromContext(ctx)
+
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs); err != nil {
+		if errors.IsNotFound(err) {
+			return
+		}
+		logger.V(1).Info("failed to read PCS for topology condition propagation", "error", err)
+		return
+	}
+
+	// Look for Grove's TopologyLevelsUnavailable condition on the PCS.
+	var groveTopoCond *metav1.Condition
+	for i := range pcs.Status.Conditions {
+		if pcs.Status.Conditions[i].Type == groveconstants.ConditionTopologyLevelsUnavailable {
+			groveTopoCond = &pcs.Status.Conditions[i]
+			break
+		}
+	}
+
+	var dynamoCond metav1.Condition
+	if groveTopoCond == nil {
+		// No topology condition from Grove yet — don't assume healthy.
+		dynamoCond = metav1.Condition{
+			Type:               nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable,
+			Status:             metav1.ConditionUnknown,
+			Reason:             nvidiacomv1alpha1.ConditionReasonTopologyConditionPending,
+			Message:            "Waiting for topology condition from the scheduling framework",
+			LastTransitionTime: metav1.Now(),
+		}
+	} else if groveTopoCond.Status == metav1.ConditionTrue {
+		// Grove reports topology levels are unavailable.
+		reason := nvidiacomv1alpha1.ConditionReasonTopologyLevelsUnavailable
+		if groveTopoCond.Reason == groveconstants.ConditionReasonClusterTopologyNotFound {
+			reason = nvidiacomv1alpha1.ConditionReasonTopologyDefinitionNotFound
+		}
+		dynamoCond = metav1.Condition{
+			Type:               nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            groveTopoCond.Message,
+			LastTransitionTime: metav1.Now(),
+		}
+		prev := meta.FindStatusCondition(dgd.Status.Conditions, nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable)
+		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason || prev.Message != groveTopoCond.Message {
+			logger.Info("Topology constraints no longer enforced", "reason", reason, "message", groveTopoCond.Message)
+			r.Recorder.Eventf(dgd, corev1.EventTypeWarning, reason, "Topology constraints no longer enforced: %s", groveTopoCond.Message)
+		}
+	} else {
+		// Grove's TopologyLevelsUnavailable is False → all levels available.
+		dynamoCond = metav1.Condition{
+			Type:               nvidiacomv1alpha1.ConditionTypeTopologyLevelsAvailable,
+			Status:             metav1.ConditionTrue,
+			Reason:             nvidiacomv1alpha1.ConditionReasonAllTopologyLevelsAvailable,
+			Message:            "All required topology levels are available in the cluster topology",
+			LastTransitionTime: metav1.Now(),
+		}
+	}
+
+	dgd.AddStatusCondition(dynamoCond)
+}
+
 func isRestartAlreadyProcessed(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
 		return true
@@ -473,7 +558,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 	}
 
 	// generate the dynamoComponentsDeployments from the config
-	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.RuntimeConfig, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
+	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.RuntimeConfig, r.Client, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
@@ -575,6 +660,27 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
+
+	// Sync ResourceClaimTemplates for GMS-enabled components before creating pods.
+	if r.RuntimeConfig.DRAEnabled {
+		for serviceName, component := range dynamoDeployment.Spec.Services {
+			svcComponent := component
+			claimTemplateName := dynamo.GMSResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
+			_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+				return dynamo.GenerateGMSResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, svcComponent)
+			})
+			if err != nil {
+				logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
+				return ReconcileResult{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", serviceName, err)
+			}
+		}
+	} else {
+		for _, component := range dynamoDeployment.Spec.Services {
+			if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+				return ReconcileResult{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
+			}
+		}
+	}
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
 	if err != nil {
@@ -1505,6 +1611,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
 	return nil
+}
+
+// reconcileWaitLeaderConfigMap ensures the wait-for-leader Python script
+// ConfigMap exists for multinode DGDs. The ConfigMap is only mounted by
+// vLLM mp worker pods (via UpdatePodSpec); for other backends it is inert.
+func (r *DynamoGraphDeploymentReconciler) reconcileWaitLeaderConfigMap(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	if !dgd.HasAnyMultinodeService() {
+		return nil
+	}
+
+	cm := dynamo.GenerateWaitLeaderConfigMap(dgd.Name, dgd.Namespace)
+	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+		return cm, false, nil
+	})
+	return err
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {

@@ -293,9 +293,9 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 1. The trace is synthesized (same parameters as `real_data_benchmark.py`) and split into low / medium / high tiers according to `--priority-distribution`.
 2. Each tier is sent to aiperf as a concurrent stream. In the priority-tagged run, every request carries an OpenAI-compatible extension header:
    ```json
-   {"nvext": {"agent_hints": {"latency_sensitivity": <value>}}}
+   {"nvext": {"agent_hints": {"priority": <value>}}}
    ```
-   The `latency_sensitivity` value acts as a **priority jump** (in seconds) inside the router's scheduler queue -- a higher value shifts the request's effective arrival time earlier, giving it priority over lower-valued requests.
+   The `priority` value raises the request's router queue priority -- a higher value shifts the request's effective arrival time earlier, giving it priority over lower-valued requests.
 3. Two separate aiperf seeds are used for baseline vs. priority runs to ensure different generated prompt content and prevent mocker KV cache cross-contamination.
 
 #### Prerequisites: enable the priority queue
@@ -332,16 +332,15 @@ python real_data_priority_benchmark.py \
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--priority-distribution` | `0.5,0.3,0.2` | Fraction of requests assigned to low/medium/high tiers (must sum to 1.0) |
-| `--priority-values` | `0,1,2` | `latency_sensitivity` values for low/medium/high tiers (seconds of priority jump) |
+| `--priority-values` | `0,1,2` | `priority` values for low/medium/high tiers |
 
 Examples:
 
 ```bash
 # Equal tier sizes with aggressive priority differentiation.
-# --priority-values sets the latency_sensitivity per tier (low, medium, high).
-# Each value is a priority jump in seconds: the router subtracts it from the
-# request's arrival time, so higher values move the request further ahead
-# in the queue. Here low gets no boost, medium jumps 2s ahead, high jumps 5s.
+# --priority-values sets the request priority per tier (low, medium, high).
+# Higher values move the request further ahead in the router queue.
+# Here low gets no boost, medium gets priority 2, and high gets priority 5.
 python real_data_priority_benchmark.py \
     --input-dataset mooncake_trace.jsonl \
     --num-requests 5000 \

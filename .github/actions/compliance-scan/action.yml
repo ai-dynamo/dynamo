@@ -12,9 +12,9 @@ inputs:
     description: 'Name for the uploaded artifact (e.g., compliance-vllm-cuda12-amd64)'
     required: true
   arch:
-    description: 'Target architecture (amd64, arm64)'
+    description: 'Docker platform string (e.g. linux/amd64, linux/arm64)'
     required: false
-    default: 'amd64'
+    default: 'linux/amd64'
   framework:
     description: 'Framework name for base image resolution (vllm, sglang, trtllm, dynamo)'
     required: false
@@ -78,7 +78,7 @@ runs:
         mkdir -p /tmp/compliance-target
         docker buildx build \
           --builder ${{ steps.builder.outputs.name }} \
-          --platform linux/${{ inputs.arch }} \
+          --platform ${{ inputs.arch }} \
           --build-arg TARGET_IMAGE="${{ inputs.image }}" \
           --output "type=local,dest=/tmp/compliance-target" \
           --pull \
@@ -102,7 +102,7 @@ runs:
         mkdir -p /tmp/compliance-base
         docker buildx build \
           --builder ${{ steps.builder.outputs.name }} \
-          --platform linux/${{ inputs.arch }} \
+          --platform ${{ inputs.arch }} \
           --build-arg TARGET_IMAGE="${{ steps.resolve-base.outputs.base_image }}" \
           --output "type=local,dest=/tmp/compliance-base" \
           --pull \

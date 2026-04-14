@@ -28,10 +28,36 @@ helm repo update
 echo ""
 echo "Step 3: Installing kube-prometheus-stack..."
 echo "This includes: Prometheus Operator, Prometheus, Grafana, Alertmanager"
+PROMETHEUS_REMOTE_WRITE_ARGS=()
+if [ -n "${REMOTE_WRITE_HOST:-}" ]; then
+  REMOTE_WRITE_PORT="${REMOTE_WRITE_PORT:-9091}"
+  REMOTE_WRITE_METRIC_REGEX="${REMOTE_WRITE_METRIC_REGEX:-^agent_.*}"
+  echo "Remote write enabled: pushing metrics to ${REMOTE_WRITE_HOST}:${REMOTE_WRITE_PORT} (filter: ${REMOTE_WRITE_METRIC_REGEX})"
+  REMOTE_WRITE_URL="http://${REMOTE_WRITE_HOST}:${REMOTE_WRITE_PORT}/api/v1/write"
+  REMOTE_WRITE_JSON="$(
+    jq -cn \
+      --arg url "$REMOTE_WRITE_URL" \
+      --arg regex "$REMOTE_WRITE_METRIC_REGEX" \
+      '[
+        {
+          url: $url,
+          writeRelabelConfigs: [
+            {
+              sourceLabels: ["__name__"],
+              regex: $regex,
+              action: "keep"
+            }
+          ]
+        }
+      ]'
+  )"
+  PROMETHEUS_REMOTE_WRITE_ARGS=(--set-json "prometheus.prometheusSpec.remoteWrite=${REMOTE_WRITE_JSON}")
+fi
 helm upgrade --install prometheus -n monitoring --create-namespace prometheus-community/kube-prometheus-stack \
   --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
   --set-json 'prometheus.prometheusSpec.podMonitorNamespaceSelector={}' \
-  --set-json 'prometheus.prometheusSpec.probeNamespaceSelector={}'
+  --set-json 'prometheus.prometheusSpec.probeNamespaceSelector={}' \
+  "${PROMETHEUS_REMOTE_WRITE_ARGS[@]}"
 
 # Step 4: Wait for pods to be ready
 echo ""

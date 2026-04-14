@@ -10,10 +10,10 @@ inputs:
     description: 'Kubernetes namespace for deployment'
     required: true
   registry:
-    description: 'Container registry hostname. Required for rerun self-bootstrap.'
+    description: 'Container registry hostname'
     required: true
   operator_tag:
-    description: 'Operator image tag (default: main-operator). Required for rerun self-bootstrap.'
+    description: 'Operator image tag (default: main-operator)'
     required: false
     default: 'main-operator'
   hf_token:
@@ -31,67 +31,39 @@ inputs:
 
   framework:
     description: 'Framework name (vllm, sglang, trtllm)'
-    required: true
+    required: false
+    default: ''
   profile:
     description: 'Deployment profile (e.g., disagg_router, agg)'
-    required: true
+    required: false
+    default: ''
   image:
     description: 'Full container image reference for the framework runtime'
-    required: true
+    required: false
+    default: ''
   platform_arch:
     description: 'Platform architecture (amd64, arm64)'
     required: false
     default: 'amd64'
+  test_name:
+    description: 'Name for artifact naming. Defaults to {framework}_{profile}.'
+    required: false
+    default: ''
+  extra_pytest_args:
+    description: 'Additional pytest arguments (e.g., --frontend-image=...)'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
   steps:
-    - name: Check if namespace exists
-      id: ns-check
-      shell: bash
-      env:
-        KUBECONFIG_B64: ${{ inputs.kubeconfig_base64 }}
-        NAMESPACE: ${{ inputs.namespace }}
-        FRAMEWORK: ${{ inputs.framework }}
-        PROFILE: ${{ inputs.profile }}
-      run: |
-        echo "::group::Check if namespace exists"
-        echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_check
-        chmod 600 ${{ github.workspace }}/.kubeconfig_check
-        if KUBECONFIG=${{ github.workspace }}/.kubeconfig_check kubectl get namespace $NAMESPACE --ignore-not-found | grep -q $NAMESPACE; then
-          echo "exists=true" >> $GITHUB_OUTPUT
-          echo "ns=${NAMESPACE}" >> $GITHUB_OUTPUT
-          echo "Namespace $NAMESPACE exists, will reuse it"
-        else
-          echo "exists=false" >> $GITHUB_OUTPUT
-          # Use check_run_id (unique per job+retry) to keep namespace under k8s 63-char label limit
-          SELF_NS="${NAMESPACE}-${{ job.check_run_id }}"
-          SELF_NS="${SELF_NS:0:36}"
-          SELF_NS="${SELF_NS%-}"
-          echo "ns=${SELF_NS}" >> $GITHUB_OUTPUT
-          echo "Namespace $NAMESPACE not found, will self-bootstrap as ${SELF_NS}"
-        fi
-        rm -f ${{ github.workspace }}/.kubeconfig_check
-        echo "::endgroup::"
-
-    - name: Setup namespace (self-bootstrap on rerun)
-      if: steps.ns-check.outputs.exists != 'true'
-      uses: ./.github/actions/setup-deploy-namespace
-      with:
-        kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
-        namespace: ${{ steps.ns-check.outputs.ns }}
-        registry: ${{ inputs.registry }}
-        operator_tag: ${{ inputs.operator_tag }}
-        hf_token: ${{ inputs.hf_token }}
-        dockerhub_username: ${{ inputs.dockerhub_username }}
-        dockerhub_password: ${{ inputs.dockerhub_password }}
-
     - name: Setup Kubeconfig
       id: setup-kubeconfig
       shell: bash
       env:
-        NAMESPACE: ${{ steps.ns-check.outputs.ns }}
+        NAMESPACE: ${{ inputs.namespace }}
       run: |
+        set +x
         echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
         chmod 600 ${{ github.workspace }}/.kubeconfig
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
@@ -101,7 +73,7 @@ runs:
         kubectl config get-contexts
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
       with:
         python-version: '3.12'
         cache: 'pip'
@@ -117,27 +89,50 @@ runs:
       shell: bash
       env:
         KUBECONFIG: ${{ github.workspace }}/.kubeconfig
-        NAMESPACE: ${{ steps.ns-check.outputs.ns }}
+        NAMESPACE: ${{ inputs.namespace }}
         FRAMEWORK: ${{ inputs.framework }}
         PROFILE: ${{ inputs.profile }}
         IMAGE: ${{ inputs.image }}
+        DYN_TEST_OUTPUT_PATH: ${{ github.workspace }}/test-output
+        TEST_NAME: ${{ inputs.test_name }}
+        EXTRA_PYTEST_ARGS: ${{ inputs.extra_pytest_args }}
+        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
+        DYNAMO_TEST_TYPE: deploy_${{ inputs.profile }}
+        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
       run: |
         mkdir -p test-results
+
+        PYTEST_ARGS=""
+        if [ -n "${FRAMEWORK}" ]; then
+          PYTEST_ARGS+=" --framework=${FRAMEWORK}"
+        fi
+        if [ -n "${PROFILE}" ]; then
+          PYTEST_ARGS+=" --profile=${PROFILE}"
+        fi
+        if [ -n "${IMAGE}" ]; then
+          PYTEST_ARGS+=" --image=${IMAGE}"
+        fi
+
+        if [ -z "${TEST_NAME}" ]; then
+          TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
+        fi
+
         pytest tests/deploy/test_deploy.py \
-          --framework="${FRAMEWORK}" \
-          --profile="${PROFILE}" \
-          --image="${IMAGE}" \
           --namespace="${NAMESPACE}" \
+          ${PYTEST_ARGS} \
+          ${EXTRA_PYTEST_ARGS} \
           -v -s \
           --durations=10 \
-          --junitxml=test-results/pytest_deploy_${FRAMEWORK}_${PROFILE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
+          --junitxml=test-results/pytest_deploy_${TEST_NAME}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
+          --alluredir=test-results/allure-results \
           --log-cli-level=INFO
 
     - name: Cleanup Deployment
       if: always()
       shell: bash
       env:
-        NAMESPACE: ${{ steps.ns-check.outputs.ns }}
+        NAMESPACE: ${{ inputs.namespace }}
         GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
       run: |
         echo "::group::Cleanup Deployment"
@@ -163,17 +158,43 @@ runs:
         fi
         echo "::endgroup::"
 
-    - name: Teardown namespace (self-cleanup on rerun)
-      if: always() && steps.ns-check.outputs.exists != 'true'
-      uses: ./.github/actions/teardown-deploy-namespace
-      with:
-        kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
-        namespace: ${{ steps.ns-check.outputs.ns }}
+
+    - name: Determine test name for artifacts
+      id: test-name
+      if: always()
+      shell: bash
+      env:
+        TEST_NAME: ${{ inputs.test_name }}
+        FRAMEWORK: ${{ inputs.framework }}
+        PROFILE: ${{ inputs.profile }}
+      run: |
+        if [ -z "${TEST_NAME}" ]; then
+          TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
+        fi
+        echo "name=${TEST_NAME}" >> $GITHUB_OUTPUT
 
     - name: Upload Test Results
       uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
       if: always()
       with:
-        name: test-results-${{ inputs.framework }}-${{ inputs.profile }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/pytest_deploy_${{ inputs.framework }}_${{ inputs.profile }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+        name: test-results-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/pytest_deploy_${{ steps.test-name.outputs.name }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
+
+    - name: Upload Pod Logs
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      if: always()
+      with:
+        name: pod-logs-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: ${{ github.workspace }}/test-output/
+        if-no-files-found: warn
+        retention-days: 7
+
+    - name: Upload Allure Results
+      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
+      if: always()
+      with:
+        name: allure-results-${{ steps.test-name.outputs.name }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore

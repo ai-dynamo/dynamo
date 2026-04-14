@@ -7,6 +7,9 @@ trap 'echo Cleaning up...; kill 0' EXIT
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+# Use TCP transport for multimodal workloads (base64 images can exceed NATS 1MB limit)
+export DYN_REQUEST_PLANE=tcp
+
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 SINGLE_GPU=false
@@ -75,20 +78,14 @@ python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 
-# Embedding transfer:
-#   "local" = local file (safetensors),
-#   "nixl-write" = NIXL WRITE transfer
-#   "nixl-read" = NIXL READ transfer (default: "local")
-export DYN_VLLM_EMBEDDING_TRANSFER_MODE=${DYN_VLLM_EMBEDDING_TRANSFER_MODE:-"local"}
-
 # GPU assignments (override via environment variables)
-# TODO: use build_gpu_mem_args to measure VRAM instead of hardcoded fractions
+# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of hardcoded fractions
 # In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
     DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-0}
-    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.4}
-    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.4}
+    DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.1}
+    DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
     EXTRA_ARGS="--enforce-eager"
 else
     DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
@@ -112,7 +109,6 @@ echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (GPU mem: $DYN_PD_GPU_MEM)...
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
-  --multimodal-worker \
   --enable-multimodal \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \

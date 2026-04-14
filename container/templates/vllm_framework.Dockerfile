@@ -87,7 +87,6 @@ ENV CUDA_HOME=/usr/local/cuda
 {% endif %}
 
 {% if device == "xpu" %}
-RUN wget --tries=3 --waitretry=5 https://raw.githubusercontent.com/intel/llm-scaler/35a14cbc08d714f460a29b7a7328df5620c8530f/vllm/patches/ai-dynamo-xpu/patches/vllm-xpu-v0.14.0.patch -O /tmp/vllm-xpu.patch
 ENV VLLM_TARGET_DEVICE=xpu
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 {% endif %}

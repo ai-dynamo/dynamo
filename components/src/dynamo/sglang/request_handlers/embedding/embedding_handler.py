@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import EmbeddingRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -55,7 +56,14 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         else:
             raise TypeError(f"Invalid input type: {type(embedding_request.input)}")
 
-        result = await self.engine.async_encode(prompt=prompt)
+        trace_header = build_trace_headers(context) if self.enable_trace else None
+        trace_id = context.trace_id
+
+        result = await self.engine.async_encode(
+            prompt=prompt,
+            external_trace_header=trace_header,
+            rid=trace_id,
+        )
 
         # Transform the response to OpenAI format
         response = self._transform_response(result, embedding_request.model)

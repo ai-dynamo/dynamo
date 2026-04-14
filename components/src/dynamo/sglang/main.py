@@ -22,7 +22,6 @@ from dynamo.sglang.init_llm import init_decode, init_prefill
 from dynamo.sglang.init_multimodal import (
     init_multimodal_encode_worker,
     init_multimodal_prefill_worker,
-    init_multimodal_processor,
     init_multimodal_worker,
 )
 from dynamo.sglang.shutdown import install_graceful_shutdown
@@ -51,7 +50,10 @@ async def worker():
         (
             dynamo_args.namespace,
             dynamo_args.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity()
+        ) = snapshot_controller.reload_restore_identity(
+            dynamo_args.namespace,
+            dynamo_args.discovery_backend,
+        )
 
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
@@ -80,14 +82,6 @@ async def worker():
         )
     elif config.dynamo_args.embedding_worker:
         await init_embedding(
-            runtime,
-            config,
-            shutdown_event,
-            shutdown_endpoints,
-            run_deferred_handlers,
-        )
-    elif config.dynamo_args.multimodal_processor:
-        await init_multimodal_processor(
             runtime,
             config,
             shutdown_event,

@@ -189,10 +189,14 @@ jobs:
           echo "========================================"
 
           copy_image() {
-            local SRC="$1" DST="$2" LABEL="$3"
+            local SRC="$1" DST="$2" LABEL="$3" PLATFORM="${4:-}"
+            local PLATFORM_ARG=""
+            if [ -n "${PLATFORM}" ]; then
+              PLATFORM_ARG="--platform ${PLATFORM}"
+            fi
             echo "----------------------------------------"
             echo "Copying: ${LABEL}"
-            if crane copy "${SRC}" "${DST}"; then
+            if crane copy ${PLATFORM_ARG} "${SRC}" "${DST}"; then
               echo "  Copied: ${LABEL}"
               SUCCESSFUL_COPIES+=("${LABEL}")
               return 0
@@ -223,9 +227,9 @@ jobs:
           for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
             NGC_NAME="${FRAMEWORK}-runtime"
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
-              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}"
+              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-${ARCH}" "linux/${ARCH}"
             done
 
             create_manifest \
@@ -247,9 +251,9 @@ jobs:
             fi
 
             for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13-${ARCH}"
+              SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13"
               TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
-              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}"
+              copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13-${ARCH}" "linux/${ARCH}"
             done
 
             create_manifest \
@@ -264,12 +268,12 @@ jobs:
           echo "=== EFA Runtime Images ==="
 
           # vllm EFA (CUDA 12, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12-amd64"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
           # trtllm EFA (CUDA 13, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13-amd64"
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
           TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
           copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
@@ -286,6 +290,13 @@ jobs:
           OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
           OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
           copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
+
+          # ---- Snapshot image ----
+          echo ""
+          echo "=== Snapshot Image ==="
+          SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
+          SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
+          copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
 
           # ---- Summary ----
           echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT

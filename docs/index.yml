@@ -69,10 +69,14 @@ navigation:
             path: kubernetes/autoscaling.md
           - page: Rolling Update
             path: kubernetes/rolling-update.md
+          - page: Developing with Tilt
+            path: kubernetes/tilt-dev-setup.md
           - page: Inference Gateway (GAIE)
             path: kubernetes/inference-gateway.md
           - page: Snapshot
             path: kubernetes/snapshot.md
+          - page: Disagg Communication
+            path: kubernetes/disagg-communication-guide.md
       - section: Observability (K8s)
         contents:
           - page: Metrics
@@ -87,6 +91,8 @@ navigation:
             path: kubernetes/deployment/multinode-deployment.md
           - page: Grove
             path: kubernetes/grove.md
+          - page: Topology Aware Scheduling
+            path: kubernetes/topology-aware-scheduling.md
 
   # ==================== User Guides ====================
   - section: User Guides
@@ -99,6 +105,8 @@ navigation:
         path: components/kvbm/kvbm-guide.md
       - page: Dynamo Benchmarking
         path: benchmarks/benchmarking.md
+      - page: Mocker Offline Trace Replay
+        path: benchmarks/mocker-trace-replay.md
       - section: Testing
         contents:
           - page: Mocker
@@ -127,6 +135,8 @@ navigation:
             path: backends/trtllm/trtllm-video-diffusion.md
       - page: Tool Calling
         path: agents/tool-calling.md
+      - page: Reasoning
+        path: agents/reasoning.md
       - page: LoRA Adapters
         path: features/lora/README.md
       - section: Agents
@@ -193,8 +203,8 @@ navigation:
             path: backends/trtllm/trtllm-reference-guide.md
           - page: Examples
             path: backends/trtllm/trtllm-examples.md
-          - page: Prometheus Metrics
-            path: backends/trtllm/trtllm-prometheus.md
+          - page: Observability
+            path: backends/trtllm/trtllm-observability.md
           - page: Video Diffusion (Experimental)
             path: backends/trtllm/trtllm-video-diffusion.md
           - page: Known Issues and Mitigations
@@ -210,13 +220,25 @@ navigation:
         contents:
           - page: Frontend Guide
             path: components/frontend/frontend-guide.md
+          - page: Tokenizer
+            path: components/frontend/Tokenizer.md
       - section: Router
         path: components/router/README.md
         contents:
           - page: Router Guide
             path: components/router/router-guide.md
+          - page: Routing Concepts
+            path: components/router/router-concepts.md
+          - page: Configuration and Tuning
+            path: components/router/router-configuration.md
+          - page: Disaggregated Serving
+            path: components/router/router-disaggregated-serving.md
+          - page: Router Operations
+            path: components/router/router-operations.md
           - page: Router Examples
             path: components/router/router-examples.md
+          - page: Standalone Indexer
+            path: components/router/standalone-indexer.md
           - page: KV Event Replay — Dynamo vs vLLM
             path: components/router/kv-event-replay-comparison.md
       - section: Planner

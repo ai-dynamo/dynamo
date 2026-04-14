@@ -25,8 +25,8 @@ crate-type = ["cdylib", "rlib"]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber"]
-kv-indexer-runtime = ["kv-indexer", "dynamo-kv-router/indexer-runtime"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
+nvtx = ["dynamo-runtime/nvtx"]
 
 [dependencies]
 dynamo-runtime = { path = "../../runtime" }
@@ -35,7 +35,9 @@ dynamo-parsers = { path = "../../parsers" }
 
 anyhow = { version = "1" }
 async-trait = { version = "0.1" }
+dashmap = { version = "6.1" }
 futures = { version = "0.3" }
+rmp = { version = "0.8" }
 once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
 serde = { version = "1" }
@@ -45,6 +47,7 @@ tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = { version = "0" }
+uuid = { version = "1.18.1" }
 
 # kv-indexer / shared kv-router types
 dynamo-kv-router = { path = "../../kv-router", features = ["standalone-indexer"] }
@@ -79,3 +82,8 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

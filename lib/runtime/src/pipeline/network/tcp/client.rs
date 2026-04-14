@@ -12,6 +12,8 @@ use tokio::{
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+use prometheus::IntCounter;
+
 use super::{CallHomeHandshake, ControlMessage, TcpStreamConnectionInfo};
 use crate::engine::AsyncEngineContext;
 use crate::pipeline::network::{
@@ -63,6 +65,7 @@ impl TcpClient {
     pub async fn create_response_stream(
         context: Arc<dyn AsyncEngineContext>,
         info: ConnectionInfo,
+        cancellation_counter: Option<IntCounter>,
     ) -> Result<StreamSender> {
         let info =
             TcpStreamConnectionInfo::try_from(info).context("tcp-stream-connection-info-error")?;
@@ -97,7 +100,12 @@ impl TcpClient {
         // captured by the monitor task
         let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let reader_task = tokio::spawn(handle_reader(framed_reader, context.clone(), alive_tx));
+        let reader_task = tokio::spawn(handle_reader(
+            framed_reader,
+            context.clone(),
+            alive_tx,
+            cancellation_counter,
+        ));
 
         // transport specific handshake message
         let handshake = CallHomeHandshake {
@@ -213,9 +221,11 @@ async fn handle_reader(
     framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
     context: Arc<dyn AsyncEngineContext>,
     alive_tx: tokio::sync::oneshot::Sender<()>,
+    cancellation_counter: Option<IntCounter>,
 ) -> FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec> {
     let mut framed_reader = framed_reader;
     let mut alive_tx = alive_tx;
+    let mut cancellation_counted = false;
     loop {
         tokio::select! {
             msg = framed_reader.next() => {
@@ -233,9 +243,17 @@ async fn handle_reader(
 
                                 match msg {
                                     ControlMessage::Stop => {
+                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
+                                            counter.inc();
+                                            cancellation_counted = true;
+                                        }
                                         context.stop();
                                     }
                                     ControlMessage::Kill => {
+                                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
+                                            counter.inc();
+                                            cancellation_counted = true;
+                                        }
                                         context.kill();
                                     }
                                     ControlMessage::Sentinel => {
@@ -256,6 +274,11 @@ async fn handle_reader(
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
+                        // If no Stop/Kill was received, this is a cancellation where frontend
+                        // dropped the connection
+                        if let Some(counter) = &cancellation_counter && !cancellation_counted {
+                            counter.inc();
+                        }
                         break;
                     }
                 }
@@ -768,10 +791,9 @@ mod tests {
 
         // Spawn the reader task
         let controller_clone = controller.clone();
-        let reader_handle =
-            tokio::spawn(
-                async move { handle_reader(framed_reader, controller_clone, alive_tx).await },
-            );
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(framed_reader, controller_clone, alive_tx, None).await
+        });
 
         // Send Stop control message from server
         framed_server
@@ -805,10 +827,9 @@ mod tests {
 
         // Spawn the reader task
         let controller_clone = controller.clone();
-        let reader_handle =
-            tokio::spawn(
-                async move { handle_reader(framed_reader, controller_clone, alive_tx).await },
-            );
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(framed_reader, controller_clone, alive_tx, None).await
+        });
 
         // Send Kill control message from server
         framed_server
@@ -842,7 +863,9 @@ mod tests {
 
         // Spawn the reader task
         let reader_handle =
-            tokio::spawn(async move { handle_reader(framed_reader, controller, alive_tx).await });
+            tokio::spawn(
+                async move { handle_reader(framed_reader, controller, alive_tx, None).await },
+            );
 
         // Drop the alive_rx to close the channel (simulating writer finishing)
         drop(alive_rx);
@@ -869,7 +892,9 @@ mod tests {
 
         // Spawn the reader task
         let reader_handle =
-            tokio::spawn(async move { handle_reader(framed_reader, controller, alive_tx).await });
+            tokio::spawn(
+                async move { handle_reader(framed_reader, controller, alive_tx, None).await },
+            );
 
         // Close the framed server to signal EOF to the client
         framed_server.close().await.unwrap();
@@ -896,10 +921,9 @@ mod tests {
 
         // Spawn the reader task
         let controller_clone = controller.clone();
-        let reader_handle =
-            tokio::spawn(
-                async move { handle_reader(framed_reader, controller_clone, alive_tx).await },
-            );
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(framed_reader, controller_clone, alive_tx, None).await
+        });
 
         // Send multiple Stop messages (first one will stop, subsequent ones are no-ops)
         framed_server
@@ -937,10 +961,9 @@ mod tests {
 
         // Spawn the reader task
         let controller_clone = controller.clone();
-        let reader_handle =
-            tokio::spawn(
-                async move { handle_reader(framed_reader, controller_clone, alive_tx).await },
-            );
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(framed_reader, controller_clone, alive_tx, None).await
+        });
 
         // Send Stop first, then Kill
         framed_server

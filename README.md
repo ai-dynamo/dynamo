@@ -200,6 +200,42 @@ Dynamo is built in the open with an OSS-first development model. We welcome cont
 <details>
 <summary>Older news</summary>
 
+Dynamo provides comprehensive benchmarking tools:
+
+- **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies using AIPerf
+- **[SLA-Driven Deployments](docs/components/planner/planner-guide.md)** – Optimize deployments to meet SLA requirements
+
+## Frontend OpenAPI Specification
+
+The OpenAI-compatible frontend exposes an OpenAPI 3 spec at `/openapi.json`. To generate without running the server:
+
+```bash
+cargo run -p dynamo-llm --bin generate-frontend-openapi
+```
+
+This writes to `docs/reference/api/openapi.json`.
+
+## Service Discovery and Messaging
+
+Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/kubernetes/service-discovery.md)) handle service discovery. External services are optional for most deployments:
+
+| Deployment | etcd | NATS | Notes |
+|------------|------|------|-------|
+| **Local Development** | ❌ Not required | ❌ Not required | Pass `--discovery-backend file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
+| **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
+
+> **Note:** KV-Aware Routing requires NATS for prefix caching coordination.
+
+For Slurm or other distributed deployments (and KV-aware routing):
+
+- [etcd](https://etcd.io/) can be run directly as `./etcd`.
+- [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.
+
+To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
+
+## More News
+
+- [11/20] [Dell integrates PowerScale with Dynamo's NIXL for 19x faster TTFT](https://www.dell.com/en-us/dt/corporate/newsroom/announcements/detailpage.press-releases~usa~2025~11~dell-technologies-and-nvidia-advance-enterprise-ai-innovation.htm)
 - [11/20] [WEKA partners with NVIDIA on KV cache storage for Dynamo](https://siliconangle.com/2025/11/20/nvidia-weka-kv-cache-solution-ai-inferencing-sc25/)
 - [11/13] [Dynamo Office Hours Playlist](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
 - [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)
@@ -220,7 +256,6 @@ Dynamo is built in the open with an OSS-first development model. We welcome cont
 [kv-routing]: docs/components/router/README.md
 [planner]: docs/components/planner/planner-guide.md
 [kvbm]: docs/components/kvbm/README.md
-[mm]: examples/multimodal/
 [migration]: docs/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
 [tools]: docs/agents/tool-calling.md

@@ -6,13 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dynamo_async_openai::types::{
-    ChatCompletionMessageContent, ChatCompletionToolChoiceOption, FinishReason,
-};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+};
+use dynamo_protocols::types::{
+    ChatCompletionMessageContent, ChatCompletionToolChoiceOption, FinishReason,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{StreamExt, stream};
@@ -55,7 +55,10 @@ fn parse_fixture(
         let value: Value = serde_json::from_str(line).unwrap();
         let chunk: NvCreateChatCompletionStreamResponse =
             serde_json::from_value(value.clone()).unwrap();
-        expected_stream_json.push(value);
+        // Round-trip through the typed struct so expected JSON matches current serialization
+        // (upstream async-openai skips None fields that the old fork serialized as null).
+        let normalized = serde_json::to_value(&chunk).unwrap();
+        expected_stream_json.push(normalized);
         input_chunks.push(chunk);
     }
 
@@ -88,7 +91,7 @@ struct MergedToolCall {
 impl MergedToolCall {
     fn merge_from(
         &mut self,
-        tool_call: &dynamo_async_openai::types::ChatCompletionMessageToolCallChunk,
+        tool_call: &dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
     ) {
         if self.id.is_none() {
             self.id = tool_call.id.clone();
@@ -149,7 +152,7 @@ async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
         parse_fixture(&fixture_path("stream_interval_20.jsonl"));
 
     // Mirror tests/frontend/test_prepost.py::request_for_sampling
-    let tools: Vec<dynamo_async_openai::types::ChatCompletionTool> =
+    let tools: Vec<dynamo_protocols::types::ChatCompletionTool> =
         serde_json::from_value(serde_json::json!([
             {
                 "type": "function",
@@ -192,7 +195,7 @@ async fn postprocessor_parsing_stream_replays_interval_20_fixture() {
             continue;
         };
 
-        for choice in &output_data.choices {
+        for choice in &output_data.inner.choices {
             if let Some(reasoning_content) = &choice.delta.reasoning_content {
                 reasoning.push_str(reasoning_content);
             }

@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
@@ -43,19 +44,70 @@ from .common import check_module_available
 
 HAS_VLLM_BENCH = check_module_available("vllm")
 
+
+@dataclass
+class KvbmModelConfig:
+    """Describes a model and the vLLM serving flags needed for KVBM testing."""
+
+    model_id: str
+    block_size: Optional[int] = None  # None = let vllm decide
+    attention_backend: Optional[str] = None  # None = let vllm decide
+    max_model_len: int = 8000
+    # Set False for MLA models: VLLM_BATCH_INVARIANT=1 disables prefix caching
+    # for TRITON_MLA in vLLM 0.17.1, defeating KV offload testing.
+    batch_invariant: bool = True
+
+    @property
+    def short_name(self) -> str:
+        return self.model_id.split("/")[-1]
+
+    @property
+    def use_mla(self) -> bool:
+        """True when the model uses Multi-head Latent Attention (e.g. TRITON_MLA)."""
+        return self.attention_backend is not None and "MLA" in self.attention_backend
+
+
+# Models exercised by this test suite.
+# CI iterates over all entries; add a new entry to test an additional model.
+_MODEL_CONFIGS: List[KvbmModelConfig] = [
+    KvbmModelConfig(
+        model_id=os.environ.get(
+            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        ),
+        block_size=16,
+        attention_backend="FLASH_ATTN",
+    ),
+    KvbmModelConfig(
+        model_id="deepseek-ai/DeepSeek-V2-Lite",
+        # TRITON_MLA works on all devices; on H100 set KVBM_MLA_BACKEND=FLASH_ATTN_MLA
+        attention_backend=os.environ.get("KVBM_MLA_BACKEND", "TRITON_MLA"),
+        # VLLM_BATCH_INVARIANT=1 disables prefix caching for TRITON_MLA in vLLM 0.17.1
+        batch_invariant=False,
+    ),
+]
+
 # KVBM env vars that drive test duration (used to compute timeouts below).
 _KVBM_MAX_ITERATIONS = int(os.environ.get("KVBM_MAX_ITERATIONS", "100"))
 _KVBM_NUM_ITERATIONS = int(os.environ.get("KVBM_NUM_ITERATIONS", "15"))
 _KVBM_REQUEST_DELAY = int(os.environ.get("KVBM_REQUEST_DELAY", "30"))
 
+# Server startup timeout (env-configurable; larger models like DeepSeek-V2-Lite
+# may need 600s+).
+_SERVER_START_TIMEOUT = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
+
 # Compute timeouts from the same env vars that control test duration.
-# test_determinism_agg_with_cache_reset: runs warmup + 2 phases of KVBM_MAX_ITERATIONS,
-# each iteration ~4s (request + overhead), plus ~50s setup/teardown.
-_CACHE_RESET_TIMEOUT = 2 * (_KVBM_MAX_ITERATIONS * 4 + 50)
+# Each formula adds _SERVER_START_TIMEOUT so the pytest timeout covers both
+# the server startup and the actual test body.
+#
+# test_determinism_agg_with_cache_reset: warmup + 2 phases of KVBM_MAX_ITERATIONS,
+# each iteration ~4s (request + overhead), plus ~50s teardown.
+_CACHE_RESET_TIMEOUT = _SERVER_START_TIMEOUT + 2 * (_KVBM_MAX_ITERATIONS * 4 + 50)
 # test_concurrent_determinism_under_load: dominated by
 # (KVBM_NUM_ITERATIONS - 1) * KVBM_REQUEST_DELAY seconds of sleep,
-# plus ~150s overhead (server startup, benchmark ramp, teardown).
-_CONCURRENT_TIMEOUT = 2 * ((_KVBM_NUM_ITERATIONS - 1) * _KVBM_REQUEST_DELAY + 150)
+# plus ~150s overhead (benchmark ramp, teardown).
+_CONCURRENT_TIMEOUT = _SERVER_START_TIMEOUT + 2 * (
+    (_KVBM_NUM_ITERATIONS - 1) * _KVBM_REQUEST_DELAY + 150
+)
 
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
@@ -78,8 +130,10 @@ class LLMServerManager:
         gpu_cache_blocks: Optional[int] = None,
         log_dir: Optional[Path] = None,
         server_type: Optional[str] = ServerType.vllm,
+        model_config: Optional[KvbmModelConfig] = None,
     ):
         self.server_type = server_type
+        self.model_config = model_config or _MODEL_CONFIGS[0]
         # Use provided port, env var, or allocate a dynamic port to avoid conflicts
         if port is not None:
             self.port = port
@@ -121,8 +175,6 @@ class LLMServerManager:
                 # Enable KVBM metrics for monitoring offload/onboard
                 "DYN_KVBM_METRICS": "true",
                 "DYN_KVBM_METRICS_PORT": str(self.metrics_port),
-                # Enable vLLM batch invariant for deterministic batching
-                "VLLM_BATCH_INVARIANT": "1",
             }
         )
 
@@ -131,7 +183,7 @@ class LLMServerManager:
             self.env["DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS"] = str(cpu_cache_blocks)
 
         if self.server_type == ServerType.vllm:
-            self._set_up_vllm_config(gpu_cache_blocks)
+            self._set_up_vllm_config(gpu_cache_blocks, self.model_config)
         elif self.server_type == ServerType.trtllm:
             self._set_up_trtllm_config(gpu_cache_blocks)
         else:
@@ -139,27 +191,33 @@ class LLMServerManager:
                 f"{self.server_type} is not supported yet in the KVBM test suite"
             )
 
-    def _set_up_vllm_config(self, gpu_cache_blocks):
+    def _set_up_vllm_config(self, gpu_cache_blocks, model_config: KvbmModelConfig):
         self.env["VLLM_SERVER_DEV_MODE"] = "1"
+        if model_config.batch_invariant:
+            self.env["VLLM_BATCH_INVARIANT"] = "1"
+        else:
+            self.env.pop("VLLM_BATCH_INVARIANT", None)
 
-        # Construct serve command
         self.server_cmd = [
             "vllm",
             "serve",
-            "--block-size",
-            "16",
             "--port",
             str(self.port),
             "--kv-transfer-config",
             '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"}',
-            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
-            "--attention-config.backend",
-            "FLASH_ATTN",
+            model_config.model_id,
             "--max-model-len",
-            "8000",  # required to fit on L4 GPU when using 8b model
+            str(model_config.max_model_len),
         ]
 
-        # GPU blocks override
+        if model_config.block_size is not None:
+            self.server_cmd.extend(["--block-size", str(model_config.block_size)])
+
+        if model_config.attention_backend is not None:
+            self.server_cmd.extend(
+                ["--attention-config.backend", model_config.attention_backend]
+            )
+
         if gpu_cache_blocks is not None:
             self.server_cmd.extend(["--num-gpu-blocks-override", str(gpu_cache_blocks)])
 
@@ -332,9 +390,7 @@ class LLMServerManager:
 
             # Then check if the model endpoint is ready with a simple test request
             test_payload = {
-                "model": os.environ.get(
-                    "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-                ),
+                "model": self.model_config.model_id,
                 "messages": [{"role": "user", "content": "test"}],
                 "max_completion_tokens": 1,
                 "temperature": 0,
@@ -404,6 +460,7 @@ def llm_server(request, runtime_services):
     cpu_blocks = getattr(request, "param", {}).get("cpu_blocks", None)
     gpu_blocks = getattr(request, "param", {}).get("gpu_blocks", None)
     port = getattr(request, "param", {}).get("port", None)
+    model_config = getattr(request, "param", {}).get("model_config", None)
 
     # Put logs in the per-test directory set up by tests/conftest.py
     log_dir = Path(resolve_test_output_path(request.node.name))
@@ -423,9 +480,10 @@ def llm_server(request, runtime_services):
         gpu_cache_blocks=gpu_blocks,
         log_dir=log_dir,
         server_type=server_type,
+        model_config=model_config,
     )
 
-    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "300"))
+    start_timeout = _SERVER_START_TIMEOUT
     if not server_manager.start_server(timeout=start_timeout):
         pytest.fail(
             f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
@@ -441,6 +499,7 @@ def tester(llm_server):
     """Create determinism tester bound to the running server's base URL."""
     t = AggDeterminismTester(
         base_url=llm_server.base_url,
+        model_id=llm_server.model_config.model_id,
         server_type=llm_server.server_type,
     )
     t.download_shakespeare_text()
@@ -456,9 +515,12 @@ class TestDeterminismAgg(BaseTestDeterminism):
             {
                 "cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000")),
                 "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "2048")),
-            },
+                "model_config": cfg,
+            }
+            for cfg in _MODEL_CONFIGS
         ],
         indirect=True,
+        ids=[cfg.short_name for cfg in _MODEL_CONFIGS],
     )
     @pytest.mark.kvbm
     @pytest.mark.timeout(
@@ -479,9 +541,12 @@ class TestDeterminismAgg(BaseTestDeterminism):
             {
                 "cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "30000")),
                 "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "2048")),
-            },
+                "model_config": cfg,
+            }
+            for cfg in _MODEL_CONFIGS
         ],
         indirect=True,
+        ids=[cfg.short_name for cfg in _MODEL_CONFIGS],
     )
     @pytest.mark.kvbm_concurrency
     @pytest.mark.skipif(

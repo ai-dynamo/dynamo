@@ -20,18 +20,16 @@ from typing import Union
 
 from pydantic import BaseModel
 
-from dynamo.planner.utils.agg_planner import AggPlanner
-from dynamo.planner.utils.decode_planner import DecodePlanner
-from dynamo.planner.utils.disagg_planner import DisaggPlanner
-from dynamo.planner.utils.planner_config import PlannerConfig
-from dynamo.planner.utils.prefill_planner import PrefillPlanner
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.adapters import (
+    AggPlanner,
+    DecodePlanner,
+    DisaggPlanner,
+    PrefillPlanner,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)
-
-# start planner 30 seconds after the other components to make sure planner can see them
-# TODO: remove this delay
-INIT_PLANNER_START_DELAY = 30
 
 
 class RequestType(BaseModel):
@@ -51,21 +49,29 @@ async def start_planner(runtime: DistributedRuntime, config: PlannerConfig):
         planner = AggPlanner(runtime, config)
     else:
         raise ValueError(f"Invalid planner mode: {mode}")
+
     await planner._async_init()
-    await planner.run()
-
-
-async def init_planner(runtime: DistributedRuntime, config: PlannerConfig):
-    await asyncio.sleep(INIT_PLANNER_START_DELAY)
-
-    await start_planner(runtime, config)
 
     async def generate(request: RequestType):
-        """Dummy endpoint to satisfy that each component has an endpoint"""
         yield "mock endpoint"
 
     generate_endpoint = runtime.endpoint(f"{config.namespace}.Planner.generate")
-    await generate_endpoint.serve_endpoint(generate)
+
+    # serve_endpoint registers a health check target and sets HealthStatus::Ready
+    # once the handler is registered with the transport.  Running it concurrently
+    # with planner.run() ensures the system server (/health, /live) reports the
+    # planner as ready only after _async_init() has completed.
+    await asyncio.gather(
+        generate_endpoint.serve_endpoint(
+            generate,  # type: ignore[arg-type]
+            health_check_payload={"text": "health"},
+        ),
+        planner.run(),
+    )
+
+
+async def init_planner(runtime: DistributedRuntime, config: PlannerConfig):
+    await start_planner(runtime, config)
 
 
 def _parse_config() -> PlannerConfig:
@@ -80,13 +86,13 @@ def _parse_config() -> PlannerConfig:
 
 
 @dynamo_worker()
-async def worker(runtime: DistributedRuntime):
-    config = _parse_config()
+async def worker(runtime: DistributedRuntime, config: PlannerConfig):
     await init_planner(runtime, config)
 
 
 def main():
-    asyncio.run(worker())  # type: ignore[call-arg]
+    config = _parse_config()
+    asyncio.run(worker(config))  # type: ignore[call-arg]
 
 
 if __name__ == "__main__":

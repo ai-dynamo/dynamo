@@ -22,17 +22,13 @@ inputs:
     description: 'Buildkit flavor used to route workers on re-init (vllm, sglang, trtllm, general)'
     required: true
   arch:
-    description: 'Target architecture used on re-init (amd64, arm64)'
+    description: 'Docker platform string used on re-init (e.g. linux/amd64, linux/arm64, linux/amd64,linux/arm64)'
     required: false
-    default: 'amd64'
+    default: 'linux/amd64'
   cuda_version:
     description: 'CUDA version used on re-init (e.g. 12.9, 13.0). Leave empty for general flavor.'
     required: false
     default: ''
-  all_arch:
-    description: 'If true, re-initialize builder for both amd64 and arm64 architectures'
-    required: false
-    default: 'false'
 
   # Kubernetes fallback passthrough inputs (forwarded to init-dynamo-builder)
   ephemeral_storage:
@@ -90,7 +86,6 @@ runs:
         builder_name: ${{ inputs.builder_name }}
         flavor: ${{ inputs.flavor }}
         arch: ${{ inputs.arch }}
-        all_arch: ${{ inputs.all_arch }}
         cuda_version: ${{ inputs.cuda_version }}
         ephemeral_storage: ${{ inputs.ephemeral_storage }}
         namespace: ${{ inputs.namespace }}

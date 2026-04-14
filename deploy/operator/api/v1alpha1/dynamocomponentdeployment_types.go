@@ -143,6 +143,17 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
 	// +optional
 	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
+
+	// TopologyConstraint for this service. packDomain is required.
+	// When both this and spec.topologyConstraint.packDomain are set, packDomain
+	// must be narrower than or equal to the spec-level packDomain.
+	// +optional
+	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+	// When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+	// +optional
+	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 }
 
 type MultinodeSpec struct {

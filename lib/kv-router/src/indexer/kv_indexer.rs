@@ -378,11 +378,7 @@ impl KvIndexer {
         self.event_tx.clone()
     }
 
-    /// Get a sender for dump requests (snapshot events).
-    ///
-    /// ### Returns
-    ///
-    /// A `mpsc::Sender` for `DumpRequest`s.
+    #[cfg(test)]
     pub fn snapshot_event_sender(&self) -> mpsc::Sender<DumpRequest> {
         self.dump_tx.clone()
     }
@@ -449,13 +445,22 @@ impl KvIndexerInterface for KvIndexer {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
         tracing::debug!(
             "Finding matches for request tokens: {:?} / len: {}",
             tokens,
             tokens.len()
         );
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None, lora_name);
+        let sequence = compute_block_hash_for_seq(
+            tokens,
+            self.kv_block_size,
+            BlockHashOptions {
+                lora_name,
+                is_eagle,
+                ..Default::default()
+            },
+        );
         tracing::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }
@@ -501,7 +506,7 @@ impl KvIndexerInterface for KvIndexer {
         let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
         let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
 
-        self.process_routing_decision_internal(worker, local_hashes, sequence_hashes)
+        self.process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
             .await
     }
     async fn flush(&self) -> usize {
@@ -517,8 +522,8 @@ impl KvIndexerInterface for KvIndexer {
 }
 
 impl KvIndexer {
-    /// Internal method to process a routing decision with pre-computed hashes.
-    async fn process_routing_decision_internal(
+    /// Process a routing decision with pre-computed hashes.
+    pub async fn process_routing_decision_with_hashes(
         &self,
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,

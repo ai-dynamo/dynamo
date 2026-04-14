@@ -18,8 +18,12 @@ from typing import Optional
 
 import uvloop
 
-from dynamo.llm import KvRouter, KvRouterConfig
-from dynamo.router.args import DynamoRouterConfig, build_kv_router_config
+from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.router.args import (
+    DynamoRouterConfig,
+    build_aic_perf_config,
+    build_kv_router_config,
+)
 from dynamo.router.args import parse_args as parse_router_args
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -37,11 +41,13 @@ class StandaloneRouterHandler:
         worker_endpoint_path: str,
         block_size: int,
         kv_router_config: KvRouterConfig,
+        aic_perf_config: Optional[AicPerfConfig],
     ):
         self.runtime = runtime
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
+        self.aic_perf_config = aic_perf_config
         self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
 
@@ -67,6 +73,7 @@ class StandaloneRouterHandler:
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
+                aic_perf_config=self.aic_perf_config,
             )
 
         except Exception as e:
@@ -171,16 +178,22 @@ async def worker(runtime: DistributedRuntime):
         f"router_track_active_blocks={config.router_track_active_blocks}, "
         f"router_track_output_blocks={config.router_track_output_blocks}, "
         f"router_assume_kv_reuse={config.router_assume_kv_reuse}, "
+        f"router_track_prefill_tokens={config.router_track_prefill_tokens}, "
         f"router_ttl_secs={config.router_ttl_secs}, "
         f"router_max_tree_size={config.router_max_tree_size}, "
         f"router_prune_target_ratio={config.router_prune_target_ratio}"
     )
 
     kv_router_config = build_kv_router_config(config)
+    aic_perf_config = build_aic_perf_config(config)
 
     # Create handler
     handler = StandaloneRouterHandler(
-        runtime, config.endpoint, config.router_block_size, kv_router_config
+        runtime,
+        config.endpoint,
+        config.router_block_size,
+        kv_router_config,
+        aic_perf_config,
     )
     await handler.initialize()
 

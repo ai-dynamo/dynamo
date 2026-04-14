@@ -84,6 +84,13 @@ type DynamoGraphDeploymentSpec struct {
 	// Restart specifies the restart policy for the graph deployment.
 	// +kubebuilder:validation:Optional
 	Restart *Restart `json:"restart,omitempty"`
+
+	// TopologyConstraint is the deployment-level topology constraint.
+	// When set, topologyProfile is required and names the ClusterTopology CR to use.
+	// packDomain is optional here — it can be omitted when only services carry constraints.
+	// Services without their own topologyConstraint inherit from this value.
+	// +optional
+	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
 }
 
 type Restart struct {
@@ -317,6 +324,19 @@ func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {
 	}
 	// If no matching condition found, append the new one
 	s.Status.Conditions = append(s.Status.Conditions, condition)
+}
+
+// HasAnyTopologyConstraint reports whether any topology constraint is set at any level.
+func (s *DynamoGraphDeployment) HasAnyTopologyConstraint() bool {
+	if s.Spec.TopologyConstraint != nil {
+		return true
+	}
+	for _, svc := range s.Spec.Services {
+		if svc != nil && svc.TopologyConstraint != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // HasAnyMultinodeService reports whether any service in the graph is configured with more than one node.

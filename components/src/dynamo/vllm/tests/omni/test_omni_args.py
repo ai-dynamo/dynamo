@@ -22,7 +22,7 @@ pytestmark = [
 
 def _make_omni_config(**overrides) -> OmniConfig:
     """Build a minimal OmniConfig with valid defaults, applying overrides."""
-    defaults = {
+    defaults: dict = {
         # DynamoRuntimeConfig fields
         "namespace": "dynamo",
         "component": "backend",
@@ -62,6 +62,8 @@ def _make_omni_config(**overrides) -> OmniConfig:
         "ulysses_degree": 1,
         "ring_degree": 1,
         "cfg_parallel_size": 1,
+        "stage_id": None,
+        "omni_router": False,
     }
     defaults.update(overrides)
     obj = OmniConfig.__new__(OmniConfig)
@@ -113,3 +115,80 @@ def test_omni_config_valid_boundary_ratio(ratio):
     """boundary_ratio within (0, 1] should pass."""
     config = _make_omni_config(boundary_ratio=ratio)
     config.validate()  # should not raise
+
+
+# --- disaggregated stage flag validation ---
+
+
+def test_negative_stage_id_rejected():
+    config = _make_omni_config(stage_id=-1, stage_configs_path="/fake/path.yaml")
+    with pytest.raises(ValueError, match="--stage-id must be >= 0"):
+        config.validate()
+
+
+def test_stage_id_requires_stage_configs_path():
+    config = _make_omni_config(stage_id=0, stage_configs_path=None)
+    with pytest.raises(ValueError, match="--stage-id requires"):
+        config.validate()
+
+
+def test_omni_router_requires_stage_configs_path():
+    config = _make_omni_config(omni_router=True, stage_configs_path=None)
+    with pytest.raises(ValueError, match="--omni-router requires"):
+        config.validate()
+
+
+def test_stage_id_and_omni_router_mutually_exclusive(tmp_path):
+    config = _make_omni_config(
+        stage_id=0, omni_router=True, stage_configs_path=str(tmp_path / "stages.yaml")
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        config.validate()
+
+
+def test_stage_id_with_stage_configs_path_valid(tmp_path):
+    config = _make_omni_config(
+        stage_id=0, stage_configs_path=str(tmp_path / "stages.yaml")
+    )
+    config.validate()  # should not raise
+
+
+def test_omni_router_with_stage_configs_path_valid(tmp_path):
+    config = _make_omni_config(
+        omni_router=True, stage_configs_path=str(tmp_path / "stages.yaml")
+    )
+    config.validate()  # should not raise
+
+
+# --- vllm_omni API compatibility guards ---
+# These tests catch regressions when vllm_omni is upgraded.
+
+
+def test_omni_engine_args_importable():
+    """vllm_omni.engine.arg_utils must export a usable engine args class."""
+    from vllm_omni.engine.arg_utils import OmniEngineArgs
+
+    assert hasattr(OmniEngineArgs, "add_cli_args")
+    assert hasattr(OmniEngineArgs, "from_cli_args")
+
+
+def test_omni_engine_args_add_cli_args_no_extra_params():
+    """add_cli_args must accept a parser and no other required args."""
+
+    from vllm_omni.engine.arg_utils import OmniEngineArgs
+
+    try:
+        from vllm.utils import FlexibleArgumentParser
+    except ImportError:
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    parser = FlexibleArgumentParser(add_help=False)
+    OmniEngineArgs.add_cli_args(parser)
+
+
+def test_omni_config_imports_cleanly():
+    """OmniConfig and parse_omni_args must be importable without error."""
+    from dynamo.vllm.omni.args import OmniConfig, parse_omni_args
+
+    assert OmniConfig is not None
+    assert callable(parse_omni_args)
