@@ -735,6 +735,7 @@ def _make_dynamo_config(**overrides):
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "use_kv_events": False,
         "enable_local_indexer": True,
+        "benchmark_mode": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
