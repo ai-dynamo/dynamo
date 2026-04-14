@@ -18,7 +18,12 @@ use serde_json::json;
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{
+        KvRouter,
+        agent_controller::{AgentController, SessionCloseAction},
+        metrics::RouterRequestMetrics,
+        sticky_sessions::{InMemoryAffinityStore, StickySessionRouter},
+    },
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -29,6 +34,10 @@ use crate::{
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    /// Sticky session routing. Lazily activated when requests carry session_control.
+    sticky_sessions: Arc<StickySessionRouter>,
+    /// Session lifecycle RPCs (open/close). Client is lazy (OnceCell).
+    agent_controller: Arc<AgentController>,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -61,6 +70,8 @@ struct RequestGuard {
     isl_tokens: usize,
     block_size: usize,
     expected_output_tokens: Option<u32>,
+    /// Deferred session close action (fires after generation completes)
+    deferred_close: Option<SessionCloseAction>,
 }
 
 impl RequestGuard {
@@ -89,6 +100,12 @@ impl RequestGuard {
         if !self.first_token_recorded && new_tokens > 0 {
             if let Some(ref tracker) = self.tracker {
                 tracker.record_first_token();
+                // Record decode-phase first token for KV transfer latency metric.
+                // In disaggregated serving, first_token_time is locked by the prefill phase,
+                // so we need a separate timestamp for the decode worker's first token.
+                if tracker.phase() == RequestPhase::Decode {
+                    tracker.record_decode_first_token();
+                }
                 if let Some(ttft) = tracker.ttft_ms() {
                     self.request_metrics
                         .time_to_first_token_seconds
@@ -140,6 +157,11 @@ impl RequestGuard {
             tracing::warn!("Failed to free request {}: {e}", self.context_id);
         }
         self.freed = true;
+
+        // Take to prevent double-fire from Drop
+        if let Some(close) = self.deferred_close.take() {
+            close.execute(&self.context_id);
+        }
     }
 
     fn record_metrics(&mut self) {
@@ -150,6 +172,12 @@ impl RequestGuard {
         if let Some(ref tracker) = self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
+            // Observe KV transfer estimated latency (disaggregated paths)
+            if let Some(latency) = tracker.kv_transfer_estimated_latency_secs() {
+                self.request_metrics
+                    .kv_transfer_estimated_latency_seconds
+                    .observe(latency);
+            }
         }
         self.request_metrics
             .output_sequence_tokens
@@ -161,19 +189,35 @@ impl RequestGuard {
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.record_metrics();
-        if !self.freed && self.scheduler_tracked {
-            let chooser = self.chooser.clone();
-            let context_id = self.context_id.clone();
-            let Ok(handle) = tokio::runtime::Handle::try_current() else {
-                tracing::warn!("No tokio runtime for drop guard free of request {context_id}");
-                return;
-            };
-            handle.spawn(async move {
-                if let Err(e) = chooser.free(&context_id).await {
-                    tracing::warn!("Failed to free request {context_id} (drop guard): {e}");
-                }
-            });
+
+        let deferred_close = self.deferred_close.take();
+        let needs_free = !self.freed && self.scheduler_tracked;
+
+        if deferred_close.is_none() && !needs_free {
+            return;
         }
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "No tokio runtime for drop guard cleanup of request {}",
+                self.context_id
+            );
+            return;
+        };
+
+        // Mirror finish(): free the scheduler slot first, then fire the
+        // deferred session close so the worker's KV isn't released while
+        // generation teardown is still in progress.
+        let chooser = self.chooser.clone();
+        let context_id = self.context_id.clone();
+        handle.spawn(async move {
+            if needs_free && let Err(e) = chooser.free(&context_id).await {
+                tracing::warn!("Failed to free request {context_id} (drop guard): {e}");
+            }
+            if let Some(close) = deferred_close {
+                close.execute(&context_id);
+            }
+        });
     }
 }
 
@@ -187,7 +231,32 @@ impl KvPushRouter {
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        KvPushRouter { inner, chooser }
+        // Agent controller manages session lifecycle RPCs (open/close).
+        // Always created; the event-plane client inside is lazy (OnceCell)
+        // so there is zero cost until a request actually carries session_control.
+        let component = chooser.client().endpoint.component().clone();
+        let agent_controller = Arc::new(AgentController::new(component));
+
+        // Sticky sessions share expiry handling with the agent controller so
+        // router-side reap also closes the worker session.
+        let on_expire = {
+            let controller = agent_controller.clone();
+            Arc::new(move |session_id: String, worker_id: u64| {
+                controller
+                    .clone()
+                    .close_expired_session(session_id, worker_id);
+            }) as Arc<dyn Fn(String, u64) + Send + Sync>
+        };
+        let sticky_sessions = Arc::new(StickySessionRouter::new(
+            InMemoryAffinityStore::new_with_on_expire(Some(on_expire)),
+        ));
+
+        KvPushRouter {
+            inner,
+            chooser,
+            sticky_sessions,
+            agent_controller,
+        }
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -358,13 +427,31 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     /// prefill/completion lifecycle for proper KV cache management.
     async fn generate(
         &self,
-        request: SingleIn<PreprocessedRequest>,
+        mut request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         // Extract context ID for request tracking
         let context_id = request.context().id().to_string();
 
         // Simple query-only detection: presence of query_instance_id annotation means query-only mode
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+
+        // Resolve session affinity: if the request has a session_id, inject the
+        // pinned worker_id into backend_instance_id before worker selection.
+        // Skip entirely for non-session requests to keep them off the sticky path.
+        if request
+            .routing
+            .as_ref()
+            .and_then(|r| r.session_control.as_ref())
+            .is_some()
+            && request
+                .routing
+                .as_ref()
+                .and_then(|r| r.backend_instance_id)
+                .is_none()
+            && let Some(worker_id) = self.sticky_sessions.resolve(&request)
+        {
+            request.routing_mut().backend_instance_id = Some(worker_id);
+        }
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
         let phase = request
@@ -481,6 +568,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let track_output_blocks = self.chooser.kv_router_config().router_track_output_blocks;
         let tracker = request.tracker.clone();
 
+        // Session lifecycle RPCs via agent controller.
+        // Fails fast if session_control.open is requested but the client can't be created.
+        let deferred_close = self
+            .agent_controller
+            .on_routed(
+                &request,
+                instance_id,
+                &context_id,
+                Some(&*self.sticky_sessions),
+            )
+            .await?;
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = backend_dp_rank;
         let updated_request = context.map(|_| backend_input);
@@ -523,6 +622,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 isl_tokens,
                 block_size,
                 expected_output_tokens,
+                deferred_close,
             };
 
             loop {

@@ -306,6 +306,29 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_same_gpu": VLLMConfig(
+        name="disaggregated_same_gpu",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_023_525_000
+            ),  # KV cache cap (2x safety over min=511_762_432)
+            pytest.mark.timeout(300),  # ~6x observed 50s
+            # post_merge: cumulative sequential test time exceeds 35-min job budget.
+            # Move back to pre_merge once GPU tests run in parallel.
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "deepep": VLLMConfig(
         name="deepep",
         directory=vllm_dir,
@@ -486,7 +509,7 @@ vllm_configs = {
                             },
                         }
                     ],
-                    "tool_choice": "auto",
+                    "tool_choice": "required",
                     "max_tokens": 1024,
                 },
                 repeat_count=1,
@@ -633,7 +656,7 @@ def test_serve_deployment(
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.gpu_2
+@pytest.mark.gpu_1
 @pytest.mark.nightly
 @pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
@@ -649,9 +672,10 @@ def test_multimodal_b64(
     This test is separate because it loads the required image at runtime
     (not collection time), ensuring it only fails when actually executed.
 
-    Uses ``@pytest.mark.model`` so nightly multi-GPU jobs (gpu_2 without the
-    gpu_1 multimodal_agg_qwen param) still predownload Qwen2.5-VL-7B before
-    ``HF_HUB_OFFLINE=1``.
+    Runs on gpu_1 alongside other single-GPU multimodal tests that use the
+    same model (mm_agg_qwen2.5-vl-7b).  The ``@pytest.mark.model`` mark is
+    kept as a safety net so the model is predownloaded even if no other
+    gpu_1 config collects this model in a given CI job.
     """
     # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()

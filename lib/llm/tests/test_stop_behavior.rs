@@ -25,8 +25,8 @@ impl tokenizer_traits::Encoder for TestTokenizer {
 }
 
 impl tokenizer_traits::Decoder for TestTokenizer {
-    fn decode(&self, ids: &[u32], skip_special: bool) -> Result<String> {
-        Ok(ids
+    fn decode(&self, ids: &[u32], skip_special: bool) -> Result<tokenizer_traits::DecodeResult> {
+        let text: String = ids
             .iter()
             .filter_map(|&id| match id {
                 EOS if skip_special => None,
@@ -36,7 +36,8 @@ impl tokenizer_traits::Decoder for TestTokenizer {
                 EOS => Some("</s>"),
                 _ => Some("?"),
             })
-            .collect())
+            .collect();
+        Ok(text.into())
     }
 }
 

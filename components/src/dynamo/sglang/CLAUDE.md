@@ -273,8 +273,8 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 - **engine=None**: Multimodal encode worker passes `engine=None` to
   BaseWorkerHandler. Any code in the base class that touches engine must guard with
   `if engine is not None`.
-- **GenerationResult is a dataclass**: SGLang 0.5.9 changed `DiffGenerator.generate()`
-  to return `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
+- **GenerationResult is a dataclass**: SGLang `DiffGenerator.generate()`
+  returns `GenerationResult` (not a dict). Use `result.frames`, not `result["frames"]`.
 - **output_modalities default**: Global default is `["text"]`. Image/video diffusion
   workers must override to `["image"]`/`["video"]` or the Rust registration path tries
   to load `config.json` (which doesn't exist for diffusers models).
@@ -283,6 +283,14 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
+- **Session control graceful degradation**: Session control is request-driven --
+  the router's `AgentController` and `StickySessionRouter` are always created but
+  activate lazily. If no worker has `--enable-streaming-session`, the router warns
+  once and ignores `session_control` in requests. On the handler side,
+  `_session_kwargs()` checks `enable_streaming_session` before injecting
+  `session_params` into SGLang calls. Both layers must agree: the router skips
+  lifecycle RPCs, and the handler skips session params. Without both guards,
+  SGLang errors with "session id does not exist".
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.
