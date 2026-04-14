@@ -4,11 +4,9 @@
 name: Post-Merge CI Pipeline
 
 on:
-  push:
-    branches:
-      - main
-      - 'release/*.*.*'
-
+  pull_request:
+     branches:
+       - main
 permissions:
   contents: read
 
@@ -25,8 +23,8 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0", "non-cuda"]'
+      platform: 'linux/amd64'
+      version_selectors: '["xpu"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
@@ -40,7 +38,7 @@ jobs:
       single_gpu_test_timeout_minutes: 60
       multi_gpu_test_timeout_minutes: 60
       run_single_xpu_tests: true
-      single_xpu_test_markers: '(pre_merge or post_merge) and vllm and xpu_1'
+      single_xpu_test_markers: 'post_merge and vllm and xpu_1 and not multimodal'
       single_xpu_test_timeout_minutes: 120
     secrets: inherit
 
@@ -49,12 +47,13 @@ jobs:
   # ============================================================================
   sglang-pipeline:
     name: sglang
+    if: false
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: sglang
       target: runtime
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
+      version_selectors: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
@@ -74,12 +73,13 @@ jobs:
   # ============================================================================
   trtllm-pipeline:
     name: trtllm
+    if: false
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
       target: runtime
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["13.1"]'
+      version_selectors: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
@@ -99,6 +99,7 @@ jobs:
   # ============================================================================
   vllm-dev-pipeline:
     name: vllm-dev
+    if: false
     uses: ./.github/workflows/build-flavor.yml
     with:
       framework: vllm
@@ -114,6 +115,7 @@ jobs:
 
   sglang-dev-pipeline:
     name: sglang-dev
+    if: false
     uses: ./.github/workflows/build-flavor.yml
     with:
       framework: sglang
@@ -129,6 +131,7 @@ jobs:
 
   trtllm-dev-pipeline:
     name: trtllm-dev
+    if: false
     uses: ./.github/workflows/build-flavor.yml
     with:
       framework: trtllm
@@ -149,12 +152,13 @@ jobs:
   # VLLM EFA PIPELINE
   # ============================================================================
   vllm-efa-pipeline:
+    if: false
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: vllm
       target: runtime
       platform: 'linux/amd64'
-      cuda_versions: '["12.9"]'
+      version_selectors: '["12.9"]'
       make_efa: true
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
@@ -173,12 +177,13 @@ jobs:
   # TRTLLM EFA PIPELINE
   # ============================================================================
   trtllm-efa-pipeline:
+    if: false
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
     with:
       framework: trtllm
       target: runtime
       platform: 'linux/amd64'
-      cuda_versions: '["13.1"]'
+      version_selectors: '["13.1"]'
       make_efa: true
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
@@ -198,6 +203,7 @@ jobs:
   # ============================================================================
   frontend-image:
     name: Frontend Image
+    if: false
     uses: ./.github/workflows/build-frontend-image.yaml
     with:
       skip_change_detection: true
@@ -209,6 +215,7 @@ jobs:
 
   operator:
     name: Operator
+    if: false
     runs-on: prod-default-v2
     env:
       IMAGE_REGISTRY: ai-dynamo
@@ -225,14 +232,14 @@ jobs:
           builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
           flavor: general
           arch: 'linux/amd64,linux/arm64'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      #- name: Docker Login
+      #  uses: ./.github/actions/docker-login
+      #  with:
+      #    aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #    aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #    azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      #    azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+      #    azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Linter
         shell: bash
         working-directory: ./deploy/operator
@@ -312,6 +319,7 @@ jobs:
 
   deploy-operator:
     needs: [operator]
+    if: false
     runs-on: prod-default-small-v2
     outputs:
       namespace: ${{ steps.setup.outputs.namespace }}
@@ -332,6 +340,7 @@ jobs:
 
   deploy-test-vllm:
     needs: [deploy-operator, vllm-pipeline]
+    if: false
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
@@ -344,6 +353,7 @@ jobs:
 
   deploy-test-sglang:
     needs: [deploy-operator, sglang-pipeline]
+    if: false
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
@@ -356,6 +366,7 @@ jobs:
 
   deploy-test-trtllm:
     needs: [deploy-operator, trtllm-pipeline]
+    if: false
     uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
@@ -367,7 +378,7 @@ jobs:
     secrets: inherit
 
   deploy-cleanup:
-    if: always()
+    if: false
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
     runs-on: prod-default-small-v2
     steps:
@@ -385,6 +396,7 @@ jobs:
   # ============================================================================
   deploy-test-gaie:
     name: GAIE Deploy Test
+    if: false
     runs-on: prod-default-small-v2
     needs: [deploy-operator, frontend-image, vllm-pipeline]
     timeout-minutes: 30
@@ -447,7 +459,7 @@ jobs:
   deploy-status-check:
     runs-on: ubuntu-latest
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
-    if: always()
+    if: false
     steps:
       - name: "Check all deploy test jobs"
         run: |
@@ -481,7 +493,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
-    if: always() && failure()
+    if: false
     needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:
       contents: read

@@ -55,6 +55,7 @@ runs:
       run: |
         # Setup test directories
         mkdir -p test-results
+        echo "MINIO_STARTED_BY_ACTION=false" >> $GITHUB_ENV
 
         # Set platform architecture from input
         PLATFORM_ARCH="${{ inputs.platform_arch }}"
@@ -90,6 +91,7 @@ runs:
           docker start "${MINIO_CONTAINER_NAME}" > /dev/null
         else
           echo "🚀 No existing MinIO container found, starting a new container..."
+          echo "▶️ Executing: docker run -d --name \"${MINIO_CONTAINER_NAME}\" -p 9000:9000 -p 9001:9001 -e \"MINIO_ROOT_USER=${MINIO_ACCESS_KEY}\" -e \"MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}\" quay.io/minio/minio server /data --console-address ':9001'"
           docker run -d \
             --name "${MINIO_CONTAINER_NAME}" \
             -p 9000:9000 \
@@ -136,7 +138,7 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=long --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 -m \"${{ inputs.pytest_marks }}\""
 
           # Set device-specific docker flags
           GPU_FLAGS=""
@@ -144,7 +146,7 @@ runs:
           if [[ "${{ inputs.device }}" == "xpu" ]]; then
             echo "✓ XPU device specified, enabling /dev/dri device flags"
             RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
-            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID} -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
+            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID})
           elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
@@ -172,6 +174,7 @@ runs:
         echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
         docker rm -f "${{ env.CONTAINER_ID }}_pytest" 2>/dev/null || true
 
+        echo "▶️ Executing: docker run ${GPU_FLAGS} ${DOCKER_EXTRA_FLAGS[*]} --rm -w /workspace --cpus=${NUM_CPUS} --shm-size=200m --network host ${DOCKER_ENV_FLAGS[*]} --name ${{ env.CONTAINER_ID }}_pytest -v \"${TEST_RESULTS_DIR}:/workspace/test-results\" ${{ inputs.image_tag }} sh -c \"umask 0022 && ${PYTEST_CMD}\""
         docker run ${GPU_FLAGS} \
           "${DOCKER_EXTRA_FLAGS[@]}" \
           --rm -w /workspace \
@@ -282,6 +285,7 @@ runs:
         echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
         docker rm -f "${{ env.CONTAINER_ID }}_pytest" 2>/dev/null || true
 
+        echo "▶️ Executing: docker run ${GPU_FLAGS} ${DOCKER_OPTS} ${DOCKER_EXTRA_FLAGS[*]} --rm -w /workspace --network host ${DOCKER_ENV_FLAGS[*]} --name ${{ env.CONTAINER_ID }}_pytest -v \"${TEST_RESULTS_DIR}:/workspace/test-results\" ${{ inputs.image_tag }} sh -c \"umask 0022 && ${PYTEST_CMD}\""
         docker run ${GPU_FLAGS} ${DOCKER_OPTS} \
           "${DOCKER_EXTRA_FLAGS[@]}" \
           --rm -w /workspace \
@@ -340,12 +344,12 @@ runs:
 
         exit ${TEST_EXIT_CODE}
 
-    - name: Cleanup MinIO Service
-      if: always() && inputs.start_minio == 'true'
-      shell: bash
-      run: |
-        echo "🧹 Cleaning up MinIO container..."
-        docker rm -f dynamo-minio-test 2>/dev/null || true
+    #- name: Cleanup MinIO Service
+    #  if: always() && inputs.start_minio == 'true' && env.MINIO_STARTED_BY_ACTION == 'true'
+    #  shell: bash
+    #  run: |
+    #    echo "🧹 Cleaning up MinIO container..."
+    #    docker rm -f dynamo-minio-test 2>/dev/null || true
 
     - name: Cleanup Pytest Containers
       if: always() && inputs.device == 'xpu'
