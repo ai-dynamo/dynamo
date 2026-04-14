@@ -2327,7 +2327,7 @@ async fn handler_get_response(
         .ok_or_else(|| {
             ErrorMessage::from_http_error(HttpError {
                 code: 400,
-                message: "Session middleware not available; stateful responses may not be enabled"
+                message: "x-tenant-id header is required for stateful response operations"
                     .to_string(),
             })
         })?;
@@ -2388,7 +2388,7 @@ async fn handler_delete_response(
         .ok_or_else(|| {
             ErrorMessage::from_http_error(HttpError {
                 code: 400,
-                message: "Session middleware not available; stateful responses may not be enabled"
+                message: "x-tenant-id header is required for stateful response operations"
                     .to_string(),
             })
         })?;
