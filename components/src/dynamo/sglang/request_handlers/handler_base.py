@@ -563,7 +563,7 @@ class LoraMixin:
             logger.error(f"Failed to unload LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
 
-    async def list_loras(self, request: Optional[Dict[str, Any]] = None):
+    async def list_loras(self, _request: Optional[Dict[str, Any]] = None):
         """
         List all loaded LoRA adapters.
         Returns a dictionary of lora_name -> lora_id mappings.
