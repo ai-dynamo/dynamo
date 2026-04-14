@@ -220,6 +220,8 @@ navigation:
         contents:
           - page: Frontend Guide
             path: components/frontend/frontend-guide.md
+          - page: Tokenizer
+            path: components/frontend/Tokenizer.md
       - section: Router
         path: components/router/README.md
         contents:
