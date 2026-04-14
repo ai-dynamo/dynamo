@@ -457,11 +457,19 @@ def _run_optimization_type_sim(
         opt_config.num_gpus,
     )
 
-    chosen, best_configs, _, _, best_latencies_map = _execute_task_configs(
-        task_configs,
-        mode="default",
-        top_n=5,
-    )
+    try:
+        chosen, best_configs, _, _, best_latencies_map = _execute_task_configs(
+            task_configs,
+            mode="default",
+            top_n=5,
+        )
+    except (SystemExit, Exception) as exc:
+        logger.warning(
+            "AIC simulation failed for optimization-type mode (%s); "
+            "falling back to naive config generation.",
+            exc,
+        )
+        return _run_naive_fallback(dgdr, model, total_gpus, system, backend)
 
     # Merge all experiment results and pick by optimization type
     all_dfs = [df for df in best_configs.values() if df is not None and not df.empty]
