@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import atexit
 import os
 
 from gpu_memory_service.common.locks import GrantedLockType
@@ -23,9 +22,6 @@ except ImportError:
             )
 
     cuda = _MissingCuda()
-
-_primary_contexts: dict[int, object] = {}
-_primary_context_release_registered = False
 
 
 def cuda_check_result(result: cuda.CUresult, name: str) -> None:
@@ -169,28 +165,3 @@ def cuda_validate_pointer(va: int) -> None:
 def cuda_synchronize() -> None:
     (result,) = cuda.cuCtxSynchronize()
     cuda_check_result(result, "cuCtxSynchronize")
-
-
-def cuda_set_current_device(device: int) -> None:
-    global _primary_context_release_registered
-
-    ctx = _primary_contexts.get(device)
-    if ctx is None:
-        result, ctx = cuda.cuDevicePrimaryCtxRetain(device)
-        cuda_check_result(result, "cuDevicePrimaryCtxRetain")
-        _primary_contexts[device] = ctx
-        if not _primary_context_release_registered:
-            _primary_context_release_registered = True
-            atexit.register(_release_primary_contexts)
-    (result,) = cuda.cuCtxSetCurrent(ctx)
-    cuda_check_result(result, "cuCtxSetCurrent")
-
-
-def _release_primary_contexts() -> None:
-    for device in list(_primary_contexts):
-        try:
-            (result,) = cuda.cuDevicePrimaryCtxRelease(device)
-        except Exception:
-            continue
-        if result == cuda.CUresult.CUDA_SUCCESS:
-            _primary_contexts.pop(device, None)
