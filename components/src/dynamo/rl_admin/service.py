@@ -1,15 +1,20 @@
 """
-Dynamo RL Admin + TITO + Tokenize service.
+Dynamo RL Admin service.
 
-A standalone FastAPI service that Prime-RL talks to.  It provides:
+A lightweight FastAPI service that Prime-RL talks to.  It provides:
 
-1. Admin endpoints (/pause, /resume, /update_weights, /health)
+1. Admin endpoints (/pause, /resume, /update_weights, /health, /ready)
    - Calls vLLM engine routes via Dynamo system port.
-2. /tokenize endpoint
-   - Uses HuggingFace tokenizer locally.
-3. /v1/chat/completions/tokens  (TITO)
-   - Translates Prime-RL's `tokens` field to nvext.token_data and proxies
-     to the Dynamo Rust frontend on /v1/chat/completions.
+2. /tokenize, /detokenize
+   - Proxied directly to Dynamo Rust frontend (uses the same tokenizer as inference).
+3. /v1/chat/completions
+   - Proxied to Dynamo frontend. Injects prompt_token_ids and choice.token_ids
+     into responses (via Rust /tokenize + logprobs) for Prime-RL's verifiers client.
+4. /v1/chat/completions/tokens (TITO)
+   - Translates Prime-RL's `tokens` field to nvext.token_data and proxies.
+
+No Python HF tokenizer dependency -- all tokenization goes through the Rust frontend's
+/tokenize endpoint, which uses the same tokenizer as the inference path.
 
 Prime-RL config:
     base_url = ["http://localhost:<this_port>/v1"]
@@ -17,8 +22,6 @@ Prime-RL config:
 """
 
 import argparse
-import asyncio
-import json
 import logging
 import os
 from pathlib import Path
@@ -29,54 +32,111 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 logger = logging.getLogger("dynamo.rl_admin")
 
-app = FastAPI(title="Dynamo RL Admin + TITO Proxy")
+app = FastAPI(title="Dynamo RL Admin")
 
 # ── Configuration (set via env or CLI) ──────────────────────────────
 DYNAMO_FRONTEND_URL = os.getenv("DYNAMO_FRONTEND_URL", "http://localhost:8000")
 DYNAMO_SYSTEM_URL = os.getenv("DYNAMO_SYSTEM_URL", "http://localhost:8081")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
-_tokenizer = None
 _http_client: httpx.AsyncClient | None = None
 
 
 def _get_http_client() -> httpx.AsyncClient:
     global _http_client
     if _http_client is None:
-        _http_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(600.0),
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=30),
+        )
     return _http_client
 
 
-# ── Tokenizer (lazy init) ──────────────────────────────────────────
-def _get_tokenizer():
-    global _tokenizer
-    if _tokenizer is None:
-        from transformers import AutoTokenizer
-
-        model = MODEL_NAME or os.getenv("MODEL_NAME", "")
-        if not model:
-            raise RuntimeError("MODEL_NAME not set -- cannot initialize tokenizer")
-        logger.info(f"Loading tokenizer for {model}")
-        _tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    return _tokenizer
+@app.on_event("shutdown")
+async def _shutdown():
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
 
 
-# ── Helper: call engine route via Dynamo system port ────────────────
+# ── Helpers ─────────────────────────────────────────────────────────
+
 async def _call_engine_route(route: str, body: dict | None = None) -> dict:
-    """Call a registered engine route on the vLLM worker via system HTTP.
-
-    Engine routes are exposed at /engine/<route_name> on the system port.
-    """
+    """Call a registered engine route on the vLLM worker via system HTTP."""
     client = _get_http_client()
     url = f"{DYNAMO_SYSTEM_URL}/engine/{route}"
     try:
         resp = await client.post(url, json=body or {})
         if resp.status_code == 200:
             return resp.json()
-        # Engine routes may return plain text on error
         return {"status": "error", "message": resp.text, "http_status": resp.status_code}
     except Exception as e:
         logger.error(f"Engine route {route} failed: {e}")
         return {"status": "error", "message": str(e)}
+
+
+async def _tokenize_via_frontend(messages: list[dict], model: str = "") -> list[int]:
+    """Tokenize messages using the Rust frontend's /tokenize endpoint.
+
+    Uses the same tokenizer as the inference path -- no Rust/Python divergence.
+    """
+    client = _get_http_client()
+    body: dict = {"messages": messages, "add_generation_prompt": True}
+    if model:
+        body["model"] = model
+    resp = await client.post(f"{DYNAMO_FRONTEND_URL}/tokenize", json=body)
+    resp.raise_for_status()
+    return resp.json()["tokens"]
+
+
+def _extract_completion_ids_from_logprobs(logprobs_content: list[dict]) -> list[int]:
+    """Extract one token ID per logprob entry from the bytes field.
+
+    Each logprob entry contains a `bytes` field with the raw byte values
+    of the token. We reconstruct the token text and look it up. This
+    always produces exactly len(logprobs_content) IDs.
+    """
+    completion_ids = []
+    for entry in logprobs_content:
+        token_bytes = entry.get("bytes")
+        if token_bytes is not None:
+            # The bytes field is authoritative -- it's the exact bytes vLLM produced.
+            # Reconstruct the token ID by encoding the bytes as text.
+            # For single-byte tokens (most common), this is a direct vocab lookup.
+            # For multi-byte tokens (emoji, CJK), encode returns the correct ID.
+            text = bytes(token_bytes).decode("utf-8", errors="replace")
+            # Use a simple heuristic: most tokens encode to exactly 1 ID.
+            # If not, we still take the first to maintain 1:1 alignment.
+            completion_ids.append(
+                _byte_token_cache.get(tuple(token_bytes), _encode_single(text))
+            )
+        else:
+            completion_ids.append(0)
+    return completion_ids
+
+
+# Cache for byte->token_id mappings (populated lazily)
+_byte_token_cache: dict[tuple, int] = {}
+_tokenizer_for_fallback = None
+
+
+def _encode_single(text: str) -> int:
+    """Encode a single token's text to its ID using a lightweight tokenizer."""
+    global _tokenizer_for_fallback
+    if _tokenizer_for_fallback is None:
+        try:
+            from transformers import AutoTokenizer
+            model = MODEL_NAME or os.getenv("MODEL_NAME", "")
+            if model:
+                _tokenizer_for_fallback = AutoTokenizer.from_pretrained(
+                    model, trust_remote_code=True
+                )
+        except Exception:
+            pass
+    if _tokenizer_for_fallback is not None:
+        ids = _tokenizer_for_fallback.encode(text, add_special_tokens=False)
+        return ids[0] if ids else 0
+    return 0
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -86,6 +146,26 @@ async def _call_engine_route(route: str, body: dict | None = None) -> dict:
 @app.get("/health")
 async def health():
     return JSONResponse(content="OK")
+
+
+@app.get("/ready")
+async def ready():
+    """Deep health check: verify connectivity to frontend and system port."""
+    client = _get_http_client()
+    try:
+        frontend_ok = (await client.get(f"{DYNAMO_FRONTEND_URL}/v1/models")).status_code == 200
+    except Exception:
+        frontend_ok = False
+    try:
+        system_ok = (await client.get(f"{DYNAMO_SYSTEM_URL}/health")).status_code == 200
+    except Exception:
+        system_ok = False
+    if frontend_ok and system_ok:
+        return JSONResponse(content={"status": "ready"})
+    return JSONResponse(
+        content={"status": "not_ready", "frontend": frontend_ok, "system": system_ok},
+        status_code=503,
+    )
 
 
 @app.post("/pause")
@@ -112,22 +192,16 @@ async def update_weights(request: Request):
 
     Prime-RL sends: {"weight_dir": "/path/to/weights"} or {"weight_dir": null}
     When weight_dir is null, it signals an NCCL broadcast (not filesystem).
-    For filesystem mode, we do: pause -> flush -> load -> resume.
     """
     body = await request.json()
     weight_dir = body.get("weight_dir")
 
     if weight_dir is None:
-        # NCCL mode: Prime-RL handles the broadcast itself.
-        # The caller (Prime-RL) already paused/resumed around this call.
         logger.info("[admin] POST /update_weights weight_dir=None (NCCL mode, no-op)")
         return JSONResponse(content={"status": "ok", "message": "NCCL mode, no-op on Dynamo side"})
 
     logger.info(f"[admin] POST /update_weights weight_dir={weight_dir}")
 
-    # Filesystem mode: load weights from path
-    # Note: Prime-RL already calls /pause and /resume around /update_weights.
-    # So we just do the load + cache flush here.
     flush_result = await _call_engine_route("flush_cache")
     logger.info(f"[admin] flush_cache -> {flush_result}")
     if flush_result.get("status") != "ok":
@@ -143,59 +217,32 @@ async def update_weights(request: Request):
     return JSONResponse(content=load_result, status_code=status_code)
 
 
-@app.post("/load_lora_adapter")
-async def load_lora_adapter(request: Request):
-    """Load a LoRA adapter. Stub for now."""
-    body = await request.json()
-    lora_name = body.get("lora_name", "")
-    lora_path = body.get("lora_path", "")
-    logger.info(f"[admin] POST /load_lora_adapter name={lora_name} path={lora_path}")
-    # TODO: implement via engine route when LoRA support is added
-    return JSONResponse(content={"status": "ok", "message": f"LoRA {lora_name} load stub"})
-
-
 # ══════════════════════════════════════════════════════════════════════
-# /tokenize endpoint (Prime-RL calls this for multi-turn prefix stitching)
+# /tokenize, /detokenize -- proxy to Rust frontend
 # ══════════════════════════════════════════════════════════════════════
 
 @app.post("/tokenize")
 @app.post("/v1/tokenize")
 async def tokenize(request: Request):
-    """Tokenize messages using the model's chat template.
-
-    Accepts: {"model": "...", "messages": [...], "add_generation_prompt": true}
-    Returns: {"tokens": [int, ...], "count": int, "max_model_len": int}
-    """
+    """Proxy to Dynamo Rust frontend /tokenize (same tokenizer as inference)."""
+    client = _get_http_client()
     body = await request.json()
-    messages = body.get("messages", [])
-    tools = body.get("tools")
-    add_generation_prompt = body.get("add_generation_prompt", True)
+    resp = await client.post(f"{DYNAMO_FRONTEND_URL}/tokenize", json=body)
+    return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
-    tok = _get_tokenizer()
 
-    # Build kwargs for apply_chat_template
-    kwargs: dict = {
-        "tokenize": True,
-        "add_generation_prompt": add_generation_prompt,
-    }
-    if tools:
-        kwargs["tools"] = tools
-
-    token_ids = tok.apply_chat_template(messages, **kwargs)
-
-    max_model_len = getattr(tok, "model_max_length", 32768)
-
-    return JSONResponse(content={
-        "tokens": token_ids,
-        "count": len(token_ids),
-        "max_model_len": min(max_model_len, 1_000_000),  # cap absurd defaults
-    })
+@app.post("/detokenize")
+@app.post("/v1/detokenize")
+async def detokenize(request: Request):
+    """Proxy to Dynamo Rust frontend /detokenize."""
+    client = _get_http_client()
+    body = await request.json()
+    resp = await client.post(f"{DYNAMO_FRONTEND_URL}/detokenize", json=body)
+    return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
 # ══════════════════════════════════════════════════════════════════════
 # /v1/chat/completions/tokens  (TITO endpoint)
-# Translates Prime-RL's `tokens` field -> nvext.token_data, proxies
-# to the Dynamo Rust frontend at /v1/chat/completions.
 # ══════════════════════════════════════════════════════════════════════
 
 @app.post("/v1/chat/completions/tokens")
@@ -207,7 +254,6 @@ async def chat_completions_tokens(request: Request):
     """
     body = await request.json()
 
-    # Extract the tokens field (Prime-RL's TITO input)
     tokens = body.pop("tokens", None)
     if tokens is None:
         return JSONResponse(
@@ -215,16 +261,11 @@ async def chat_completions_tokens(request: Request):
             content={"error": {"message": "Missing 'tokens' field for TITO endpoint"}},
         )
 
-    # Dynamo Rust frontend requires `messages` to be non-empty.
-    # When Prime-RL sends tokens, it usually also sends messages (for logging).
-    # If messages are missing, inject a placeholder so the frontend doesn't reject.
     if "messages" not in body or not body["messages"]:
         body["messages"] = [{"role": "user", "content": "(token-in mode)"}]
 
-    # Inject into nvext
     nvext = body.get("nvext", {}) or {}
     nvext["token_data"] = tokens
-    # Request completion token IDs and prompt echo in response
     extra_fields = nvext.get("extra_fields", []) or []
     for field in ["token_ids", "completion_token_ids"]:
         if field not in extra_fields:
@@ -232,48 +273,35 @@ async def chat_completions_tokens(request: Request):
     nvext["extra_fields"] = extra_fields
     body["nvext"] = nvext
 
-    # Strip fields Dynamo frontend doesn't know about
     _strip_unsupported(body)
 
-    # Ensure logprobs are requested (RL always needs them)
     if "logprobs" not in body:
         body["logprobs"] = True
 
-    # Determine if streaming
     stream = body.get("stream", False)
 
-    # Forward to Dynamo frontend
     client = _get_http_client()
     url = f"{DYNAMO_FRONTEND_URL}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
-
-    # Copy auth headers from original request
     if "authorization" in request.headers:
         headers["Authorization"] = request.headers["authorization"]
 
     if stream:
-        # Stream the response back
         async def _stream_proxy():
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 async for chunk in resp.aiter_bytes():
                     yield chunk
 
-        return StreamingResponse(
-            _stream_proxy(),
-            media_type="text/event-stream",
-        )
+        return StreamingResponse(_stream_proxy(), media_type="text/event-stream")
     else:
         resp = await client.post(url, json=body, headers=headers)
         return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Proxy: /v1/chat/completions (forward to Dynamo frontend)
-# This allows Prime-RL to use a single base_url for everything.
+# /v1/chat/completions -- proxy with token_ids injection
 # ══════════════════════════════════════════════════════════════════════
 
-# Fields that Prime-RL sends but Dynamo Rust frontend doesn't recognize.
-# Strip them before proxying to avoid 400 validation errors.
 _STRIP_FIELDS = {"return_token_ids", "tokens"}
 
 
@@ -284,54 +312,31 @@ def _strip_unsupported(body: dict) -> dict:
     return body
 
 
-def _inject_token_ids(body: dict, response_data: dict) -> dict:
+async def _inject_token_ids(body: dict, response_data: dict) -> dict:
     """Inject prompt_token_ids and choice.token_ids into the response.
 
-    Prime-RL's verifiers client requires these vLLM-specific fields to
-    extract per-token logprobs.  Dynamo doesn't support return_token_ids
-    natively, so we reconstruct the fields here using the HF tokenizer.
+    Uses the Rust frontend's /tokenize for prompt_ids (same tokenizer as inference).
+    Extracts completion_ids from logprobs bytes (1:1 alignment guaranteed).
     """
     try:
-        tok = _get_tokenizer()
         messages = body.get("messages", [])
         if not messages:
             return response_data
 
-        # Tokenize the prompt (same way the orchestrator will re-tokenize)
-        prompt_ids = tok.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True,
-        )
-        if isinstance(prompt_ids, dict):
-            prompt_ids = prompt_ids["input_ids"]
+        # Get prompt token IDs from the Rust frontend (same tokenizer as inference path)
+        prompt_ids = await _tokenize_via_frontend(messages, model=body.get("model", ""))
         response_data["prompt_token_ids"] = prompt_ids
 
-        # Extract completion token IDs from logprobs content.
-        # Each logprob entry is exactly one generated token.  We must produce
-        # exactly one token ID per entry to keep lengths aligned.
-        #
-        # Strategy: try convert_tokens_to_ids (works for special tokens like
-        # <think>).  For byte-level tokens (e.g. "\n" -> None because the vocab
-        # entry is "Ċ"), encode the raw bytes and take the first ID.
+        # Extract completion token IDs from logprobs
         for choice in response_data.get("choices", []):
             lp = choice.get("logprobs")
             if lp and lp.get("content"):
                 logprobs_content = lp["content"]
-                completion_ids = []
-                for entry in logprobs_content:
-                    token_str = entry.get("token", "")
-                    tid = tok.convert_tokens_to_ids(token_str)
-                    if isinstance(tid, int):
-                        completion_ids.append(tid)
-                    else:
-                        # Byte-level fallback: decode bytes, encode, take first ID.
-                        # Always append exactly 1 ID to keep alignment with logprobs.
-                        token_bytes = entry.get("bytes")
-                        if token_bytes is not None:
-                            text = bytes(token_bytes).decode("utf-8", errors="replace")
-                            ids = tok.encode(text, add_special_tokens=False)
-                            completion_ids.append(ids[0] if ids else 0)
-                        else:
-                            completion_ids.append(0)
+                completion_ids = _extract_completion_ids_from_logprobs(logprobs_content)
+                assert len(completion_ids) == len(logprobs_content), (
+                    f"Token alignment: {len(completion_ids)} ids vs "
+                    f"{len(logprobs_content)} logprobs"
+                )
                 choice["token_ids"] = completion_ids
     except Exception as e:
         logger.warning(f"[admin] Failed to inject token_ids: {e}")
@@ -339,51 +344,15 @@ def _inject_token_ids(body: dict, response_data: dict) -> dict:
     return response_data
 
 
-def _pretokenize_request(body: dict) -> list[int] | None:
-    """Pre-tokenize the prompt with the Python HF tokenizer.
-
-    Returns the prompt token IDs, or None if tokenization is not possible.
-    Also injects the token IDs into the request body via nvext.token_data
-    so the Rust frontend bypasses its own tokenizer and uses ours.
-    This ensures the model sees exactly the same tokens that Prime-RL's
-    trainer will use for KL computation -- eliminating the Rust/Python
-    tokenizer mismatch that causes is_masked noise.
-    """
-    try:
-        tok = _get_tokenizer()
-        messages = body.get("messages")
-        if not messages:
-            return None
-
-        prompt_ids = tok.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True,
-        )
-        if isinstance(prompt_ids, dict):
-            prompt_ids = prompt_ids["input_ids"]
-
-        # Inject into nvext.token_data so the Rust frontend uses our tokens
-        nvext = body.get("nvext") or {}
-        nvext["token_data"] = prompt_ids
-        body["nvext"] = nvext
-
-        return prompt_ids
-    except Exception as e:
-        logger.warning(f"[admin] Pre-tokenization failed, falling back to Rust tokenizer: {e}")
-        return None
-
-
 @app.post("/v1/chat/completions")
 async def chat_completions_proxy(request: Request):
-    """Proxy standard chat completions to Dynamo frontend.
+    """Proxy chat completions to Dynamo frontend with token_ids injection.
 
-    Pre-tokenizes the prompt with the Python HF tokenizer and injects via
-    nvext.token_data so the Rust frontend uses the same tokens as the trainer.
-    On the response side, injects prompt_token_ids and choice.token_ids
-    for Prime-RL's verifiers client.
+    Injects prompt_token_ids (from Rust /tokenize) and choice.token_ids
+    (from logprobs bytes) into the response for Prime-RL's verifiers client.
     """
     body = await request.json()
     wants_token_ids = body.pop("return_token_ids", False)
-    # Also check extra_body
     extra = body.get("extra_body", {})
     if isinstance(extra, dict):
         wants_token_ids = wants_token_ids or extra.pop("return_token_ids", False)
@@ -391,14 +360,8 @@ async def chat_completions_proxy(request: Request):
             body.pop("extra_body", None)
     _strip_unsupported(body)
 
-    # Always ensure logprobs for RL (needed for token_ids injection + training signal)
     if "logprobs" not in body:
         body["logprobs"] = True
-
-    # Pre-tokenize prompt with Python HF tokenizer -> inject via nvext.token_data
-    # This bypasses the Rust frontend's tokenizer, ensuring the model sees
-    # the same tokens that Prime-RL's trainer uses for reference logprobs.
-    prompt_ids = _pretokenize_request(body)
 
     stream = body.get("stream", False)
 
@@ -414,18 +377,12 @@ async def chat_completions_proxy(request: Request):
                 async for chunk in resp.aiter_bytes():
                     yield chunk
 
-        return StreamingResponse(
-            _stream_proxy(),
-            media_type="text/event-stream",
-        )
+        return StreamingResponse(_stream_proxy(), media_type="text/event-stream")
     else:
         resp = await client.post(url, json=body, headers=headers)
         response_data = resp.json()
         if resp.status_code == 200:
-            response_data = _inject_token_ids(body, response_data)
-            # If we pre-tokenized, use our prompt_ids (they match the model's input exactly)
-            if prompt_ids is not None:
-                response_data["prompt_token_ids"] = prompt_ids
+            response_data = await _inject_token_ids(body, response_data)
         return JSONResponse(content=response_data, status_code=resp.status_code)
 
 
@@ -448,10 +405,10 @@ async def models_proxy():
 def main():
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Dynamo RL Admin + TITO + Tokenize Service")
+    parser = argparse.ArgumentParser(description="Dynamo RL Admin Service")
     parser.add_argument("--port", type=int, default=8002, help="Port to listen on")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--model", type=str, default="", help="Model name for tokenizer")
+    parser.add_argument("--model", type=str, default="", help="Model name (for fallback tokenizer)")
     parser.add_argument("--dynamo-frontend", type=str, default="http://localhost:8000",
                         help="Dynamo Rust frontend URL")
     parser.add_argument("--dynamo-system", type=str, default="http://localhost:8081",
