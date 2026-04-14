@@ -26,11 +26,16 @@ import (
 	"sort"
 	"strings"
 
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/imdario/mergo"
 	istioNetworking "istio.io/api/networking/v1beta1"
-
+	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -38,12 +43,6 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"github.com/imdario/mergo"
-	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
-	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // RestartState holds the restart state for DGD services.
@@ -360,7 +359,7 @@ func generateSingleDCD(
 		if deployment.Spec.ExtraPodSpec.PodSpec == nil {
 			deployment.Spec.ExtraPodSpec.PodSpec = &corev1.PodSpec{}
 		}
-		deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
+		deployment.Spec.ExtraPodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 	}
 
 	if deployment.IsFrontendComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
@@ -1136,7 +1135,7 @@ func GenerateBasePodSpec(
 	// Check if user provided their own security context before merging
 	userProvidedSecurityContext := component.ExtraPodSpec != nil &&
 		component.ExtraPodSpec.PodSpec != nil &&
-		component.ExtraPodSpec.PodSpec.SecurityContext != nil
+		component.ExtraPodSpec.SecurityContext != nil
 
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
 		// merge extraPodSpec PodSpec with base podspec

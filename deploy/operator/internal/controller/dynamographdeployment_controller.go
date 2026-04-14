@@ -25,17 +25,13 @@ import (
 
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
-
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,16 +45,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
-	rbacv1 "k8s.io/api/rbac/v1"
-	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 )
 
 type Reason string
@@ -376,10 +374,7 @@ func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1alpha1.
 	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
 	// Unset or not "false": Grove if available; else component mode
 	// "false": component mode (multinode -> LWS; single-node -> standard)
-	enableGrove := true
-	if dgd.Annotations != nil && strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) == consts.KubeLabelValueFalse {
-		enableGrove = false
-	}
+	enableGrove := dgd.Annotations == nil || strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
 
 	return enableGrove && r.RuntimeConfig.GroveEnabled
 }
@@ -396,7 +391,7 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 	logger := log.FromContext(ctx)
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
+	err := r.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
 	if err != nil {
 		logger.Error(err, "failed to get PodCliqueSet")
 		return inProgress
@@ -444,7 +439,7 @@ func (r *DynamoGraphDeploymentReconciler) propagateTopologyCondition(ctx context
 	logger := log.FromContext(ctx)
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs); err != nil {
 		if errors.IsNotFound(err) {
 			return
 		}
@@ -591,7 +586,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsPCS(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]string, error) {
 	restartAnnotations := make(map[string]string)
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
+	err := r.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
 	if err != nil && !errors.IsNotFound(err) {
 		return nil, fmt.Errorf("failed to get PodCliqueSet: %w", err)
 	}
@@ -1227,7 +1222,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVC(ctx context.Context, dyna
 		}
 
 		pvc = constructPVC(dynamoDeployment, pvcConfig)
-		if err := controllerutil.SetControllerReference(dynamoDeployment, pvc, r.Client.Scheme()); err != nil {
+		if err := controllerutil.SetControllerReference(dynamoDeployment, pvc, r.Scheme()); err != nil {
 			logger.Error(err, "Failed to set controller reference for top-level PVC", "pvcName", pvcName)
 			return nil, err
 		}

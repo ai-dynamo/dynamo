@@ -6,12 +6,13 @@
 package dynamo
 
 import (
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
+
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/utils/ptr"
 )
 
 // ComponentDefaults interface defines how defaults should be provided

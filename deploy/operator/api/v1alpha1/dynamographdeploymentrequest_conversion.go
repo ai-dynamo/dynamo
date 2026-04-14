@@ -148,12 +148,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
+
+	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 // Annotation keys used to round-trip v1alpha1 fields that have no v1beta1 equivalent.

@@ -23,10 +23,11 @@ import (
 	"fmt"
 	"strings"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
+
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 const (
@@ -339,7 +340,7 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 }
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
-	for _, ownerRef := range s.ObjectMeta.OwnerReferences {
+	for _, ownerRef := range s.OwnerReferences {
 		if ownerRef.Kind == "DynamoGraphDeployment" {
 			return ownerRef.Name
 		}

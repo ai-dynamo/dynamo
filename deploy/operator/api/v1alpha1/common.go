@@ -148,7 +148,7 @@ func (e ExtraPodSpec) MarshalJSON() ([]byte, error) {
 	if e.PodSpec != nil {
 		a := PodSpecAlias(*e.PodSpec)
 		aux.PodSpecAlias = &a
-		aux.Containers = e.PodSpec.Containers
+		aux.Containers = e.Containers
 	}
 	aux.MainContainer = e.MainContainer
 

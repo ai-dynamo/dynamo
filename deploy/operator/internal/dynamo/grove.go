@@ -8,17 +8,16 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/dynamic"
-	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 type GroveMultinodeDeployer struct {
@@ -56,7 +55,7 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 // and returns the service replica statuses for each component.
 // - PodCliques: spec.replicas == status.readyReplicas
 // - PodCliqueScalingGroups: spec.replicas == status.availableReplicas
-func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (bool, string, map[string]v1alpha1.ServiceReplicaStatus) {
+func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *v1alpha1.DynamoGraphDeployment) (bool, string, map[string]v1alpha1.ServiceReplicaStatus) {
 	logger := log.FromContext(ctx)
 	var notReadyComponents []string
 

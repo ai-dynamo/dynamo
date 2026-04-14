@@ -5,10 +5,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 const (
@@ -461,13 +462,13 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 				if volume.Name == mpiRunSecretName {
 					hasSSHVolume = true
 					// Verify volume configuration
-					if volume.VolumeSource.Secret == nil {
+					if volume.Secret == nil {
 						t.Errorf("UpdatePodSpec() SSH volume should use Secret volume source")
 					} else {
-						if volume.VolumeSource.Secret.SecretName != mpiRunSecretName {
-							t.Errorf("UpdatePodSpec() SSH volume secret name = %s, want %s", volume.VolumeSource.Secret.SecretName, mpiRunSecretName)
+						if volume.Secret.SecretName != mpiRunSecretName {
+							t.Errorf("UpdatePodSpec() SSH volume secret name = %s, want %s", volume.Secret.SecretName, mpiRunSecretName)
 						}
-						if volume.VolumeSource.Secret.DefaultMode == nil || *volume.VolumeSource.Secret.DefaultMode != 0644 {
+						if volume.Secret.DefaultMode == nil || *volume.Secret.DefaultMode != 0644 {
 							t.Errorf("UpdatePodSpec() SSH volume should have DefaultMode 0644")
 						}
 					}

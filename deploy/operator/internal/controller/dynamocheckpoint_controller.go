@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -42,7 +43,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 // CheckpointReconciler reconciles a DynamoCheckpoint object
@@ -325,7 +325,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			lastRenewal = lease.Spec.AcquireTime
 		}
 		if lastRenewal != nil {
-			checkpointWorkerActive = !now.After(lastRenewal.Time.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second))
+			checkpointWorkerActive = !now.After(lastRenewal.Add(time.Duration(*lease.Spec.LeaseDurationSeconds) * time.Second))
 		}
 	}
 
