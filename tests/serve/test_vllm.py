@@ -148,10 +148,6 @@ vllm_configs = {
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
-            # pytest.mark.skipif(
-            #     _is_cuda13(),
-            #     reason="lmcache does not support CUDA 13 as of v0.3.11",
-            # ),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -174,10 +170,6 @@ vllm_configs = {
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
-            # pytest.mark.skipif(
-            #     _is_cuda13(),
-            #     reason="lmcache does not support CUDA 13 as of v0.3.11",
-            # ),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
