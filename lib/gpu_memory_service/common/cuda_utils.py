@@ -52,6 +52,8 @@ def cumem_get_allocation_granularity(device: int) -> int:
     Returns:
         Allocation granularity in bytes (typically 2 MiB)
     """
+    cuda_ensure_initialized()
+
     prop = cuda.CUmemAllocationProp()
     prop.type = cuda.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
     prop.location.type = cuda.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
