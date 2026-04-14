@@ -277,7 +277,11 @@ mod tests {
     #[test]
     fn test_deactivated_flag_blocks_when_enforce_disagg() {
         let router = make_test_router(true);
-        assert!(router.can_serve_requests());
+        // prefill_router OnceLock is empty, so enforce_disagg blocks even before deactivation
+        assert!(
+            !router.can_serve_requests(),
+            "enforce_disagg must block before prefill activation"
+        );
 
         router.deactivate();
         assert!(router.is_deactivated());
@@ -299,7 +303,25 @@ mod tests {
     }
 
     #[test]
-    fn test_reactivate_clears_deactivated() {
+    fn test_reactivate_clears_deactivated_no_enforce() {
+        let router = make_test_router(false);
+        router.deactivate();
+        // !enforce_disagg allows fallback even while deactivated
+        assert!(router.can_serve_requests());
+
+        router.reactivate();
+        assert!(!router.is_deactivated());
+        assert!(
+            router.can_serve_requests(),
+            "reactivated non-enforce router must serve requests"
+        );
+    }
+
+    #[test]
+    fn test_reactivate_clears_deactivated_enforce_needs_inner_router() {
+        // disabled() never populates the OnceLock, so enforce_disagg stays blocked.
+        // In a real deployment, activate() populates the lock before the first
+        // deactivate/reactivate cycle, so this only exercises the flag reset.
         let router = make_test_router(true);
         router.deactivate();
         assert!(!router.can_serve_requests());
@@ -307,8 +329,8 @@ mod tests {
         router.reactivate();
         assert!(!router.is_deactivated());
         assert!(
-            router.can_serve_requests(),
-            "reactivated router must serve requests"
+            !router.can_serve_requests(),
+            "enforce_disagg without inner router still can't serve"
         );
     }
 
@@ -316,7 +338,18 @@ mod tests {
     fn test_fresh_router_not_deactivated() {
         let router = make_test_router(true);
         assert!(!router.is_deactivated());
-        assert!(router.can_serve_requests());
+        // enforce_disagg + no prefill activation => not servable
+        assert!(!router.can_serve_requests());
+    }
+
+    #[test]
+    fn test_fresh_router_no_enforce_disagg_can_serve() {
+        let router = make_test_router(false);
+        assert!(!router.is_deactivated());
+        assert!(
+            router.can_serve_requests(),
+            "non-enforce_disagg router must be servable even without prefill activation"
+        );
     }
 
     #[test]

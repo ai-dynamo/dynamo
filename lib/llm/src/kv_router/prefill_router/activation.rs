@@ -228,14 +228,18 @@ impl PrefillRouter {
     }
 
     /// Whether this router can serve requests in its current state.
-    /// - Not deactivated: true (passthrough, awaiting, or active)
-    /// - Deactivated + enforce_disagg: false (disagg required but prefill is dead)
-    /// - Deactivated + !enforce_disagg: true (fallback to aggregated mode)
+    /// - !enforce_disagg (aggregated passthrough): always servable unless deactivated
+    /// - enforce_disagg: only servable when prefill has activated AND is not deactivated,
+    ///   so a cold-started strict-disagg model isn't listed before prefill rendezvoused.
     pub fn can_serve_requests(&self) -> bool {
         if self.is_deactivated() {
-            !self.enforce_disagg
-        } else {
-            true
+            return !self.enforce_disagg;
         }
+
+        if !self.enforce_disagg {
+            return true;
+        }
+
+        self.prefill_router.get().is_some()
     }
 }
