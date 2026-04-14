@@ -36,6 +36,7 @@ for path in (os.environ["GMS_SOCKET_DIR"], os.environ["GMS_CONTROL_DIR"]):
 `
 
 const gmsServerCommand = `
+import os
 import signal
 import subprocess
 import sys
@@ -107,7 +108,11 @@ def devices():
         pynvml.nvmlShutdown()
 
 
-for device in devices():
+device_ids = devices()
+if not device_ids:
+    raise SystemExit("no nvidia devices found")
+
+for device in device_ids:
     socket_path = get_socket_path(device, "weights")
     while not os.path.exists(socket_path):
         time.sleep(1)
@@ -141,7 +146,11 @@ def devices():
         pynvml.nvmlShutdown()
 
 
-for device in devices():
+device_ids = devices()
+if not device_ids:
+    raise SystemExit("no nvidia devices found")
+
+for device in device_ids:
     socket_path = get_socket_path(device, "weights")
     while not os.path.exists(socket_path):
         time.sleep(1)
