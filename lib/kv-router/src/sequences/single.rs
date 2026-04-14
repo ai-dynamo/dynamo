@@ -42,10 +42,37 @@ pub type RequestId = String;
 
 #[derive(Debug)]
 pub(super) struct RequestState {
-    blocks: Vec<(SequenceHash, Arc<()>)>,
+    prompt_blocks: Vec<(SequenceHash, Arc<()>)>,
+    output_blocks: Vec<(SequenceHash, Arc<()>)>,
     started_at: Instant,
     prefill: Option<PrefillLoadState>,
     expected_output_tokens: Option<u32>,
+}
+
+impl RequestState {
+    fn all_blocks(&self) -> impl Iterator<Item = &(SequenceHash, Arc<()>)> {
+        self.prompt_blocks.iter().chain(self.output_blocks.iter())
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PromptPresenceDelta {
+    pub prompt_became_present: Vec<SequenceHash>,
+    pub prompt_became_absent: Vec<SequenceHash>,
+}
+
+impl PromptPresenceDelta {
+    fn extend(&mut self, other: Self) {
+        self.prompt_became_present
+            .extend(other.prompt_became_present);
+        self.prompt_became_absent.extend(other.prompt_became_absent);
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SequenceMutationOutcome {
+    pub prompt_delta: PromptPresenceDelta,
+    pub expired_request_ids: HashSet<RequestId>,
 }
 
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
@@ -208,7 +235,7 @@ impl ActiveSequences {
             return;
         };
 
-        for (hash, rc) in &request_state.blocks {
+        for (hash, rc) in request_state.all_blocks() {
             if Arc::strong_count(rc) == 1 {
                 self.blocks.fractional_blocks.insert(*hash, fraction);
             }
@@ -216,7 +243,7 @@ impl ActiveSequences {
     }
 
     /// Add a new request with its initial tokens.
-    /// Returns the set of expired request IDs that were removed during cleanup.
+    /// Returns prompt membership transitions plus any expired request IDs removed during cleanup.
     pub fn add_request(
         &mut self,
         request_id: RequestId,
@@ -225,7 +252,7 @@ impl ActiveSequences {
         overlap: u32,
         expected_output_tokens: Option<u32>,
         decay_now: Instant,
-    ) -> HashSet<RequestId> {
+    ) -> SequenceMutationOutcome {
         self.add_request_with_prefill_tracking(
             request_id,
             token_sequence,
@@ -239,7 +266,7 @@ impl ActiveSequences {
     }
 
     /// Add a new request with optional prompt-token load accounting.
-    /// Returns the set of expired request IDs that were removed during cleanup.
+    /// Returns prompt membership transitions plus any expired request IDs removed during cleanup.
     #[allow(clippy::too_many_arguments)]
     pub fn add_request_with_prefill_tracking(
         &mut self,
@@ -251,21 +278,24 @@ impl ActiveSequences {
         track_prefill_tokens: bool,
         prefill_load_hint: Option<PrefillLoadHint>,
         decay_now: Instant,
-    ) -> HashSet<RequestId> {
+    ) -> SequenceMutationOutcome {
         if self.requests.contains_key(&request_id) {
             tracing::error!("Request {request_id} is already active. Ignoring duplicate add.");
-            return HashSet::new();
+            return SequenceMutationOutcome::default();
         }
 
-        let removed_requests = self.force_expiry();
+        let mut outcome = self.force_expiry();
         let started_at = Instant::now();
 
-        let blocks = match token_sequence {
+        let prompt_blocks = match token_sequence {
             Some(sequence) => sequence
                 .into_iter()
                 .map(|block| {
-                    let rc = self.blocks.touch_block(&block);
-                    (block, rc)
+                    let acquire = self.blocks.touch_block(&block);
+                    if acquire.became_present_on_worker {
+                        outcome.prompt_delta.prompt_became_present.push(block);
+                    }
+                    (block, acquire.rc)
                 })
                 .collect(),
             None => Vec::new(),
@@ -289,7 +319,8 @@ impl ActiveSequences {
         self.requests.insert(
             request_id.clone(),
             RequestState {
-                blocks,
+                prompt_blocks,
+                output_blocks: Vec::new(),
                 started_at,
                 prefill,
                 expected_output_tokens,
@@ -301,7 +332,7 @@ impl ActiveSequences {
         }
 
         self.validate_state();
-        removed_requests
+        outcome
     }
 
     /// Mark prefill as completed for a request, removing it from prompt-load tracking.
@@ -373,26 +404,42 @@ impl ActiveSequences {
         self.new_blocks(token_sequence) + self.active_blocks()
     }
 
+    pub(super) fn active_prompt_hashes(&self) -> HashSet<SequenceHash> {
+        self.requests
+            .values()
+            .flat_map(|request_state| request_state.prompt_blocks.iter().map(|(hash, _)| *hash))
+            .collect()
+    }
+
     /// Free all blocks associated with a request.
     ///
     /// This implicitly calls [`Self::mark_prefill_completed`] first, so callers do not need
     /// to invoke both when the request is finishing.
-    pub fn free(&mut self, request_id: &RequestId, decay_now: Instant) -> usize {
-        self.mark_prefill_completed(request_id, decay_now);
+    pub fn free(&mut self, request_id: &RequestId, decay_now: Instant) -> PromptPresenceDelta {
+        let _ = self.remove_prefill_load(request_id, decay_now);
 
         let Some(request_state) = self.requests.remove(request_id) else {
             tracing::warn!("Trying to free non-existent request {request_id}");
-            return self.active_blocks();
+            return PromptPresenceDelta::default();
         };
 
         let _ = request_state.expected_output_tokens;
-        for (block_hash, rc) in request_state.blocks {
+        let mut prompt_delta = PromptPresenceDelta::default();
+
+        for (block_hash, rc) in request_state.prompt_blocks {
             drop(rc);
-            self.blocks.try_remove_block(&block_hash);
+            if self.blocks.try_remove_block(&block_hash) {
+                prompt_delta.prompt_became_absent.push(block_hash);
+            }
+        }
+
+        for (block_hash, rc) in request_state.output_blocks {
+            drop(rc);
+            let _ = self.blocks.try_remove_block(&block_hash);
         }
 
         self.validate_state();
-        self.active_blocks()
+        prompt_delta
     }
 
     /// Add an output block with a random hash and optional fractional decay weight.
@@ -409,12 +456,12 @@ impl ActiveSequences {
         }
 
         let random_hash: SequenceHash = Uuid::new_v4().as_u64_pair().0;
-        let rc = self.blocks.touch_block(&random_hash);
+        let acquire = self.blocks.touch_block(&random_hash);
         self.requests
             .get_mut(request_id)
             .expect("request existence was checked above")
-            .blocks
-            .push((random_hash, rc));
+            .output_blocks
+            .push((random_hash, acquire.rc));
 
         if let Some(frac) = decay_fraction {
             self.set_single_ref_blocks_as_fractional(request_id, frac);
@@ -425,30 +472,35 @@ impl ActiveSequences {
     }
 
     /// Force expiry of stale requests if the timer has elapsed.
-    /// Returns the set of expired request IDs that were removed.
-    pub fn force_expiry(&mut self) -> HashSet<RequestId> {
+    /// Returns prompt membership transitions plus the set of expired request IDs that were removed.
+    pub fn force_expiry(&mut self) -> SequenceMutationOutcome {
         let now = Instant::now();
 
         if now < self.last_expiry_check_time + CHECK_EXPIRY_FREQUENCY {
-            return HashSet::new();
+            return SequenceMutationOutcome::default();
         }
 
         self.last_expiry_check_time = now;
         let expired_requests_time = now - EXPIRY_DURATION;
-        let expired_requests: HashSet<RequestId> = self
+        let expired_request_ids: HashSet<RequestId> = self
             .requests
             .iter()
             .filter(|(_, state)| state.started_at < expired_requests_time)
             .map(|(request_id, _)| request_id.clone())
             .collect();
 
-        for request_id in &expired_requests {
+        let mut outcome = SequenceMutationOutcome {
+            expired_request_ids,
+            ..Default::default()
+        };
+
+        for request_id in &outcome.expired_request_ids {
             tracing::warn!("Expiring stale request: {}", request_id);
-            self.free(request_id, now);
+            outcome.prompt_delta.extend(self.free(request_id, now));
         }
 
         self.validate_state();
-        expired_requests
+        outcome
     }
 }
 
@@ -462,6 +514,76 @@ mod tests {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: Some(Duration::from_secs(duration_secs)),
         }
+    }
+
+    #[test]
+    fn test_prompt_presence_delta_only_reports_first_add_and_last_remove() {
+        let mut seq_manager = ActiveSequences::new(4);
+        let decay_now = Instant::now();
+
+        let first = seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1, 2]),
+            8,
+            0,
+            None,
+            true,
+            None,
+            decay_now,
+        );
+        assert_eq!(first.prompt_delta.prompt_became_present, vec![1, 2]);
+        assert!(first.prompt_delta.prompt_became_absent.is_empty());
+        assert!(first.expired_request_ids.is_empty());
+
+        let second = seq_manager.add_request_with_prefill_tracking(
+            "r2".to_string(),
+            Some(vec![1, 2, 3]),
+            12,
+            0,
+            None,
+            true,
+            None,
+            decay_now,
+        );
+        assert_eq!(second.prompt_delta.prompt_became_present, vec![3]);
+        assert!(second.prompt_delta.prompt_became_absent.is_empty());
+
+        let first_free = seq_manager.free(&"r1".to_string(), decay_now);
+        assert!(first_free.prompt_became_present.is_empty());
+        assert!(first_free.prompt_became_absent.is_empty());
+
+        let second_free = seq_manager.free(&"r2".to_string(), decay_now);
+        assert!(second_free.prompt_became_present.is_empty());
+        assert_eq!(second_free.prompt_became_absent, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_prompt_membership_stays_prompt_only_across_output_and_prefill_updates() {
+        let mut seq_manager = ActiveSequences::new(4);
+        let decay_now = Instant::now();
+
+        let outcome = seq_manager.add_request_with_prefill_tracking(
+            "r1".to_string(),
+            Some(vec![1, 2, 3]),
+            12,
+            0,
+            None,
+            true,
+            None,
+            decay_now,
+        );
+        assert_eq!(outcome.prompt_delta.prompt_became_present, vec![1, 2, 3]);
+        assert_eq!(seq_manager.active_prompt_hashes(), HashSet::from([1, 2, 3]));
+
+        assert!(seq_manager.add_output_block(&"r1".to_string(), Some(0.5)));
+        assert_eq!(seq_manager.active_prompt_hashes(), HashSet::from([1, 2, 3]));
+
+        seq_manager.mark_prefill_completed(&"r1".to_string(), decay_now);
+        assert_eq!(seq_manager.active_tokens(decay_now), 0);
+        assert_eq!(seq_manager.active_prompt_hashes(), HashSet::from([1, 2, 3]));
+
+        let free_delta = seq_manager.free(&"r1".to_string(), decay_now);
+        assert_eq!(free_delta.prompt_became_absent, vec![1, 2, 3]);
     }
 
     #[test]
@@ -882,18 +1004,27 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(20)).await;
         let expired = seq_manager.force_expiry();
-        assert!(expired.is_empty(), "no check before CHECK_EXPIRY_FREQUENCY");
+        assert!(
+            expired.expired_request_ids.is_empty(),
+            "no check before CHECK_EXPIRY_FREQUENCY"
+        );
         assert_eq!(seq_manager.active_blocks(), 4);
 
         tokio::time::advance(Duration::from_secs(11)).await;
         let expired = seq_manager.force_expiry();
-        assert!(expired.is_empty(), "requests not old enough to expire");
+        assert!(
+            expired.expired_request_ids.is_empty(),
+            "requests not old enough to expire"
+        );
         assert_eq!(seq_manager.active_blocks(), 4);
         seq_manager.assert_consistent();
 
         tokio::time::advance(Duration::from_secs(270)).await;
         let expired = seq_manager.force_expiry();
-        assert_eq!(expired, HashSet::from(["r1".to_string(), "r2".to_string()]));
+        assert_eq!(
+            expired.expired_request_ids,
+            HashSet::from(["r1".to_string(), "r2".to_string()])
+        );
         assert_eq!(seq_manager.active_blocks(), 0);
         assert_eq!(seq_manager.active_tokens(Instant::now()), 0);
         seq_manager.assert_consistent();
@@ -901,7 +1032,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(31)).await;
         let expired =
             seq_manager.add_request("r3".to_string(), Some(vec![5]), 4, 0, None, Instant::now());
-        assert!(expired.is_empty());
+        assert!(expired.expired_request_ids.is_empty());
         assert_eq!(seq_manager.active_blocks(), 1);
         assert_eq!(seq_manager.active_tokens(Instant::now()), 4);
         seq_manager.assert_consistent();
@@ -936,7 +1067,10 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(60)).await;
         let expired = seq_manager.force_expiry();
-        assert_eq!(expired, HashSet::from(["r1".to_string()]));
+        assert_eq!(
+            expired.expired_request_ids,
+            HashSet::from(["r1".to_string()])
+        );
         assert_eq!(seq_manager.active_tokens(Instant::now()), 30);
         assert!(
             seq_manager
