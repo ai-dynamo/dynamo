@@ -186,6 +186,10 @@ def cuda_set_current_device(device: int) -> None:
     cuda_check_result(result, "cuCtxSetCurrent")
 
 
+def cuda_forget_primary_contexts() -> None:
+    _primary_contexts.clear()
+
+
 def _release_primary_contexts() -> None:
     for device in list(_primary_contexts):
         try:

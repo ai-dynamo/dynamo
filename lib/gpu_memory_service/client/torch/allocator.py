@@ -159,6 +159,32 @@ def get_gms_client_memory_manager(
     return state.manager
 
 
+def retarget_gms_client_memory_manager(
+    tag: str,
+    socket_path: str,
+    device: int,
+) -> None:
+    state = _tag_states.get(tag)
+    if state is None:
+        raise RuntimeError(f"No GMS allocator initialized for tag={tag}")
+    if state.device != device:
+        raise RuntimeError(
+            f"Cannot retarget tag={tag} from device {state.device} to device {device}"
+        )
+    if state.manager.is_connected:
+        raise RuntimeError(f"Cannot retarget connected GMS allocator tag={tag}")
+    if state.socket_path == socket_path:
+        return
+    state.socket_path = socket_path
+    state.manager.socket_path = socket_path
+    logger.info(
+        "[GMS] Retargeted tag=%s to socket=%s (device=%d)",
+        tag,
+        socket_path,
+        device,
+    )
+
+
 def get_gms_client_memory_managers() -> tuple["GMSClientMemoryManager", ...]:
     return tuple(state.manager for state in _tag_states.values())
 

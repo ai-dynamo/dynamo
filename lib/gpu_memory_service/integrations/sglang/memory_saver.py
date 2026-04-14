@@ -24,7 +24,9 @@ import torch
 from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
     gms_use_mem_pool,
+    retarget_gms_client_memory_manager,
 )
+from gpu_memory_service.common.cuda_utils import cuda_forget_primary_contexts
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import GMS_TAGS, finalize_gms_write
@@ -167,6 +169,12 @@ class GMSMemorySaverImpl:
                 continue
 
             logger.info("[GMS] Remapping %s", target_tag)
+            cuda_forget_primary_contexts()
+            retarget_gms_client_memory_manager(
+                target_tag,
+                get_socket_path(self._device.index, target_tag),
+                self._device.index,
+            )
             self.allocators[target_tag].connect(_TAG_LOCK_TYPES[target_tag])
             if target_tag == "kv_cache":
                 # KV cache resumes into a new RW layout epoch, so the handles
