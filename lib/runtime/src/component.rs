@@ -77,6 +77,13 @@ pub enum TransportType {
     Tcp(String),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceType {
+    Cpu,
+    Cuda,
+}
+
 #[derive(Default)]
 pub struct RegistryInner {
     pub(crate) services: HashMap<String, Service>,
@@ -94,6 +101,8 @@ pub struct Instance {
     pub namespace: String,
     pub instance_id: u64,
     pub transport: TransportType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<DeviceType>,
 }
 
 impl Instance {

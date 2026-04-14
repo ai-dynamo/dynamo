@@ -305,6 +305,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._session_kwargs(request),
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
@@ -338,6 +339,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._session_kwargs(request),
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )

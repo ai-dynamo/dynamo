@@ -197,38 +197,19 @@ def send_with_retry(request, max_retries=5):
 
 Track rejection behavior with these metrics:
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `dynamo_tasks_rejected_total` | Counter | Total number of rejected tasks |
-| `dynamo_queued_requests` | Gauge | Requests waiting in HTTP queue |
+- `dynamo_frontend_model_rejection_total`: Counter tracking the total number of requests rejected due to resource exhaustion
+  - Labels:
+    - `model`: The model name being served
+    - `endpoint`: The API endpoint that received the request (e.g., `chat_completions`, `completions`, `embeddings`)
+  - This metric is incremented when the router returns a `ResourceExhausted` error because all workers are busy. The rejected request is surfaced to the client as an HTTP 503 response.
 
-### Example Prometheus Queries
-
-```promql
-# Rejection rate over 5 minutes
-rate(dynamo_tasks_rejected_total[5m])
-
-# Percentage of requests rejected
-sum(rate(dynamo_tasks_rejected_total[5m])) /
-sum(rate(dynamo_tasks_issued_total[5m])) * 100
+**Example metrics output:**
+```text
+dynamo_frontend_model_rejection_total{endpoint="chat_completions",model="Qwen/Qwen3-0.6B"} 32
+dynamo_frontend_model_rejection_total{endpoint="completions",model="Qwen/Qwen3-0.6B"} 5
 ```
 
-### Grafana Alerting
-
-Example alert for high rejection rate:
-
-```yaml
-alert: HighRequestRejectionRate
-expr: |
-  sum(rate(dynamo_tasks_rejected_total[5m])) /
-  sum(rate(dynamo_tasks_issued_total[5m])) > 0.1
-for: 5m
-labels:
-  severity: warning
-annotations:
-  summary: "High request rejection rate"
-  description: "More than 10% of requests are being rejected"
-```
+**Endpoint:** Available on the frontend HTTP service at `/metrics`.
 
 ## Tuning Thresholds
 

@@ -288,7 +288,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -304,7 +304,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.single_gpu_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -362,7 +362,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.multi_gpu_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: amd64
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -426,7 +426,7 @@ jobs:
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
     name: copy-to-acr ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}
-    runs-on: prod-default-small-v2
+    runs-on: prod-skopeo-v1
     outputs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
     steps:

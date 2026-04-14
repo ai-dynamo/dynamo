@@ -22,7 +22,7 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
-from tensorrt_llm.llmapi.llm_args import KvCacheConnectorConfig
+from tensorrt_llm.llmapi.llm_args import TOKENIZER_ALIASES, KvCacheConnectorConfig
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
@@ -35,6 +35,7 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
+    register_embedding_cache_metrics,
     register_engine_metrics_callback,
 )
 from dynamo.common.utils.runtime import parse_endpoint
@@ -293,7 +294,27 @@ async def init_llm_worker(
     engine_args = arg_map
 
     # Populate default sampling params from the model
-    tokenizer = tokenizer_factory(arg_map["model"])
+    custom_tokenizer = arg_map.get("custom_tokenizer")
+    if custom_tokenizer:
+        from importlib import import_module
+
+        try:
+            tokenizer_path = TOKENIZER_ALIASES.get(custom_tokenizer, custom_tokenizer)
+            module_path, class_name = tokenizer_path.rsplit(".", 1)
+            tokenizer_class = getattr(import_module(module_path), class_name)
+            tokenizer = tokenizer_class.from_pretrained(
+                arg_map.get("tokenizer") or arg_map["model"],
+                trust_remote_code=arg_map.get("trust_remote_code", False),
+            )
+        except (ValueError, ImportError, AttributeError) as e:
+            raise ValueError(
+                f"Failed to load custom tokenizer '{custom_tokenizer}': {e}. "
+                "Expected format: 'module.path.ClassName' or a recognized alias in TensorRT-LLM LLM API."
+            ) from e
+    else:
+        tokenizer = tokenizer_factory(
+            arg_map["model"], trust_remote_code=arg_map.get("trust_remote_code", False)
+        )
     default_sampling_params = SamplingParams()
 
     # Enable perf metrics so prompt_tokens_details can be returned
@@ -564,6 +585,16 @@ async def init_llm_worker(
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
+
+                encoder_cache = getattr(handler, "_encoder_cache", None)
+                if encoder_cache is not None:
+                    register_embedding_cache_metrics(
+                        endpoint=endpoint,
+                        cache=encoder_cache,
+                        model_name=model_name_for_metrics,
+                        component_name=config.component,
+                    )
+
                 await endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,

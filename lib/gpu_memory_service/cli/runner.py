@@ -15,7 +15,7 @@ import asyncio
 import logging
 
 import uvloop
-from gpu_memory_service.server import GMSRPCServer
+from gpu_memory_service.server.rpc import GMSRPCServer
 
 from .args import parse_args
 
