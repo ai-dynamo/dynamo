@@ -17,6 +17,18 @@ LLM inference breaks these assumptions:
 
 The Dynamo **Planner** is an autoscaler purpose-built for these constraints. It understands engine profiling data, tracks per-worker GPU utilization, predicts traffic patterns, and makes scaling decisions that directly target TTFT and ITL SLAs — not proxy metrics.
 
+## Getting Started: Optimization Targets
+
+The planner offers three `optimization_target` settings that control how scaling decisions are made:
+
+| Target | Description | Requires SLA? | Requires Profiling? |
+|--------|-------------|:-------------:|:-------------------:|
+| **`throughput`** (default) | Maximizes throughput by scaling based on queue depth and KV cache utilization. Scales up when engines are saturated, scales down when utilization drops. | No | No |
+| **`latency`** | Minimizes latency by scaling aggressively to keep queues short. Scales up at lower utilization thresholds. | No | No |
+| **`sla`** | Targets specific TTFT/ITL SLA values using regression-based performance models. Most precise, but requires configuration. | Yes (`ttft`, `itl`) | Recommended |
+
+**We recommend starting with the default `throughput` target** — it works out of the box with zero configuration. Switch to `latency` if your workload is latency-sensitive, or to `sla` when you need precise SLA targeting with pre-deployment profiling.
+
 > **New to the Planner?** Start with the [Planner Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
 > **Need multi-DGD coordination?** See the [Global Planner Guide](global-planner.md) for shared-policy coordination across multiple DGDs and single-endpoint multi-pool deployments.
@@ -63,39 +75,50 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 - Dynamo platform installed on Kubernetes ([Installation Guide](../../kubernetes/installation-guide.md))
 - kube-prometheus-stack installed ([Metrics Setup](../../kubernetes/observability/metrics.md))
 
-For throughput-based scaling, pre-deployment engine performance data is also required (via self-benchmark mode or [Profiling Guide](../profiler/profiler-guide.md)).
+### Default Mode (zero config)
 
-### Throughput-Based Scaling (with DGDR)
+The planner works out of the box with no configuration needed. By default, `optimization_target` is set to `throughput`, which uses static thresholds on queue depth and KV cache utilization — no SLAs or profiling required:
 
-The fastest path to a throughput-based planner deployment is through a DynamoGraphDeploymentRequest, which automatically profiles your model:
+```yaml
+# Minimal planner config — uses throughput optimization by default
+features:
+  planner:
+    mode: disagg
+    backend: vllm
+```
+
+For latency-sensitive workloads:
+
+```yaml
+features:
+  planner:
+    mode: disagg
+    backend: vllm
+    optimization_target: latency
+```
+
+### SLA-Based Scaling (advanced)
+
+For precise SLA targeting with pre-deployment profiling, set `optimization_target: sla`:
+
+```yaml
+features:
+  planner:
+    optimization_target: sla
+    enable_throughput_scaling: true
+    enable_load_scaling: true
+    ttft: 500.0
+    itl: 50.0
+    pre_deployment_sweeping_mode: rapid
+```
+
+The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest, which automatically profiles your model:
 
 ```bash
 kubectl apply -f components/src/dynamo/profiler/deploy/profile_sla_aic_dgdr.yaml -n $NAMESPACE
 ```
 
 See [Planner Guide](planner-guide.md) for the full workflow.
-
-### Load-Based Scaling (without profiling)
-
-To deploy with load-based scaling only (no profiling required), add these arguments to the planner service in your DGD:
-
-```yaml
-args:
-  - --enable-loadbased-scaling
-  - --disable-throughput-scaling
-  - --loadbased-adjustment-interval=5
-```
-
-The planner will auto-discover the frontend metrics endpoint from the DGD. See [disagg_planner.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_planner.yaml) for a complete example.
-
-### Manual DGD Deployment
-
-For manual control with throughput-based scaling, use the disaggregated planner templates:
-
-```bash
-# After profiling is complete
-kubectl apply -f examples/backends/vllm/deploy/disagg_planner.yaml -n $NAMESPACE
-```
 
 ## Current Limitations
 
@@ -128,6 +151,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 | `--namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
 | `--backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
 | `--mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
+| `--optimization-target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `sla` (regression-based SLA targeting) |
 | `--environment` | `kubernetes` | Deployment environment |
 | `--ttft` | `500.0` | Target Time To First Token (ms) |
 | `--itl` | `50.0` | Target Inter-Token Latency (ms) |
