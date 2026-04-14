@@ -115,8 +115,9 @@ class VllmLLMEngine(LLMEngine):
         token_ids = request.get("token_ids", [])
         prompt = TokensPrompt(prompt_token_ids=token_ids)
 
+        # TODO: remove dict() once build_sampling_params accepts GenerateRequest
         sampling_params = build_sampling_params(
-            request, self._default_sampling_params, self._model_max_len
+            dict(request), self._default_sampling_params, self._model_max_len
         )
 
         gen = self.engine_client.generate(prompt, sampling_params, request_id)
@@ -132,7 +133,9 @@ class VllmLLMEngine(LLMEngine):
 
             output = res.outputs[0]
             next_total = len(output.token_ids)
-            out: dict = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+            out: GenerateChunk = {
+                "token_ids": output.token_ids[num_output_tokens_so_far:]
+            }
 
             if output.finish_reason:
                 out["finish_reason"] = str(output.finish_reason)

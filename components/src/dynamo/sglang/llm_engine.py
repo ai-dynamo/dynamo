@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import AsyncGenerator
-from typing import Any, Dict
 
 import sglang as sgl
 
@@ -108,7 +107,7 @@ class SglangLLMEngine(LLMEngine):
         )
 
         async for res in stream:
-            out: Dict[str, Any] = {}
+            out: GenerateChunk = {"token_ids": []}
             meta_info = res["meta_info"]
             finish_reason = meta_info["finish_reason"]
 
@@ -172,7 +171,7 @@ class SglangLLMEngine(LLMEngine):
             self.engine.shutdown()
             logger.info("SGLang engine shutdown")
 
-    def _build_sampling_params(self, request: dict) -> dict:
+    def _build_sampling_params(self, request: GenerateRequest) -> dict:
         if self._skip_tokenizer_init:
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
@@ -192,7 +191,7 @@ class SglangLLMEngine(LLMEngine):
             }
         return {k: v for k, v in param_mapping.items() if v is not None}
 
-    def _get_input_param(self, request: dict) -> dict:
+    def _get_input_param(self, request: GenerateRequest) -> dict:
         assert self._input_param_manager is not None, "Engine not initialized"
         request_input = self._input_param_manager.get_input_param(
             request, use_tokenizer=not self._skip_tokenizer_init

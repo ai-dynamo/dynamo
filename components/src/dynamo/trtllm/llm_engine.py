@@ -151,7 +151,9 @@ class TrtllmLLMEngine(LLMEngine):
 
                 output = res.outputs[0]
                 next_total = len(output.token_ids)
-                out: dict = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                out: GenerateChunk = {
+                    "token_ids": output.token_ids[num_output_tokens_so_far:]
+                }
 
                 if output.finish_reason:
                     out["finish_reason"] = str(output.finish_reason)
@@ -187,7 +189,7 @@ class TrtllmLLMEngine(LLMEngine):
 
     @staticmethod
     def _override_sampling_params(
-        sampling_params: SamplingParams, request: dict
+        sampling_params: SamplingParams, request: GenerateRequest
     ) -> SamplingParams:
         overrides = {
             key: value

@@ -99,7 +99,7 @@ class SampleLLMEngine(LLMEngine):
                 break
             await asyncio.sleep(self.delay)
             token_id = (i + 1) % 32000
-            out: dict = {"token_ids": [token_id]}
+            out: GenerateChunk = {"token_ids": [token_id]}
             if i == max_new - 1:
                 out["finish_reason"] = "length"
                 out["completion_usage"] = {
