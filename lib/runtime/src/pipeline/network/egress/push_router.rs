@@ -5,7 +5,8 @@ use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::{
     component::{
-        Client, DeviceType, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state,
+        Client, DeviceType, Endpoint, Instance, RoutingOccupancyState,
+        get_or_create_routing_occupancy_state,
     },
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
@@ -22,7 +23,7 @@ use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
     sync::{
@@ -256,6 +257,61 @@ fn device_aware_candidate_group(
     }
 }
 
+/// Background task that watches the discovery plane for instance removals and
+/// cancels all pending response-stream registrations for removed instances.
+///
+/// This is the core fix for the postmortem: when a worker is killed while requests
+/// are queued (ACK'd but not yet picked up), the oneshot senders are dropped,
+/// unblocking the waiting frontends with a migratable `Disconnected` error.
+fn spawn_instance_removal_watcher(
+    instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
+    addressed: Arc<AddressedPushRouter>,
+    cancel_token: tokio_util::sync::CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut rx = instance_source.as_ref().clone();
+        let mut prev_ids: HashSet<u64> = rx.borrow_and_update().iter().map(|i| i.id()).collect();
+
+        loop {
+            tokio::select! {
+                result = rx.changed() => {
+                    if result.is_err() {
+                        // Sender dropped -- endpoint is shutting down.
+                        break;
+                    }
+                }
+                _ = cancel_token.cancelled() => {
+                    break;
+                }
+            }
+
+            let current_ids: HashSet<u64> = rx.borrow_and_update().iter().map(|i| i.id()).collect();
+
+            for removed_id in prev_ids.difference(&current_ids) {
+                let n = addressed.cancel_instance_streams(*removed_id).await;
+                if n > 0 {
+                    tracing::warn!(
+                        instance_id = removed_id,
+                        cancelled = n,
+                        "Cancelled pending response streams for removed instance \
+                         (discovery-driven cleanup)"
+                    );
+                }
+            }
+
+            // Clear tombstones for instances that have come back (re-registered
+            // after restart) so new requests can be tracked normally.
+            for added_id in current_ids.difference(&prev_ids) {
+                addressed.clear_instance_tombstone(*added_id).await;
+            }
+
+            prev_ids = current_ids;
+        }
+
+        tracing::debug!("Instance removal watcher exiting");
+    });
+}
+
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
     let manager = endpoint.drt().network_manager();
@@ -339,6 +395,17 @@ where
         } else {
             None
         };
+
+        // Spawn a background task that watches the discovery plane for instance
+        // removals and cancels pending response-stream registrations for removed
+        // instances. This is the primary mechanism for unblocking requests that
+        // were ACK'd on the request plane but never picked up by the worker pool
+        // before the worker was killed.
+        spawn_instance_removal_watcher(
+            client.instance_source.clone(),
+            addressed.clone(),
+            client.endpoint.drt().primary_token(),
+        );
 
         let router = PushRouter {
             client,
@@ -768,7 +835,7 @@ where
             }
         };
 
-        let request = request.map(|req| AddressedRequest::new(req, address));
+        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance_id));
 
         STAGE_DURATION_SECONDS
             .with_label_values(&["route"])

@@ -4,7 +4,7 @@
 use core::panic;
 use socket2::{Domain, SockAddr, Socket, Type};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr, TcpListener},
     os::fd::{AsFd, FromRawFd},
     sync::Arc,
@@ -122,6 +122,11 @@ struct RequestedRecvConnection {
 struct State {
     tx_subjects: HashMap<String, RequestedSendConnection>,
     rx_subjects: HashMap<String, RequestedRecvConnection>,
+    /// Maps subject UUID -> instance_id for reverse lookup during cleanup.
+    subject_instance: HashMap<String, u64>,
+    /// Maps instance_id -> set of subject UUIDs for batch cancellation
+    /// when the discovery plane reports the instance is gone.
+    instance_subjects: HashMap<u64, HashSet<String>>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -196,6 +201,64 @@ impl TcpStreamServer {
         }))
     }
 
+    /// Associate a registered response-stream subject with a backend instance.
+    ///
+    /// Called by the egress router after `register()` so that when the discovery
+    /// plane reports the instance as removed, we can cancel all pending subjects
+    /// for that instance in one shot.
+    pub async fn associate_instance(&self, subject: &str, instance_id: u64) {
+        let mut state = self.state.lock().await;
+        state
+            .subject_instance
+            .insert(subject.to_string(), instance_id);
+        state
+            .instance_subjects
+            .entry(instance_id)
+            .or_default()
+            .insert(subject.to_string());
+    }
+
+    /// Cancel a single pending response-stream registration.
+    ///
+    /// Removes the subject from `rx_subjects` (dropping the `oneshot::Sender`,
+    /// which causes the waiting `oneshot::Receiver` to resolve with
+    /// `RecvError`) and cleans up the instance-tracking maps.
+    pub async fn cancel_recv_stream(&self, subject: &str) {
+        let mut state = self.state.lock().await;
+        state.rx_subjects.remove(subject);
+        if let Some(instance_id) = state.subject_instance.remove(subject) {
+            if let Some(subjects) = state.instance_subjects.get_mut(&instance_id) {
+                subjects.remove(subject);
+                if subjects.is_empty() {
+                    state.instance_subjects.remove(&instance_id);
+                }
+            }
+        }
+    }
+
+    /// Cancel **all** pending response-stream registrations for a given instance.
+    ///
+    /// Called when the discovery plane reports the instance as removed (etcd lease
+    /// expired or explicit unregister). Dropping each `oneshot::Sender` causes
+    /// the corresponding `oneshot::Receiver.await` in `AddressedPushRouter::generate()`
+    /// to resolve with `RecvError`, which is converted to a migratable
+    /// `DynamoError(Disconnected)` so the migration layer can retry on another worker.
+    ///
+    /// Returns the number of streams cancelled.
+    pub async fn cancel_instance_streams(&self, instance_id: u64) -> usize {
+        let mut state = self.state.lock().await;
+        let subjects = match state.instance_subjects.remove(&instance_id) {
+            Some(subjects) => subjects,
+            None => return 0,
+        };
+        let count = subjects.len();
+        for subject in &subjects {
+            state.rx_subjects.remove(subject);
+            state.subject_instance.remove(subject);
+        }
+        count
+    }
+
     #[allow(clippy::await_holding_lock)]
     async fn start(local_ip: String, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
         let addr = format!("{}:{}", local_ip, local_port);
@@ -257,16 +320,26 @@ impl ResponseService for TcpStreamServer {
                 .tx_subjects
                 .insert(sender_subject.clone(), connection_info);
 
-            let registered_stream = RegisteredStream {
-                connection_info: TcpStreamConnectionInfo {
+            let cleanup_subject = sender_subject.clone();
+            let cleanup_state = self.state.clone();
+            let registered_stream = RegisteredStream::new(
+                TcpStreamConnectionInfo {
                     address: address.clone(),
-                    subject: sender_subject.clone(),
+                    subject: sender_subject,
                     context: options.context.id().to_string(),
                     stream_type: StreamType::Request,
                 }
                 .into(),
-                stream_provider: pending_sender_rx,
-            };
+                pending_sender_rx,
+            )
+            .with_cleanup(move || {
+                // Synchronous removal -- fire-and-forget via a spawned task
+                // because Drop cannot be async.
+                tokio::spawn(async move {
+                    let mut state = cleanup_state.lock().await;
+                    state.tx_subjects.remove(&cleanup_subject);
+                });
+            });
 
             Some(registered_stream)
         } else {
@@ -287,16 +360,34 @@ impl ResponseService for TcpStreamServer {
                 .rx_subjects
                 .insert(receiver_subject.clone(), connection_info);
 
-            let registered_stream = RegisteredStream {
-                connection_info: TcpStreamConnectionInfo {
+            let cleanup_subject = receiver_subject.clone();
+            let cleanup_state = self.state.clone();
+            let registered_stream = RegisteredStream::new(
+                TcpStreamConnectionInfo {
                     address: address.clone(),
-                    subject: receiver_subject.clone(),
+                    subject: receiver_subject,
                     context: options.context.id().to_string(),
                     stream_type: StreamType::Response,
                 }
                 .into(),
-                stream_provider: pending_recver_rx,
-            };
+                pending_recver_rx,
+            )
+            .with_cleanup(move || {
+                // Synchronous removal -- fire-and-forget via a spawned task
+                // because Drop cannot be async.
+                tokio::spawn(async move {
+                    let mut state = cleanup_state.lock().await;
+                    state.rx_subjects.remove(&cleanup_subject);
+                    if let Some(instance_id) = state.subject_instance.remove(&cleanup_subject) {
+                        if let Some(subjects) = state.instance_subjects.get_mut(&instance_id) {
+                            subjects.remove(&cleanup_subject);
+                            if subjects.is_empty() {
+                                state.instance_subjects.remove(&instance_id);
+                            }
+                        }
+                    }
+                });
+            });
 
             Some(registered_stream)
         } else {
@@ -441,11 +532,23 @@ async fn tcp_listener(
         mut reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
         writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
     ) -> Result<()> {
-        let response_stream = state
-            .lock().await
-            .rx_subjects
-            .remove(&subject)
-            .ok_or(error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject))?;
+        let response_stream = {
+            let mut guard = state.lock().await;
+            let conn = guard
+                .rx_subjects
+                .remove(&subject)
+                .ok_or(error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject))?;
+            // Clean up instance-tracking maps on the normal (worker-connected) path.
+            if let Some(instance_id) = guard.subject_instance.remove(&subject) {
+                if let Some(subjects) = guard.instance_subjects.get_mut(&instance_id) {
+                    subjects.remove(&subject);
+                    if subjects.is_empty() {
+                        guard.instance_subjects.remove(&instance_id);
+                    }
+                }
+            }
+            conn
+        };
 
         // unwrap response_stream
         let RequestedRecvConnection {
@@ -777,5 +880,186 @@ mod tests {
 
         // The server should work with the fallback IP
         assert!(socket_addr.port() > 0, "Server should have a valid port");
+    }
+
+    /// Create a test server using the failing IP resolver (falls back to loopback).
+    async fn test_server() -> Arc<TcpStreamServer> {
+        TcpStreamServer::new_with_resolver(
+            ServerOptions::builder().port(0).build().unwrap(),
+            FailingIpResolver,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Helper: register a response stream and extract its subject string.
+    async fn register_and_get_subject(
+        server: &TcpStreamServer,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, String>>,
+    ) {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let recv_stream = pending.recv_stream.unwrap();
+        let (conn_info, provider) = recv_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = conn_info.try_into().unwrap();
+        (tcp_info.subject, provider)
+    }
+
+    #[tokio::test]
+    async fn test_cancel_instance_streams_unblocks_receiver() {
+        let server = test_server().await;
+
+        let (subject, provider) = register_and_get_subject(&server).await;
+
+        // Associate the subject with instance 42
+        server.associate_instance(&subject, 42).await;
+
+        // Cancel all streams for instance 42
+        let cancelled = server.cancel_instance_streams(42).await;
+        assert_eq!(cancelled, 1);
+
+        // The oneshot receiver should now resolve with an error (sender dropped)
+        let result = provider.await;
+        assert!(result.is_err(), "Expected RecvError after cancellation");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_instance_streams_multiple_subjects() {
+        let server = test_server().await;
+
+        let (subj1, prov1) = register_and_get_subject(&server).await;
+        let (subj2, prov2) = register_and_get_subject(&server).await;
+        let (subj3, prov3) = register_and_get_subject(&server).await;
+
+        // Associate first two with instance 10, third with instance 20
+        server.associate_instance(&subj1, 10).await;
+        server.associate_instance(&subj2, 10).await;
+        server.associate_instance(&subj3, 20).await;
+
+        // Cancel instance 10 -- should cancel 2 subjects
+        let cancelled = server.cancel_instance_streams(10).await;
+        assert_eq!(cancelled, 2);
+
+        assert!(prov1.await.is_err());
+        assert!(prov2.await.is_err());
+
+        // Instance 20 should be unaffected -- cancel it separately
+        let cancelled = server.cancel_instance_streams(20).await;
+        assert_eq!(cancelled, 1);
+        assert!(prov3.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_instance_streams_nonexistent_instance() {
+        let server = test_server().await;
+
+        // Cancelling a nonexistent instance should return 0 and not panic
+        let cancelled = server.cancel_instance_streams(999).await;
+        assert_eq!(cancelled, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_recv_stream_cleans_up_instance_tracking() {
+        let server = test_server().await;
+
+        let (subject, _provider) = register_and_get_subject(&server).await;
+        server.associate_instance(&subject, 42).await;
+
+        // Cancel the individual subject
+        server.cancel_recv_stream(&subject).await;
+
+        // Instance should have no remaining subjects
+        let cancelled = server.cancel_instance_streams(42).await;
+        assert_eq!(
+            cancelled, 0,
+            "Instance tracking should have been cleaned up"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_registered_stream_drop_runs_cleanup() {
+        let server = test_server().await;
+
+        // Register a response stream but DON'T call into_parts -- just drop it
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let recv_stream = pending.recv_stream.unwrap();
+
+        // Get the subject before dropping
+        let tcp_info: TcpStreamConnectionInfo =
+            recv_stream.connection_info.clone().try_into().unwrap();
+        let subject = tcp_info.subject.clone();
+
+        // Verify it's in rx_subjects
+        {
+            let state = server.state.lock().await;
+            assert!(state.rx_subjects.contains_key(&subject));
+        }
+
+        // Drop the RegisteredStream -- RAII cleanup should fire
+        drop(recv_stream);
+
+        // Give the spawned cleanup task a moment to run
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify it's been removed from rx_subjects
+        {
+            let state = server.state.lock().await;
+            assert!(
+                !state.rx_subjects.contains_key(&subject),
+                "RAII cleanup should have removed the rx_subjects entry"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_registered_stream_into_parts_disarms_cleanup() {
+        let server = test_server().await;
+
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let recv_stream = pending.recv_stream.unwrap();
+
+        let tcp_info: TcpStreamConnectionInfo =
+            recv_stream.connection_info.clone().try_into().unwrap();
+        let subject = tcp_info.subject.clone();
+
+        // Call into_parts to disarm the cleanup
+        let (_conn_info, _provider) = recv_stream.into_parts();
+
+        // Give any potential cleanup a moment to run
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // The entry should still be in rx_subjects (cleanup was disarmed)
+        {
+            let state = server.state.lock().await;
+            assert!(
+                state.rx_subjects.contains_key(&subject),
+                "into_parts() should disarm the RAII cleanup"
+            );
+        }
     }
 }
