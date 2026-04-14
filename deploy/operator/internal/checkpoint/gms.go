@@ -68,6 +68,17 @@ func BuildGMSRestoreSidecars(
 		return nil
 	}
 
+	// Remove gms-server from initContainers if the DGD-level
+	// applyGPUMemoryService already placed it there. For restore pods the
+	// server runs as a regular container so that all containers start in
+	// parallel — the restored main process does not need sockets at startup.
+	for i := range podSpec.InitContainers {
+		if podSpec.InitContainers[i].Name == gmsruntime.ServerContainerName {
+			podSpec.InitContainers = append(podSpec.InitContainers[:i], podSpec.InitContainers[i+1:]...)
+			break
+		}
+	}
+
 	server := gmsruntime.BuildServerContainer(podSpec, mainContainer)
 
 	loader := gmsCheckpointLoaderContainer(mainContainer.Image)
