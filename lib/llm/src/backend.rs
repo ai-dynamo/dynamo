@@ -43,7 +43,7 @@ use crate::protocols::{
     },
 };
 use crate::tokenizers::{DecodeStream, Tokenizer};
-use dynamo_async_openai::types::StopReason;
+use dynamo_protocols::types::StopReason;
 
 /// Represents the output stream from the execution engine
 pub type ExecutionOutputStream = Annotated<LLMEngineOutput>;
@@ -638,7 +638,7 @@ mod tests {
             &self,
             _token_ids: &[TokenIdType],
             _skip_special_tokens: bool,
-        ) -> anyhow::Result<String> {
+        ) -> anyhow::Result<traits::DecodeResult> {
             Err(anyhow::anyhow!(
                 "Unable to decode into a valid UTF-8 string: incomplete utf-8 byte sequence from index 6"
             ))

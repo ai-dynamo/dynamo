@@ -156,7 +156,7 @@ impl Discovery for KVStoreDiscovery {
         self.store.connection_id()
     }
 
-    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+    async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance_id = self.instance_id();
         let instance = spec.with_instance_id(instance_id);
 
@@ -613,6 +613,7 @@ mod tests {
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
+            device_type: None,
         };
 
         let instance = client.register(spec).await.unwrap();
@@ -638,6 +639,7 @@ mod tests {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
             endpoint: "ep1".to_string(),
+            device_type: None,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
         client.register(spec1).await.unwrap();
@@ -645,6 +647,7 @@ mod tests {
         let spec2 = DiscoverySpec::Endpoint {
             namespace: "ns1".to_string(),
             component: "comp1".to_string(),
+            device_type: None,
             endpoint: "ep2".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
         };
@@ -652,6 +655,7 @@ mod tests {
 
         let spec3 = DiscoverySpec::Endpoint {
             namespace: "ns2".to_string(),
+            device_type: None,
             component: "comp2".to_string(),
             endpoint: "ep1".to_string(),
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
@@ -699,6 +703,7 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
             let spec = DiscoverySpec::Endpoint {
+                device_type: None,
                 namespace: "test".to_string(),
                 component: "comp1".to_string(),
                 endpoint: "ep1".to_string(),

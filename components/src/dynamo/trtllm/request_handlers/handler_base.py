@@ -21,18 +21,20 @@ import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi.disagg_utils import get_global_disagg_request_id
 from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -55,6 +57,53 @@ if TYPE_CHECKING:
     from tensorrt_llm.metrics import MetricsCollector
 
 configure_dynamo_logging()
+
+
+class _Abortable(Protocol):
+    """Structural type for objects that support abort(). Satisfied by both
+    GenerationResult and _DeferredAbort."""
+
+    def abort(self) -> None:
+        ...
+
+
+class _DeferredAbort:
+    """Wraps GenerationResult.abort() to defer until first token in disagg decode.
+
+    When abort() is called before the first generation result, spawns a
+    background asyncio.Task that reads from GenerationResult.aqueue (TRT-LLM's
+    internal asyncio.Queue, decoupled from Dynamo RPC transport) until the
+    first result arrives, then calls the real abort().
+    """
+
+    def __init__(self, generation_result: GenerationResult):
+        self._generation_result = generation_result
+        self._first_token_received = False
+
+    def signal_first_token(self) -> None:
+        """Called by generate_locally() when first generation result is yielded."""
+        self._first_token_received = True
+
+    def abort(self) -> None:
+        """Abort immediately if first token received, otherwise defer."""
+        if self._first_token_received:
+            self._generation_result.abort()
+            logging.debug("Deferred abort: first token already received, aborting now")
+        else:
+            logging.debug(
+                "Deferred abort: first token not received, spawning background task"
+            )
+            asyncio.create_task(self._wait_and_abort())
+
+    async def _wait_and_abort(self) -> None:
+        """Background task: read from GenerationResult until first token, then abort."""
+        try:
+            async for _ in self._generation_result:
+                break  # First result = KV transfer complete
+        except Exception:
+            pass
+        self._generation_result.abort()
+        logging.debug("Deferred abort: background task completed, abort fired")
 
 
 @dataclass
@@ -82,6 +131,7 @@ class RequestHandlerConfig:
     disable_request_abort: bool = True
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
+    disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -113,6 +163,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.disable_request_abort = config.disable_request_abort
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
+        self.disagg_machine_id = config.disagg_machine_id
 
     def check_error(self, result: dict) -> bool:
         """
@@ -179,9 +230,9 @@ class HandlerBase(BaseGenerativeHandler):
             for tok_id, logprob_info in token_logprobs_dict.items():
                 token_top_logprobs.append(
                     {
-                        "rank": logprob_info.rank
-                        if hasattr(logprob_info, "rank")
-                        else 0,
+                        "rank": (
+                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
+                        ),
                         "token_id": tok_id,
                         "token": (
                             logprob_info.decoded_token
@@ -196,13 +247,19 @@ class HandlerBase(BaseGenerativeHandler):
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
     async def _handle_cancellation(
-        self, generation_result: GenerationResult, context: Context
+        self,
+        generation_result: _Abortable,
+        context: Context,
     ):
         """
         Background task to trigger cancellation if request is cancelled or shutdown
         event is set.
 
-        Raise GeneratorExit if shutdown event is triggered.
+        In disaggregated decode mode, generation_result may be a _DeferredAbort
+        wrapper that defers abort() until the first token is received (KV
+        transfer complete).
+
+        Raise EngineShutdown if shutdown event is triggered.
         """
         try:
             cancellation_triggers: list[asyncio.Future[Any]] = [
@@ -238,9 +295,9 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
-            # Raise GeneratorExit if cancellation is due to shutdown event triggered
+            # Raise EngineShutdown if cancellation is due to shutdown event triggered
             if shutdown_task in done:
-                raise GeneratorExit("Engine was shut down during generation.")
+                raise EngineShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
@@ -248,13 +305,18 @@ class HandlerBase(BaseGenerativeHandler):
 
     @asynccontextmanager
     async def _cancellation_monitor(
-        self, generation_result: GenerationResult, context: Context
+        self,
+        generation_result: _Abortable,
+        context: Context,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
         Monitor for cancellation triggers and cancel by calling
         generation_result.abort().
 
-        Raise GeneratorExit if shutdown event is triggered.
+        In disaggregated decode mode, generation_result may be a _DeferredAbort
+        wrapper that defers abort() until the first token.
+
+        Raise EngineShutdown if shutdown event is triggered.
 
         Yields:
             asyncio.Task: The cancellation monitoring task
@@ -464,7 +526,18 @@ class HandlerBase(BaseGenerativeHandler):
                 disaggregated_params = ep_disaggregated_params
             else:
                 disaggregated_params = LlmDisaggregatedParams(
-                    request_type="context_only"
+                    request_type="context_only",
+                    disagg_request_id=get_global_disagg_request_id(
+                        self.disagg_machine_id
+                    ),
+                )
+
+            # Ensure disagg_request_id is set even when using
+            # ep_disaggregated_params, so the PYTHON transceiver can track
+            # requests across prefill/decode workers.
+            if disaggregated_params.disagg_request_id is None:
+                disaggregated_params.disagg_request_id = get_global_disagg_request_id(
+                    self.disagg_machine_id
                 )
 
         # AGGREGATED (prefill_and_decode) mode with encoder disaggregation:
@@ -823,9 +896,23 @@ class HandlerBase(BaseGenerativeHandler):
                 scheduling_params=scheduling_params,
             )
 
-            # Monitor for cancellation triggers and cancel by calling generation_result.abort()
-            async with self._cancellation_monitor(generation_result, context):
+            # In disagg decode mode, wrap abort() to defer until first token
+            # (KV transfer complete).
+            abort_guard = (
+                _DeferredAbort(generation_result)
+                if self.disaggregation_mode == DisaggregationMode.DECODE
+                else None
+            )
+
+            # Monitor for cancellation triggers and cancel by calling abort()
+            async with self._cancellation_monitor(
+                abort_guard or generation_result, context
+            ):
                 async for res in generation_result:
+                    # Signal first token to deferred abort guard
+                    if abort_guard is not None:
+                        abort_guard.signal_first_token()
+
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.
                     if self.first_generation and self.publisher:
@@ -968,7 +1055,11 @@ class HandlerBase(BaseGenerativeHandler):
                 "token_ids": [],
             }
 
-        # 3. ALL OTHER ERRORS - graceful shutdown
+        # 3. EngineShutdown - let it propagate to the Rust bridge
+        except EngineShutdown:
+            raise
+
+        # 4. ALL OTHER ERRORS - graceful shutdown
         except Exception as e:
             error_type = type(e).__name__
             error_msg = str(e)

@@ -78,6 +78,7 @@ async fn test_metrics_prefix_default() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 false,
+                "",
             );
         }
 
@@ -117,6 +118,7 @@ async fn test_metrics_prefix_custom() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 true,
+                "",
             );
         }
 
@@ -151,6 +153,7 @@ async fn test_metrics_prefix_sanitized() {
                 "test-model",
                 Endpoint::ChatCompletions,
                 true,
+                "",
             );
         }
 
@@ -218,16 +221,16 @@ async fn test_metrics_with_mock_model() {
         let client = reqwest::Client::new();
 
         // Create a chat completion request
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     "Hello, mock model!".to_string(),
                 ),
                 name: None,
             },
         );
 
-        let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .model("mockmodel")
             .messages(vec![message])
             .max_tokens(50u32)
@@ -339,7 +342,9 @@ mod integration_tests {
             distributed_runtime.clone(),
             service.state().manager_clone(),
             dynamo_llm::entrypoint::RouterConfig::default(),
-            0, // migration_limit
+            0,    // migration_limit
+            None, // migration_max_seq_len
+            None,
             None,
             service.state().metrics_clone(),
         );
@@ -419,16 +424,16 @@ mod integration_tests {
         let client = reqwest::Client::new();
 
         // Create a chat completion request
-        let message = dynamo_async_openai::types::ChatCompletionRequestMessage::User(
-            dynamo_async_openai::types::ChatCompletionRequestUserMessage {
-                content: dynamo_async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+        let message = dynamo_protocols::types::ChatCompletionRequestMessage::User(
+            dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
                     "Hello, MDC model!".to_string(),
                 ),
                 name: None,
             },
         );
 
-        let request = dynamo_async_openai::types::CreateChatCompletionRequestArgs::default()
+        let request = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
             .model(model.service_name())
             .messages(vec![message])
             .max_tokens(50u32)

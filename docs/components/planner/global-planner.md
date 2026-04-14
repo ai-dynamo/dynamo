@@ -239,7 +239,7 @@ The planner inside each pool must be configured for `global-planner` mode so it 
   "ttft": 2000,
   "prefill_engine_num_gpu": 2,
   "model_name": "${MODEL_NAME}",
-  "profile_results_dir": "/workspace/tests/planner/profiling_results/H200_TP1P_TP1D"
+  "profile_results_dir": "/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
 }
 ```
 

@@ -25,7 +25,7 @@ from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_m
 from aiconfigurator.sdk.task import TaskConfig
 
 from deploy.utils.dynamo_deployment import DynamoDeploymentClient
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.rapid import _generate_dgd_from_pick
 from dynamo.profiler.utils.aic_dataframe import (
     build_decode_row,

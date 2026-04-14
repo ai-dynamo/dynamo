@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Deploy template: vLLM backend for openai/gpt-oss-20b (TP=2, 2 GPUs per worker).
+#
+# Model: openai/gpt-oss-20b (20B params, BF16/FP8, 131K context)
+#   - Architecture: gpt_oss, 24 layers, 64 attn heads, 8 KV heads
+#   - TP options: 1, 2, 4, 8 (all divide heads/kv_heads evenly)
+#   - Weight size: ~13 GB (safetensors, excluding metal/ and original/)
+#   - Recommended: TP=2 on H100 for good prefill throughput
+#
+# Template variables (substituted by sweep_runner.py --deploy-template):
+#   ${DGD_NAME}              - DynamoGraphDeployment name
+#   ${IMAGE}                 - Container image
+#   ${DYN_TOKENIZER_BACKEND} - "default" (hf) or "fast"
+#   ${FRONTEND_PORT}         - Frontend HTTP port (default: 8000)
+#   ${ROUTER_MODE}           - Frontend router mode (default: round-robin)
+#   ${MODEL}                 - Model path (HF ID or local path on PVC)
+#   ${MODEL_NAME}            - Served model name (used by aiperf --model)
+#   ${FRONTEND_REPLICAS}     - Number of frontend pods (default: 1)
+#   ${WORKER_REPLICAS}       - Number of vLLM worker pods
+#
+# Prerequisites:
+#   - Model downloaded to model-cache PVC (excluding metal/ and original/):
+#       huggingface-cli download openai/gpt-oss-20b \
+#           --exclude "metal/*" --exclude "original/*" \
+#           --local-dir /model-store/hub/models--openai--gpt-oss-20b/snapshots/main
+#   - hf-token-secret in the target namespace
+#   - model-cache PVC (>= 100Gi) in the target namespace
+#   - GPU nodes with nvidia.com/gpu toleration
+#
+# Usage:
+#   python3 sweep_runner.py --mode k8s \
+#       --deploy-template dgd/templates/vllm-gpt-oss-20b.yaml \
+#       --dgd-name dynamo-bench-vllm \
+#       --model /model-store/hub/models--openai--gpt-oss-20b/snapshots/main \
+#       --image nvcr.io/.../vllm-runtime:tag \
+#       --tokenizers hf,fastokens --concurrency 20 --isl 8192
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: ${DGD_NAME}
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: ${FRONTEND_REPLICAS}
+      extraPodSpec:
+${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
+        mainContainer:
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.frontend --router-mode ${ROUTER_MODE} --http-port ${FRONTEND_PORT}
+          env:
+            - name: DYN_TOKENIZER_BACKEND
+              value: "${DYN_TOKENIZER_BACKEND}"
+            - name: DYN_PERF_DIAG
+              value: "1"
+            - name: HF_HOME
+              value: /model-store
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${HF_TOKEN_SECRET_NAME}
+                  key: HF_TOKEN
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-store
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+
+    VllmWorker:
+      componentType: worker
+      replicas: ${WORKER_REPLICAS}
+      extraPodSpec:
+${WORKER_IMAGE_PULL_SECRETS_BLOCK}
+        tolerations:
+          - effect: NoSchedule
+            key: nvidia.com/gpu
+            operator: Exists
+        mainContainer:
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - >-
+              python3 -m dynamo.vllm
+              --model ${MODEL}
+              --served-model-name ${MODEL_NAME}
+              --tensor-parallel-size 2
+              --max-model-len 65536
+              --max-num-batched-tokens 32768
+              --gpu-memory-utilization 0.90
+          env:
+            - name: HF_HOME
+              value: /model-store
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${HF_TOKEN_SECRET_NAME}
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-store
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache

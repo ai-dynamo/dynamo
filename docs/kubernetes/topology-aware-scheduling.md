@@ -15,7 +15,7 @@ TAS is **opt-in**. Existing deployments without topology constraints continue to
 | **Grove** | Installed on the cluster. See the [Grove Installation Guide](https://github.com/NVIDIA/grove/blob/main/docs/installation.md). |
 | **ClusterTopology CR** | A cluster-scoped `ClusterTopology` resource configured by the cluster admin, mapping topology domain names to node labels. See [Grove documentation](https://github.com/NVIDIA/grove) for setup instructions. |
 | **KAI Scheduler** | [KAI Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is required by Grove for topology-aware pod placement. |
-| **Dynamo operator** | The latest Dynamo operator Helm chart includes read-only RBAC for `clustertopologies.grove.io` via a dedicated ClusterRole. This works for both cluster-wide and namespace-restricted operator deployments — no extra configuration is needed. |
+| **Dynamo operator** | The latest Dynamo operator Helm chart includes read-only RBAC for `clustertopologies.grove.io` via a dedicated ClusterRole. No extra configuration is needed. |
 
 ## Topology Domains
 

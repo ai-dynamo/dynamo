@@ -17,6 +17,8 @@ except ImportError:
     DiffusionParallelConfig = None  # type: ignore[assignment, misc]
 
 from dynamo._core import Context
+from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
+from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
 logger = logging.getLogger(__name__)
@@ -159,8 +161,26 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
             request, self.default_sampling_params, self.model_max_len
         )
 
-    def _error_chunk(self, request_id: str, error_message: str) -> Dict[str, Any]:
-        """Create an error chunk in OpenAI format."""
+    def _error_chunk(
+        self,
+        request_id: str,
+        error_message: str,
+        request_type=None,
+    ) -> Dict[str, Any]:
+        """Create an error response matching the expected protocol for the request type.
+
+        For AUDIO_GENERATION returns NvAudioSpeechResponse format.
+        For all other types returns OpenAI chat.completion.chunk format.
+        """
+        if request_type == RequestType.AUDIO_GENERATION:
+            return NvAudioSpeechResponse(
+                id=request_id,
+                model=self.config.served_model_name or self.config.model,
+                status="failed",
+                created=int(time.time()),
+                error=error_message,
+            ).model_dump()
+
         return {
             "id": request_id,
             "created": int(time.time()),

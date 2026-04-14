@@ -4,7 +4,7 @@
 title: vLLM-Omni
 ---
 
-Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-text, text-to-image, and text-to-video capabilities via OpenAI-compatible API endpoints.
+Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-text, text-to-image, text-to-video, and text-to-audio (TTS) capabilities via OpenAI-compatible API endpoints.
 
 ## Prerequisites
 
@@ -26,17 +26,19 @@ pip install git+https://github.com/vllm-project/vllm-omni.git@v0.16.0rc1
 | Text-to-Image | `/v1/chat/completions`, `/v1/images/generations` | `image` |
 | Text-to-Video | `/v1/videos` | `video` |
 | Image-to-Video | `/v1/videos` | `video` |
+| Text-to-Audio (TTS) | `/v1/audio/speech` | `audio` |
 
-The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`.
+The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`. When set to `audio`, the worker serves `/v1/audio/speech`.
 
 ## Tested Models
 
 | Modality | Models |
 |---|---|
 | Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
-| Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B` |
+| Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B`, `zai-org/GLM-Image` (disagg) |
 | Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
 | Image-to-Video | `Wan-AI/Wan2.2-TI2V-5B-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
+| Text-to-Audio (TTS) | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` |
 
 To run a non-default model, pass `--model` to any launch script:
 
@@ -203,13 +205,80 @@ The `input_reference` field accepts:
 
 The I2V-specific `nvext` fields (`boundary_ratio`, `guidance_scale_2`) control the dual-expert MoE denoising schedule in Wan2.x models. See [Wan2.2-I2V model card](https://huggingface.co/Wan-AI/Wan2.2-I2V-A14B-Diffusers) for details.
 
+## Text-to-Audio (TTS)
+
+Launch using the provided script with `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_audio.sh
+```
+
+### CustomVoice (predefined speakers)
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": "Hello, how are you?",
+    "voice": "vivian",
+    "language": "English"
+  }' --output output.wav
+```
+
+### CustomVoice with style instructions
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": "I am so excited!",
+    "voice": "vivian",
+    "instructions": "Speak with great enthusiasm"
+  }' --output excited.wav
+```
+
+### VoiceDesign (describe a voice)
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_audio.sh --model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": "Hello world",
+    "task_type": "VoiceDesign",
+    "instructions": "A warm, friendly female voice with a gentle tone"
+  }' --output voicedesign.wav
+```
+
+### Parameters
+
+The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/qwen3_tts/) API format. All TTS-specific parameters are top-level fields:
+
+| Field | Description | Default |
+|---|---|---|
+| `input` | Text to synthesize (required) | -- |
+| `model` | TTS model name | auto-detected |
+| `voice` | Speaker name (e.g., vivian, ryan). Validated against model config. | Vivian |
+| `response_format` | Audio format: wav, mp3, pcm, flac, aac, opus | wav |
+| `speed` | Speed factor (0.25-4.0) | 1.0 |
+| `task_type` | CustomVoice, VoiceDesign, or Base (Qwen3-TTS) | CustomVoice |
+| `language` | Language code. Validated against model config. | Auto |
+| `instructions` | Voice style/emotion description. Required for VoiceDesign. | -- |
+| `ref_audio` | Reference audio URL or base64 data URI. Required for Base. | -- |
+| `ref_text` | Transcript of reference audio (Base task) | -- |
+| `max_new_tokens` | Maximum tokens to generate (1-4096) | 2048 |
+
+Available voices and languages are loaded dynamically from the model's `config.json` at startup. Non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
+
 ## CLI Reference
 
 The omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 
 | Flag | Description |
 |---|---|
-| `--output-modalities <modality>` | Output modality: `text`, `image`, or `video` |
+| `--omni` | Enable the vLLM-Omni orchestrator (required for all omni workloads) |
+| `--output-modalities <modality>` | Output modality: `text`, `image`, `video`, or `audio` |
 | `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
 | `--boundary-ratio <float>` | MoE expert switching boundary (default: 0.875) |
 | `--flow-shift <float>` | Scheduler flow_shift (5.0 for 720p, 12.0 for 480p) |
@@ -231,7 +300,7 @@ The omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 
 ## Storage Configuration
 
-Generated images and videos are stored via [fsspec](https://filesystem-spec.readthedocs.io/), which supports local filesystems, S3, GCS, and Azure Blob.
+Generated images, videos, and audio files are stored via [fsspec](https://filesystem-spec.readthedocs.io/), which supports local filesystems, S3, GCS, and Azure Blob.
 
 By default, media is written to the local filesystem at `file:///tmp/dynamo_media`. To use cloud storage:
 
@@ -249,8 +318,100 @@ For S3 credential configuration, set the standard AWS environment variables (`AW
 
 Omni pipelines are configured via YAML stage configs. See [`examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml) for an example. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
 
+## Disaggregated Multi-Stage Serving
+
+For models with multiple pipeline stages (e.g., AR + Diffusion), Dynamo supports disaggregated serving where each stage runs as an independent process on its own GPU. This enables independent scaling, GPU isolation, and multi-worker replicas per stage.
+
+### Architecture
+
+Each stage runs as an independent process on its own GPU. A lightweight router coordinates them, acting as a **pure message broker** — it never inspects or transforms inter-stage data.
+
+```mermaid
+flowchart LR
+  client(Client) --> frontend(Frontend)
+  frontend --> router(Router)
+  router -->|request| s0(Stage 0)
+  s0 -->|ref| router
+  router -->|ref| s1(Stage 1)
+  s1 -->|result| router
+  router --> frontend --> client
+  s0 <-->|bulk data| conn[(Connector)]
+  conn <--> s1
+```
+
+**How it works:**
+
+- The router sends the initial request to Stage 0 and receives back a lightweight connector reference (pointer to the output in shared memory).
+- The router forwards that reference — unchanged — to Stage 1. It never reads the bulk data.
+- Each stage fetches its inputs from the connector, runs any model-specific processor (e.g., `ar2diffusion`, `thinker2talker`), then runs its engine.
+- The final stage's result goes back to the router for formatting and response.
+- Connector references accumulate as the pipeline progresses, so any stage can access outputs from all previous stages.
+
+### Data Flow
+
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant R as Router
+  participant S0 as Stage 0 (AR)
+  participant SHM as Connector
+  participant S1 as Stage 1 (DiT)
+
+  C->>R: POST /v1/images/generations
+  R->>S0: request + prompt
+  S0->>SHM: store output
+  S0-->>R: connector ref
+  R->>S1: connector ref (opaque)
+  S1->>SHM: fetch output
+  S1->>S1: processor → engine
+  S1-->>R: result
+  R-->>C: {"data": [...]}
+```
+
+### Quick Start: GLM-Image (2-Stage, 2 GPUs)
+
+GLM-Image is a 2-stage text-to-image model with an AR stage (generates prior token IDs) and a DiT stage (diffusion denoising + VAE decode). The built-in vLLM-Omni stage config already assigns each stage to a separate GPU.
+
+```bash
+bash examples/backends/vllm/launch/disagg_omni_glm_image.sh
+```
+
+Test:
+
+```bash
+curl -s http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "zai-org/GLM-Image",
+    "prompt": "A red apple on a white table",
+    "size": "1024x1024",
+    "response_format": "url"
+  }' | jq
+```
+
+### Scaling Stage Replicas
+
+Each stage registers independently with Dynamo's service discovery. To scale a bottleneck stage, launch additional workers with the same `--stage-id` on different GPUs — the router automatically load-balances across all replicas for that stage. Other stages are unaffected.
+
+### Tested Models
+
+| Model | Stages | Output | Stage Config |
+|---|---|---|---|
+| GLM-Image (`zai-org/GLM-Image`) | AR -> DiT | Image | `glm_image.yaml` (built-in) |
+
+### CLI Flags (Disaggregated Mode)
+
+| Flag | Description |
+|---|---|
+| `--stage-id <int>` | Run as a single-stage worker for the given stage ID. Requires `--stage-configs-path`. |
+| `--omni-router` | Run as the stage router. Requires `--stage-configs-path`. Mutually exclusive with `--stage-id`. |
+| `--stage-configs-path <path>` | Path to vLLM-Omni stage configuration YAML. |
+
 ## Current Limitations
 
 - Image input is supported only for I2V via `input_reference` in `/v1/videos`. Other endpoints accept text prompts only.
 - KV cache events are not published for omni workers.
 - Each worker supports a single output modality at a time.
+- Audio: streaming (`stream: true`) is not yet supported.
+- Audio: Base task (voice cloning) is not yet supported.
+- Disaggregated mode: `async_chunk=true` (streaming between stages) is not yet supported.

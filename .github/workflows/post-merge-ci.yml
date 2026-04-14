@@ -234,12 +234,12 @@ jobs:
         shell: bash
         working-directory: ./deploy/operator
         run: |
-          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
       - name: Tester
         shell: bash
         working-directory: ./deploy/operator
         run: |
-          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ --build-context snapshot=../snapshot .
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
@@ -291,6 +291,7 @@ jobs:
           docker buildx build --push ${NO_CACHE_FLAG} \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              --build-context snapshot=../snapshot \
               ${TAGGING_FLAGS} -f Dockerfile .
 
           echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
@@ -328,7 +329,7 @@ jobs:
 
   deploy-test-vllm:
     needs: [deploy-operator, vllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
@@ -340,7 +341,7 @@ jobs:
 
   deploy-test-sglang:
     needs: [deploy-operator, sglang-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
@@ -352,7 +353,7 @@ jobs:
 
   deploy-test-trtllm:
     needs: [deploy-operator, trtllm-pipeline]
-    uses: ./.github/workflows/shared-deploy-test-framework.yml
+    uses: ./.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
@@ -389,12 +390,48 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          host_kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+          vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+      - name: Install GAIE prerequisites (Gateway API, kgateway, Inference Extension CRDs)
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+        run: |
+          echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
+          export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
+          export NAMESPACE=default
+          bash deploy/inference-gateway/scripts/install_gaie_crd_kgateway.sh
+          rm -f ${{ github.workspace }}/.kubeconfig_gaie
       - name: Run GAIE Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
         with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.namespace }}
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -402,7 +439,7 @@ jobs:
           extra_pytest_args: >-
             -m framework_with_gaie
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-frontend
-            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12-amd64
+            --image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-cuda12
 
   deploy-status-check:
     runs-on: ubuntu-latest

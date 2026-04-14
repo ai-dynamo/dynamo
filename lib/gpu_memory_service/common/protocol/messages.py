@@ -3,25 +3,10 @@
 
 """Message types for GPU Memory Service RPC protocol."""
 
-from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import List, Optional, Union
 
 import msgspec
-
-
-class RequestedLockType(str, Enum):
-    """Lock type requested by client."""
-
-    RW = "rw"
-    RO = "ro"
-    RW_OR_RO = "rw_or_ro"
-
-
-class GrantedLockType(str, Enum):
-    """Lock type actually granted by server."""
-
-    RW = "rw"
-    RO = "ro"
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 
 
 class HandshakeRequest(msgspec.Struct, tag="handshake_request"):
@@ -62,7 +47,6 @@ class GetAllocationStateRequest(msgspec.Struct, tag="get_allocation_state_reques
 
 class GetAllocationStateResponse(msgspec.Struct, tag="get_allocation_state_response"):
     allocation_count: int
-    total_bytes: int
 
 
 class AllocateRequest(msgspec.Struct, tag="allocate_request"):
@@ -74,10 +58,19 @@ class AllocateResponse(msgspec.Struct, tag="allocate_response"):
     allocation_id: str
     size: int
     aligned_size: int
+    layout_slot: int
 
 
-class ExportRequest(msgspec.Struct, tag="export_request"):
+class ExportAllocationRequest(msgspec.Struct, tag="export_allocation_request"):
     allocation_id: str
+
+
+class ExportAllocationResponse(msgspec.Struct, tag="export_allocation_response"):
+    allocation_id: str
+    size: int
+    aligned_size: int
+    tag: str
+    layout_slot: int
 
 
 class GetAllocationRequest(msgspec.Struct, tag="get_allocation_request"):
@@ -89,6 +82,7 @@ class GetAllocationResponse(msgspec.Struct, tag="get_allocation_response"):
     size: int
     aligned_size: int
     tag: str
+    layout_slot: int
 
 
 class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):
@@ -96,23 +90,15 @@ class ListAllocationsRequest(msgspec.Struct, tag="list_allocations_request"):
 
 
 class ListAllocationsResponse(msgspec.Struct, tag="list_allocations_response"):
-    allocations: List[Dict[str, Any]] = []
+    allocations: List[GetAllocationResponse] = []
 
 
-class FreeRequest(msgspec.Struct, tag="free_request"):
+class FreeAllocationRequest(msgspec.Struct, tag="free_allocation_request"):
     allocation_id: str
 
 
-class FreeResponse(msgspec.Struct, tag="free_response"):
+class FreeAllocationResponse(msgspec.Struct, tag="free_allocation_response"):
     success: bool
-
-
-class ClearAllRequest(msgspec.Struct, tag="clear_all_request"):
-    pass
-
-
-class ClearAllResponse(msgspec.Struct, tag="clear_all_response"):
-    cleared_count: int
 
 
 class ErrorResponse(msgspec.Struct, tag="error_response"):
@@ -166,6 +152,34 @@ class GetStateHashResponse(msgspec.Struct, tag="get_memory_layout_hash_response"
     memory_layout_hash: str  # Hash of allocations + metadata, empty if not committed
 
 
+class GetRuntimeStateRequest(msgspec.Struct, tag="get_runtime_state_request"):
+    pass
+
+
+class GetRuntimeStateResponse(msgspec.Struct, tag="get_runtime_state_response"):
+    state: str
+    has_rw_session: bool
+    ro_session_count: int
+    waiting_writers: int
+    committed: bool
+    is_ready: bool
+    allocation_count: int = 0
+    memory_layout_hash: str = ""
+
+
+class GMSRuntimeEvent(msgspec.Struct):
+    kind: str
+    allocation_count: int = 0
+
+
+class GetEventHistoryRequest(msgspec.Struct, tag="get_event_history_request"):
+    pass
+
+
+class GetEventHistoryResponse(msgspec.Struct, tag="get_event_history_response"):
+    events: List[GMSRuntimeEvent] = []
+
+
 Message = Union[
     HandshakeRequest,
     HandshakeResponse,
@@ -177,15 +191,14 @@ Message = Union[
     GetAllocationStateResponse,
     AllocateRequest,
     AllocateResponse,
-    ExportRequest,
+    ExportAllocationRequest,
+    ExportAllocationResponse,
     GetAllocationRequest,
     GetAllocationResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
-    FreeRequest,
-    FreeResponse,
-    ClearAllRequest,
-    ClearAllResponse,
+    FreeAllocationRequest,
+    FreeAllocationResponse,
     ErrorResponse,
     MetadataPutRequest,
     MetadataPutResponse,
@@ -197,6 +210,10 @@ Message = Union[
     MetadataListResponse,
     GetStateHashRequest,
     GetStateHashResponse,
+    GetRuntimeStateRequest,
+    GetRuntimeStateResponse,
+    GetEventHistoryRequest,
+    GetEventHistoryResponse,
 ]
 
 _encoder = msgspec.msgpack.Encoder()

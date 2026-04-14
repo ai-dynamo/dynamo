@@ -91,6 +91,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -325,6 +326,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile EPP resources: %w", err)
 	}
 
+	// Reconcile the wait-for-leader ConfigMap for multinode mp deployments
+	err = r.reconcileWaitLeaderConfigMap(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile wait-leader ConfigMap")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile wait-leader ConfigMap: %w", err)
+	}
+
 	// Determine if any service is multinode
 	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
 
@@ -547,7 +555,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 	}
 
 	// generate the dynamoComponentsDeployments from the config
-	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.RuntimeConfig, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
+	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.RuntimeConfig, r.Client, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
@@ -1579,6 +1587,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
 	return nil
+}
+
+// reconcileWaitLeaderConfigMap ensures the wait-for-leader Python script
+// ConfigMap exists for multinode DGDs. The ConfigMap is only mounted by
+// vLLM mp worker pods (via UpdatePodSpec); for other backends it is inert.
+func (r *DynamoGraphDeploymentReconciler) reconcileWaitLeaderConfigMap(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	if !dgd.HasAnyMultinodeService() {
+		return nil
+	}
+
+	cm := dynamo.GenerateWaitLeaderConfigMap(dgd.Name, dgd.Namespace)
+	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+		return cm, false, nil
+	})
+	return err
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {

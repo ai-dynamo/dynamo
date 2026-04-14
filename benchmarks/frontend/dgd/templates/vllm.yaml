@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Deploy template: vLLM backend (requires GPUs).
+#
+# Template variables (substituted by sweep_runner.py --deploy-template):
+#   ${DGD_NAME}              - DynamoGraphDeployment name
+#   ${IMAGE}                 - Container image
+#   ${DYN_TOKENIZER_BACKEND} - "default" (hf) or "fast"
+#   ${FRONTEND_PORT}         - Frontend HTTP port
+#   ${ROUTER_MODE}           - Frontend router mode
+#   ${MODEL}                 - HF model ID
+#   ${MODEL_NAME}            - Served model name
+#   ${FRONTEND_REPLICAS}     - Number of frontend pods (default: 1)
+#   ${WORKER_REPLICAS}       - Number of vLLM worker pods
+#
+# Usage:
+#   python3 sweep_runner.py --mode k8s --deploy-template dgd/templates/vllm.yaml \
+#       --dgd-name dynamo-bench-vllm --image nvcr.io/.../vllm-runtime:tag \
+#       --model meta-llama/Llama-3.1-8B-Instruct \
+#       --tokenizers hf --concurrency 128 --isl 1024
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: ${DGD_NAME}
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: ${FRONTEND_REPLICAS}
+      extraPodSpec:
+${FRONTEND_IMAGE_PULL_SECRETS_BLOCK}
+        mainContainer:
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.frontend --router-mode ${ROUTER_MODE} --http-port ${FRONTEND_PORT}
+          env:
+            - name: DYN_TOKENIZER_BACKEND
+              value: "${DYN_TOKENIZER_BACKEND}"
+            - name: DYN_PERF_DIAG
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${HF_TOKEN_SECRET_NAME}
+                  key: HF_TOKEN
+
+    VllmWorker:
+      componentType: worker
+      replicas: ${WORKER_REPLICAS}
+      extraPodSpec:
+${WORKER_IMAGE_PULL_SECRETS_BLOCK}
+        mainContainer:
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - python3 -m dynamo.vllm --model ${MODEL} --tensor-parallel-size 1
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ${HF_TOKEN_SECRET_NAME}
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: "1"

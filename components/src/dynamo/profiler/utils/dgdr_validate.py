@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 
-from dynamo.planner.utils.planner_config import PlannerPreDeploymentSweepMode
+from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,

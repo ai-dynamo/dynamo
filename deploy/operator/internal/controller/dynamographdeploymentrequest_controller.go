@@ -169,6 +169,13 @@ metadata:
     dgdr.nvidia.com/name: {{.DGDRName}}
     dgdr.nvidia.com/namespace: {{.Namespace}}
     nvidia.com/managed-by: dynamo-operator
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeploymentRequest
+    name: {{.DGDRName}}
+    uid: {{.DGDRuid}}
+    blockOwnerDeletion: true
+    controller: true
 data:
   phase: "$PHASE"
   message: "$MESSAGE"
@@ -265,6 +272,13 @@ metadata:
     dgdr.nvidia.com/name: {{.DGDRName}}
     dgdr.nvidia.com/namespace: {{.Namespace}}
     nvidia.com/managed-by: dynamo-operator
+  ownerReferences:
+  - apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeploymentRequest
+    name: {{.DGDRName}}
+    uid: {{.DGDRuid}}
+    blockOwnerDeletion: true
+    controller: true
 data:
   phase: "$FINAL_PHASE"
   message: "$FINAL_MESSAGE"
@@ -946,16 +960,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx c
 		cm.Labels[nvidiacomv1beta1.LabelDGDRNamespace] = dgdr.Namespace
 		cm.Labels[nvidiacomv1beta1.LabelManagedBy] = nvidiacomv1beta1.LabelValueDynamoOperator
 
-		// Create the ConfigMap
-		if err := r.Create(ctx, cm); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				logger.Info("ConfigMap already exists, skipping", "name", cm.Name)
-			} else {
-				return fmt.Errorf("failed to create ConfigMap %s: %w", cm.Name, err)
-			}
-		} else {
-			logger.Info("Created ConfigMap from profiling output", "name", cm.Name, "namespace", targetNamespace)
+		// Use SyncResource to create/update the ConfigMap with owner reference and change detection
+		_, _, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+			return cm, false, nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to sync ConfigMap %s: %w", cm.Name, err)
 		}
+		logger.Info("Synced ConfigMap from profiling output", "name", cm.Name, "namespace", targetNamespace)
 	}
 
 	if resourceCount > 0 {
@@ -1270,6 +1282,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			"ConfigMapName": outputConfigMapName,
 			"Namespace":     dgdr.Namespace,
 			"DGDRName":      dgdr.Name,
+			"DGDRuid":       string(dgdr.UID),
 		})
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to execute sidecar script template: %w", err)
@@ -1611,6 +1624,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) getProfilingJobErrorDetails(ctx
 	return ""
 }
 
+// computeDGDName returns the Kubernetes name to use for the DGD that a DGDR owns.
+// If the user supplied an explicit name via spec.overrides.dgd.metadata.name that
+// value is returned as-is; otherwise the DGDR's own name is used with a "-dgd"
+// suffix, guaranteeing uniqueness even when two DGDRs have identical specs (which
+// would otherwise both produce the same profiler-generated name, e.g. "vllm-agg").
+func computeDGDName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
+	if dgdr.Spec.Overrides != nil && dgdr.Spec.Overrides.DGD != nil && len(dgdr.Spec.Overrides.DGD.Raw) > 0 {
+		var meta struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(dgdr.Spec.Overrides.DGD.Raw, &meta); err == nil && meta.Metadata.Name != "" {
+			return meta.Metadata.Name
+		}
+	}
+	return dgdr.Name + "-dgd"
+}
+
 // generateDGDSpec reads profiling output from the sidecar ConfigMap, extracts the
 // DynamoGraphDeployment spec and pareto configs, stores the spec in an annotation via
 // r.Update, and returns the ProfilingResultsStatus and DGD name.
@@ -1651,7 +1683,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		return nil, "", fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
 	}
 
-	logger.Info("Parsed profiling output", "dgdName", dgd.Name, "additionalResources", len(additionalResources))
+	// Override the profiler-generated name with a DGDR-scoped unique name.
+	// The profiler emits a static topology-derived name (e.g. "vllm-agg") which
+	// collides when multiple DGDRs share identical specs. Derive the name from
+	// DGDR identity instead, respecting an explicit override if the user set one.
+	dgd.Name = computeDGDName(dgdr)
+
+	logger.Info("Parsed profiling output", "profilerDGDName", dgd.Name, "additionalResources", len(additionalResources))
 
 	if len(additionalResources) > 0 {
 		if err := r.storeAdditionalResources(ctx, dgdr, additionalResources); err != nil {

@@ -11,7 +11,37 @@ on:
 permissions:
   contents: read
 
+
+env:
+  BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
+
 jobs:
+
+  # ============================================================================
+  # PRE-WARM K8S BUILDER
+  # ============================================================================
+  create-fresh-builder:
+    name: Create fresh K8s builder
+    runs-on: prod-default-small-v2
+    permissions:
+      contents: read
+    outputs:
+      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Export builder name
+        id: export-builder-name
+        run: |
+          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
+      - name: Create and bootstrap fresh K8s builder
+        uses: ./.github/actions/bootstrap-buildkit
+        with:
+          builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+          buildkit_worker_addresses: ''
+          fresh_builder: 'true'
+
+
   # ============================================================================
   # FRAMEWORK PIPELINES (Build → Test → Copy)
   # ============================================================================
@@ -20,16 +50,17 @@ jobs:
   # ============================================================================
   vllm-pipeline:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    needs: [create-fresh-builder]
     with:
       framework: vllm
       target: runtime
-      no_cache: true
+      fresh_builder: true
       platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 180
       cpu_only_test_markers: 'vllm and gpu_0'
       single_gpu_test_markers: 'vllm and gpu_1'
@@ -43,16 +74,17 @@ jobs:
   # ============================================================================
   sglang-pipeline:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    needs: [create-fresh-builder]
     with:
       framework: sglang
       target: runtime
-      no_cache: true
+      fresh_builder: true
       platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["12.9", "13.0"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 180
       cpu_only_test_markers: 'sglang and gpu_0'
       single_gpu_test_markers: 'sglang and gpu_1'
@@ -66,16 +98,17 @@ jobs:
   # ============================================================================
   trtllm-pipeline:
     uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+    needs: [create-fresh-builder]
     with:
       framework: trtllm
       target: runtime
-      no_cache: true
+      fresh_builder: true
       platform: 'linux/amd64,linux/arm64'
       cuda_versions: '["13.1"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 180
       cpu_only_test_markers: 'trtllm and gpu_0'
       single_gpu_test_markers: 'trtllm and gpu_1'
@@ -84,10 +117,35 @@ jobs:
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
 
+  # ============================================================================
+  # CLEANUP
+  # ============================================================================
+  clean-k8s-builder:
+    name: Clean K8s builder if exists
+    runs-on: prod-default-small-v2
+    if: always()
+    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, create-fresh-builder]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Register K8s builder context (skip bootstrap)
+        uses: ./.github/actions/bootstrap-buildkit
+        continue-on-error: true
+        with:
+          builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+          buildkit_worker_addresses: ''
+          skip_bootstrap: 'true'
+      - name: Remove K8s builder
+        shell: bash
+        run: |
+          docker buildx rm ${{ env.BUILDER_NAME }} || true
+
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
-    runs-on: prod-builder-amd-v1
+    runs-on: ubuntu-slim
     if: always() && failure()
     needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
     permissions:

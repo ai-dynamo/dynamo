@@ -16,7 +16,6 @@ from dynamo.sglang._compat import NetworkAddress, get_local_ip_auto, get_zmq_soc
 
 if TYPE_CHECKING:
     from prometheus_client import CollectorRegistry
-    from sglang.srt.managers.scheduler_metrics_mixin import KvMetrics
 
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -131,16 +130,17 @@ class DynamoSglangPublisher:
         while self._running:
             try:
                 # Receive KvMetrics object from SGLang scheduler via ZMQ
-                # KvMetrics class: sglang/srt/managers/scheduler_metrics_mixin.py lines 45-54
-                # Sent from: sglang/srt/managers/scheduler_metrics_mixin.py lines 482-499 (_emit_kv_metrics)
-                kv_metrics: KvMetrics = await self._sock.recv_pyobj()
+                # KvMetrics class: sglang/srt/observability/scheduler_metrics_mixin.py
+                kv_metrics = await self._sock.recv_pyobj()
                 dp_rank = (
                     kv_metrics.data_parallel_rank
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
                 active_decode_blocks = kv_metrics.kv_active_blocks
-                self.metrics_publisher.publish(dp_rank, active_decode_blocks)
+                self.metrics_publisher.publish(
+                    dp_rank, kv_used_blocks=active_decode_blocks
+                )
                 dp_rank_str = str(dp_rank)
                 # Publish total blocks (always available in KvMetrics)
                 self.component_gauges.set_total_blocks(
@@ -185,7 +185,7 @@ class DynamoSglangPublisher:
     def init_engine_metrics_publish(self) -> None:
         """Publish initial dummy metrics to bootstrap the metrics endpoint."""
         logging.info("Sending dummy metrics to initialize")
-        self.metrics_publisher.publish(self.dp_rank, 0)
+        self.metrics_publisher.publish(self.dp_rank, kv_used_blocks=0)
         dp_rank_str = str(self.dp_rank)
         self.component_gauges.set_total_blocks(dp_rank_str, 0)
         self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)

@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use dynamo_async_openai::types::ChatCompletionRequestUserMessageContentPart;
 use dynamo_memory::nixl::NixlAgent;
+use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 
 use super::common::EncodedMediaData;
 use super::decoders::{Decoder, MediaDecoder};
@@ -157,7 +157,7 @@ mod tests {
     use super::super::decoders::ImageDecoder;
     use super::super::rdma::DataType;
     use super::*;
-    use dynamo_async_openai::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
+    use dynamo_protocols::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
     #[tokio::test]
     async fn test_fetch_and_decode() {

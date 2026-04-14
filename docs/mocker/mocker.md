@@ -139,7 +139,8 @@ python -m dynamo.replay /path/to/mooncake_trace.jsonl \
     --replay-mode offline \
     --router-mode kv_router \
     --arrival-speedup-ratio 5 \
-    --extra-engine-args '{"block_size":512}' \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
     --router-config '{"router_queue_policy":"fcfs"}' \
     --report-json /tmp/replay-report.json
 ```
@@ -183,6 +184,11 @@ first turn uses `timestamp`/`created_time`; later turns can use `delay` or `dela
 {"session_id":"session-a","timestamp":1000,"input_length":2048,"output_length":128,"hash_ids":[1,2,3,4]}
 {"session_id":"session-a","delay":250,"input_length":2560,"output_length":128,"hash_ids":[1,2,3,4,5]}
 ```
+
+For trace-file replay, `--trace-block-size` controls how many tokens each `hash_id` represents in
+the dataset, while engine `block_size` still controls the replay engine and router hashing. Public
+Mooncake/toolagent traces use `--trace-block-size 512`; engine `block_size` can still stay at `64`
+to match the live runtime configuration.
 
 The standalone replay CLI prints an AIPerf-style summary table to stdout and writes the full replay
 report JSON to disk.
@@ -241,7 +247,7 @@ It also accepts older raw-data directories containing:
 ```bash
 python -m dynamo.mocker \
     --model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
-    --planner-profile-data tests/planner/profiling_results/H200_TP1P_TP1D \
+    --planner-profile-data components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D \
     --speedup-ratio 1.0
 ```
 
@@ -264,12 +270,19 @@ The AIC model automatically uses `--model-path` and `--engine-type` to select th
 Important notes:
 
 - AIC is opt-in. If you do not pass `--aic-perf-model`, `python -m dynamo.mocker` does not use AIC.
-- `python -m dynamo.replay` also does not use AIC unless you explicitly put AIC fields in the engine-args JSON.
+- `python -m dynamo.replay` has two separate AIC surfaces:
+  - engine timing AIC through `--extra-engine-args` / staged engine JSON
+  - router-side prefill-load AIC through top-level `--aic-*` flags plus `router_prefill_load_model="aic"` in `--router-config`
+- The Python AIC session bridge is now shared with the live KV router path via the internal `dynamo._internal.aic` module. Mocker CLI behavior is unchanged; this just removes duplicate AIC session code.
 - `aiconfigurator` must be able to load the requested performance database for the selected `system/backend/version`. If the SDK is installed but the backing systems data is missing or unreadable, mocker now fails fast at startup with a clear error instead of failing later on first request.
 - In development environments, this may require pointing Python at a source checkout of `aiconfigurator` with real Git LFS payloads materialized in its `systems/` directory.
 
-When using `python -m dynamo.replay`, there are no dedicated AIC flags. For aggregated replay,
-pass the equivalent fields via `--extra-engine-args`:
+This mocker AIC path is separate from the router-side prefill-load estimator. Live router,
+frontend, and replay all use `router_prefill_load_model="aic"` plus top-level `--aic-*` flags for
+oldest-prefill prompt-load decay. Replay still uses engine-args AIC separately when you want the
+mocked worker timing model itself to come from AIC.
+
+For aggregated replay, engine timing AIC still comes from `--extra-engine-args`:
 
 ```bash
 python -m dynamo.replay /path/to/trace.jsonl \
@@ -289,6 +302,25 @@ python -m dynamo.replay /path/to/trace.jsonl \
 ```
 
 The `aic_backend` field enables the AIC perf model and should match `engine_type` (`"vllm"` or `"sglang"`). The `aic_model_path` field is the equivalent of `--model-path` in `dynamo.mocker`.
+
+Replay router-side AIC prompt-load modeling is configured separately with top-level flags:
+
+```bash
+python -m dynamo.replay /path/to/trace.jsonl \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --num-workers 4 \
+    --trace-block-size 512 \
+    --extra-engine-args '{"block_size":64}' \
+    --router-config '{"router_track_prefill_tokens":true,"router_prefill_load_model":"aic"}' \
+    --aic-backend vllm \
+    --aic-system h200_sxm \
+    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --aic-tp-size 1
+```
+
+For offline disagg replay, the same top-level `--aic-*` flags drive the prefill-stage router only;
+the decode-stage router keeps prompt tracking disabled.
 
 Example `--reasoning` configuration:
 

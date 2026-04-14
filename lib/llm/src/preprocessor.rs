@@ -18,7 +18,7 @@ pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
 
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
     ChatCompletionRequestUserMessageContentPart, ChatCompletionToolChoiceOption, EncodingFormat,
 };
@@ -33,6 +33,7 @@ use dynamo_runtime::metrics::frontend_perf::{
     DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, TEMPLATE_SECONDS,
     TOKENIZE_SECONDS,
 };
+use std::borrow::Cow;
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
@@ -311,9 +312,6 @@ impl OpenAIPreprocessor {
         builder.mdc_sum(Some(self.mdcsum.clone()));
         let lora_name = self.lora_name.clone();
 
-        // Extract cache_control TTL from either nvext or top-level field
-        let cache_control_ttl = request.effective_cache_control().map(|cc| cc.ttl_seconds());
-
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
@@ -323,7 +321,8 @@ impl OpenAIPreprocessor {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
-                dp_rank: None, // dp_rank is set later in the pipeline
+                dp_rank: nvext.dp_rank,
+                prefill_dp_rank: nvext.prefill_dp_rank,
                 expected_output_tokens: hints.and_then(|h| h.osl),
                 priority_jump: hints.and_then(|h| {
                     h.priority
@@ -332,16 +331,15 @@ impl OpenAIPreprocessor {
                 }),
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
-                cache_control_ttl: nvext.cache_control.as_ref().map(|cc| cc.ttl_seconds()),
                 allowed_worker_ids: None,
+                session_control: nvext.session_control.clone(),
             };
             builder.routing(Some(routing));
-        } else if lora_name.is_some() || cache_control_ttl.is_some() {
-            // Ensure routing hints exist when we have LoRA or cache_control,
-            // even when nvext is absent (e.g. Anthropic endpoint requests).
+        } else if lora_name.is_some() {
+            // Ensure routing hints exist when we have LoRA,
+            // even when nvext is absent.
             builder.routing(Some(RoutingHints {
                 lora_name,
-                cache_control_ttl,
                 ..Default::default()
             }));
         }
@@ -384,6 +382,32 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Replace inline `data:` URLs with empty strings in message content parts.
+    /// Preserves HTTP(S) URLs, text content, and overall message structure.
+    fn strip_inline_data_urls(messages: &mut serde_json::Value) {
+        let Some(arr) = messages.as_array_mut() else {
+            return;
+        };
+        for msg in arr {
+            let Some(content) = msg.get_mut("content") else {
+                continue;
+            };
+            let Some(parts) = content.as_array_mut() else {
+                continue;
+            };
+            for part in parts {
+                for key in ["image_url", "video_url", "audio_url"] {
+                    if let Some(media) = part.get_mut(key)
+                        && let Some(url) = media.get_mut("url")
+                        && url.as_str().is_some_and(|s| s.starts_with("data:"))
+                    {
+                        *url = serde_json::Value::String(String::new());
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
         &self,
         request: &R,
@@ -391,12 +415,14 @@ impl OpenAIPreprocessor {
         formatted_prompt: Option<String>,
     ) -> Result<()> {
         let mut media_map: MultimodalDataMap = HashMap::new();
-        let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
+        let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
 
         let Some(messages) = request.typed_messages() else {
             return Ok(());
         };
+        let has_media_loader = self.media_loader.is_some();
+
         for message in messages.iter() {
             let content_parts = match message {
                 ChatCompletionRequestMessage::User(u) => match &u.content {
@@ -405,31 +431,33 @@ impl OpenAIPreprocessor {
                 },
                 _ => continue,
             };
-            // Iterate over content parts
             for content_part in content_parts.iter() {
-                let (type_str, url) = match content_part {
-                    ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
-                        ("image_url".to_string(), image_part.image_url.url.clone())
-                    }
-                    ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
-                        ("video_url".to_string(), video_part.video_url.url.clone())
-                    }
-                    ChatCompletionRequestUserMessageContentPart::AudioUrl(audio_part) => {
-                        ("audio_url".to_string(), audio_part.audio_url.url.clone())
-                    }
-                    _ => continue,
-                };
-
-                if self.media_loader.is_some() {
-                    fetch_tasks.push((type_str, content_part.clone()));
-                    continue;
+                if has_media_loader {
+                    let type_str = match content_part {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => "image_url",
+                        ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => "video_url",
+                        ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
+                        _ => continue,
+                    };
+                    fetch_tasks.push((type_str.to_string(), content_part));
+                } else {
+                    let (type_str, url) = match content_part {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
+                            ("image_url", p.image_url.url.clone())
+                        }
+                        ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => {
+                            ("video_url", p.video_url.url.clone())
+                        }
+                        ChatCompletionRequestUserMessageContentPart::AudioUrl(p) => {
+                            ("audio_url", p.audio_url.url.clone())
+                        }
+                        _ => continue,
+                    };
+                    media_map
+                        .entry(type_str.to_string())
+                        .or_default()
+                        .push(MultimodalData::Url(url));
                 }
-
-                //Fallback: ust pass the URL through
-                media_map
-                    .entry(type_str)
-                    .or_default()
-                    .push(MultimodalData::Url(url));
             }
         }
 
@@ -462,6 +490,14 @@ impl OpenAIPreprocessor {
             let mut extra_args = serde_json::json!({
                 "messages": messages_json
             });
+
+            // Strip redundant inline data: URLs only when frontend decoding is active
+            // (media_loader decoded the images into RDMA descriptors). TRT-LLM and
+            // other backends that pass URLs through still need the original data: URIs.
+            if self.media_loader.is_some() {
+                Self::strip_inline_data_urls(&mut extra_args["messages"]);
+            }
+
             if let Some(ref prompt) = formatted_prompt {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.clone());
             }
@@ -621,7 +657,13 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
         let encode_start = Instant::now();
-        let encoding = self.tokenizer.encode(prompt)?;
+        let prompt = if prompt.contains('\0') {
+            tracing::debug!("Prompt contains null bytes; stripping to avoid tokenizer divergence");
+            Cow::Owned(prompt.replace('\0', ""))
+        } else {
+            Cow::Borrowed(prompt)
+        };
+        let encoding = self.tokenizer.encode(prompt.as_ref())?;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -642,11 +684,11 @@ impl OpenAIPreprocessor {
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
         let all_token_ids = match &request.inner.input {
-            dynamo_async_openai::types::EmbeddingInput::String(s) => {
+            dynamo_protocols::types::EmbeddingInput::String(s) => {
                 let encoding = self.tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
             }
-            dynamo_async_openai::types::EmbeddingInput::StringArray(arr) => {
+            dynamo_protocols::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
                 let encodings = tokio::task::spawn_blocking({
                     let tokenizer = self.tokenizer.clone();
@@ -662,10 +704,10 @@ impl OpenAIPreprocessor {
                     .collect();
                 token_arrays
             }
-            dynamo_async_openai::types::EmbeddingInput::IntegerArray(token_ids) => {
+            dynamo_protocols::types::EmbeddingInput::IntegerArray(token_ids) => {
                 vec![token_ids.clone()]
             }
-            dynamo_async_openai::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
+            dynamo_protocols::types::EmbeddingInput::ArrayOfIntegerArray(token_arrays) => {
                 token_arrays.clone()
             }
         };
@@ -1025,11 +1067,11 @@ impl OpenAIPreprocessor {
         stream.map(move |output| {
             output.map_data(|engine_output| {
                 // Convert engine output to OpenAI response format
-                let embeddings: Vec<dynamo_async_openai::types::Embedding> = engine_output
+                let embeddings: Vec<dynamo_protocols::types::Embedding> = engine_output
                     .embeddings
                     .into_iter()
                     .enumerate()
-                    .map(|(index, embedding)| dynamo_async_openai::types::Embedding {
+                    .map(|(index, embedding)| dynamo_protocols::types::Embedding {
                         index: index as u32,
                         object: "embedding".to_string(),
                         embedding: embedding.into_iter().map(|f| f as f32).collect(),
@@ -1037,11 +1079,11 @@ impl OpenAIPreprocessor {
                     .collect();
 
                 let response = NvCreateEmbeddingResponse {
-                    inner: dynamo_async_openai::types::CreateEmbeddingResponse {
+                    inner: dynamo_protocols::types::CreateEmbeddingResponse {
                         object: "list".to_string(),
                         model: original_request.inner.model.clone(),
                         data: embeddings,
-                        usage: dynamo_async_openai::types::EmbeddingUsage {
+                        usage: dynamo_protocols::types::EmbeddingUsage {
                             prompt_tokens: engine_output.prompt_tokens,
                             total_tokens: engine_output.total_tokens,
                         },
@@ -1088,14 +1130,14 @@ impl OpenAIPreprocessor {
     /// Apply tool calling jail to the stream if needed
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
-        tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+        tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
         tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
+        use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
         let mut builder = JailedStream::builder();
 
@@ -1107,14 +1149,35 @@ impl OpenAIPreprocessor {
         }
 
         // Configure jail based on tool_choice
+        //
+        // When a tool_call_parser is configured, always use marker-based mode
+        // so that format-specific parsers (e.g. qwen3_coder XML) are invoked.
+        // Immediate JSON mode is only a fallback for required/named when no
+        // parser exists (the model is expected to emit raw JSON in that case).
         match tool_choice {
             Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                // Immediate jail mode for named tool choice
-                builder = builder.tool_choice_named(named.function.name.clone());
+                if let Some(parser) = tool_call_parser {
+                    // Parser-aware path: use marker-based jail so the parser
+                    // handles format-specific output (XML, pythonic, etc.).
+                    // Also install a named-tool filter so that if the model emits
+                    // the wrong tool, the parsed call is rejected before emission.
+                    builder = builder
+                        .tool_call_parser(parser)
+                        .named_tool_filter(named.function.name.clone());
+                } else {
+                    // No parser: fall back to Immediate JSON jail mode.
+                    builder = builder.tool_choice_named(named.function.name.clone());
+                }
             }
             Some(ChatCompletionToolChoiceOption::Required) => {
-                // Immediate jail mode for required tool choice
-                builder = builder.tool_choice_required();
+                if let Some(parser) = tool_call_parser {
+                    // Parser-aware path: use marker-based jail so the parser
+                    // handles format-specific output (XML, pythonic, etc.).
+                    builder = builder.tool_call_parser(parser);
+                } else {
+                    // No parser: fall back to Immediate JSON jail mode.
+                    builder = builder.tool_choice_required();
+                }
             }
             Some(ChatCompletionToolChoiceOption::Auto)
             | Some(ChatCompletionToolChoiceOption::None)
@@ -1217,12 +1280,10 @@ impl OpenAIPreprocessor {
                 let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
-                        for choice in data.choices.iter_mut() {
+                        for choice in data.inner.choices.iter_mut() {
                             // Reasoning parsing only applies to text content
                             if let Some(
-                                dynamo_async_openai::types::ChatCompletionMessageContent::Text(
-                                    text,
-                                ),
+                                dynamo_protocols::types::ChatCompletionMessageContent::Text(text),
                             ) = choice.delta.content.as_ref()
                             {
                                 let parser_result =
@@ -1230,7 +1291,7 @@ impl OpenAIPreprocessor {
 
                                 // Update this specific choice with parsed content
                                 choice.delta.content = parser_result.get_some_normal_text().map(
-                                    dynamo_async_openai::types::ChatCompletionMessageContent::Text,
+                                    dynamo_protocols::types::ChatCompletionMessageContent::Text,
                                 );
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
@@ -1527,6 +1588,64 @@ impl
 }
 
 // Note: tests for jailing and parser detection live in `lib/llm/tests/test_jail.rs`
+
+#[cfg(test)]
+mod strip_tests {
+    use super::OpenAIPreprocessor;
+
+    #[test]
+    fn test_strip_inline_data_urls_replaces_data_urls() {
+        let mut messages = serde_json::json!([{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR...longdata..."}},
+                {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+            ]
+        }]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "What is this?");
+        assert_eq!(parts[1]["image_url"]["url"], "");
+        assert_eq!(parts[2]["image_url"]["url"], "https://example.com/img.png");
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_handles_video_audio() {
+        let mut messages = serde_json::json!([{
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA..."}},
+                {"type": "audio_url", "audio_url": {"url": "https://example.com/audio.wav"}}
+            ]
+        }]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["video_url"]["url"], "");
+        assert_eq!(
+            parts[1]["audio_url"]["url"],
+            "https://example.com/audio.wav"
+        );
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_preserves_text_only() {
+        let mut messages = serde_json::json!([{
+            "role": "user",
+            "content": "plain text message"
+        }]);
+        let original = messages.clone();
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        assert_eq!(messages, original);
+    }
+
+    #[test]
+    fn test_strip_inline_data_urls_empty_messages() {
+        let mut messages = serde_json::json!([]);
+        OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
+        assert_eq!(messages, serde_json::json!([]));
+    }
+}
 
 #[cfg(test)]
 mod tests {

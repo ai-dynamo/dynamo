@@ -45,7 +45,6 @@ pub struct PreparedEngine {
     pub service_name: String,
     pub engine: OpenAIChatCompletionsStreamingEngine,
     pub inspect_template: bool,
-    pub card: Option<ModelDeploymentCard>,
     pub request_template: Option<RequestTemplate>,
 }
 
@@ -88,16 +87,6 @@ async fn wait_for_min_initial_workers(
     }
 }
 
-impl PreparedEngine {
-    pub fn has_tokenizer(&self) -> bool {
-        if let Some(card) = self.card.as_ref() {
-            card.has_tokenizer()
-        } else {
-            false
-        }
-    }
-}
-
 /// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
 pub async fn prepare_engine(
     distributed_runtime: DistributedRuntime,
@@ -105,7 +94,9 @@ pub async fn prepare_engine(
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
         EngineConfig::Dynamic {
-            model: local_model, ..
+            model: local_model,
+            prefill_load_estimator,
+            ..
         } => {
             let model_manager = Arc::new(ModelManager::new());
             // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
@@ -115,7 +106,9 @@ pub async fn prepare_engine(
                 model_manager.clone(),
                 RouterConfig::default(),
                 local_model.migration_limit(),
+                local_model.migration_max_seq_len(),
                 None,
+                prefill_load_estimator,
                 metrics,
             ));
             let discovery = distributed_runtime.discovery();
@@ -148,7 +141,6 @@ pub async fn prepare_engine(
                 service_name: model_service_name,
                 engine,
                 inspect_template: false,
-                card: None,
                 request_template: local_model.request_template(),
             })
         }
@@ -161,7 +153,6 @@ pub async fn prepare_engine(
                 engine,
                 inspect_template: false,
                 request_template: model.request_template(),
-                card: Some(model.into_card()),
             })
         }
         EngineConfig::InProcessTokens {
@@ -182,7 +173,6 @@ pub async fn prepare_engine(
                 engine: pipeline,
                 inspect_template: true,
                 request_template: model.request_template(),
-                card: Some(model.into_card()),
             })
         }
     }
@@ -232,6 +222,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -261,6 +252,7 @@ where
         prefill_chooser,
         enforce_disagg,
         migration_limit,
+        migration_max_seq_len,
         metrics,
     )
     .await
@@ -279,6 +271,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -294,7 +287,8 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
-    let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
+    let migration =
+        Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics).into_operator();
     let min_initial_workers = min_initial_workers_from_env()?;
 
     // For KV routing, use the client from the chooser to ensure shared state
@@ -336,9 +330,11 @@ where
         RouterMode::Direct => {
             ServiceBackend::from_engine(Arc::new(DirectRoutingRouter::new(router)))
         }
-        RouterMode::Random | RouterMode::RoundRobin | RouterMode::PowerOfTwoChoices => {
-            ServiceBackend::from_engine(Arc::new(router))
-        }
+        RouterMode::Random
+        | RouterMode::RoundRobin
+        | RouterMode::PowerOfTwoChoices
+        | RouterMode::LeastLoaded
+        | RouterMode::DeviceAwareWeighted => ServiceBackend::from_engine(Arc::new(router)),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");

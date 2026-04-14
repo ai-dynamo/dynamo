@@ -22,7 +22,7 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
-from tensorrt_llm.llmapi.llm_args import KvCacheConnectorConfig
+from tensorrt_llm.llmapi.llm_args import TOKENIZER_ALIASES, KvCacheConnectorConfig
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
@@ -107,6 +107,23 @@ def build_kv_connector_config(config: Config):
             logging.error(f"Invalid connector: {config.connector[0]}")
             sys.exit(1)
     return None
+
+
+def _warn_override_collisions(target: dict, source: dict, path: str = "") -> None:
+    """Log warnings for keys in *source* that will overwrite existing values in *target*."""
+    for key, new_val in source.items():
+        full_key = f"{path}.{key}" if path else key
+        if key in target:
+            old_val = target[key]
+            if isinstance(new_val, dict) and isinstance(old_val, dict):
+                _warn_override_collisions(old_val, new_val, full_key)
+            elif old_val != new_val:
+                logging.warning(
+                    "override_engine_args will replace %s: %r -> %r",
+                    full_key,
+                    old_val,
+                    new_val,
+                )
 
 
 async def init_llm_worker(
@@ -206,6 +223,7 @@ async def init_llm_worker(
             overrides = json.loads(config.override_engine_args)
             logging.info(f"Applying engine arg overrides: {overrides}")
 
+            _warn_override_collisions(arg_map, overrides)
             deep_update(arg_map, overrides)
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
@@ -275,7 +293,27 @@ async def init_llm_worker(
     engine_args = arg_map
 
     # Populate default sampling params from the model
-    tokenizer = tokenizer_factory(arg_map["model"])
+    custom_tokenizer = arg_map.get("custom_tokenizer")
+    if custom_tokenizer:
+        from importlib import import_module
+
+        try:
+            tokenizer_path = TOKENIZER_ALIASES.get(custom_tokenizer, custom_tokenizer)
+            module_path, class_name = tokenizer_path.rsplit(".", 1)
+            tokenizer_class = getattr(import_module(module_path), class_name)
+            tokenizer = tokenizer_class.from_pretrained(
+                arg_map.get("tokenizer") or arg_map["model"],
+                trust_remote_code=arg_map.get("trust_remote_code", False),
+            )
+        except (ValueError, ImportError, AttributeError) as e:
+            raise ValueError(
+                f"Failed to load custom tokenizer '{custom_tokenizer}': {e}. "
+                "Expected format: 'module.path.ClassName' or a recognized alias in TensorRT-LLM LLM API."
+            ) from e
+    else:
+        tokenizer = tokenizer_factory(
+            arg_map["model"], trust_remote_code=arg_map.get("trust_remote_code", False)
+        )
     default_sampling_params = SamplingParams()
 
     # Enable perf metrics so prompt_tokens_details can be returned
@@ -479,6 +517,7 @@ async def init_llm_worker(
             disable_request_abort=config.disable_request_abort,
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
+            disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
 
         # Register the model with runtime config

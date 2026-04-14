@@ -1,12 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::BinaryHeap;
+#[cfg(test)]
+use std::collections::VecDeque;
 
 use dynamo_kv_router::protocols::RouterEvent;
 
 use super::events::{SimulationEvent, SimulationEventKind, SimulationWorkerStage};
-use crate::common::protocols::{DirectRequest, OutputSignal};
+#[cfg(test)]
+use crate::common::protocols::DirectRequest;
+use crate::common::protocols::OutputSignal;
 
 #[derive(Debug)]
 pub(super) struct WorkerCompletionPayload {
@@ -29,6 +33,7 @@ pub(super) fn next_timestamp(
     }
 }
 
+#[cfg(test)]
 pub(super) fn pop_next_trace_ready(
     pending: &mut VecDeque<DirectRequest>,
     now_ms: f64,
@@ -43,6 +48,7 @@ pub(super) fn pop_next_trace_ready(
     Some((request, arrival_ms))
 }
 
+#[cfg(test)]
 pub(super) fn pop_next_concurrency_ready(
     pending: &mut VecDeque<DirectRequest>,
     now_ms: f64,

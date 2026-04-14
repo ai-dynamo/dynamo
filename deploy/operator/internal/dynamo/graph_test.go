@@ -31,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
@@ -2258,7 +2259,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Spec: grovev1alpha1.PodCliqueSpec{
 									RoleName:     "worker-wkr",
 									Replicas:     2,
-									MinAvailable: ptr.To(int32(1)),
+									MinAvailable: ptr.To(int32(2)),
 									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										RestartPolicy:                 corev1.RestartPolicyAlways,
@@ -3256,7 +3257,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 								Spec: grovev1alpha1.PodCliqueSpec{
 									RoleName:     "worker-wkr",
 									Replicas:     2,
-									MinAvailable: ptr.To(int32(1)),
+									MinAvailable: ptr.To(int32(2)),
 									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
@@ -3787,7 +3788,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -3848,7 +3849,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -4953,7 +4954,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, &controller_common.RuntimeConfig{}, secretsRetriever, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, &controller_common.RuntimeConfig{}, nil, secretsRetriever, nil, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -6783,7 +6784,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{}, nil, tt.restartState, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, tt.restartState, nil, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}
@@ -6859,13 +6860,13 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 			ComponentType:   commonconsts.ComponentTypeWorker,
 			DynamoNamespace: ptr.To("default-test-dgd"),
 			Labels: map[string]string{
-				"user-label":                          "keep",
-				commonconsts.KubeLabelIsRestoreTarget: commonconsts.KubeLabelValueTrue,
+				"user-label":                        "keep",
+				snapshotprotocol.RestoreTargetLabel: commonconsts.KubeLabelValueTrue,
 			},
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 				Labels: map[string]string{
-					"extra-label":                        "keep-too",
-					commonconsts.KubeLabelCheckpointHash: "stale-hash",
+					"extra-label":                      "keep-too",
+					snapshotprotocol.CheckpointIDLabel: "stale-hash",
 				},
 			},
 		},
@@ -6883,8 +6884,8 @@ func TestGenerateLabels_RemovesStaleRestoreLabelsWhenCheckpointNotReady(t *testi
 	})
 	assert.Equal(t, "keep", labels["user-label"])
 	assert.Equal(t, "keep-too", labels["extra-label"])
-	_, hasRestoreTarget := labels[commonconsts.KubeLabelIsRestoreTarget]
-	_, hasCheckpointHash := labels[commonconsts.KubeLabelCheckpointHash]
+	_, hasRestoreTarget := labels[snapshotprotocol.RestoreTargetLabel]
+	_, hasCheckpointHash := labels[snapshotprotocol.CheckpointIDLabel]
 	assert.False(t, hasRestoreTarget)
 	assert.False(t, hasCheckpointHash)
 }
@@ -6895,11 +6896,11 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 			ComponentType:   commonconsts.ComponentTypeWorker,
 			DynamoNamespace: ptr.To("default-test-dgd"),
 			Labels: map[string]string{
-				commonconsts.KubeLabelIsRestoreTarget: "false",
+				snapshotprotocol.RestoreTargetLabel: "false",
 			},
 			ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{
 				Labels: map[string]string{
-					commonconsts.KubeLabelCheckpointHash: "stale-hash",
+					snapshotprotocol.CheckpointIDLabel: "stale-hash",
 				},
 			},
 		},
@@ -6915,8 +6916,8 @@ func TestGenerateLabels_OverwritesStaleRestoreLabelsWhenCheckpointReady(t *testi
 		Ready:   true,
 		Hash:    "resolved-hash",
 	})
-	assert.Equal(t, commonconsts.KubeLabelValueTrue, labels[commonconsts.KubeLabelIsRestoreTarget])
-	assert.Equal(t, "resolved-hash", labels[commonconsts.KubeLabelCheckpointHash])
+	assert.Equal(t, commonconsts.KubeLabelValueTrue, labels[snapshotprotocol.RestoreTargetLabel])
+	assert.Equal(t, "resolved-hash", labels[snapshotprotocol.CheckpointIDLabel])
 }
 
 func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {
@@ -7459,7 +7460,7 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 		},
 	}
 
-	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil)
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
 
 	// PCS object-level metadata
@@ -7627,6 +7628,7 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 				tt.deployment,
 				operatorConfig,
 				&controller_common.RuntimeConfig{},
+				nil,
 				secretsRetriever,
 				&RestartState{},
 				nil,

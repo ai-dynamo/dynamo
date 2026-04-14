@@ -51,6 +51,8 @@ pub enum RouterMode {
     /// Direct routing - reads worker ID from each request's routing hints.
     /// Used when an external orchestrator (e.g., EPP) handles worker selection.
     Direct,
+    LeastLoaded,
+    DeviceAwareWeighted,
 }
 
 impl From<RouterMode> for RsRouterMode {
@@ -61,12 +63,15 @@ impl From<RouterMode> for RsRouterMode {
             RouterMode::PowerOfTwoChoices => Self::PowerOfTwoChoices,
             RouterMode::KV => Self::KV,
             RouterMode::Direct => Self::Direct,
+            RouterMode::LeastLoaded => Self::LeastLoaded,
+            RouterMode::DeviceAwareWeighted => Self::DeviceAwareWeighted,
         }
     }
 }
 
 mod context;
 mod engine;
+pub mod errors;
 mod http;
 mod kserve_grpc;
 mod llm;
@@ -166,6 +171,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
+    m.add_class::<llm::entrypoint::AicPerfConfig>()?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::replay::ReasoningConfig>()?;
@@ -196,6 +202,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
+    errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;

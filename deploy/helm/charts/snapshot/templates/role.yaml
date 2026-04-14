@@ -10,7 +10,6 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 rules:
   # Watch and annotate pods in this namespace to drive checkpoint/restore lifecycle
   - apiGroups: [""]
@@ -39,7 +38,6 @@ metadata:
   name: {{ include "snapshot.fullname" . }}-agent
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 rules:
   # Watch and annotate pods cluster-wide on assigned nodes
   - apiGroups: [""]
@@ -73,7 +71,6 @@ metadata:
   name: {{ include "snapshot.fullname" . }}-agent-resourceslices
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
-    app.kubernetes.io/component: checkpoint-agent
 rules:
   - apiGroups: ["resource.k8s.io"]
     resources: ["resourceslices"]

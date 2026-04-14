@@ -17,7 +17,7 @@ import json
 import time
 from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_checkable
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -27,6 +27,7 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.inputs.data import TokensPrompt
 from vllm.renderers.registry import renderer_from_config
 from vllm.sampling_params import SamplingParams
@@ -41,7 +42,7 @@ class StubEngineClient:
 
     def __init__(self, model_config: ModelConfig):
         self.model_config = model_config
-        self.renderer = renderer_from_config(model_config)
+        self.renderer = renderer_from_config(VllmConfig(model_config=model_config))
         self.input_processor = None
         self.io_processor = None
 
@@ -94,7 +95,6 @@ class ProcessMixIn(ProcessMixInRequired):
 
         sampling_params = request.to_sampling_params(
             default_max_tokens,
-            self.model_config.logits_processor_pattern,
             self.default_sampling_params,
         )
         return (
@@ -138,10 +138,20 @@ class ChatProcessor:
                 BaseModelPath(name=model_config.model, model_path=model_config.model)
             ],
         )
+        serving_render = OpenAIServingRender(
+            model_config=model_config,
+            renderer=stub_engine.renderer,
+            io_processor=None,
+            model_registry=serving_models.registry,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
         self.openai_serving = OpenAIServingChat(
             engine_client=stub_engine,
             models=serving_models,
             response_role="assistant",
+            openai_serving_render=serving_render,
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -285,9 +295,19 @@ class CompletionsProcessor:
                 BaseModelPath(name=model_config.model, model_path=model_config.model)
             ],
         )
+        serving_render = OpenAIServingRender(
+            model_config=model_config,
+            renderer=stub_engine.renderer,
+            io_processor=None,
+            model_registry=serving_models.registry,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
         self.openai_serving = OpenAIServingCompletion(
             engine_client=stub_engine,
             models=serving_models,
+            openai_serving_render=serving_render,
             request_logger=None,
         )
 

@@ -922,7 +922,7 @@ mod tests {
                 config.clone(),
                 layout_type,
                 agent,
-                &DiskAllocator,
+                &DiskAllocator::from_env()?,
                 duplication_setting,
             )?)
         } else {

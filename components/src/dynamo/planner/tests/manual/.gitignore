@@ -1,0 +1,11 @@
+# E2E test results - don't commit test artifacts to git
+e2e_scaling_results/
+
+# Temporary files
+*.tmp
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

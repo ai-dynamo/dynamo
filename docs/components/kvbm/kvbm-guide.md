@@ -235,6 +235,23 @@ To disable disk offload filtering:
 export DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER=true
 ```
 
+### NCCL Replicated Mode for MLA Models
+
+For MLA (Multi-Layer Attention) models such as DeepSeek, KVBM can use **NCCL replicated mode** so that only rank 0 loads KV blocks from G2/G3 storage and then broadcasts them to all GPUs via NCCL. This avoids redundant loads and can improve performance when multiple GPUs share the same replicated KV cache.
+
+**Enable NCCL MLA mode:**
+
+```bash
+export DYN_KVBM_NCCL_MLA_MODE=true
+```
+
+**Requirements:**
+
+- MPI must be initialized (e.g., when launching with `mpirun` or equivalent) so that rank and world size are available for NCCL.
+- For optimal broadcast-based replication, build KVBM with the NCCL feature: `cargo build -p kvbm --features nccl`. Without it, the connector falls back to worker-level replication (each GPU loads independently).
+
+When disabled (default), each GPU loads KV blocks independently. Set `DYN_KVBM_NCCL_MLA_MODE=true` when running MLA models with KVBM to use the NCCL broadcast optimization.
+
 ## Enable and View KVBM Metrics
 
 ### Setup Monitoring Stack
@@ -366,15 +383,29 @@ export DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS=3600  # 1 hour
 
 **Symptom:** KVBM fails to start when disk offloading is enabled.
 
-**Cause:** `fallocate()` is not supported on the filesystem (e.g., Lustre, certain network filesystems).
+**Cause:** `fallocate()` is not supported on the filesystem (e.g., Lustre, certain network filesystems),
+or the storage backend requires a different method for setting `O_DIRECT`.
 
-**Solution:** Enable disk zerofill fallback:
+**Solution:**
+
+1. If `fallocate()` is not supported, enable the zerofill fallback:
 
 ```bash
 export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true
 ```
 
-If you encounter "write all error" or EINVAL (errno 22), also try:
+2. If your filesystem ignores `fcntl(F_SETFL, O_DIRECT)` (e.g., IBM Storage Scale), set the
+disk allocator type to pass `O_DIRECT` at file open time instead:
+
+```bash
+export DYN_KVBM_DISK_ALLOCATOR_TYPE=open-direct
+```
+
+Supported values for `DYN_KVBM_DISK_ALLOCATOR_TYPE`:
+- `default`: Apply `O_DIRECT` via `fcntl` after file creation. Works on most POSIX filesystems (ext4, XFS, Lustre, etc.).
+- `open-direct`: Pass `O_DIRECT` to `mkostemp` at file open time. Required on filesystems where `fcntl(F_SETFL, O_DIRECT)` is ignored (e.g., IBM Storage Scale).
+
+3. If you encounter "write all error" or EINVAL (errno 22), or need to debug without `O_DIRECT`:
 
 ```bash
 export DYN_KVBM_DISK_DISABLE_O_DIRECT=true

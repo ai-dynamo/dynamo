@@ -52,9 +52,7 @@ pub enum PromptInput {
 pub trait OAIChatLikeRequest {
     fn model(&self) -> String;
     fn messages(&self) -> Value;
-    fn typed_messages(
-        &self,
-    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+    fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
         None
     }
     fn tools(&self) -> Option<Value> {

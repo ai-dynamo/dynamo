@@ -16,8 +16,12 @@
 # =============================================================================
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.25
-ARG CRIU_REPO=https://github.com/dfeigin-nv/criu.git
-ARG CRIU_COMMIT=777baaf27f6a76f743c9bf24b64886297dc0129b
+# Default to upstream CRIU development branch. Custom forks can override both
+# args at build time, for example:
+#   --build-arg CRIU_REPO=<git-remote-url>
+#   --build-arg CRIU_REF=<fork-branch-or-sha>
+ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
+ARG CRIU_REF=criu-dev
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
@@ -71,12 +75,31 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
 # =============================================================================
+# Stage: CUDA checkpoint helper builder
+# =============================================================================
+FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
+
+RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
+    ./cmd/cuda-checkpoint-helper/main.c \
+    -I/usr/local/cuda/include \
+    -L/usr/local/cuda/lib64/stubs \
+    -lcuda
+
+# =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
 FROM ubuntu:24.04 AS criu-builder
 
 ARG CRIU_REPO
-ARG CRIU_COMMIT
+ARG CRIU_REF
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -102,7 +125,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
-    && git fetch --depth 1 origin ${CRIU_COMMIT} \
+    && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
@@ -143,9 +166,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 RUN criu --version
 
-# Copy cuda-checkpoint binary
+# Copy CUDA checkpoint binaries
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-RUN chmod +x /usr/local/sbin/cuda-checkpoint
+COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
@@ -198,9 +222,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 RUN criu --version && echo "CRIU installed successfully"
 
-# Copy cuda-checkpoint binary (used for external CUDA state checkpoint/restore)
+# Copy CUDA checkpoint binaries
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
-RUN chmod +x /usr/local/sbin/cuda-checkpoint
+COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 
 # Copy nsrestore binary (invoked by DaemonSet via nsenter)
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore

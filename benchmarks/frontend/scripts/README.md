@@ -11,11 +11,11 @@ source dynamo/bin/activate
 # Single run (mocker + frontend + aiperf + Prometheus)
 cd benchmarks/frontend/scripts
 ./run_perf.sh --model Qwen/Qwen3-0.6B --concurrency 32 --num-requests 640 \
-    --speedup-ratio 0 --skip-bpf --skip-nsys --skip-flamegraph --skip-perf
+    --speedup-ratio 1000000 --skip-bpf --skip-nsys --skip-flamegraph --skip-perf
 
 # Sweep (multiple config points)
 python3 sweep_runner.py --tokenizers hf --concurrency 32 --isl 512 \
-    --benchmark-duration 30 --speedup-ratio 0 \
+    --benchmark-duration 30 --speedup-ratio 1000000 \
     -- --skip-bpf --skip-nsys --skip-flamegraph --skip-perf
 ```
 
@@ -132,17 +132,17 @@ The main entry point for running performance sweeps. Iterates over a grid of con
 ```bash
 # Smoke test (1 run)
 python3 sweep_runner.py --tokenizers hf --concurrency 32 --isl 512 \
-    --benchmark-duration 30 --speedup-ratio 0 \
+    --benchmark-duration 30 --speedup-ratio 1000000 \
     -- --skip-bpf --skip-nsys --skip-flamegraph --skip-perf
 
 # Full tokenizer comparison
 python3 sweep_runner.py --tokenizers hf,fastokens \
     --concurrency 32,64 --isl 512,1024,2048 \
-    --benchmark-duration 60 --speedup-ratio 0
+    --benchmark-duration 60 --speedup-ratio 1000000
 
 # Transport saturation (vary workers and request count)
 python3 sweep_runner.py --tokenizers hf --concurrency 4096 \
-    --num-requests 16384,32768 --workers 1,2,4,8 --speedup-ratio 0
+    --num-requests 16384,32768 --workers 1,2,4,8 --speedup-ratio 1000000
 
 # Preview sweep plan without running
 python3 sweep_runner.py --dry-run --tokenizers hf,fastokens \
@@ -168,7 +168,7 @@ for m in 1 2 3 4; do
         --num-models $m \
         --rps 75 \
         --benchmark-duration 60 \
-        --speedup-ratio 0 \
+        --speedup-ratio 1000000 \
         --output-dir artifacts/sweep_models/m${m} \
         -- --skip-bpf
 done
@@ -195,7 +195,7 @@ python3 sweep_runner.py \
     --num-models 1 \
     --rps 75 \
     --benchmark-duration 60 \
-    --speedup-ratio 0 \
+    --speedup-ratio 1000000 \
     --output-dir artifacts/sweep_workers \
     -- --skip-bpf
 ```
@@ -214,7 +214,7 @@ python3 sweep_runner.py \
     --num-models 2 \
     --rps 50 \
     --benchmark-duration 60 \
-    --speedup-ratio 0 \
+    --speedup-ratio 1000000 \
     --output-dir artifacts/sweep_grid \
     -- --skip-bpf
 ```
@@ -237,15 +237,15 @@ python3 sweep_runner.py \
 ```bash
 # With perf stat + flamegraphs (no root needed)
 python3 sweep_runner.py --tokenizers hf --concurrency 64 --isl 1024 \
-    --benchmark-duration 60 --speedup-ratio 0
+    --benchmark-duration 60 --speedup-ratio 1000000
 
 # With everything including BPF (needs sudo)
 sudo -E python3 sweep_runner.py --tokenizers hf --concurrency 64 --isl 1024 \
-    --benchmark-duration 60 --speedup-ratio 0
+    --benchmark-duration 60 --speedup-ratio 1000000
 
 # nsys profiling (needs nsys in PATH)
 python3 sweep_runner.py --tokenizers hf --concurrency 64 --isl 1024 \
-    --benchmark-duration 60 --speedup-ratio 0 \
+    --benchmark-duration 60 --speedup-ratio 1000000 \
     -- --nsys-path /opt/nvidia/nsight-systems/bin/nsys
 ```
 
@@ -272,7 +272,7 @@ Profiler controls are passed through to run_perf.sh after `--`:
 | `--num-models` | `1` | Number of model instances (each gets `--workers` workers) |
 | `--rps` | - | Comma-separated target request rates (req/s) |
 | `--aiperf-targets` | `first` | `first`: model-1 only. `all`: run aiperf for each model |
-| `--speedup-ratio` | `1.0` | Mocker speedup (0 = infinite) |
+| `--speedup-ratio` | `1.0` | Mocker speedup divisor; use large values (e.g., 1000000) for near-instant mocker |
 | `--benchmark-duration` | `60` | aiperf run duration (seconds) |
 | `--num-requests` | - | Comma-separated request counts (overrides duration) |
 | `--output-dir` | auto | Output directory |
@@ -288,21 +288,21 @@ Low-level per-run harness. Normally called by sweep_runner.py, but can be used d
 ```bash
 # Minimal (no profilers)
 ./run_perf.sh --model Qwen/Qwen3-0.6B --concurrency 32 --num-requests 640 \
-    --speedup-ratio 0 --skip-bpf --skip-nsys --skip-flamegraph --skip-perf
+    --speedup-ratio 1000000 --skip-bpf --skip-nsys --skip-flamegraph --skip-perf
 
 # Full observability (needs sudo for BPF)
 sudo -E ./run_perf.sh --model Qwen/Qwen3-0.6B --concurrency 64 \
-    --benchmark-duration 60 --speedup-ratio 0
+    --benchmark-duration 60 --speedup-ratio 1000000
 
 # Multi-model with 2 workers each
 ./run_perf.sh --model Qwen/Qwen3-0.6B --num-models 2 --workers 2 \
-    --concurrency 32 --benchmark-duration 30 --speedup-ratio 0 \
+    --concurrency 32 --benchmark-duration 30 --speedup-ratio 1000000 \
     --skip-bpf --skip-nsys --skip-flamegraph --skip-perf
 
 # 4 models, 1 worker each, rate-limited to 75 rps
 ./run_perf.sh --model Qwen/Qwen3-0.6B --num-models 4 --workers 1 \
     --concurrency 512 --benchmark-duration 60 --request-rate 75 \
-    --speedup-ratio 0 --skip-bpf
+    --speedup-ratio 1000000 --skip-bpf
 ```
 
 ## Analyzing Results

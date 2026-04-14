@@ -7,7 +7,10 @@ import logging
 import os
 import tempfile
 import time
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
@@ -34,7 +37,6 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -144,7 +146,10 @@ async def worker() -> None:
         (
             config.namespace,
             config.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity()
+        ) = snapshot_controller.reload_restore_identity(
+            config.namespace,
+            config.discovery_backend,
+        )
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -184,7 +189,7 @@ async def worker() -> None:
 
 
 def setup_metrics_collection(
-    config: Config | OmniConfig, generate_endpoint: Endpoint, logger: logging.Logger
+    config: "Config | OmniConfig", generate_endpoint: Endpoint, logger: logging.Logger
 ) -> None:
     """Set up metrics collection for vLLM and LMCache metrics.
 
@@ -554,6 +559,15 @@ def setup_vllm_engine(
     if fpm_worker_id is not None:
         vllm_config.additional_config["fpm_worker_id"] = fpm_worker_id
 
+    # Pass benchmark config to InstrumentedScheduler via additional_config.
+    if hasattr(config, "_benchmark_additional_config"):
+        bench = config._benchmark_additional_config
+        if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
+            short_id = fpm_worker_id[-8:]
+            bench["output_path"] = f"/tmp/benchmark_results_{short_id}.json"
+        vllm_config.additional_config["benchmark"] = bench
+        logger.info("Benchmark config injected into additional_config")
+
     factory = []
     if stat_logger:
         factory.append(stat_logger)
@@ -573,6 +587,10 @@ def setup_vllm_engine(
     component_gauges.set_model_load_time(load_time)
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+
+    # update block_size in vllm_config based on final engine cache info for later use
+    runtime_values = get_engine_cache_info(engine_client)
+    vllm_config.cache_config.block_size = runtime_values["block_size"]
 
     return (
         engine_client,

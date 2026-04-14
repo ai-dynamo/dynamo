@@ -11,6 +11,7 @@ use super::{
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use crate::types::TokenIdType;
 
+pub mod audios;
 pub mod chat_completions;
 pub mod common_ext;
 pub mod completions;
@@ -36,7 +37,7 @@ pub struct AnnotatedDelta<R> {
     pub comment: Option<String>,
 }
 
-trait OpenAISamplingOptionsProvider {
+pub(crate) trait OpenAISamplingOptionsProvider {
     fn get_temperature(&self) -> Option<f32>;
 
     fn get_top_p(&self) -> Option<f32>;
@@ -54,7 +55,7 @@ trait OpenAISamplingOptionsProvider {
     fn nvext(&self) -> Option<&nvext::NvExt>;
 }
 
-trait OpenAIStopConditionsProvider {
+pub(crate) trait OpenAIStopConditionsProvider {
     fn get_max_tokens(&self) -> Option<u32>;
 
     fn get_min_tokens(&self) -> Option<u32>;
@@ -81,7 +82,7 @@ trait OpenAIStopConditionsProvider {
     }
 }
 
-trait OpenAIOutputOptionsProvider {
+pub(crate) trait OpenAIOutputOptionsProvider {
     fn get_logprobs(&self) -> Option<u32>;
 
     fn get_prompt_logprobs(&self) -> Option<u32>;
@@ -229,15 +230,15 @@ pub(crate) fn convert_backend_top_logprobs(
     selected_token: &str,
     selected_token_id: TokenIdType,
     selected_logprob: f32,
-) -> Vec<dynamo_async_openai::types::TopLogprobs> {
+) -> Vec<dynamo_protocols::types::TopLogprobs> {
     let mut found_selected = false;
-    let mut result: Vec<dynamo_async_openai::types::TopLogprobs> = top_lps
+    let mut result: Vec<dynamo_protocols::types::TopLogprobs> = top_lps
         .iter()
         .map(|top_lp| {
             let tok = top_lp.token.clone().unwrap_or_default();
             found_selected = found_selected || top_lp.token_id == selected_token_id;
             let bytes = top_lp.bytes.clone().or_else(|| token_to_utf8_bytes(&tok));
-            dynamo_async_openai::types::TopLogprobs {
+            dynamo_protocols::types::TopLogprobs {
                 token: tok,
                 logprob: top_lp.logprob as f32,
                 bytes,
@@ -246,7 +247,7 @@ pub(crate) fn convert_backend_top_logprobs(
         .collect();
 
     if !found_selected {
-        result.push(dynamo_async_openai::types::TopLogprobs {
+        result.push(dynamo_protocols::types::TopLogprobs {
             token: selected_token.to_string(),
             logprob: selected_logprob,
             bytes: token_to_utf8_bytes(selected_token),
@@ -276,7 +277,7 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
     fn is_continuous_usage_enabled(&self) -> bool;
 
     /// Get the current usage statistics with properly calculated total_tokens.
-    fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage;
+    fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage;
 
     /// Returns the request tracker if available, for accessing worker timing metrics.
     fn tracker(&self) -> Option<std::sync::Arc<common::timing::RequestTracker>> {

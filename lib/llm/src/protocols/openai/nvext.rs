@@ -11,12 +11,17 @@ pub use crate::protocols::common::timing::TimingInfo;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
+pub const HEADER_DP_RANK: &str = "x-dp-rank";
+pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 /// Apply routing overrides from HTTP headers to nvext.
 ///
 /// Header mappings:
 /// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
+/// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
+/// - `x-prefill-dp-rank` -> `prefill_dp_rank`
 ///
 /// Headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -31,7 +36,19 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
-    if worker_id.is_none() && prefill_id.is_none() {
+    let dp_rank = headers
+        .get(HEADER_DP_RANK)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+
+    let prefill_dp_rank = headers
+        .get(HEADER_PREFILL_DP_RANK)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u32>().ok());
+    let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
+
+    if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
+    {
         return nvext;
     }
 
@@ -43,19 +60,18 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     if let Some(id) = prefill_id {
         ext.prefill_worker_id = Some(id);
     }
+    if let Some(rank) = dp_rank {
+        ext.dp_rank = Some(rank);
+    }
+    if let Some(rank) = prefill_dp_rank {
+        ext.prefill_dp_rank = Some(rank);
+    }
     Some(ext)
 }
 
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
     fn raw_prompt(&self) -> Option<String>;
-
-    /// Return the effective cache control for this request.
-    /// Default: delegates to `nvext.cache_control`. Implementations may override
-    /// to also check a top-level `cache_control` field (see `NvCreateChatCompletionRequest`).
-    fn effective_cache_control(&self) -> Option<&CacheControl> {
-        self.nvext().and_then(|ext| ext.cache_control.as_ref())
-    }
 }
 
 /// Worker ID information for disaggregated serving
@@ -164,21 +180,36 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
 
+    /// Data parallel rank for the decode worker, set by the EPP via the
+    /// `x-dp-rank` header. When a worker hosts multiple DP engines,
+    /// this steers the request to the correct engine instance.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<u32>,
+
+    /// Data parallel rank for the prefill worker in disaggregated serving,
+    /// set by the EPP via the `x-prefill-dp-rank` header.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
+
     /// Agent-provided hints for request handling.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_hints: Option<AgentHints>,
 
-    /// Cache control hint (Anthropic-style). When present, the router pins
-    /// the prefix on the selected worker with the given TTL.
-    #[builder(default, setter(strip_option))]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control: Option<CacheControl>,
-
     /// Optional request timestamp in milliseconds for trace replay / virtual-time simulation.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timestamp_ms: Option<f64>,
+
+    /// Session control for subagent KV isolation and sticky routing.
+    /// When present, the router uses `session_id` for worker affinity.
+    /// When `action` is set to `open` or `close`, the router also fires
+    /// session lifecycle RPCs to the worker.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_control: Option<SessionControl>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -214,49 +245,34 @@ pub struct AgentHints {
     pub latency_sensitivity: Option<f64>,
 }
 
-/// Anthropic-style cache control hint for prefix pinning with TTL.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct CacheControl {
-    #[serde(rename = "type")]
-    pub control_type: CacheControlType,
-    /// TTL as seconds (integer) or shorthand ("5m" = 300s, "1h" = 3600s). Clamped to [300, 3600].
+fn default_session_timeout() -> u64 {
+    300
+}
+
+/// Session control for subagent KV isolation and sticky routing.
+///
+/// Always requires `session_id`. The `action` field is optional:
+/// - `action: "open"` on the first turn creates a streaming session on the worker
+/// - `action: "close"` on the last turn frees session KV after generation
+/// - No `action` on intermediate turns -- just provides `session_id` for sticky routing
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SessionControl {
+    /// Unique session identifier. Present on every turn for sticky routing.
+    pub session_id: String,
+    /// Lifecycle action: `"open"` or `"close"`. Omit on intermediate turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<String>,
+    pub action: Option<SessionAction>,
+    /// Inactivity timeout in seconds (default 300, only used with `action: "open"`).
+    #[serde(default = "default_session_timeout")]
+    pub timeout: u64,
 }
 
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum CacheControlType {
-    #[default]
-    Ephemeral,
-    #[serde(other)]
-    Unknown,
-}
-
-const MIN_TTL_SECONDS: u64 = 300;
-const MAX_TTL_SECONDS: u64 = 3600;
-
-impl CacheControl {
-    /// Parse TTL string to seconds, clamped to [300, 3600].
-    ///
-    /// Accepts integer seconds ("120", "600") or shorthand ("5m", "1h").
-    /// Values below 300 are clamped to 300; values above 3600 are clamped to 3600.
-    /// Unrecognized strings default to 300s.
-    pub fn ttl_seconds(&self) -> u64 {
-        let raw = match self.ttl.as_deref() {
-            None => return MIN_TTL_SECONDS,
-            Some("5m") => 300,
-            Some("1h") => 3600,
-            Some(other) => match other.parse::<u64>() {
-                Ok(secs) => secs,
-                Err(_) => {
-                    tracing::warn!("Unrecognized TTL '{}', defaulting to 300s", other);
-                    return MIN_TTL_SECONDS;
-                }
-            },
-        };
-        raw.clamp(MIN_TTL_SECONDS, MAX_TTL_SECONDS)
-    }
+/// Session lifecycle actions.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAction {
+    Open,
+    Close,
 }
 
 impl Default for NvExt {
@@ -306,74 +322,8 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
-        assert_eq!(nv_ext.cache_control, None);
-    }
-
-    // Test CacheControl serde roundtrip and TTL parsing
-    #[test]
-    fn test_cache_control_serde_and_ttl() {
-        // Default (ephemeral, no TTL)
-        let cc = CacheControl::default();
-        assert_eq!(cc.control_type, CacheControlType::Ephemeral);
-        assert_eq!(cc.ttl, None);
-        assert_eq!(cc.ttl_seconds(), 300);
-
-        // Shorthand values
-        let cc_5m = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("5m".to_string()),
-        };
-        assert_eq!(cc_5m.ttl_seconds(), 300);
-
-        let cc_1h = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("1h".to_string()),
-        };
-        assert_eq!(cc_1h.ttl_seconds(), 3600);
-
-        // Integer seconds -- within range
-        let cc_600 = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("600".to_string()),
-        };
-        assert_eq!(cc_600.ttl_seconds(), 600);
-
-        // Integer seconds -- clamped to min (300)
-        let cc_low = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("10".to_string()),
-        };
-        assert_eq!(cc_low.ttl_seconds(), 300);
-
-        // Integer seconds -- clamped to max (3600)
-        let cc_high = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("7200".to_string()),
-        };
-        assert_eq!(cc_high.ttl_seconds(), 3600);
-
-        // Unrecognized string defaults to 300
-        let cc_bad = CacheControl {
-            control_type: CacheControlType::Ephemeral,
-            ttl: Some("forever".to_string()),
-        };
-        assert_eq!(cc_bad.ttl_seconds(), 300);
-
-        // Serde roundtrip
-        let json = serde_json::to_string(&cc_5m).unwrap();
-        let deser: CacheControl = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser, cc_5m);
-
-        // Deserialize from API-style JSON
-        let api_json = r#"{"type": "ephemeral", "ttl": "1h"}"#;
-        let from_api: CacheControl = serde_json::from_str(api_json).unwrap();
-        assert_eq!(from_api.ttl_seconds(), 3600);
-
-        // NvExt with cache_control
-        let nvext_json = r#"{"cache_control": {"type": "ephemeral", "ttl": "5m"}}"#;
-        let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
-        assert!(nvext.cache_control.is_some());
-        assert_eq!(nvext.cache_control.unwrap().ttl_seconds(), 300);
+        assert_eq!(nv_ext.request_timestamp_ms, None);
+        assert_eq!(nv_ext.session_control, None);
     }
 
     // Test valid builder configurations
@@ -413,29 +363,63 @@ mod tests {
         assert!(nv_ext.validate().is_ok());
     }
 
-    // Test apply_header_routing_overrides - worker header present, prefill header absent
+    #[test]
+    fn test_session_control_serde() {
+        // Open action with timeout
+        let sc_json = r#"{"session_id": "sub-1", "action": "open", "timeout": 60}"#;
+        let sc: SessionControl = serde_json::from_str(sc_json).unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Open));
+        assert_eq!(sc.session_id, "sub-1");
+        assert_eq!(sc.timeout, 60);
+
+        // Close action (timeout defaults to 300)
+        let sc_close = r#"{"session_id": "sub-1", "action": "close"}"#;
+        let sc: SessionControl = serde_json::from_str(sc_close).unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Close));
+        assert_eq!(sc.timeout, 300);
+
+        // Continue (no action, just session_id for sticky routing)
+        let sc_continue = r#"{"session_id": "sub-1"}"#;
+        let sc: SessionControl = serde_json::from_str(sc_continue).unwrap();
+        assert_eq!(sc.action, None);
+        assert_eq!(sc.session_id, "sub-1");
+
+        // NvExt with session_control
+        let nvext_json =
+            r#"{"session_control": {"session_id": "sub-2", "action": "open", "timeout": 300}}"#;
+        let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
+        assert!(nvext.session_control.is_some());
+        let sc = nvext.session_control.unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Open));
+        assert_eq!(sc.session_id, "sub-2");
+
+        // Roundtrip
+        let original = SessionControl {
+            session_id: "test-session".to_string(),
+            action: Some(SessionAction::Close),
+            timeout: 90,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deser: SessionControl = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, original);
+    }
+
     #[test]
     fn test_apply_header_routing_overrides() {
         use axum::http::HeaderMap;
 
-        // Only HEADER_WORKER_INSTANCE_ID is in the header
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_WORKER_INSTANCE_ID, "123".parse().unwrap());
-        // Note: HEADER_PREFILL_INSTANCE_ID is NOT in the header
+        headers.insert(HEADER_PREFILL_INSTANCE_ID, "456".parse().unwrap());
+        headers.insert(HEADER_DP_RANK, "3".parse().unwrap());
+        headers.insert(HEADER_PREFILL_DP_RANK, "5".parse().unwrap());
 
-        let nvext = NvExt::builder()
-            .backend_instance_id(999)
-            .decode_worker_id(888)
-            .prefill_worker_id(777)
-            .build()
-            .unwrap();
+        let result = apply_header_routing_overrides(None, &headers).unwrap();
 
-        let result = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
-
-        // Header should override backend_instance_id and decode_worker_id
         assert_eq!(result.backend_instance_id, Some(123));
         assert_eq!(result.decode_worker_id, Some(123));
-        // prefill_worker_id should remain from original nvext (not overwritten by header)
-        assert_eq!(result.prefill_worker_id, Some(777));
+        assert_eq!(result.prefill_worker_id, Some(456));
+        assert_eq!(result.dp_rank, Some(3));
+        assert_eq!(result.prefill_dp_rank, Some(5));
     }
 }

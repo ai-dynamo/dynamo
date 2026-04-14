@@ -78,4 +78,10 @@ def parse_args(description: str = "") -> argparse.Namespace:
         metavar=("WIDTH", "HEIGHT"),
         help="Size of generated PNG images in pixels (default: 512 512)",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible dataset generation (default: time-based)",
+    )
     return parser.parse_args()

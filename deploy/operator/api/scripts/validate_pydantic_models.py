@@ -68,7 +68,7 @@ sys.path.insert(0, str(_components_src))
 # dynamo itself must be a namespace-like package (has __path__) so that
 # Python's import machinery can traverse down to dynamo.profiler from the
 # filesystem.  dynamo.planner is pre-registered as a stub to skip its heavy
-# __init__.py, while still allowing dynamo.planner.utils.* to load normally.
+# __init__.py, while still allowing dynamo.planner.config.* to load normally.
 # ---------------------------------------------------------------------------
 _dynamo_path = str(_components_src / "dynamo")
 _planner_path = str(_components_src / "dynamo" / "planner")

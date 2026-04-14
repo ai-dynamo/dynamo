@@ -35,7 +35,8 @@ pub use delta::DeltaGenerator;
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
-    pub inner: dynamo_async_openai::types::CreateChatCompletionRequest,
+    #[schema(value_type = Object)]
+    pub inner: dynamo_protocols::types::CreateChatCompletionRequest,
 
     #[serde(flatten, default)]
     pub common: CommonExt,
@@ -64,21 +65,24 @@ pub struct NvCreateChatCompletionRequest {
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
-/// `CreateChatCompletionResponse`.
-///
-/// # Fields
-/// - `inner`: The base OpenAI unary chat completion response, embedded
-///   using `serde(flatten)`.
-pub type NvCreateChatCompletionResponse = dynamo_async_openai::types::CreateChatCompletionResponse;
+/// `CreateChatCompletionResponse` with optional NVIDIA extension metadata.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct NvCreateChatCompletionResponse {
+    #[serde(flatten)]
+    pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
+}
 
 /// A response structure for streamed chat completions, embedding OpenAI's
-/// `CreateChatCompletionStreamResponse`.
-///
-/// # Fields
-/// - `inner`: The base OpenAI streaming chat completion response, embedded
-///   using `serde(flatten)`.
-pub type NvCreateChatCompletionStreamResponse =
-    dynamo_async_openai::types::CreateChatCompletionStreamResponse;
+/// `CreateChatCompletionStreamResponse` with optional NVIDIA extension metadata.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct NvCreateChatCompletionStreamResponse {
+    #[serde(flatten)]
+    pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
+}
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to NVIDIA-specific extensions.
@@ -91,10 +95,6 @@ impl NvExtProvider for NvCreateChatCompletionRequest {
     /// Returns `None`, as raw prompt extraction is not implemented.
     fn raw_prompt(&self) -> Option<String> {
         None
-    }
-
-    fn effective_cache_control(&self) -> Option<&crate::protocols::openai::nvext::CacheControl> {
-        NvExtProvider::nvext(self).and_then(|ext| ext.cache_control.as_ref())
     }
 }
 
@@ -199,7 +199,7 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
 
         // 2) OpenAI `response_format` (applies to assistant content, not tool calls)
         if let Some(response_format) = self.inner.response_format.as_ref() {
-            use dynamo_async_openai::types::ResponseFormat;
+            use dynamo_protocols::types::ResponseFormat;
             match response_format {
                 ResponseFormat::Text => {}
                 ResponseFormat::JsonObject => {
@@ -286,8 +286,8 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// * `None` if no stop conditions are defined.
     fn get_stop(&self) -> Option<Vec<String>> {
         self.inner.stop.as_ref().map(|stop| match stop {
-            dynamo_async_openai::types::Stop::String(s) => vec![s.clone()],
-            dynamo_async_openai::types::Stop::StringArray(arr) => arr.clone(),
+            dynamo_protocols::types::Stop::String(s) => vec![s.clone()],
+            dynamo_protocols::types::Stop::StringArray(arr) => arr.clone(),
         })
     }
 

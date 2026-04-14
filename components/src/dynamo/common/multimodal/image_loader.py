@@ -18,6 +18,7 @@ import base64
 import binascii
 import logging
 import os
+from collections import OrderedDict
 from io import BytesIO
 from typing import Any, Dict, Final, List
 from urllib.parse import urlparse
@@ -33,7 +34,6 @@ from dynamo.common.utils.runtime import run_async
 from .http_client import get_http_client
 
 logger = logging.getLogger(__name__)
-
 
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
@@ -63,8 +63,9 @@ class ImageLoader:
                 network transport. Defaults to False.
         """
         self._http_timeout = http_timeout
-        self._image_cache: dict[str, Image.Image] = {}
-        self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
+        self._cache_size = cache_size
+        self._image_cache: OrderedDict[str, Image.Image] = OrderedDict()
+        self._inflight: dict[str, asyncio.Task[Image.Image]] = {}
         self._enable_frontend_decoding = enable_frontend_decoding
         # Lazy-init NIXL connector only when frontend decoding is enabled
         self._nixl_connector = None
@@ -74,47 +75,112 @@ class ImageLoader:
                 self._nixl_connector.initialize
             )  # Synchronously wait for async init
 
+    @staticmethod
+    def _open_image_sync(image_data: BytesIO) -> Image.Image:
+        """Open, validate, and decode an image from raw bytes. Runs in a thread."""
+        image = Image.open(image_data, formats=["JPEG", "PNG", "WEBP"])
+        if image.format not in ("JPEG", "PNG", "WEBP"):
+            raise ValueError(f"Unsupported image format: {image.format}")
+        # Image.open() is lazy — convert() forces the actual pixel decode
+        return image.convert("RGB")
+
+    @staticmethod
+    async def _open_image(image_data: BytesIO) -> Image.Image:
+        """Open and validate an image from raw bytes, converting to RGB."""
+        with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
+            return await asyncio.to_thread(ImageLoader._open_image_sync, image_data)
+
+    def _cache_put(self, key: str, image: Image.Image) -> None:
+        """Insert into cache if not already present. Sync — no awaits."""
+        if key not in self._image_cache:
+            if len(self._image_cache) >= self._cache_size:
+                self._image_cache.popitem(last=False)
+            self._image_cache[key] = image
+
+    async def _fetch_and_process(self, image_url: str) -> Image.Image:
+        """Fetch image via HTTP(S), decode with PIL, return RGB Image.
+
+        All exception normalization happens here so shared callers
+        see identical error types.
+        """
+        try:
+            with _nvtx.annotate("mm:img:http_fetch", color="lime"):
+                http_client = get_http_client(self._http_timeout)
+                response = await http_client.get(image_url)
+                response.raise_for_status()
+                if not response.content:
+                    raise ValueError("Empty response content from image URL")
+                image_data = BytesIO(response.content)
+
+            return await self._open_image(image_data)
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP {e.response.status_code} loading image: '{image_url}'")
+            raise
+        except httpx.TimeoutException as e:
+            logger.error(
+                f"{type(e).__name__} loading image: '{image_url}' "
+                f"(timeout={self._http_timeout}s)"
+            )
+            raise ValueError(f"Timeout loading image: '{image_url}'") from e
+        except httpx.HTTPError as e:
+            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
+            raise
+        except Exception as e:
+            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
+            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
+
+    async def _fetch_and_cache(self, key: str, image_url: str) -> Image.Image:
+        """Shared task: fetch, cache, then remove from _inflight."""
+        try:
+            image = await self._fetch_and_process(image_url)
+            self._cache_put(key, image)
+            return image
+        finally:
+            self._inflight.pop(key, None)
+
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:
         parsed_url = urlparse(image_url)
 
-        # For HTTP(S) URLs, check cache first
         if parsed_url.scheme in ("http", "https"):
-            image_url_lower = image_url.lower()
-            if image_url_lower in self._image_cache:
+            key = image_url.lower()
+
+            # Check cache (sync — no await, no interleaving possible)
+            if key in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
-                return self._image_cache[image_url_lower]
+                self._image_cache.move_to_end(key)
+                return self._image_cache[key]
+
+            # Join existing in-flight task, or start a new one
+            if key not in self._inflight:
+                task = asyncio.create_task(self._fetch_and_cache(key, image_url))
+                # Suppress "exception was never retrieved" if all waiters cancel
+                task.add_done_callback(
+                    lambda t: t.exception() if not t.cancelled() else None
+                )
+                self._inflight[key] = task
+
+            # shield so cancelling THIS caller doesn't cancel the shared task
+            return await asyncio.shield(self._inflight[key])
 
         try:
             if parsed_url.scheme == "data":
                 with _nvtx.annotate("mm:img:base64_decode", color="lime"):
-                    # Parse data URL format: data:[<media type>][;base64],<data>
                     if not parsed_url.path.startswith("image/"):
                         raise ValueError("Data URL must be an image type")
 
-                    # Split the path into media type and data
                     media_type, data = parsed_url.path.split(",", 1)
                     if ";base64" not in media_type:
                         raise ValueError("Data URL must be base64 encoded")
 
                     try:
-                        image_bytes = base64.b64decode(data)
-                        image_data = BytesIO(image_bytes)
+                        image_bytes = base64.b64decode(data, validate=True)
                     except binascii.Error as e:
-                        raise ValueError(f"Invalid base64 encoding: {e}")
-            elif parsed_url.scheme in ("http", "https"):
-                with _nvtx.annotate("mm:img:http_fetch", color="lime"):
-                    http_client = get_http_client(self._http_timeout)
+                        raise ValueError(f"Invalid base64 encoding: {e}") from e
+                    image_data = BytesIO(image_bytes)
 
-                    response = await http_client.get(image_url)
-                    response.raise_for_status()
-
-                    if not response.content:
-                        raise ValueError("Empty response content from image URL")
-
-                    image_data = BytesIO(response.content)
             elif parsed_url.scheme in ("", "file"):
-                # Local file path (plain path or file:// URI)
                 path = image_url if parsed_url.scheme == "" else parsed_url.path
 
                 def _read_local_file(p: str) -> bytes:
@@ -126,38 +192,11 @@ class ImageLoader:
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
-            with _nvtx.annotate("mm:img:pil_open_convert", color="lime"):
-                # PIL is sync, so offload to a thread to avoid blocking the event loop
-                # Restrict to supported formats to prevent PSD parsing (GHSA-cfh3-3jmp-rvhc)
-                image = await asyncio.to_thread(
-                    Image.open, image_data, formats=["JPEG", "PNG", "WEBP"]
-                )
+            return await self._open_image(image_data)
 
-                # Validate image format and convert to RGB
-                if image.format not in ("JPEG", "PNG", "WEBP"):
-                    raise ValueError(f"Unsupported image format: {image.format}")
-
-                image_converted = image.convert("RGB")
-
-            # Cache HTTP(S) URLs
-            if parsed_url.scheme in ("http", "https"):
-                image_url_lower = image_url.lower()
-                # Cache the image for future use, and evict the oldest image if the cache is full
-                if self._cache_queue.full():
-                    oldest_image_url = await self._cache_queue.get()
-                    del self._image_cache[oldest_image_url]
-
-                self._image_cache[image_url_lower] = image_converted
-                await self._cache_queue.put(image_url_lower)
-
-            return image_converted
-
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP error loading image: {e}")
-            raise
         except Exception as e:
-            logger.error(f"Error loading image: {e}")
-            raise ValueError(f"Failed to load image: {e}")
+            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
+            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
 
     async def load_image_batch(
         self,
