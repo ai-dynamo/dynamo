@@ -14,17 +14,25 @@
 //! - Frame 2: sequence (8 bytes, u64 big-endian) - for fast deduplication
 //! - Frame 3: Binary frame (5-byte header + EventEnvelope payload)
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::sync::{Arc, Mutex};
+use futures::{SinkExt, StreamExt};
+use std::sync::Arc;
+use tmq::{
+    AsZmqSocket, Context, Multipart, SocketBuilder,
+    publish::{Publish, publish},
+    subscribe::{Subscribe, subscribe},
+};
+use tokio::sync::{Mutex, broadcast};
 
 /// High Water Mark (HWM) for ZMQ sockets.
 /// This controls the maximum number of messages that can be queued.
 /// Default ZMQ HWM is 1000, which limits scalability.
 const ZMQ_SNDHWM: i32 = 100_000; // Send buffer: 100K messages
 const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
+const ZMQ_SNDTIMEOUT_MS: i32 = 0; // Send timeout: fail fast under pressure
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
 
 use super::codec::MsgpackCodec;
@@ -32,20 +40,31 @@ use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
 
-/// Parts of a received ZMQ multipart message.
-struct ZmqMessage {
-    #[allow(dead_code)]
-    topic: Vec<u8>,
-    publisher_id: u64,
-    sequence: u64,
-    data: Vec<u8>,
+fn configure_publish_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder
+        .set_sndhwm(ZMQ_SNDHWM)
+        .set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
+}
+
+fn configure_subscribe_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder
+        .set_rcvhwm(ZMQ_RCVHWM)
+        .set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+}
+
+fn multipart_message(multipart: Multipart) -> Vec<Vec<u8>> {
+    multipart.into_iter().map(|frame| frame.to_vec()).collect()
 }
 
 /// ZMQ PUB transport for publishing events.
-///
-/// Uses raw zmq::Socket with configured HWM for better scalability.
 pub struct ZmqPubTransport {
-    socket: Arc<Mutex<zmq::Socket>>,
+    socket: Arc<Mutex<Publish>>,
     topic: String,
 }
 
@@ -57,38 +76,19 @@ impl ZmqPubTransport {
     ///
     /// Returns the transport and the actual bound endpoint.
     pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
-        // Parse the endpoint to check if we need to find an available port
         let actual_endpoint = if endpoint.ends_with(":0") {
-            // Find an available port using TcpListener
             let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
             let actual_addr = listener.local_addr()?;
             let port = actual_addr.port();
-            drop(listener); // Close listener so ZMQ can bind to the port
+            drop(listener);
 
-            format!("tcp://0.0.0.0:{}", port)
+            format!("tcp://0.0.0.0:{port}")
         } else {
             endpoint.to_string()
         };
 
-        // Create raw ZMQ socket with HWM configuration
-        let endpoint_for_closure = actual_endpoint.clone();
-        let socket = tokio::task::spawn_blocking(move || -> Result<zmq::Socket> {
-            let ctx = zmq::Context::new();
-            let socket = ctx.socket(zmq::PUB)?;
-
-            // Configure High Water Mark for better scalability
-            socket.set_sndhwm(ZMQ_SNDHWM)?;
-
-            // Set send timeout to 0 (non-blocking)
-            socket.set_sndtimeo(0)?;
-
-            // Bind to endpoint
-            socket.bind(&endpoint_for_closure)?;
-
-            Ok(socket)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+        let ctx = Context::new();
+        let socket = configure_publish_builder(publish(&ctx)).bind(&actual_endpoint)?;
 
         tracing::info!(
             endpoint = %actual_endpoint,
@@ -112,26 +112,8 @@ impl ZmqPubTransport {
 
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
-        let endpoint_owned = xsub_endpoint.to_string();
-        let topic_owned = topic.to_string();
-
-        let socket = tokio::task::spawn_blocking(move || -> Result<zmq::Socket> {
-            let ctx = zmq::Context::new();
-            let socket = ctx.socket(zmq::PUB)?;
-
-            // Configure High Water Mark for better scalability
-            socket.set_sndhwm(ZMQ_SNDHWM)?;
-
-            // Set send timeout to 0 (non-blocking)
-            socket.set_sndtimeo(0)?;
-
-            // Connect (not bind) to broker's XSUB
-            socket.connect(&endpoint_owned)?;
-
-            Ok(socket)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+        let ctx = Context::new();
+        let socket = configure_publish_builder(publish(&ctx)).connect(xsub_endpoint)?;
 
         tracing::info!(
             endpoint = %xsub_endpoint,
@@ -142,39 +124,24 @@ impl ZmqPubTransport {
 
         Ok(Self {
             socket: Arc::new(Mutex::new(socket)),
-            topic: topic_owned,
+            topic: topic.to_string(),
         })
     }
 
     /// Connect to multiple broker XSUB endpoints (HA mode)
     pub async fn connect_multiple(xsub_endpoints: &[String], topic: &str) -> Result<Self> {
-        if xsub_endpoints.is_empty() {
+        let mut endpoints = xsub_endpoints.iter();
+        let Some(first_endpoint) = endpoints.next() else {
             anyhow::bail!("Cannot connect to zero endpoints");
+        };
+
+        let ctx = Context::new();
+        let socket = configure_publish_builder(publish(&ctx)).connect(first_endpoint)?;
+
+        for endpoint in endpoints {
+            socket.get_socket().connect(endpoint)?;
+            tracing::debug!(endpoint = %endpoint, "ZMQ PUB connected to broker XSUB");
         }
-
-        let endpoints_owned = xsub_endpoints.to_vec();
-        let topic_owned = topic.to_string();
-
-        let socket = tokio::task::spawn_blocking(move || -> Result<zmq::Socket> {
-            let ctx = zmq::Context::new();
-            let socket = ctx.socket(zmq::PUB)?;
-
-            // Configure High Water Mark for better scalability
-            socket.set_sndhwm(ZMQ_SNDHWM)?;
-
-            // Set send timeout to 0 (non-blocking)
-            socket.set_sndtimeo(0)?;
-
-            // Connect to all XSUB endpoints (ZMQ handles load balancing)
-            for endpoint in &endpoints_owned {
-                socket.connect(endpoint)?;
-                tracing::debug!(endpoint = %endpoint, "ZMQ PUB connected to broker XSUB");
-            }
-
-            Ok(socket)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
 
         tracing::info!(
             num_endpoints = xsub_endpoints.len(),
@@ -185,7 +152,7 @@ impl ZmqPubTransport {
 
         Ok(Self {
             socket: Arc::new(Mutex::new(socket)),
-            topic: topic_owned,
+            topic: topic.to_string(),
         })
     }
 }
@@ -193,35 +160,22 @@ impl ZmqPubTransport {
 #[async_trait]
 impl EventTransportTx for ZmqPubTransport {
     async fn publish(&self, _subject: &str, envelope_bytes: Bytes) -> Result<()> {
-        // Decode envelope to extract publisher_id and sequence for fast deduplication
         let codec = MsgpackCodec;
         let envelope = codec.decode_envelope(&envelope_bytes)?;
 
-        // Create binary frame
         let frame = Frame::new(envelope_bytes);
-        let frame_bytes = frame.encode();
+        let frames = vec![
+            self.topic.as_bytes().to_vec(),
+            envelope.publisher_id.to_be_bytes().to_vec(),
+            envelope.sequence.to_be_bytes().to_vec(),
+            frame.encode().to_vec(),
+        ];
 
-        // Prepare multipart message: [topic, publisher_id, sequence, frame_bytes]
-        let topic_bytes = self.topic.as_bytes().to_vec();
-        let publisher_id_bytes = envelope.publisher_id.to_be_bytes().to_vec();
-        let sequence_bytes = envelope.sequence.to_be_bytes().to_vec();
-        let frame_vec = frame_bytes.to_vec();
-
-        let socket = Arc::clone(&self.socket);
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let socket = socket.lock().unwrap();
-            // Send topic frame (for ZMQ subscription filtering)
-            socket.send(&topic_bytes, zmq::SNDMORE)?;
-            // Send publisher_id (for fast deduplication)
-            socket.send(&publisher_id_bytes, zmq::SNDMORE)?;
-            // Send sequence (for fast deduplication)
-            socket.send(&sequence_bytes, zmq::SNDMORE)?;
-            // Send data frame (complete envelope)
-            socket.send(&frame_vec, 0)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+        self.socket
+            .lock()
+            .await
+            .send(Multipart::from(frames))
+            .await?;
 
         Ok(())
     }
@@ -233,40 +187,19 @@ impl EventTransportTx for ZmqPubTransport {
 
 /// ZMQ SUB transport for subscribing to events.
 ///
-/// Uses a background socket pump to avoid holding the socket lock across stream lifetimes.
-/// Multiple subscribers can receive events concurrently via broadcast channel.
+/// Uses a background async reader to fan out frames to multiple local subscribers.
 pub struct ZmqSubTransport {
-    socket: Arc<Mutex<zmq::Socket>>,
-    broadcast_tx: tokio::sync::broadcast::Sender<Bytes>,
+    broadcast_tx: broadcast::Sender<Bytes>,
     _socket_pump_handle: tokio::task::JoinHandle<()>,
 }
 
 impl ZmqSubTransport {
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
     pub async fn connect(endpoint: &str, topic: &str) -> Result<Self> {
-        let endpoint_owned = endpoint.to_string();
-        let topic_owned = topic.to_string();
-
-        let socket = tokio::task::spawn_blocking(move || -> Result<zmq::Socket> {
-            let ctx = zmq::Context::new();
-            let socket = ctx.socket(zmq::SUB)?;
-
-            // Configure High Water Mark for better scalability
-            socket.set_rcvhwm(ZMQ_RCVHWM)?;
-
-            // Set receive timeout to avoid blocking forever (fixes test hangs)
-            socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
-
-            // Connect to endpoint
-            socket.connect(&endpoint_owned)?;
-
-            // Subscribe to topic
-            socket.set_subscribe(topic_owned.as_bytes())?;
-
-            Ok(socket)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+        let ctx = Context::new();
+        let socket = configure_subscribe_builder(subscribe(&ctx))
+            .connect(endpoint)?
+            .subscribe(topic.as_bytes())?;
 
         tracing::info!(
             endpoint = %endpoint,
@@ -275,16 +208,10 @@ impl ZmqSubTransport {
             "ZMQ SUB transport connected with configured HWM"
         );
 
-        let socket = Arc::new(Mutex::new(socket));
-
-        // Create broadcast channel for multiple subscribers
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
-
-        // Start background socket pump
-        let pump_handle = Self::start_socket_pump(Arc::clone(&socket), broadcast_tx.clone());
+        let (broadcast_tx, _) = broadcast::channel(1024);
+        let pump_handle = Self::start_socket_pump(socket, broadcast_tx.clone());
 
         Ok(Self {
-            socket,
             broadcast_tx,
             _socket_pump_handle: pump_handle,
         })
@@ -296,43 +223,26 @@ impl ZmqSubTransport {
     }
 
     /// Connect to multiple broker XPUB endpoints (HA mode)
-    /// Reuses existing connect_multiple implementation
     pub async fn connect_broker_multiple(xpub_endpoints: &[String], topic: &str) -> Result<Self> {
         Self::connect_multiple(xpub_endpoints, topic).await
     }
 
     /// Create a new ZMQ subscriber by connecting to multiple endpoints (fan-in).
     pub async fn connect_multiple(endpoints: &[String], topic: &str) -> Result<Self> {
-        if endpoints.is_empty() {
+        let mut endpoints_iter = endpoints.iter();
+        let Some(first_endpoint) = endpoints_iter.next() else {
             anyhow::bail!("Cannot connect to zero endpoints");
+        };
+
+        let ctx = Context::new();
+        let socket = configure_subscribe_builder(subscribe(&ctx))
+            .connect(first_endpoint)?
+            .subscribe(topic.as_bytes())?;
+
+        for endpoint in endpoints_iter {
+            socket.get_socket().connect(endpoint)?;
+            tracing::debug!(endpoint = %endpoint, "ZMQ SUB connected to endpoint");
         }
-
-        let endpoints_owned = endpoints.to_vec();
-        let topic_owned = topic.to_string();
-
-        let socket = tokio::task::spawn_blocking(move || -> Result<zmq::Socket> {
-            let ctx = zmq::Context::new();
-            let socket = ctx.socket(zmq::SUB)?;
-
-            // Configure High Water Mark for better scalability
-            socket.set_rcvhwm(ZMQ_RCVHWM)?;
-
-            // Set receive timeout to avoid blocking forever (fixes test hangs)
-            socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
-
-            // Connect to all endpoints
-            for endpoint in &endpoints_owned {
-                socket.connect(endpoint)?;
-                tracing::debug!(endpoint = %endpoint, "ZMQ SUB connected to endpoint");
-            }
-
-            // Subscribe to topic
-            socket.set_subscribe(topic_owned.as_bytes())?;
-
-            Ok(socket)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
 
         tracing::info!(
             num_endpoints = endpoints.len(),
@@ -341,115 +251,76 @@ impl ZmqSubTransport {
             "ZMQ SUB transport connected to multiple endpoints with configured HWM"
         );
 
-        let socket = Arc::new(Mutex::new(socket));
-
-        // Create broadcast channel for multiple subscribers
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
-
-        // Start background socket pump
-        let pump_handle = Self::start_socket_pump(Arc::clone(&socket), broadcast_tx.clone());
+        let (broadcast_tx, _) = broadcast::channel(1024);
+        let pump_handle = Self::start_socket_pump(socket, broadcast_tx.clone());
 
         Ok(Self {
-            socket,
             broadcast_tx,
             _socket_pump_handle: pump_handle,
         })
     }
 
-    /// Background task that reads from socket and broadcasts to all subscribers.
-    ///
-    /// This task holds the socket lock only briefly during each recv operation,
-    /// allowing multiple subscribers to receive concurrently via broadcast channel.
-    /// Uses finite timeout to avoid blocking forever (fixes test hangs from ZMQ "slow joiner" problem).
     fn start_socket_pump(
-        socket: Arc<Mutex<zmq::Socket>>,
-        broadcast_tx: tokio::sync::broadcast::Sender<Bytes>,
+        mut socket: Subscribe,
+        broadcast_tx: broadcast::Sender<Bytes>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             loop {
-                // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
-                let socket_clone = Arc::clone(&socket);
-                let result = tokio::task::spawn_blocking(move || -> Result<Option<ZmqMessage>> {
-                    let socket = socket_clone.lock().unwrap();
+                let Some(result) = socket.next().await else {
+                    tracing::info!("ZMQ socket stream ended");
+                    break;
+                };
 
-                    // Receive topic frame (may timeout with EAGAIN)
-                    let topic = match socket.recv_bytes(0) {
-                        Ok(data) => data,
-                        Err(zmq::Error::EAGAIN) => return Ok(None), // Timeout, retry
-                        Err(e) => return Err(e.into()),
-                    };
-
-                    // Receive publisher_id frame (8 bytes, u64 big-endian)
-                    let publisher_id_bytes = socket.recv_bytes(0)?;
-                    if publisher_id_bytes.len() != 8 {
-                        anyhow::bail!(
-                            "Invalid publisher_id frame: expected 8 bytes, got {}",
-                            publisher_id_bytes.len()
-                        );
-                    }
-                    let publisher_id = u64::from_be_bytes(publisher_id_bytes.try_into().unwrap());
-
-                    // Receive sequence frame (8 bytes, u64 big-endian)
-                    let sequence_bytes = socket.recv_bytes(0)?;
-                    if sequence_bytes.len() != 8 {
-                        anyhow::bail!(
-                            "Invalid sequence frame: expected 8 bytes, got {}",
-                            sequence_bytes.len()
-                        );
-                    }
-                    let sequence = u64::from_be_bytes(sequence_bytes.try_into().unwrap());
-
-                    // Receive data frame
-                    let data = socket.recv_bytes(0)?;
-
-                    Ok(Some(ZmqMessage {
-                        topic,
-                        publisher_id,
-                        sequence,
-                        data,
-                    }))
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(Some(ZmqMessage {
-                        publisher_id,
-                        sequence,
-                        data: frame_bytes,
-                        ..
-                    }))) => {
-                        // Log dedup metadata for debugging
-                        tracing::trace!(
-                            publisher_id = publisher_id,
-                            sequence = sequence,
-                            "Socket pump received ZMQ message"
-                        );
-
-                        // Parse binary frame
-                        let frame_bytes = Bytes::from(frame_bytes);
-                        match Frame::decode(frame_bytes) {
-                            Ok(frame) => {
-                                // Broadcast payload to all subscribers
-                                // Ignore send errors (no receivers or lagging receivers)
-                                let _ = broadcast_tx.send(frame.payload);
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "Failed to decode ZMQ frame in socket pump");
-                                continue;
-                            }
-                        }
-                    }
-                    Ok(Ok(None)) => {
-                        // Timeout (EAGAIN), continue polling
-                        continue;
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!(error = %e, "ZMQ receive error in socket pump");
+                let frames = match result {
+                    Ok(frames) => multipart_message(frames),
+                    Err(error) => {
+                        tracing::error!(error = %error, "ZMQ receive error in socket pump");
                         break;
                     }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Task join error in socket pump");
-                        break;
+                };
+
+                if frames.len() != 4 {
+                    tracing::warn!(
+                        frame_count = frames.len(),
+                        "Unexpected multipart frame count in socket pump"
+                    );
+                    continue;
+                }
+
+                let publisher_id_bytes = &frames[1];
+                if publisher_id_bytes.len() != 8 {
+                    tracing::warn!(
+                        actual = publisher_id_bytes.len(),
+                        "Invalid publisher_id frame in socket pump"
+                    );
+                    continue;
+                }
+                let publisher_id =
+                    u64::from_be_bytes(publisher_id_bytes.as_slice().try_into().unwrap());
+
+                let sequence_bytes = &frames[2];
+                if sequence_bytes.len() != 8 {
+                    tracing::warn!(
+                        actual = sequence_bytes.len(),
+                        "Invalid sequence frame in socket pump"
+                    );
+                    continue;
+                }
+                let sequence = u64::from_be_bytes(sequence_bytes.as_slice().try_into().unwrap());
+
+                tracing::trace!(
+                    publisher_id = publisher_id,
+                    sequence = sequence,
+                    "Socket pump received ZMQ message"
+                );
+
+                let frame_bytes = Bytes::from(frames[3].clone());
+                match Frame::decode(frame_bytes) {
+                    Ok(frame) => {
+                        let _ = broadcast_tx.send(frame.payload);
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Failed to decode ZMQ frame in socket pump");
                     }
                 }
             }
@@ -462,22 +333,14 @@ impl ZmqSubTransport {
 #[async_trait]
 impl EventTransportRx for ZmqSubTransport {
     async fn subscribe(&self, _subject: &str) -> Result<WireStream> {
-        // Subscribe to broadcast channel (does not hold socket lock)
         let mut receiver = self.broadcast_tx.subscribe();
 
         let stream = stream! {
             loop {
                 match receiver.recv().await {
-                    Ok(payload) => {
-                        yield Ok(payload);
-                    }
+                    Ok(payload) => yield Ok(payload),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(
-                            skipped = skipped,
-                            "Subscriber lagged behind, skipped messages"
-                        );
-                        // Continue receiving, don't break the stream
-                        continue;
+                        tracing::warn!(skipped = skipped, "Subscriber lagged behind, skipped messages");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::info!("Broadcast channel closed");
@@ -504,7 +367,7 @@ mod tests {
     #[tokio::test]
     async fn test_zmq_pubsub_basic() {
         let port = 25555;
-        let endpoint = format!("tcp://127.0.0.1:{}", port);
+        let endpoint = format!("tcp://127.0.0.1:{port}");
         let topic = "test-topic";
 
         let (publisher, _actual_endpoint) = ZmqPubTransport::bind(&endpoint, topic)
@@ -517,7 +380,6 @@ mod tests {
             .await
             .expect("Failed to create subscriber");
 
-        use futures::StreamExt;
         let mut stream = subscriber
             .subscribe(topic)
             .await
@@ -551,14 +413,13 @@ mod tests {
     #[tokio::test]
     async fn test_zmq_multiple_messages() {
         let port = 25556;
-        let endpoint = format!("tcp://127.0.0.1:{}", port);
+        let endpoint = format!("tcp://127.0.0.1:{port}");
         let topic = "multi-test";
 
         let (publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let subscriber = ZmqSubTransport::connect(&endpoint, topic).await.unwrap();
-        use futures::StreamExt;
         let mut stream = subscriber.subscribe(topic).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -570,7 +431,7 @@ mod tests {
                 sequence: i,
                 published_at: 1700000000000 + i,
                 topic: topic.to_string(),
-                payload: Bytes::from(format!("message {}", i)),
+                payload: Bytes::from(format!("message {i}")),
             };
 
             let bytes = codec.encode_envelope(&envelope).unwrap();
@@ -579,7 +440,7 @@ mod tests {
 
         for i in 0..5 {
             let result = timeout(Duration::from_secs(2), stream.next()).await;
-            assert!(result.is_ok(), "Timeout on message {}", i);
+            assert!(result.is_ok(), "Timeout on message {i}");
 
             let received = result.unwrap().unwrap().unwrap();
             let decoded = codec.decode_envelope(&received).unwrap();

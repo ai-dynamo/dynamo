@@ -24,6 +24,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang._compat import enable_disjoint_streaming_output
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -352,7 +353,6 @@ async def parse_args(args: list[str]) -> Config:
         server_args.served_model_name = parsed_args.served_model_name
         server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
         server_args.log_level = getattr(parsed_args, "log_level", "info")
-        server_args.skip_tokenizer_init = True
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
         server_args.tp_size = getattr(parsed_args, "tp_size", 1)
         server_args.dp_size = getattr(parsed_args, "dp_size", 1)
@@ -374,12 +374,10 @@ async def parse_args(args: list[str]) -> Config:
         )
 
     # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
-    # tokens since last output), not cumulative tokens.
-    # sglang renamed stream_output -> incremental_streaming_output in PR #20614.
-    if hasattr(ServerArgs, "incremental_streaming_output"):
-        server_args.incremental_streaming_output = True
-    else:
-        server_args.stream_output = True
+    # tokens since last output), not cumulative tokens. Modern SGLang gates this
+    # behavior behind incremental_streaming_output, while older releases used
+    # stream_output.
+    enable_disjoint_streaming_output(server_args)
 
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
@@ -390,15 +388,9 @@ async def parse_args(args: list[str]) -> Config:
             FutureWarning,
             stacklevel=2,
         )
-        logging.info(
-            "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
-        )
-        server_args.skip_tokenizer_init = False
+        logging.info("Using SGLang's built in tokenizer")
     else:
-        logging.info(
-            "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
-        )
-        server_args.skip_tokenizer_init = True
+        logging.info("Using dynamo's built in tokenizer")
 
     # Derive use_kv_events from server_args.kv_events_config
     # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)

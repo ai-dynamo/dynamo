@@ -4,6 +4,7 @@
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::TraceCollector;
 use crate::scheduler::{EngineCore, EnginePassResult, SglangCore, VllmCore};
+use dynamo_kv_router::protocols::WorkerId;
 
 pub(crate) struct ReplayWorkerCore {
     core: EngineCore,
@@ -15,6 +16,18 @@ impl ReplayWorkerCore {
             crate::common::protocols::EngineType::Vllm => EngineCore::Vllm(VllmCore::new(args)),
             crate::common::protocols::EngineType::Sglang => {
                 EngineCore::Sglang(SglangCore::new(args))
+            }
+        };
+        Self { core }
+    }
+
+    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+        let core = match args.engine_type {
+            crate::common::protocols::EngineType::Vllm => {
+                EngineCore::Vllm(VllmCore::new_with_kv_capture(args, worker_id))
+            }
+            crate::common::protocols::EngineType::Sglang => {
+                EngineCore::Sglang(SglangCore::new_with_kv_capture(args, worker_id))
             }
         };
         Self { core }

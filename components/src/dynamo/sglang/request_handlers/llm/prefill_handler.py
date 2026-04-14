@@ -13,8 +13,9 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
-# Sentinel value matching u32::MAX from prefill_router.rs SimpleRouter path,
-# indicating no specific data-parallel rank was selected.
+# Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
+# This remains as a compatibility fallback for older callers that still encode
+# an unresolved data-parallel rank in-band instead of omitting the field.
 _DP_RANK_UNSET = 2**32 - 1
 
 
@@ -86,6 +87,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 "top_p": sampling_opts.get("top_p"),
                 "top_k": sampling_opts.get("top_k"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
+                **self._get_guided_decoding_params(
+                    sampling_opts.get("guided_decoding")
+                ),
             }
             sampling_params = {
                 k: v for k, v in sampling_params.items() if v is not None
@@ -153,6 +157,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             external_trace_header=trace_header,
             rid=trace_id,
             data_parallel_rank=dp_rank,
+            **self._session_kwargs(inner_request),
             **self._priority_kwargs(priority),
         )
 

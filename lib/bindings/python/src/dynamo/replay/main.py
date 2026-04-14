@@ -15,7 +15,7 @@ from typing import Protocol
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.llm import AicPerfConfig, KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -27,15 +27,17 @@ class PlannerProfileDataResult(Protocol):
 def resolve_planner_profile_data(
     planner_profile_data: Path | None,
 ) -> PlannerProfileDataResult:
+    if planner_profile_data is None:
+        return SimpleNamespace(npz_path=None)
+
+    if planner_profile_data.suffix == ".npz":
+        return SimpleNamespace(npz_path=planner_profile_data)
+
     try:
         module = importlib.import_module("dynamo.mocker.args")
     except ImportError:
-        if planner_profile_data is None:
-            return SimpleNamespace(npz_path=None)
         return SimpleNamespace(
-            npz_path=planner_profile_data
-            if planner_profile_data.suffix == ".npz"
-            else None
+            npz_path=None,
         )
     return module.resolve_planner_profile_data(planner_profile_data)
 
@@ -62,14 +64,46 @@ def _load_engine_args(raw_args: str | None):
                 "worker_type must be one of 'aggregated', 'prefill', or 'decode'"
             )
     if "planner_profile_data" in raw:
-        profile_data_result = resolve_planner_profile_data(
-            Path(raw["planner_profile_data"])
-        )
-        if profile_data_result.npz_path is not None:
-            raw["planner_profile_data"] = str(profile_data_result.npz_path)
-        else:
+        if raw["planner_profile_data"] is None:
             del raw["planner_profile_data"]
+        else:
+            profile_data_result = resolve_planner_profile_data(
+                Path(raw["planner_profile_data"])
+            )
+            if profile_data_result.npz_path is not None:
+                raw["planner_profile_data"] = str(profile_data_result.npz_path)
+            else:
+                del raw["planner_profile_data"]
     return MockEngineArgs.from_json(json.dumps(raw))
+
+
+def _load_aic_perf_config(args: argparse.Namespace):
+    values = {
+        "aic_backend": args.aic_backend,
+        "aic_system": args.aic_system,
+        "aic_model_path": args.aic_model_path,
+        "aic_backend_version": args.aic_backend_version,
+        "aic_tp_size": args.aic_tp_size,
+    }
+    if not any(value is not None for value in values.values()):
+        return None
+
+    missing = [
+        name
+        for name in ("aic_backend", "aic_system", "aic_model_path")
+        if values[name] is None
+    ]
+    if missing:
+        missing_flags = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+        raise ValueError(f"AIC replay modeling requires {missing_flags}")
+
+    return AicPerfConfig(
+        aic_backend=values["aic_backend"],
+        aic_system=values["aic_system"],
+        aic_model_path=values["aic_model_path"],
+        aic_tp_size=values["aic_tp_size"] or 1,
+        aic_backend_version=values["aic_backend_version"],
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -79,6 +113,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--prefill-engine-args")
     parser.add_argument("--decode-engine-args")
     parser.add_argument("--router-config")
+    parser.add_argument("--aic-backend")
+    parser.add_argument("--aic-system")
+    parser.add_argument("--aic-backend-version")
+    parser.add_argument("--aic-tp-size", type=int)
+    parser.add_argument("--aic-model-path")
     parser.add_argument("--input-tokens", type=int)
     parser.add_argument("--output-tokens", type=int)
     parser.add_argument(
@@ -106,6 +145,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="round_robin",
     )
     parser.add_argument("--arrival-speedup-ratio", type=float, default=1.0)
+    parser.add_argument(
+        "--trace-block-size",
+        type=int,
+        default=512,
+        help="tokens represented by each hash_id in the trace file; only used for file replay",
+    )
     parser.add_argument(
         "--report-json",
         help="path to save the full replay report JSON; defaults to a timestamped file in the current directory",
@@ -140,6 +185,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.router_config is not None
         else None
     )
+    try:
+        aic_perf_config = _load_aic_perf_config(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if using_trace_file:
         report = run_trace_replay(
@@ -148,6 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
             router_config=router_config,
+            aic_perf_config=aic_perf_config,
             num_workers=args.num_workers,
             num_prefill_workers=args.num_prefill_workers,
             num_decode_workers=args.num_decode_workers,
@@ -155,6 +205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             replay_mode=args.replay_mode,
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
+            trace_block_size=args.trace_block_size,
         )
     else:
         report = run_synthetic_trace_replay(
@@ -165,6 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
             router_config=router_config,
+            aic_perf_config=aic_perf_config,
             num_workers=args.num_workers,
             num_prefill_workers=args.num_prefill_workers,
             num_decode_workers=args.num_decode_workers,

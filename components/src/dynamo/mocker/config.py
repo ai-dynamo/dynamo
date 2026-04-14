@@ -54,12 +54,18 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
     aic_backend_version = None
     aic_tp_size = None
     aic_model_path = None
+    aic_moe_tp_size = None
+    aic_moe_ep_size = None
+    aic_attention_dp_size = None
     if getattr(args, "aic_perf_model", False):
         aic_backend = getattr(args, "engine_type", None) or "vllm"
         aic_system = getattr(args, "aic_system", None)
         aic_backend_version = getattr(args, "aic_backend_version", None)
         aic_tp_size = getattr(args, "aic_tp_size", None)
         aic_model_path = getattr(args, "model_path", None)
+        aic_moe_tp_size = getattr(args, "aic_moe_tp_size", None)
+        aic_moe_ep_size = getattr(args, "aic_moe_ep_size", None)
+        aic_attention_dp_size = getattr(args, "aic_attention_dp_size", None)
     return MockEngineArgs(
         engine_type=getattr(args, "engine_type", None) or "vllm",
         num_gpu_blocks=getattr(args, "num_gpu_blocks", _DEFAULT_NUM_GPU_BLOCKS),
@@ -81,6 +87,9 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_backend_version=aic_backend_version,
         aic_tp_size=aic_tp_size,
         aic_model_path=aic_model_path,
+        aic_moe_tp_size=aic_moe_tp_size,
+        aic_moe_ep_size=aic_moe_ep_size,
+        aic_attention_dp_size=aic_attention_dp_size,
         enable_local_indexer=not getattr(args, "durable_kv_events", False),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),

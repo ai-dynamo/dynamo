@@ -7,11 +7,13 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::protocols::{DirectRequest, KvEventPublishers, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{
+    DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
+};
 use crate::common::utils::sleep_until_precise;
 use crate::scheduler::{
-    AdmissionEvent, MockerMetrics, RouterEventVisibility, SchedulerHandle,
-    capture_deferred_kv_publish_sink, publish_deferred_kv_events,
+    AdmissionEvent, DeferredFpmBuffer, MockerMetrics, RouterEventVisibility, SchedulerHandle,
+    capture_deferred_kv_publish_sink, publish_deferred_fpm, publish_deferred_kv_events,
 };
 
 use super::core::SglangCore;
@@ -39,6 +41,7 @@ impl SglangScheduler {
         output_tx: Option<mpsc::UnboundedSender<Vec<OutputSignal>>>,
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         Self::new_internal(
             args,
@@ -47,6 +50,7 @@ impl SglangScheduler {
             kv_event_publishers,
             cancellation_token,
             None,
+            fpm_publisher,
         )
     }
 
@@ -57,6 +61,7 @@ impl SglangScheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         Self::new_internal(
             args,
@@ -65,6 +70,7 @@ impl SglangScheduler {
             kv_event_publishers,
             cancellation_token,
             admission_tx,
+            fpm_publisher,
         )
     }
 
@@ -75,6 +81,7 @@ impl SglangScheduler {
         kv_event_publishers: KvEventPublishers,
         cancellation_token: Option<CancellationToken>,
         admission_tx: Option<mpsc::UnboundedSender<AdmissionEvent>>,
+        fpm_publisher: FpmPublisher,
     ) -> Self {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
         let total_blocks = args.num_gpu_blocks as u64;
@@ -89,6 +96,7 @@ impl SglangScheduler {
         tokio::spawn(async move {
             let (deferred_kv_events, buffering_publishers) =
                 capture_deferred_kv_publish_sink(kv_event_publishers.raw_enabled());
+            let deferred_fpm = DeferredFpmBuffer::default();
             let mut core = SglangCore::new_with_sink(args, dp_rank, buffering_publishers);
 
             loop {
@@ -111,8 +119,12 @@ impl SglangScheduler {
                         let _ = admission_tx.send(admission.clone());
                     }
                 }
+                if let Some(fpm) = pass.fpm {
+                    deferred_fpm.push(fpm);
+                }
                 if pass.router_event_visibility == RouterEventVisibility::PassStart {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 }
                 let total_time = std::time::Duration::from_secs_f64(pass.end_ms / 1000.0);
                 if total_time > std::time::Duration::ZERO {
@@ -120,10 +132,12 @@ impl SglangScheduler {
                 }
                 if pass.router_event_visibility == RouterEventVisibility::PassEnd {
                     publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                    publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 }
                 let active_decode_blocks = pass.active_decode_blocks;
                 flush_output_signals(&output_tx, pass.output_signals);
                 publish_deferred_kv_events(&kv_event_publishers, deferred_kv_events.drain());
+                publish_deferred_fpm(&fpm_publisher, deferred_fpm.drain());
                 let _ = metrics_tx.send(MockerMetrics::new(
                     dp_rank,
                     active_decode_blocks,

@@ -243,7 +243,6 @@ KV-aware routing uses live KV cache block events from workers so the EPP can rou
    - **vLLM:** Pass `--enable-prefix-caching` and `--kv-events-config '{"enable_kv_cache_events":true}'`.
    - **SGLang:** Pass `--kv-events-config` with the appropriate endpoint.
    - **TRT-LLM:** Pass `--publish-events-and-metrics`.
-   - **Disaggregated vLLM (prefill/decode separation):** Do **not** pass `--disaggregation-mode decode` on decode workers — this flag hardcodes KV event publishing to off. Instead, omit the flag (defaults to aggregated mode) so decode workers also publish their cache state.
 2. **EPP — leave `DYN_USE_KV_EVENTS` at its default (`true`).** The EPP subscribes to worker KV events via event plane (NATS/ZMQ) and uses them for prefix-overlap scoring.
 3. **Block size — must be consistent.** The `--block-size` on all workers must match `DYN_KV_CACHE_BLOCK_SIZE` on the EPP (default: 128). Mismatched block sizes cause incorrect block hash computation.
 

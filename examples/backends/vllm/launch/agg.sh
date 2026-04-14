@@ -8,7 +8,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # gpu_gb_to_total_fraction
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_vllm_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default model
@@ -33,7 +33,10 @@ done
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
+# Default KV cache cap from profiling (2x safety over min=560 MiB); ~3.8 GiB peak VRAM
+# Profiler/test framework overrides via env
+: "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=1119388000}"
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving (1 GPU)" "$MODEL" "$HTTP_PORT"

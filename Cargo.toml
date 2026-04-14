@@ -11,6 +11,8 @@ members = [
     "lib/kv-router",
     "lib/memory",
     "lib/kvbm-common",
+    "lib/kvbm-config",
+    "lib/kvbm-engine",
     "lib/kvbm-kernels",
     "lib/kvbm-logical",
     "lib/kvbm-physical",
@@ -19,9 +21,6 @@ members = [
     "lib/bench",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
-    "lib/velo-common",
-    "lib/velo-transports",
-    "lib/velo-events",
 ]
 resolver = "3"
 
@@ -44,27 +43,27 @@ dynamo-tokens = { path = "lib/tokens", version = "1.0.0" }
 dynamo-memory = { path = "lib/memory", version = "1.0.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics", "runtime-protocols"] }
-dynamo-protocols = { path = "lib/protocols", version = "1.0.0", features = ["byot"] }
+dynamo-protocols = { path = "lib/protocols", version = "1.0.0" }
 dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
 fastokens = { version = "0.1.0" }
 
+
 # kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "0.1.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.1.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "0.1.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "0.1.0" }
+kvbm-common = { path = "lib/kvbm-common", version = "1.0.0" }
+kvbm-config = { path = "lib/kvbm-config", version = "1.0.0" }
+kvbm-engine = { path = "lib/kvbm-engine", version = "1.0.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
 
 # velo
-velo-common = { path = "lib/velo-common", version = "0.1.0" }
-velo-transports = { path = "lib/velo-transports", version = "0.1.0" }
-velo-events = { path = "lib/velo-events", version = "0.1.0" }
+velo = { version = "0.1.0" }
 
 # External dependencies
 anyhow = { version = "1" }
 async-nats = { version = "0.45.0", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
-async_zmq = { version = "0.4.0" }
 blake3 = { version = "1" }
 bytes = { version = "1" }
 chrono = { version = "0.4", default-features = false, features = [
@@ -74,7 +73,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.19.2", features = ["cuda-version-from-build-system", "fallback-latest"] }
+cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"] }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
@@ -115,7 +114,6 @@ strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
-zmq = { version = "0.10" }
 tokio = { version = "=1.48.0", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
@@ -124,6 +122,7 @@ axum = { version = "=0.8.4", features = ["macros"] }
 axum-core = { version = "0.5.2" }
 hyper = { version = "=1.7.0" }
 hyper-util = { version = "=0.1.17" }
+mio = { version = "=1.1.1" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",

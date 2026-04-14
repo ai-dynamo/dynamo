@@ -467,6 +467,17 @@ func (v *DynamoGraphDeploymentValidator) validateAnnotations() error {
 		}
 	}
 
+	// Validate kube discovery mode
+	if value, exists := annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists {
+		switch value {
+		case "pod", "container":
+			// valid
+		default:
+			errs = append(errs, fmt.Errorf("annotation %s has invalid value %q: must be \"pod\" or \"container\"",
+				consts.KubeAnnotationDynamoKubeDiscoveryMode, value))
+		}
+	}
+
 	return errors.Join(errs...)
 }
 

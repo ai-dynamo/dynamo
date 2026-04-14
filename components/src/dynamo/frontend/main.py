@@ -8,7 +8,7 @@
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_model`).
 # - Pre-processor: Prompt templating and tokenization.
 # - Router, defaulting to round-robin. Use --router-mode to switch
-#   (round-robin, random, kv, direct, least-loaded).
+#   (round-robin, random, kv, direct, least-loaded, device-aware-weighted).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -29,6 +29,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.llm import (
+    AicPerfConfig,
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
@@ -113,6 +114,17 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     vllm_flags = None
     sglang_flags = None
 
+    # --trust-remote-code is only meaningful with --dyn-chat-processor vllm.
+    # Warn and strip it when a different (or no) chat processor is active so
+    # it does not propagate as an unknown-argument error below.
+    if "--trust-remote-code" in unknown and config.chat_processor != "vllm":
+        logger.warning(
+            "--trust-remote-code has no effect without '--dyn-chat-processor vllm'. "
+            "It is only supported by the vLLM chat processor. "
+            "Pass '--dyn-chat-processor vllm' to enable trust_remote_code."
+        )
+        unknown = [arg for arg in unknown if arg != "--trust-remote-code"]
+
     # parse extra vllm flags using vllm native parser.
     if config.chat_processor == "vllm":
         try:
@@ -172,9 +184,14 @@ async def async_main():
         os.environ["DYN_TOKENIZER"] = "fastokens"
     else:
         os.environ.pop("DYN_TOKENIZER", None)
+    max_seq_info = (
+        f", max_seq_len: {config.migration_max_seq_len}"
+        if config.migration_max_seq_len is not None
+        else ""
+    )
     logger.info(
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
-        f"(limit: {config.migration_limit})"
+        f"(limit: {config.migration_limit}{max_seq_info})"
     )
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
@@ -234,6 +251,9 @@ async def async_main():
     elif config.router_mode == "least-loaded":
         router_mode = RouterMode.LeastLoaded
         kv_router_config = None
+    elif config.router_mode == "device-aware-weighted":
+        router_mode = RouterMode.DeviceAwareWeighted
+        kv_router_config = None
     else:
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
@@ -254,6 +274,8 @@ async def async_main():
         "router_config": router_config,
         "migration_limit": config.migration_limit,
     }
+    if config.migration_max_seq_len is not None:
+        kwargs["migration_max_seq_len"] = config.migration_max_seq_len
 
     if config.model_name:
         kwargs["model_name"] = config.model_name
@@ -301,6 +323,9 @@ async def async_main():
             runtime, router_config, config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
+
+    if config.router_prefill_load_model == "aic":
+        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

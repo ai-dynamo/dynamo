@@ -50,7 +50,10 @@ async def worker():
         (
             dynamo_args.namespace,
             dynamo_args.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity()
+        ) = snapshot_controller.reload_restore_identity(
+            dynamo_args.namespace,
+            dynamo_args.discovery_backend,
+        )
 
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
