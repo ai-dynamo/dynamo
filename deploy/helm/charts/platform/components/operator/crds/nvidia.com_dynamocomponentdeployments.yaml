@@ -10727,6 +10727,30 @@ spec:
                 globalDynamoNamespace:
                   description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
                   type: boolean
+                gpuMemoryService:
+                  description: |-
+                    GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+                    When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+                  properties:
+                    deviceClassName:
+                      default: gpu.nvidia.com
+                      description: DeviceClassName is the DRA DeviceClass to request GPUs from.
+                      type: string
+                    enabled:
+                      description: |-
+                        Enabled activates the GMS sidecar. GPU resources on the main container
+                        are replaced with a DRA ResourceClaim for shared GPU access.
+                      type: boolean
+                    mode:
+                      default: intraPod
+                      description: Mode selects the GMS deployment topology.
+                      enum:
+                        - intraPod
+                        - interPod
+                      type: string
+                  required:
+                    - enabled
+                  type: object
                 ingress:
                   description: Ingress config to expose the component outside the cluster (or through a service mesh).
                   properties:
