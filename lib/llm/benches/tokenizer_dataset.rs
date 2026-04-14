@@ -6,17 +6,20 @@
 //! Downloads a real dataset (LongBench-v2) from HuggingFace Hub and benchmarks
 //! per-sample encode throughput with correctness verification.
 //!
+//! This benchmark is opt-in: set RUN_BENCH=1 to run it. Without that variable
+//! it exits immediately so that `cargo test --all-targets` in CI is not affected.
+//!
 //! Run:
-//!   cargo bench --bench tokenizer_dataset
+//!   RUN_BENCH=1 cargo bench --bench tokenizer_dataset
 //!
 //! Override tokenizer (default: Qwen/Qwen3-0.6B):
-//!   TOKENIZER_PATH=deepseek-ai/DeepSeek-V3 cargo bench --bench tokenizer_dataset
+//!   RUN_BENCH=1 TOKENIZER_PATH=deepseek-ai/DeepSeek-V3 cargo bench --bench tokenizer_dataset
 //!
-//! Override dataset and sample count (default: 503 local, 20 in CI):
-//!   DATASET=RyokoAI/ShareGPT52K MAX_SAMPLES=50 cargo bench --bench tokenizer_dataset
+//! Override dataset and sample count (default: 503):
+//!   RUN_BENCH=1 DATASET=RyokoAI/ShareGPT52K MAX_SAMPLES=50 cargo bench --bench tokenizer_dataset
 //!
 //! Batch benchmark (default: sequential):
-//!   BATCH_SIZE=64 cargo bench --bench tokenizer_dataset
+//!   RUN_BENCH=1 BATCH_SIZE=64 cargo bench --bench tokenizer_dataset
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -29,11 +32,8 @@ const DEFAULT_HF_MODEL: &str = "Qwen/Qwen3-0.6B";
 /// Default dataset on HuggingFace Hub.
 const DEFAULT_DATASET: &str = "zai-org/LongBench-v2";
 
-/// Default sample count when MAX_SAMPLES is not set.
-/// CI environments (detected via the CI env var) use a small subset to stay
-/// within job timeouts; local runs use the full dataset.
-const DEFAULT_MAX_SAMPLES_CI: usize = 20;
-const DEFAULT_MAX_SAMPLES_LOCAL: usize = 503;
+/// Default number of samples when MAX_SAMPLES is not set.
+const DEFAULT_MAX_SAMPLES: usize = 503;
 
 /// Resolve tokenizer path: local file, HF model name, or default.
 fn resolve_tokenizer_path() -> String {
@@ -320,17 +320,20 @@ fn bench_batched(
 }
 
 fn main() {
+    // This benchmark downloads a large dataset and takes several minutes.
+    // It is opt-in to avoid blocking `cargo test --all-targets` in CI.
+    if std::env::var("RUN_BENCH").is_err() {
+        eprintln!("[skip] tokenizer_dataset benchmark skipped. Set RUN_BENCH=1 to run it.");
+        eprintln!("[skip] See lib/llm/benches/README.md for usage.");
+        return;
+    }
+
     let tokenizer_path = resolve_tokenizer_path();
     let dataset = std::env::var("DATASET").unwrap_or_else(|_| DEFAULT_DATASET.to_string());
-    let default_max = if std::env::var("CI").is_ok() {
-        DEFAULT_MAX_SAMPLES_CI
-    } else {
-        DEFAULT_MAX_SAMPLES_LOCAL
-    };
     let max_samples: usize = std::env::var("MAX_SAMPLES")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(default_max);
+        .unwrap_or(DEFAULT_MAX_SAMPLES);
     let batch_size: Option<usize> = std::env::var("BATCH_SIZE")
         .ok()
         .and_then(|v| v.parse().ok());

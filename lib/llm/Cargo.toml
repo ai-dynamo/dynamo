@@ -35,12 +35,10 @@ kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 [[bench]]
 name = "tokenizer_simple"
 harness = false
-test = false
 
 [[bench]]
 name = "tokenizer_dataset"
 harness = false
-test = false
 
 [[bench]]
 name = "transfer_context_v2"
