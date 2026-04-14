@@ -70,16 +70,6 @@ func failoverPodSpec() corev1.PodSpec {
 	}
 }
 
-func failoverComponent() *v1alpha1.DynamoComponentDeploymentSharedSpec {
-	return &v1alpha1.DynamoComponentDeploymentSharedSpec{
-		ComponentType:    commonconsts.ComponentTypeWorker,
-		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
-		Failover:         &v1alpha1.FailoverSpec{Enabled: true},
-		Resources: &v1alpha1.Resources{
-			Limits: &v1alpha1.ResourceItem{GPU: "2"},
-		},
-	}
-}
 
 // --- buildFailoverPod ---
 
