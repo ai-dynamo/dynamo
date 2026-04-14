@@ -591,7 +591,9 @@ impl AggRuntime {
     }
 
     /// Run the aggregated offline replay until all arrivals and worker work are exhausted.
-    pub(in crate::replay::offline) fn run(mut self) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
+    pub(in crate::replay::offline) fn run(
+        mut self,
+    ) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
         self.drain_current_timestamp()?;
 
         while !self.is_done() {
