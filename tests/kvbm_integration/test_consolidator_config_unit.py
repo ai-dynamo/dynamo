@@ -14,10 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-pytest.importorskip(
-    "kvbm.trtllm_integration.consolidator_config",
-    reason="kvbm trtllm_integration not available",
-)
+kvbm = pytest.importorskip("kvbm", reason="kvbm package not installed")
 from kvbm.trtllm_integration.consolidator_config import (  # noqa: E402
     should_enable_consolidator,
 )
