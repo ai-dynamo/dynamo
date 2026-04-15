@@ -15,4 +15,5 @@ pub(in crate::replay) use types::ReplayMode;
 pub(in crate::replay::offline) use types::{
     EngineEffects, EnginePassMode, ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator,
 };
+pub use types::TrafficStats;
 pub(crate) use types::{RouterEffects, WorkerAdmission};

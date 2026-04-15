@@ -200,6 +200,33 @@ def _run_planner_replay(
         bridge=bridge,
         capabilities=capabilities,
     )
+
+    # Bootstrap regression models from profiling data if available
+    if planner_config.enable_throughput_scaling and planner_config.profile_results_dir:
+        try:
+            from dynamo.planner.monitoring.perf_metrics import (
+                _convert_profiling_data_to_fpms,
+            )
+            from dynamo.planner.monitoring.worker_info import SubComponentType
+
+            if planner_config.mode == "agg":
+                decode_fpms = _convert_profiling_data_to_fpms(
+                    planner_config.profile_results_dir, SubComponentType.DECODE
+                )
+                adapter._sm.load_benchmark_fpms(agg_fpms=decode_fpms)
+            else:
+                prefill_fpms = _convert_profiling_data_to_fpms(
+                    planner_config.profile_results_dir, SubComponentType.PREFILL
+                )
+                decode_fpms = _convert_profiling_data_to_fpms(
+                    planner_config.profile_results_dir, SubComponentType.DECODE
+                )
+                adapter._sm.load_benchmark_fpms(
+                    prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
+                )
+        except Exception as e:
+            sys.stderr.write(f"Warning: failed to load profiling data: {e}\n")
+
     return adapter.run()
 
 

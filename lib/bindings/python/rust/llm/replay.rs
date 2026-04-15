@@ -1354,13 +1354,15 @@ impl PlannerReplayBridge {
             .as_mut()
             .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
 
-        let (duration_s, num_req, avg_isl, avg_osl) = handle.drain_traffic();
+        let stats = handle.drain_traffic();
 
         let result = json!({
-            "duration_s": duration_s,
-            "num_req": num_req,
-            "avg_isl": avg_isl,
-            "avg_osl": avg_osl,
+            "duration_s": stats.duration_s,
+            "num_req": stats.num_req,
+            "avg_isl": stats.avg_isl,
+            "avg_osl": stats.avg_osl,
+            "avg_ttft_ms": stats.avg_ttft_ms,
+            "avg_itl_ms": stats.avg_itl_ms,
         });
 
         pythonize(py, &result)

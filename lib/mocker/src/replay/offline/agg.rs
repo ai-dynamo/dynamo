@@ -16,7 +16,7 @@ use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-        ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
+        ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
     },
     state::AggRequestState,
 };
@@ -361,8 +361,9 @@ impl AggRuntime {
             let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
+            let latencies = self.collector.request_latencies(signal.uuid);
             self.traffic
-                .on_request(removed_state.input_tokens, removed_state.output_tokens);
+                .on_request(removed_state.input_tokens, removed_state.output_tokens, latencies);
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
             self.progress.inc_completed();
@@ -560,7 +561,7 @@ impl AggRuntime {
     }
 
     /// Drain accumulated traffic stats since the last drain.
-    pub(in crate::replay) fn drain_traffic(&mut self) -> (f64, usize, f64, f64) {
+    pub(in crate::replay) fn drain_traffic(&mut self) -> TrafficStats {
         self.traffic.drain(self.now_ms)
     }
 

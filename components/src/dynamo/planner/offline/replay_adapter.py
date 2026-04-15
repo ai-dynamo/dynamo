@@ -218,15 +218,6 @@ class ReplayPlannerAdapter:
             self._cumulative_gpu_hours += (num_p * gpu_p + num_d * gpu_d) * dt_h
         self._last_tick_s = now_s
 
-        # Build observed Metrics from traffic in tick_input
-        if tick_input.traffic is not None:
-            t = tick_input.traffic
-            self._last_traffic = Metrics(
-                num_req=t.num_req,
-                isl=t.isl,
-                osl=t.osl,
-            )
-
         self._recorder.record(
             tick_input,
             effects,
@@ -427,6 +418,16 @@ class ReplayPlannerAdapter:
                     num_req=float(t.get("num_req", 0)),
                     isl=t.get("avg_isl", 0.0),
                     osl=t.get("avg_osl", 0.0),
+                )
+                # Stash observed TTFT/ITL for the diagnostics recorder
+                avg_ttft = t.get("avg_ttft_ms", 0.0)
+                avg_itl = t.get("avg_itl_ms", 0.0)
+                self._last_traffic = Metrics(
+                    ttft=avg_ttft if avg_ttft > 0 else None,
+                    itl=avg_itl if avg_itl > 0 else None,
+                    num_req=traffic.num_req,
+                    isl=traffic.isl,
+                    osl=traffic.osl,
                 )
 
         return TickInput(

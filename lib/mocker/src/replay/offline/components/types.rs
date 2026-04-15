@@ -65,6 +65,17 @@ pub(in crate::replay::offline) struct ReadyArrival {
     pub(in crate::replay::offline) replay_hashes: Option<ReplayRequestHashes>,
 }
 
+/// Accumulated traffic statistics returned by [`TrafficAccumulator::drain`].
+#[derive(Debug, Clone)]
+pub struct TrafficStats {
+    pub duration_s: f64,
+    pub num_req: usize,
+    pub avg_isl: f64,
+    pub avg_osl: f64,
+    pub avg_ttft_ms: f64,
+    pub avg_itl_ms: f64,
+}
+
 /// Accumulates traffic statistics between planner ticks for deriving
 /// `TrafficObservation` (num_req, avg ISL, avg OSL over a window).
 #[derive(Debug)]
@@ -73,6 +84,9 @@ pub(in crate::replay::offline) struct TrafficAccumulator {
     num_req: usize,
     total_isl: usize,
     total_osl: usize,
+    total_ttft_ms: f64,
+    total_itl_ms: f64,
+    itl_count: usize,
 }
 
 impl TrafficAccumulator {
@@ -82,23 +96,33 @@ impl TrafficAccumulator {
             num_req: 0,
             total_isl: 0,
             total_osl: 0,
+            total_ttft_ms: 0.0,
+            total_itl_ms: 0.0,
+            itl_count: 0,
         }
     }
 
-    /// Record one admitted request.
+    /// Record one completed request with optional latency data.
     pub(in crate::replay::offline) fn on_request(
         &mut self,
         input_tokens: usize,
         output_tokens: usize,
+        latencies: Option<(f64, f64)>,
     ) {
         self.num_req += 1;
         self.total_isl += input_tokens;
         self.total_osl += output_tokens;
+        if let Some((ttft_ms, mean_itl_ms)) = latencies {
+            self.total_ttft_ms += ttft_ms;
+            if mean_itl_ms > 0.0 {
+                self.total_itl_ms += mean_itl_ms;
+                self.itl_count += 1;
+            }
+        }
     }
 
-    /// Drain the accumulator at the given simulated time, returning
-    /// (duration_s, num_req, avg_isl, avg_osl) and resetting counters.
-    pub(in crate::replay::offline) fn drain(&mut self, now_ms: f64) -> (f64, usize, f64, f64) {
+    /// Drain the accumulator at the given simulated time, resetting counters.
+    pub(in crate::replay::offline) fn drain(&mut self, now_ms: f64) -> TrafficStats {
         let duration_s = (now_ms - self.window_start_ms) / 1000.0;
         let num_req = self.num_req;
         let avg_isl = if num_req > 0 {
@@ -111,10 +135,30 @@ impl TrafficAccumulator {
         } else {
             0.0
         };
+        let avg_ttft_ms = if num_req > 0 {
+            self.total_ttft_ms / num_req as f64
+        } else {
+            0.0
+        };
+        let avg_itl_ms = if self.itl_count > 0 {
+            self.total_itl_ms / self.itl_count as f64
+        } else {
+            0.0
+        };
         self.window_start_ms = now_ms;
         self.num_req = 0;
         self.total_isl = 0;
         self.total_osl = 0;
-        (duration_s, num_req, avg_isl, avg_osl)
+        self.total_ttft_ms = 0.0;
+        self.total_itl_ms = 0.0;
+        self.itl_count = 0;
+        TrafficStats {
+            duration_s,
+            num_req,
+            avg_isl,
+            avg_osl,
+            avg_ttft_ms,
+            avg_itl_ms,
+        }
     }
 }
