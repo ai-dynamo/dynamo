@@ -416,11 +416,11 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         }
 
         // Propagate partial FNV state on the last block of this batch.
-        if let Some(fnv_state) = new_fnv_state {
-            if let Some(last_block) = store_data.blocks.last() {
-                self.block_to_fnv_state
-                    .insert(last_block.block_hash.0, fnv_state);
-            }
+        if let Some(fnv_state) = new_fnv_state
+            && let Some(last_block) = store_data.blocks.last()
+        {
+            self.block_to_fnv_state
+                .insert(last_block.block_hash.0, fnv_state);
         }
 
         self.shards[shard_idx].apply_event(event).await;

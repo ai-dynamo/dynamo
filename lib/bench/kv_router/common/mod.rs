@@ -128,6 +128,17 @@ pub struct MooncakeRequest {
     pub output_length: u64,
 }
 
+#[derive(Deserialize)]
+struct RawMooncakeRecord {
+    #[serde(default)]
+    timestamp: Option<f64>,
+    #[serde(default)]
+    delay: Option<f64>,
+    hash_ids: Vec<u64>,
+    #[serde(alias = "output_length", alias = "osl")]
+    output_length: u64,
+}
+
 /// Load the mooncake trace from disk into a flat list of requests.
 ///
 /// Supports two JSONL formats:

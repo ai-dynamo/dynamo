@@ -8,7 +8,7 @@ use common::*;
 use clap::{Parser, Subcommand};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::indexer::{
-    KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvIndexerSharded, ShardSizeSnapshot,
+    KvIndexer, KvIndexerInterface, KvIndexerMetrics, ShardSizeSnapshot,
 };
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent};
 use dynamo_kv_router::{
