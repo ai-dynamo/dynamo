@@ -1754,6 +1754,7 @@ async fn responses(
                                 r#type: MessageType::Message,
                                 role: ResponseRole::User,
                                 content: EasyInputContent::Text(text.clone()),
+                                phase: None,
                             }));
                         }
                         InputParam::Items(items) => {
