@@ -67,7 +67,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{KvIndexerMetrics, SyncIndexer, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
 use crate::protocols::*;
 
 macro_rules! read_lock {
@@ -1203,17 +1203,18 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
+        let counters = metrics.as_ref().map(|m| m.prebind());
 
         while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
-                    let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
+                    let kind = EventKind::of(&event.event.data);
                     let result = self.apply_event(&mut lookup, event);
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
-                    if let Some(ref m) = metrics {
-                        m.increment_event_applied(event_type, result);
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
