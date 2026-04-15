@@ -12,6 +12,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -35,7 +36,7 @@ func failoverPodSpec() corev1.PodSpec {
 					{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "true"},
 					{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 					{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
-					{Name: "TMPDIR", Value: gmsSharedMountPath},
+					{Name: "TMPDIR", Value: gmsruntime.SharedMountPath},
 				},
 				Ports: []corev1.ContainerPort{
 					{Name: "system", ContainerPort: 9090, Protocol: corev1.ProtocolTCP},
@@ -56,10 +57,10 @@ func failoverPodSpec() corev1.PodSpec {
 					},
 				},
 				Resources: corev1.ResourceRequirements{
-					Claims: []corev1.ResourceClaim{{Name: gmsDRAClaimName}},
+					Claims: []corev1.ResourceClaim{{Name: gmsruntime.DRAClaimName}},
 				},
 				VolumeMounts: []corev1.VolumeMount{
-					{Name: gmsSharedVolumeName, MountPath: gmsSharedMountPath},
+					{Name: gmsruntime.SharedVolumeName, MountPath: gmsruntime.SharedMountPath},
 				},
 			},
 			{
@@ -164,7 +165,7 @@ func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
 	for i := range 2 {
 		engine := ps.Containers[i]
 		require.Len(t, engine.Resources.Claims, 1, "engine-%d should retain DRA claim", i)
-		assert.Equal(t, gmsDRAClaimName, engine.Resources.Claims[0].Name)
+		assert.Equal(t, gmsruntime.DRAClaimName, engine.Resources.Claims[0].Name)
 	}
 }
 
