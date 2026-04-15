@@ -352,11 +352,11 @@ mod core_behavior {
         let mut sequence = ActiveSequence::new((0..6).collect(), 16, Some(4), true, false);
 
         let signal = sequence.take_creation_signal().unwrap();
-        assert_eq!(core.kv_manager.process(&signal), 2);
+        assert_eq!(core.kv_manager.process(&signal, 0.0), 2);
         for _ in 0..6 {
             let signals = sequence.generate();
             for signal in &signals {
-                core.kv_manager.process(signal);
+                core.kv_manager.process(signal, 0.0);
             }
             if sequence.generated_tokens() < sequence.max_output_tokens() {
                 sequence.commit_allocation(sequence.len());
@@ -365,12 +365,12 @@ mod core_behavior {
 
         let free = sequence.reset_with_signal();
         for signal in &free {
-            core.kv_manager.process(signal);
+            core.kv_manager.process(signal, 0.0);
         }
         let prompt_only = sequence
             .prepare_allocation(sequence.num_input_tokens())
             .unwrap();
-        assert_eq!(core.kv_manager.process(&prompt_only), 2);
+        assert_eq!(core.kv_manager.process(&prompt_only, 0.0), 2);
         sequence.commit_allocation(sequence.num_input_tokens());
 
         core.state.insert_running_for_test(uuid);

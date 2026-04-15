@@ -16,6 +16,9 @@ use crate::scheduler::{
     capture_deferred_kv_publish_sink, publish_deferred_fpm, publish_deferred_kv_events,
 };
 
+#[cfg(feature = "kvbm")]
+use crate::kv_manager::kvbm_offload::{KvbmOffloadConfig, MockOffloadEngine};
+
 use super::core::VllmCore;
 
 #[derive(Clone, Default, Debug)]
@@ -119,11 +122,41 @@ impl Scheduler {
         let cancel_token_clone = cancel_token.clone();
         let cancel_guard = Arc::new(CancelGuard(cancel_token));
 
+        // Build KVBM config before moving args into the spawned task.
+        #[cfg(feature = "kvbm")]
+        let kvbm_config = if args.num_g2_blocks > 0 {
+            Some(KvbmOffloadConfig {
+                num_g2_blocks: args.num_g2_blocks,
+                offload_batch_size: args.kvbm_offload_batch_size,
+                block_size_bytes: args.kv_bytes_per_token.map(|bpt| args.block_size * bpt),
+                bandwidth_g1_g2_gbps: args.kvbm_bandwidth_g1_g2,
+            })
+        } else {
+            None
+        };
+
         tokio::spawn(async move {
             let (deferred_kv_events, buffering_publishers) =
                 capture_deferred_kv_publish_sink(kv_event_publishers.raw_enabled());
             let deferred_fpm = DeferredFpmBuffer::default();
             let mut core = VllmCore::new_with_sink(args, dp_rank, buffering_publishers);
+
+            #[cfg(feature = "kvbm")]
+            if let Some(config) = kvbm_config {
+                match MockOffloadEngine::build(&config).await {
+                    Ok(engine) => {
+                        tracing::info!(
+                            num_g2 = config.num_g2_blocks,
+                            block_size_bytes = ?config.block_size_bytes,
+                            "KVBM offload engine initialized"
+                        );
+                        core.set_offload_engine(Arc::new(engine));
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to initialize KVBM offload engine: {e}");
+                    }
+                }
+            }
 
             loop {
                 if receive_requests(&mut core, &mut request_rx, &cancel_token_clone)

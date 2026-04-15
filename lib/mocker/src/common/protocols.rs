@@ -447,6 +447,20 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub router_queue_policy: Option<RouterQueuePolicy>,
 
+    // ── KVBM G1↔G2 offload ────────────────────────────────────────────
+    /// Number of G2 (host-memory) blocks. Set > 0 to enable KVBM offload.
+    #[builder(default = "0")]
+    pub num_g2_blocks: usize,
+
+    /// Max blocks per offload batch in the G1→G2 pipeline.
+    #[builder(default = "32")]
+    pub kvbm_offload_batch_size: usize,
+
+    /// Simulated G1↔G2 bandwidth in GB/s (PCIe Gen4 x16).
+    #[builder(default = "14.0")]
+    pub kvbm_bandwidth_g1_g2: f64,
+
+    // ── SGLang ──────────────────────────────────────────────────────────
     /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
     #[builder(default = "None")]
     pub sglang: Option<SglangArgs>,
@@ -577,6 +591,9 @@ impl MockEngineArgs {
             "zmq_replay_port",
             "preemption_mode",
             "router_queue_policy",
+            "num_g2_blocks",
+            "kvbm_offload_batch_size",
+            "kvbm_bandwidth_g1_g2",
             "sglang",
             "has_perf_model",
         ]
@@ -745,6 +762,24 @@ impl MockEngineArgs {
         {
             let policy = policy_str.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             builder = builder.router_queue_policy(Some(policy));
+        }
+
+        if let Some(value) = extra_args.get("num_g2_blocks")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.num_g2_blocks(num as usize);
+        }
+
+        if let Some(value) = extra_args.get("kvbm_offload_batch_size")
+            && let Some(num) = value.as_u64()
+        {
+            builder = builder.kvbm_offload_batch_size(num as usize);
+        }
+
+        if let Some(value) = extra_args.get("kvbm_bandwidth_g1_g2")
+            && let Some(num) = value.as_f64()
+        {
+            builder = builder.kvbm_bandwidth_g1_g2(num);
         }
 
         if let Some(value) = extra_args.get("sglang")

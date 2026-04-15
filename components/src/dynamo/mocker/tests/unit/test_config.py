@@ -226,6 +226,9 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         "zmq_replay_port": None,
         "preemption_mode": "fifo",
         "router_queue_policy": None,
+        "num_g2_blocks": 0,
+        "kvbm_offload_batch_size": 32,
+        "kvbm_bandwidth_g1_g2": 14.0,
         "sglang": {
             "schedule_policy": "lpm",
             "page_size": 128,

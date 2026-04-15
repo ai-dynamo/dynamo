@@ -260,6 +260,14 @@ impl<T: BlockMetadata> BlockManager<T> {
         self.reset_pool.len() + self.inactive_pool.len()
     }
 
+    /// Non-destructive check: which of the given hashes exist in the inactive pool?
+    pub fn has_blocks(&self, seq_hashes: &[SequenceHash]) -> Vec<bool> {
+        seq_hashes
+            .iter()
+            .map(|h| self.inactive_pool.has_block(*h))
+            .collect()
+    }
+
     /// Tokens per block (constant after construction).
     pub fn block_size(&self) -> usize {
         self.block_size
