@@ -7497,6 +7497,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 
 	pcs, err := GenerateGrovePodCliqueSet(context.Background(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
+	require.NotNil(t, pcs)
 	require.NotNil(t, pcs.Annotations)
 	assert.Equal(t, "qa-volcano-e2e", pcs.Annotations[commonconsts.KubeAnnotationVolcanoQueue])
 }
