@@ -262,14 +262,15 @@ async def test_deployment(
 
         # Wait for model to be available
         endpoint = deployment_spec.endpoint
-        deploy_payload = None
         max_attempts = 30
-        attempt_timeouts = None
-        request_timeout = float(DEFAULT_REQUEST_TIMEOUT)
         if deployment_target.request_kind == "video":
-            deploy_payload = build_video_generation_payload(model)
             request_timeout = float(FASTVIDEO_REQUEST_TIMEOUT)
             attempt_timeouts = [request_timeout] * max_attempts
+            deploy_payload = build_video_generation_payload(model)
+        else:
+            request_timeout = float(DEFAULT_REQUEST_TIMEOUT)
+            attempt_timeouts = None
+            deploy_payload = None
 
         model_ready = wait_for_model_availability(
             url=base_url,
@@ -287,8 +288,12 @@ async def test_deployment(
 
         # Send test request
         url = f"{base_url}{endpoint}"
-        if deploy_payload is not None:
-            payload = deploy_payload
+        if deployment_target.request_kind == "video":
+            payload = build_video_generation_payload(model)
+            response = send_request(
+                url, payload, timeout=request_timeout, method="POST"
+            )
+            validate_video_response(response=response, expected_model=model)
         else:
             payload = {
                 "model": model,
@@ -297,12 +302,9 @@ async def test_deployment(
                 "temperature": DEFAULT_TEMPERATURE,
                 "stream": False,
             }
-        response = send_request(url, payload, timeout=request_timeout, method="POST")
-
-        # Validate response
-        if deploy_payload is not None:
-            validate_video_response(response=response, expected_model=model)
-        else:
+            response = send_request(
+                url, payload, timeout=request_timeout, method="POST"
+            )
             validate_chat_response(
                 response=response,
                 expected_model=model,
