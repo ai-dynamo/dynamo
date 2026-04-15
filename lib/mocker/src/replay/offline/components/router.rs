@@ -19,6 +19,7 @@ use dynamo_kv_router::{
     SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
 };
 use dynamo_tokens::SequenceHash;
+use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -124,8 +125,8 @@ impl PendingRequest {
 
     fn scheduling_request(
         &self,
-        decode_blocks: HashMap<WorkerWithDpRank, usize>,
-        prefill_tokens: HashMap<WorkerWithDpRank, usize>,
+        decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
+        prefill_tokens: FxHashMap<WorkerWithDpRank, usize>,
     ) -> SchedulingRequest {
         SchedulingRequest {
             maybe_request_id: Some(self.request_id()),
@@ -408,7 +409,7 @@ impl OfflineReplayRouter {
         let arrival_offset = Duration::from_secs_f64((now_ms.max(0.0)) / 1000.0);
         self.policy.enqueue_key(
             arrival_offset,
-            &request.scheduling_request(HashMap::new(), HashMap::new()),
+            &request.scheduling_request(FxHashMap::default(), FxHashMap::default()),
         )
     }
 

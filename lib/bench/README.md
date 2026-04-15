@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Multiturn Benchmark
+# Bench Entrypoints
 
 `multiturn_bench` simulates concurrent multi-turn conversations against an
 OpenAI-compatible chat endpoint and reports per-turn TTFT and total latency
@@ -11,14 +11,14 @@ statistics. It can optionally enable **speculative prefill** — a technique tha
 pre-warms the KV cache with the predicted next-turn prefix after each assistant
 response, cutting TTFT on subsequent turns.
 
+`offline_replay_bench` runs the Rust-native replay loop directly for profiling
+and throughput measurements without going through the Python wrapper.
+
 ## Quick start
 
 ```bash
-# Build
-cargo build --release --package dynamo-bench --bin multiturn_bench
-
 # Smoke test (1 user, 1 turn, ~50 tokens)
-./target/release/multiturn_bench --ping
+cargo bench --package dynamo-bench --bench multiturn_bench -- --ping
 ```
 
 ## Speculative prefill demo
@@ -45,7 +45,7 @@ python -m dynamo.frontend \
 ### 2. Run baseline (no speculative prefill)
 
 ```bash
-./target/release/multiturn_bench \
+cargo bench --package dynamo-bench --bench multiturn_bench -- \
   --url http://localhost:8000 \
   --num-users 10 \
   --num-turns 5 \
@@ -59,7 +59,7 @@ python -m dynamo.frontend \
 ### 3. Run with speculative prefill
 
 ```bash
-./target/release/multiturn_bench \
+cargo bench --package dynamo-bench --bench multiturn_bench -- \
   --url http://localhost:8000 \
   --num-users 10 \
   --num-turns 5 \
@@ -101,4 +101,16 @@ request arrives.
 4. The KV router routes the speculative request to the same worker, warming its cache.
 5. When the real next-turn request arrives, the KV router sees high cache overlap on that worker and routes there, yielding a much lower TTFT.
 
-See also: [Agent Hints documentation](../../../../docs/components/frontend/nvext.md#agent-hints)
+See also: [Agent Hints documentation](../../docs/components/frontend/nvext.md#agent-hints)
+
+## Offline replay
+
+```bash
+cargo bench --package dynamo-bench --bench offline_replay_bench -- \
+  /path/to/mooncake_trace.jsonl \
+  --num-workers 4 \
+  --router-mode kv-router \
+  --arrival-speedup-ratio 4 \
+  --trace-block-size 512 \
+  --block-size 64
+```

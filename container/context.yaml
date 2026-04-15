@@ -98,7 +98,7 @@ trtllm:
     runtime_image_tag: 26.02-cuda13.1-runtime-ubuntu24.04
   nixl_ref: v1.0.1
   enable_media_ffmpeg: "false"
-  enable_gpu_memory_service: "false"
+  enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   python_version: "3.12"
   index_url: https://pypi.nvidia.com/

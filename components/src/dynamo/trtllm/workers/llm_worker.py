@@ -22,7 +22,11 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
-from tensorrt_llm.llmapi.llm_args import TOKENIZER_ALIASES, KvCacheConnectorConfig
+from tensorrt_llm.llmapi.llm_args import (
+    TOKENIZER_ALIASES,
+    KvCacheConnectorConfig,
+    LoadFormat,
+)
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
@@ -127,6 +131,42 @@ def _warn_override_collisions(target: dict, source: dict, path: str = "") -> Non
                 )
 
 
+def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
+    """Parse --model-loader-extra-config into a dict. Accepts a dict or a JSON string."""
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON in --model-loader-extra-config: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("--model-loader-extra-config must decode to a JSON object")
+        return parsed
+    raise ValueError(
+        "--model-loader-extra-config must be a JSON object string or a dict"
+    )
+
+
+def _register_memory_routes(runtime, handler) -> None:
+    runtime.register_engine_route(
+        "release_memory_occupation",
+        handler.release_memory_occupation,
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation",
+        handler.resume_memory_occupation,
+    )
+    logging.info(
+        "Registered engine routes: "
+        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
+    )
+
+
 async def init_llm_worker(
     runtime: DistributedRuntime,
     config: Config,
@@ -187,6 +227,40 @@ async def init_llm_worker(
     )
     kv_connector_config = build_kv_connector_config(config)
 
+    try:
+        model_loader_extra_config = _parse_model_loader_extra_config(
+            config.model_loader_extra_config
+        )
+    except ValueError as exc:
+        logging.error("%s", exc)
+        sys.exit(1)
+
+    if config.load_format == "gms":
+        try:
+            from gpu_memory_service.integrations.trtllm import setup_gms
+        except ImportError as exc:
+            raise RuntimeError(
+                "gpu-memory-service is required for --load-format gms. "
+                "Install or update the package."
+            ) from exc
+        setup_gms(model_loader_extra_config)
+        logging.info(
+            "TRT-LLM GMS integration enabled (extra=%s)", model_loader_extra_config
+        )
+
+    # Resolve load_format for engine args. GMS patches are active regardless;
+    # fall back to "auto" if TRT-LLM doesn't recognise "gms" as a LoadFormat.
+    engine_load_format = config.load_format
+    if config.load_format == "gms":
+        try:
+            LoadFormat(config.load_format)
+        except (ValueError, KeyError):
+            logging.warning(
+                "TensorRT-LLM does not recognise load_format='gms'; "
+                "using 'auto' while GMS patches remain active."
+            )
+            engine_load_format = "auto"
+
     arg_map = {
         "model": model_path,
         "scheduler_config": scheduler_config,
@@ -208,6 +282,16 @@ async def init_llm_worker(
         "enable_iter_perf_stats": config.publish_events_and_metrics,
         "kv_connector_config": kv_connector_config,
     }
+
+    arg_map["load_format"] = engine_load_format
+
+    # Enable sleep_config when GMS manages weights — required for GMS
+    # unmap/remap. Conditional because SleepConfig contains unpicklable
+    # lambdas that break MPI-based multi-rank distribution.
+    if config.load_format == "gms":
+        from tensorrt_llm.llmapi.llm_args import SleepConfig
+
+        arg_map["sleep_config"] = SleepConfig()
 
     # Add guided decoding backend if specified
     if config.guided_decoding_backend is not None:
@@ -517,6 +601,7 @@ async def init_llm_worker(
             disaggregation_mode=config.disaggregation_mode,
             encode_client=encode_client,
             multimodal_processor=multimodal_processor,
+            generate_endpoint=endpoint,
             connector=connector,
             runtime=runtime,  # Pass runtime for graceful shutdown
             metrics_collector=metrics_collector,
@@ -593,6 +678,8 @@ async def init_llm_worker(
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
+                if config.load_format == "gms":
+                    _register_memory_routes(runtime, handler)
 
                 encoder_cache = getattr(handler, "_encoder_cache", None)
                 if encoder_cache is not None:
@@ -602,7 +689,6 @@ async def init_llm_worker(
                         model_name=model_name_for_metrics,
                         component_name=config.component,
                     )
-
                 await endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=metrics_labels,
@@ -614,6 +700,8 @@ async def init_llm_worker(
                 consolidator_publisher.shutdown()
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
+            if config.load_format == "gms":
+                _register_memory_routes(runtime, handler)
             await endpoint.serve_endpoint(
                 handler.generate, health_check_payload=health_check_payload
             )
