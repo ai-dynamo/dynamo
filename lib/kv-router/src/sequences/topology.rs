@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::HashMap;
 
 use super::single::ActiveSequences;
 use crate::protocols::WorkerWithDpRank;
@@ -15,13 +16,13 @@ pub(super) struct WorkerTopologyChange {
 
 pub(super) struct WorkerTable {
     pub(super) slots: Vec<(WorkerWithDpRank, RwLock<ActiveSequences>)>,
-    pub(super) index: HashMap<WorkerWithDpRank, usize>,
+    pub(super) index: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 impl WorkerTable {
     pub(super) fn new(block_size: usize, dp_range: &HashMap<u64, (u32, u32)>) -> Self {
         let mut slots = Vec::new();
-        let mut index = HashMap::new();
+        let mut index = FxHashMap::default();
         for worker in workers_from_dp_range(dp_range) {
             let idx = slots.len();
             slots.push((worker, RwLock::new(ActiveSequences::new(block_size))));
@@ -59,7 +60,7 @@ impl WorkerTable {
         block_size: usize,
         new_dp_range: &HashMap<u64, (u32, u32)>,
     ) -> WorkerTopologyChange {
-        let target_workers: HashSet<WorkerWithDpRank> =
+        let target_workers: FxHashSet<WorkerWithDpRank> =
             workers_from_dp_range(new_dp_range).into_iter().collect();
 
         let removed = self
@@ -69,7 +70,7 @@ impl WorkerTable {
             .filter(|worker| !target_workers.contains(worker))
             .collect();
 
-        let mut old: HashMap<WorkerWithDpRank, ActiveSequences> = self
+        let mut old: FxHashMap<WorkerWithDpRank, ActiveSequences> = self
             .slots
             .drain(..)
             .map(|(worker, lock)| (worker, lock.into_inner()))
@@ -136,10 +137,10 @@ mod tests {
     fn new_expands_dp_ranges_into_slots_and_index() {
         let table = WorkerTable::new(4, &HashMap::from([(7, (2, 3)), (9, (0, 1))]));
 
-        let workers: HashSet<_> = table.workers().collect();
+        let workers: FxHashSet<_> = table.workers().collect();
         assert_eq!(
             workers,
-            HashSet::from([worker(7, 2), worker(7, 3), worker(7, 4), worker(9, 0)])
+            FxHashSet::from_iter([worker(7, 2), worker(7, 3), worker(7, 4), worker(9, 0)])
         );
         assert_eq!(table.index.len(), 4);
         assert_eq!(table.slots.len(), 4);
@@ -154,8 +155,8 @@ mod tests {
         let change = table.register_external(4, &HashMap::from([(1, (0, 2)), (2, (0, 1))]));
 
         assert_eq!(
-            change.added.into_iter().collect::<HashSet<_>>(),
-            HashSet::from([worker(1, 1), worker(2, 0)])
+            change.added.into_iter().collect::<FxHashSet<_>>(),
+            FxHashSet::from_iter([worker(1, 1), worker(2, 0)])
         );
         assert!(change.removed.is_empty());
         assert_eq!(table.index.len(), 3);

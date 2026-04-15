@@ -11,6 +11,7 @@
 
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -778,8 +779,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         overlaps: OverlapScores,
         decay_now: Instant,
     ) -> (
-        HashMap<WorkerWithDpRank, usize>,
-        HashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
     ) {
         self.potential_blocks_and_tokens_with_prefill_tracking(
             token_sequence,
@@ -798,8 +799,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         track_prefill_tokens: bool,
         decay_now: Instant,
     ) -> (
-        HashMap<WorkerWithDpRank, usize>,
-        HashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
     ) {
         self.prompt_registry
             .potential_blocks_and_tokens_with_prefill_tracking(
@@ -903,6 +904,8 @@ mod tests {
     use std::future::{self, Future};
     use std::time::Duration;
 
+    use rustc_hash::FxHashMap;
+
     use super::*;
     use crate::protocols::{
         ActiveSequenceEvent, ActiveSequenceEventData, BlockHashOptions, OverlapScores,
@@ -940,12 +943,12 @@ mod tests {
         track_prefill_tokens: bool,
         decay_now: Instant,
     ) -> (
-        HashMap<WorkerWithDpRank, usize>,
-        HashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
     ) {
         let table = sequences.workers.read();
-        let mut potential_blocks = HashMap::with_capacity(table.slots.len());
-        let mut potential_tokens = HashMap::with_capacity(table.slots.len());
+        let mut potential_blocks = FxHashMap::default();
+        let mut potential_tokens = FxHashMap::default();
         for (worker, lock) in &table.slots {
             let seq = lock.read();
             let overlap_depth = token_sequence.map_or(0, |query| {

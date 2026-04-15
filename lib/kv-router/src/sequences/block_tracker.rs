@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_tokens::SequenceHash;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::{Arc, Weak};
 
 #[derive(Debug)]
@@ -13,8 +13,8 @@ pub(super) struct BlockAcquire {
 
 #[derive(Debug, Default)]
 pub(super) struct BlockTracker {
-    pub(super) unique_blocks: HashMap<SequenceHash, Weak<()>>,
-    pub(super) fractional_blocks: HashMap<SequenceHash, f64>,
+    pub(super) unique_blocks: FxHashMap<SequenceHash, Weak<()>>,
+    pub(super) fractional_blocks: FxHashMap<SequenceHash, f64>,
 }
 
 impl BlockTracker {

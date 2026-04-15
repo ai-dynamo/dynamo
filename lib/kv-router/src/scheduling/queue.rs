@@ -405,6 +405,7 @@ mod tests {
     use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
+    use rustc_hash::FxHashMap;
     use tokio::sync::{Barrier, watch};
 
     use super::*;
@@ -629,8 +630,8 @@ mod tests {
             token_seq: None,
             isl_tokens,
             overlaps: OverlapScores::default(),
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
@@ -1020,8 +1021,8 @@ mod tests {
             token_seq: None,
             isl_tokens: isl,
             overlaps: OverlapScores::default(),
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,

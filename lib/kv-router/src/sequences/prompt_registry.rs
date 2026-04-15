@@ -3,7 +3,7 @@
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_tokens::SequenceHash;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use tokio::time::Instant;
 
@@ -27,7 +27,7 @@ impl WorkerLoadSnapshot {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct PromptRegistry {
     // WARNING: `block_workers` membership and `workers` load are only eventually consistent.
     // Each mutation still starts from one worker-local source of truth: we mutate the chosen
@@ -37,8 +37,17 @@ pub(super) struct PromptRegistry {
     // state in the middle of that publish sequence that never existed atomically, which can yield
     // suboptimal routing. We accept that gap temporarily to remove the coarse global registry
     // lock; restoring a coherent published snapshot is still a follow-up item.
-    block_workers: DashMap<SequenceHash, FxHashSet<WorkerWithDpRank>>,
-    workers: DashMap<WorkerWithDpRank, WorkerLoadSnapshot>,
+    block_workers: DashMap<SequenceHash, FxHashSet<WorkerWithDpRank>, FxBuildHasher>,
+    workers: DashMap<WorkerWithDpRank, WorkerLoadSnapshot, FxBuildHasher>,
+}
+
+impl Default for PromptRegistry {
+    fn default() -> Self {
+        Self {
+            block_workers: DashMap::with_hasher(FxBuildHasher),
+            workers: DashMap::with_hasher(FxBuildHasher),
+        }
+    }
 }
 
 impl PromptRegistry {
@@ -216,11 +225,13 @@ impl PromptRegistry {
         block_size: usize,
         decay_now: Instant,
     ) -> (
-        HashMap<WorkerWithDpRank, usize>,
-        HashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
     ) {
-        let mut potential_blocks = HashMap::with_capacity(self.workers.len());
-        let mut potential_tokens = HashMap::with_capacity(self.workers.len());
+        let mut potential_blocks =
+            FxHashMap::with_capacity_and_hasher(self.workers.len(), FxBuildHasher);
+        let mut potential_tokens =
+            FxHashMap::with_capacity_and_hasher(self.workers.len(), FxBuildHasher);
         for entry in &self.workers {
             let worker = *entry.key();
             let load = *entry.value();
@@ -250,8 +261,8 @@ impl PromptRegistry {
         block_size: usize,
         decay_now: Instant,
     ) -> (
-        HashMap<WorkerWithDpRank, usize>,
-        HashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
     ) {
         let (query_len, matched_depth) = self.compute_overlap_depths(token_sequence);
         self.project_loads_from_overlap(
@@ -391,11 +402,13 @@ mod tests {
         block_size: usize,
         decay_now: Instant,
     ) -> (
-        HashMap<WorkerWithDpRank, usize>,
-        HashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
+        FxHashMap<WorkerWithDpRank, usize>,
     ) {
-        let mut potential_blocks = HashMap::with_capacity(expected_loads.len());
-        let mut potential_tokens = HashMap::with_capacity(expected_loads.len());
+        let mut potential_blocks =
+            FxHashMap::with_capacity_and_hasher(expected_loads.len(), FxBuildHasher);
+        let mut potential_tokens =
+            FxHashMap::with_capacity_and_hasher(expected_loads.len(), FxBuildHasher);
 
         for (&worker, load) in expected_loads {
             let overlap_depth = token_sequence.map_or(0, |query| {

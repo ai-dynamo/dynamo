@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -185,8 +186,8 @@ where
             token_seq,
             isl_tokens,
             overlaps,
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
             track_prefill_tokens,
             router_config_override: router_config_override.cloned(),
             update_states,
@@ -269,7 +270,7 @@ where
                 decay_now,
             );
 
-        let mut workers: HashSet<WorkerWithDpRank> = HashSet::new();
+        let mut workers: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
         workers.extend(decode_blocks.keys().copied());
         workers.extend(prefill_tokens.keys().copied());
 
