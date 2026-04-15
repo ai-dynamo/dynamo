@@ -116,6 +116,43 @@ pub struct NvExtResponse {
     pub routed_experts: Option<serde_json::Value>,
 }
 
+/// Response nvext fields requested for a given request.
+///
+/// The OpenAI-compatible API should only include `nvext` response fields when the
+/// client explicitly opts in via `nvext.extra_fields`, except for the GAIE
+/// `query_instance_id` flow which automatically returns `worker_id` and `token_ids`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NvExtResponseFieldSelection {
+    pub worker_id: bool,
+    pub timing: bool,
+    pub token_ids: bool,
+    pub routed_experts: bool,
+}
+
+impl NvExtResponseFieldSelection {
+    pub fn from_nvext(nvext: Option<&NvExt>) -> Self {
+        let query_instance_id = nvext.is_some_and(NvExt::has_query_instance_id_annotation);
+        let has_extra_field = |field_name: &str| {
+            nvext.is_some_and(|ext| {
+                ext.extra_fields
+                    .as_ref()
+                    .is_some_and(|fields| fields.iter().any(|field| field == field_name))
+            })
+        };
+
+        Self {
+            worker_id: has_extra_field("worker_id") || query_instance_id,
+            timing: has_extra_field("timing"),
+            token_ids: query_instance_id,
+            routed_experts: has_extra_field("routed_experts"),
+        }
+    }
+
+    pub fn any(&self) -> bool {
+        self.worker_id || self.timing || self.token_ids || self.routed_experts
+    }
+}
+
 /// NVIDIA LLM extensions to the OpenAI API
 #[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
@@ -285,6 +322,14 @@ impl NvExt {
     pub fn builder() -> NvExtBuilder {
         NvExtBuilder::default()
     }
+
+    pub fn has_query_instance_id_annotation(&self) -> bool {
+        self.annotations.as_ref().is_some_and(|annotations| {
+            annotations
+                .iter()
+                .any(|annotation| annotation.starts_with("query_instance_id"))
+        })
+    }
 }
 
 fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
@@ -421,5 +466,43 @@ mod tests {
         assert_eq!(result.prefill_worker_id, Some(456));
         assert_eq!(result.dp_rank, Some(3));
         assert_eq!(result.prefill_dp_rank, Some(5));
+    }
+
+    #[test]
+    fn test_nvext_response_field_selection_defaults_to_none() {
+        let selection = NvExtResponseFieldSelection::from_nvext(None);
+
+        assert_eq!(selection, NvExtResponseFieldSelection::default());
+        assert!(!selection.any());
+    }
+
+    #[test]
+    fn test_nvext_response_field_selection_respects_extra_fields() {
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["worker_id".to_string(), "routed_experts".to_string()])
+            .build()
+            .unwrap();
+
+        let selection = NvExtResponseFieldSelection::from_nvext(Some(&nvext));
+
+        assert!(selection.worker_id);
+        assert!(!selection.timing);
+        assert!(!selection.token_ids);
+        assert!(selection.routed_experts);
+    }
+
+    #[test]
+    fn test_nvext_response_field_selection_query_instance_id_exception() {
+        let nvext = NvExt::builder()
+            .annotations(vec!["query_instance_id:".to_string()])
+            .build()
+            .unwrap();
+
+        let selection = NvExtResponseFieldSelection::from_nvext(Some(&nvext));
+
+        assert!(selection.worker_id);
+        assert!(!selection.timing);
+        assert!(selection.token_ids);
+        assert!(!selection.routed_experts);
     }
 }
