@@ -92,46 +92,6 @@ struct RequestGuard {
     deferred_close: Option<SessionCloseAction>,
 }
 
-struct PendingDispatchGuard {
-    chooser: Arc<KvRouter>,
-    scheduler_tracked: bool,
-    context_id: String,
-    deferred_close: Option<SessionCloseAction>,
-    disarmed: bool,
-}
-
-fn spawn_cleanup_task(
-    chooser: &Arc<KvRouter>,
-    scheduler_tracked: bool,
-    context_id: &str,
-    deferred_close: Option<SessionCloseAction>,
-    log_context: &'static str,
-) {
-    if deferred_close.is_none() && !scheduler_tracked {
-        return;
-    }
-
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        tracing::warn!(
-            "No tokio runtime for {log_context} cleanup of request {}",
-            context_id
-        );
-        return;
-    };
-
-    let chooser = chooser.clone();
-    let context_id = context_id.to_owned();
-
-    handle.spawn(async move {
-        if scheduler_tracked && let Err(e) = chooser.free(&context_id).await {
-            tracing::warn!("Failed to free request {context_id} ({log_context}): {e}");
-        }
-        if let Some(close) = deferred_close {
-            close.execute(&context_id);
-        }
-    });
-}
-
 impl RequestGuard {
     async fn on_item(&mut self, item: &Annotated<LLMEngineOutput>) {
         if !self.prefill_marked {
@@ -254,51 +214,34 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.record_metrics();
 
-        spawn_cleanup_task(
-            &self.chooser,
-            !self.freed && self.scheduler_tracked,
-            &self.context_id,
-            self.deferred_close.take(),
-            "drop guard",
-        );
-    }
-}
+        let deferred_close = self.deferred_close.take();
+        let needs_free = !self.freed && self.scheduler_tracked;
 
-impl PendingDispatchGuard {
-    fn new(
-        chooser: Arc<KvRouter>,
-        scheduler_tracked: bool,
-        context_id: String,
-        deferred_close: Option<SessionCloseAction>,
-    ) -> Self {
-        Self {
-            chooser,
-            scheduler_tracked,
-            context_id,
-            deferred_close,
-            disarmed: false,
-        }
-    }
-
-    fn disarm(mut self) -> Option<SessionCloseAction> {
-        self.disarmed = true;
-        self.deferred_close.take()
-    }
-}
-
-impl Drop for PendingDispatchGuard {
-    fn drop(&mut self) {
-        if self.disarmed {
+        if deferred_close.is_none() && !needs_free {
             return;
         }
 
-        spawn_cleanup_task(
-            &self.chooser,
-            self.scheduler_tracked,
-            &self.context_id,
-            self.deferred_close.take(),
-            "dispatch guard",
-        );
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "No tokio runtime for drop guard cleanup of request {}",
+                self.context_id
+            );
+            return;
+        };
+
+        // Mirror finish(): free the scheduler slot first, then fire the
+        // deferred session close so the worker's KV isn't released while
+        // generation teardown is still in progress.
+        let chooser = self.chooser.clone();
+        let context_id = self.context_id.clone();
+        handle.spawn(async move {
+            if needs_free && let Err(e) = chooser.free(&context_id).await {
+                tracing::warn!("Failed to free request {context_id} (drop guard): {e}");
+            }
+            if let Some(close) = deferred_close {
+                close.execute(&context_id);
+            }
+        });
     }
 }
 
@@ -683,12 +626,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
-        let dispatch_guard = PendingDispatchGuard::new(
-            chooser.clone(),
-            scheduler_tracked,
-            context_id.clone(),
-            deferred_close,
-        );
         let mut response_stream = self
             .inner
             .direct(updated_request, instance_id)
@@ -701,11 +638,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 phase = ?phase,
             ))
             .await?;
-        let deferred_close = dispatch_guard.disarm();
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
-        // Build the guard before returning the stream so a drop-before-first-poll
-        // still frees booked scheduler state.
+
+        // Build the guard BEFORE constructing the stream so that a
+        // drop-before-first-poll (client disconnects immediately after the
+        // request is accepted) still triggers Drop and releases the scheduler
+        // slot + deferred session close.  If the guard were built inside the
+        // `async_stream::stream!` closure, it would never be constructed — and
+        // `chooser.free()` + `deferred_close` would never fire — in that case.
         let guard = RequestGuard {
             chooser: chooser.clone(),
             scheduler_tracked,
@@ -726,6 +667,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
 
         let wrapped_stream = Box::pin(async_stream::stream! {
+            // Move guard into the stream closure. Drop fires here if the stream
+            // is polled to completion, or via the outer Drop if never polled.
             let mut guard = guard;
 
             loop {
