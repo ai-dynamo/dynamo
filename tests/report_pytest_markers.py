@@ -206,8 +206,16 @@ class DependencyStubber:
         return stub
 
     def ensure_available(self, module_name: str) -> ModuleType:
-        """Ensure a module is available, stubbing it if not installed."""
-        if module_name in sys.modules:
+        """Ensure a module is available as a stub for test collection.
+
+        Always installs a stub for ``module_name`` so that even partially-built
+        native extensions (e.g. a stale ``dynamo._core`` ``.so`` that is
+        importable but is missing freshly-added symbols) do not cause
+        ``ImportError`` during collection.  Parent packages already present in
+        ``sys.modules`` are left untouched.
+        """
+        # If we already stubbed this exact module, return the existing stub.
+        if module_name in self.stubbed:
             return sys.modules[module_name]
 
         parts = module_name.split(".")
@@ -216,12 +224,17 @@ class DependencyStubber:
         )
 
         if not parent_stubbed:
+            # Attempt the real import solely to populate parent packages (e.g.
+            # the ``dynamo`` namespace package) with their real implementations.
+            # We intentionally do *not* return here: even a successful import
+            # may produce a stale module that is missing newly-added symbols, so
+            # we always fall through and replace it with a stub below.
             try:
-                return importlib.import_module(module_name)
+                importlib.import_module(module_name)
             except (ImportError, AttributeError):
                 pass
 
-        # Create parent packages if needed
+        # Create parent packages if needed (skip any already in sys.modules).
         for i in range(1, len(parts)):
             sub = ".".join(parts[:i])
             if sub not in sys.modules:
@@ -230,7 +243,8 @@ class DependencyStubber:
                 sys.modules[sub] = pkg
                 self.stubbed.add(sub)
 
-        # Create stub module with proper attributes
+        # Always install a stub for the leaf module, overriding any real
+        # (possibly stale) module that may have been loaded above.
         stub = self._create_module_stub(module_name)
         sys.modules[module_name] = stub
         self.stubbed.add(module_name)
