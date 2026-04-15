@@ -288,11 +288,12 @@ impl AggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
-        self.traffic
-            .on_request(request.tokens.len(), request.max_output_tokens);
 
         if self.router.is_none() {
-            self.requests.insert(uuid, AggRequestState::new_running());
+            self.requests.insert(
+                uuid,
+                AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
+            );
             let worker_idx = self.next_worker();
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
@@ -357,9 +358,11 @@ impl AggRuntime {
                 }
                 self.record_router_pending();
             }
-            self.requests.remove(&signal.uuid).ok_or_else(|| {
+            let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
+            self.traffic
+                .on_request(removed_state.input_tokens, removed_state.output_tokens);
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
             self.progress.inc_completed();

@@ -336,22 +336,18 @@ impl OfflineReplayRouter {
         Ok(())
     }
 
-    /// Remove a worker from the router.
+    /// Remove a worker from routing eligibility.
+    ///
+    /// Only removes the worker from the config map so the selector won't
+    /// pick it for new requests.  The radix tree and active-sequence slots
+    /// are left intact so that in-flight requests on this worker can still
+    /// complete (free / mark_prefill_completed) and KV events can still
+    /// reference existing blocks without "parent block not found" errors.
+    /// Stale slot and indexer state is harmless — the selector and
+    /// `all_workers_busy` both skip workers absent from `workers_with_configs`.
     pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
-
-        // Remove from the radix tree indexer
-        self.indexer.tree.remove_worker(wid);
-
-        // Rebuild slots with updated worker set
-        let dp_range: HashMap<u64, (u32, u32)> = self
-            .workers_with_configs
-            .keys()
-            .map(|&id| (id, (0u32, 1u32)))
-            .collect();
-        self.slots.update_workers(&dp_range);
-
         Ok(())
     }
 

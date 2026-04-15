@@ -374,9 +374,6 @@ impl DisaggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
-        self.traffic
-            .on_request(request.tokens.len(), request.max_output_tokens);
-
         let queued_request = request.clone();
         self.requests
             .insert(uuid, DisaggRequestState::new(request, arrival_time_ms));
@@ -500,6 +497,11 @@ impl DisaggRuntime {
                 .transition_log
                 .push(DisaggTransition::WorkloadCompleted { uuid: signal.uuid });
         }
+        let state = self.state(signal.uuid)?;
+        let original = state.original_request()?;
+        let input_tokens = original.tokens.len();
+        let output_tokens = original.max_output_tokens;
+        self.traffic.on_request(input_tokens, output_tokens);
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {

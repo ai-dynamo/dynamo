@@ -237,6 +237,12 @@ impl EngineComponent {
         })?;
         worker.mark_idle();
         worker.mark_completed(payload.completed_requests);
+        // Eagerly clean up drained workers that are pending removal so they
+        // don't linger indefinitely when no further scaling events trigger
+        // apply_target_count.
+        if self.pending_removal.contains(&payload.worker_idx) {
+            self.try_remove_drained();
+        }
         Ok(payload)
     }
 
