@@ -78,8 +78,7 @@ class FastVideoHandler:
             return
 
         logger.info("Loading FastVideo model from %s", self.config.model_path)
-        loop = asyncio.get_running_loop()
-        self.generator = await loop.run_in_executor(None, self._load_generator)
+        self.generator = await asyncio.to_thread(self._load_generator)
         logger.info("FastVideo model ready")
 
     def _load_generator(self) -> Any:
