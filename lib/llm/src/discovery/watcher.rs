@@ -515,6 +515,10 @@ impl ModelWatcher {
         // Uses a Notify + enable() loop instead of polling to wake up
         // immediately when the RegistrationGuard drops, avoiding up to 100ms
         // of unnecessary latency and wasted CPU cycles.
+        // An absolute deadline ensures spurious wakeups (from unrelated
+        // registrations sharing the same Notify) cannot extend the wait
+        // beyond 30 seconds.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let notified = self.registration_notify.notified();
             tokio::pin!(notified);
@@ -525,10 +529,11 @@ impl ModelWatcher {
             if !self.registering_worker_sets.contains(registration_key) {
                 break;
             }
-            if tokio::time::timeout(Duration::from_secs(30), notified)
-                .await
-                .is_err()
-            {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if tokio::time::timeout(remaining, notified).await.is_err() {
                 break;
             }
         }
