@@ -152,8 +152,6 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         librdmacm-devel \
         numactl-devel \
         # Libfabric support
-        hwloc \
-        hwloc-devel \
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
