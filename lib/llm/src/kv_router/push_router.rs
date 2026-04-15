@@ -7,6 +7,7 @@ use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
     dynamo_nvtx_range,
+    error::{DynamoError, ErrorType as DynamoErrorType},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -352,7 +353,7 @@ impl KvPushRouter {
         let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
         let Some((pinned_worker_id, requested_dp_rank)) = pinned_worker_hint(phase, routing) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
-            let (best_worker, overlap_amount) = self
+            let outcome = self
                 .chooser
                 .find_best_match(
                     Some(context_id),
@@ -367,6 +368,25 @@ impl KvPushRouter {
                     allowed_worker_ids,
                 )
                 .await?;
+            let (best_worker, overlap_amount) = match outcome {
+                crate::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                } => (worker, overlap_blocks),
+                crate::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queue_depth,
+                    max_queue_depth,
+                } => {
+                    return Err(DynamoError::builder()
+                        .error_type(DynamoErrorType::ResourceExhausted)
+                        .message(format!(
+                            "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+                        ))
+                        .build()
+                        .into());
+                }
+            };
 
             if !is_query_only {
                 let total_blocks = routing_token_ids
@@ -402,7 +422,7 @@ impl KvPushRouter {
             .map(|dp_rank| WorkerWithDpRank::new(pinned_worker_id, dp_rank));
 
         if !is_query_only && let Some(pinned_worker) = resolved_pinned_worker {
-            let (best_worker, overlap_amount) = self
+            let outcome = self
                 .chooser
                 .find_best_match(
                     Some(context_id),
@@ -417,6 +437,25 @@ impl KvPushRouter {
                     allowed_worker_ids,
                 )
                 .await?;
+            let (best_worker, overlap_amount) = match outcome {
+                crate::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                } => (worker, overlap_blocks),
+                crate::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queue_depth,
+                    max_queue_depth,
+                } => {
+                    return Err(DynamoError::builder()
+                        .error_type(DynamoErrorType::ResourceExhausted)
+                        .message(format!(
+                            "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+                        ))
+                        .build()
+                        .into());
+                }
+            };
 
             return Ok(WorkerSelection {
                 instance_id: best_worker.worker_id,

@@ -18,6 +18,7 @@ use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
+use rs::error::{DynamoError, ErrorType as DynamoErrorType};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -1067,7 +1068,7 @@ impl KvRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
+            let outcome = chooser
                 .find_best_match(
                     request_id.as_deref(),
                     &token_ids,
@@ -1082,6 +1083,26 @@ impl KvRouter {
                 )
                 .await
                 .map_err(to_pyerr)?;
+            let (best_worker, overlap_blocks) = match outcome {
+                llm_rs::kv_router::FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                } => (worker, overlap_blocks),
+                llm_rs::kv_router::FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queue_depth,
+                    max_queue_depth,
+                } => {
+                    return Err(to_pyerr(
+                        DynamoError::builder()
+                            .error_type(DynamoErrorType::ResourceExhausted)
+                            .message(format!(
+                                "router backpressure: {reason:?} (queue_depth={queue_depth}, max_queue_depth={max_queue_depth:?})"
+                            ))
+                            .build(),
+                    ));
+                }
+            };
 
             if update_indexer && !chooser.kv_router_config().use_kv_events {
                 let mut tokens_with_hashes =

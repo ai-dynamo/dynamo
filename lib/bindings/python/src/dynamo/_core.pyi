@@ -1190,6 +1190,7 @@ class KvRouterConfig:
         router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
         router_queue_threshold: Optional[float] = 4.0,
+        router_max_queue_depth_per_worker: Optional[int] = None,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
     ) -> None:
@@ -1224,6 +1225,9 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
+            router_max_queue_depth_per_worker: Maximum queued requests allowed per worker slot.
+                Effective queue limit is this value multiplied by the current worker slot count.
+                When exceeded, requests that would otherwise queue return backpressure immediately.
             router_event_threads: Number of event processing threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool.
             router_queue_policy: Scheduling policy for the router queue (default: "fcfs").

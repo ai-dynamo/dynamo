@@ -510,7 +510,8 @@ impl RouterHandles {
             None
         };
 
-        self.decode_router
+        let outcome = self
+            .decode_router
             .find_best_match(
                 None,
                 tokens,
@@ -527,7 +528,26 @@ impl RouterHandles {
             .map_err(|e| {
                 tracing::error!(error = ?e, "Decode query failed");
                 QueryRouterResult::ErrQueryFailed
-            })
+            })?;
+        match outcome {
+            dynamo_llm::kv_router::FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+            } => Ok((worker, overlap_blocks)),
+            dynamo_llm::kv_router::FindBestMatchOutcome::Backpressure {
+                reason,
+                queue_depth,
+                max_queue_depth,
+            } => {
+                tracing::warn!(
+                    reason = ?reason,
+                    queue_depth,
+                    max_queue_depth = ?max_queue_depth,
+                    "Decode query rejected due to router backpressure"
+                );
+                Err(QueryRouterResult::ErrBackpressure)
+            }
+        }
     }
 }
 
@@ -542,8 +562,9 @@ pub enum QueryRouterResult {
     ErrInvalidParam = 2,
     ErrInitFailed = 3,
     ErrQueryFailed = 4,
-    ErrDisaggEnforced = 5,
-    ErrTimeout = 6,
+    ErrBackpressure = 5,
+    ErrDisaggEnforced = 6,
+    ErrTimeout = 7,
 }
 
 /// Build a `KvRouterConfig` from defaults, overridden by optional `DYN_*` environment variables.
@@ -587,6 +608,12 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     if let Some(v) = env_f64("DYN_ROUTER_QUEUE_THRESHOLD") {
         cfg.router_queue_threshold = Some(v);
     }
+    if let Some(v) = std::env::var("DYN_ROUTER_MAX_QUEUE_DEPTH_PER_WORKER")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        cfg.router_max_queue_depth_per_worker = Some(v);
+    }
 
     tracing::info!(
         overlap_score_weight = cfg.overlap_score_weight,
@@ -597,6 +624,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
         router_track_output_blocks = cfg.router_track_output_blocks,
         router_track_prefill_tokens = cfg.router_track_prefill_tokens,
         router_queue_threshold = ?cfg.router_queue_threshold,
+        router_max_queue_depth_per_worker = ?cfg.router_max_queue_depth_per_worker,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 

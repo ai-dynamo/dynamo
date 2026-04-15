@@ -6,14 +6,14 @@ use std::time::Instant;
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    PrefillLoadEstimator,
+    KvSchedulerError, PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
-        compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint,
+        RouterBackpressureReason, RouterEvent, RouterRequest, RouterResponse, TokensWithHashes,
+        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
 };
 use dynamo_runtime::{
@@ -63,6 +63,18 @@ use crate::{
 };
 
 use std::collections::HashSet;
+
+pub enum FindBestMatchOutcome {
+    Routed {
+        worker: WorkerWithDpRank,
+        overlap_blocks: u32,
+    },
+    Backpressure {
+        reason: RouterBackpressureReason,
+        queue_depth: usize,
+        max_queue_depth: Option<usize>,
+    },
+}
 
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
@@ -300,7 +312,7 @@ where
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
@@ -337,7 +349,7 @@ where
             .await?;
         let find_matches_elapsed = start.elapsed();
 
-        let response = self
+        let response = match self
             .scheduler
             .schedule(
                 context_id.map(|s| s.to_string()),
@@ -353,7 +365,22 @@ where
                 allowed_worker_ids,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(KvSchedulerError::Backpressure {
+                reason,
+                queue_depth,
+                max_queue_depth,
+            }) => {
+                return Ok(FindBestMatchOutcome::Backpressure {
+                    reason,
+                    queue_depth,
+                    max_queue_depth,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
         let total_elapsed = start.elapsed();
 
         if let Some(m) = metrics::RoutingOverheadMetrics::get() {
@@ -376,7 +403,10 @@ where
             "find_best_match completed"
         );
 
-        Ok((response.best_worker, response.overlap_blocks))
+        Ok(FindBestMatchOutcome::Routed {
+            worker: response.best_worker,
+            overlap_blocks: response.overlap_blocks,
+        })
     }
 
     /// Register externally-provided workers in the slot tracker.
@@ -594,7 +624,7 @@ where
                 tokens,
                 block_mm_infos,
             } => {
-                let (best_worker, overlap_blocks) = self
+                match self
                     .find_best_match(
                         Some(&context_id),
                         &tokens,
@@ -607,12 +637,26 @@ where
                         None,
                         None,
                     )
-                    .await?;
-
-                RouterResponse::New {
-                    worker_id: best_worker.worker_id,
-                    dp_rank: best_worker.dp_rank,
-                    overlap_blocks,
+                    .await
+                {
+                    Ok(FindBestMatchOutcome::Routed {
+                        worker,
+                        overlap_blocks,
+                    }) => RouterResponse::New {
+                        worker_id: worker.worker_id,
+                        dp_rank: worker.dp_rank,
+                        overlap_blocks,
+                    },
+                    Ok(FindBestMatchOutcome::Backpressure {
+                        reason,
+                        queue_depth,
+                        max_queue_depth,
+                    }) => RouterResponse::Backpressure {
+                        reason,
+                        queue_depth,
+                        max_queue_depth,
+                    },
+                    Err(error) => return Err(error),
                 }
             }
             RouterRequest::MarkPrefill => RouterResponse::PrefillMarked {
