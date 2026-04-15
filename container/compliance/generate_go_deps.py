@@ -189,7 +189,9 @@ def resolve_go_packages(module_dir: Path, go_cmd: str) -> list[str]:
     for go_file in module_dir.rglob("*.go"):
         rel = go_file.parent.relative_to(module_dir)
         parts = rel.parts
-        if parts and any(p in ("vendor", "srcs", "testdata") or "@" in p for p in parts):
+        if parts and any(
+            p in ("vendor", "srcs", "testdata") or "@" in p for p in parts
+        ):
             continue
         go_dirs.add(str(rel))
 
@@ -308,7 +310,7 @@ def derive_repo_url(module_path: str, license_url: str = "") -> str:
     for prefix, url_base in _PREFIX_REPOS:
         if clean_path.startswith(prefix):
             # Extract the first path component after the prefix
-            remainder = clean_path[len(prefix):]
+            remainder = clean_path[len(prefix) :]
             name = remainder.split("/")[0]
             return url_base + name
 
@@ -327,7 +329,7 @@ def derive_repo_url(module_path: str, license_url: str = "") -> str:
     # gopkg.in/X.vN -> https://github.com/go-X/X (single element)
     # gopkg.in/USER/X.vN -> https://github.com/USER/X (two elements)
     if clean_path.startswith("gopkg.in/"):
-        remainder = clean_path[len("gopkg.in/"):]
+        remainder = clean_path[len("gopkg.in/") :]
         # Strip .vN suffix
         remainder = re.sub(r"\.v\d+$", "", remainder)
         parts = remainder.split("/")
@@ -350,9 +352,7 @@ def deduplicate(entries: list[dict[str, str]]) -> list[dict[str, str]]:
     return list(seen.values())
 
 
-def get_module_cache_dirs(
-    module_dir: Path, go_cmd: str
-) -> dict[str, str]:
+def get_module_cache_dirs(module_dir: Path, go_cmd: str) -> dict[str, str]:
     """Run ``go list -m -json all`` and return a {module_path: dir} map.
 
     Only includes modules that have a local ``Dir`` (i.e. are cached).
@@ -391,7 +391,9 @@ def write_attributions_md(
     module_dirs_map: dict[str, str],
 ) -> None:
     """Write a markdown attribution file following the ATTRIBUTIONS-Go.md style."""
-    sorted_packages = sorted(packages, key=lambda p: (p["package_name"].lower(), p["version"]))
+    sorted_packages = sorted(
+        packages, key=lambda p: (p["package_name"].lower(), p["version"])
+    )
 
     lines = [_ATTRIBUTION_PREAMBLE]
     found = 0
@@ -530,7 +532,9 @@ def main() -> None:
         # Pass 2: get license info via go-licenses
         licenses: dict[str, tuple[str, str]] = {}
         try:
-            licenses = get_go_licenses(abs_dir, args.go_licenses_cmd, ignore_prefix, packages)
+            licenses = get_go_licenses(
+                abs_dir, args.go_licenses_cmd, ignore_prefix, packages
+            )
             log.info("Found %d license entries in %s", len(licenses), rel_dir)
         except FileNotFoundError:
             log.warning(
@@ -539,7 +543,9 @@ def main() -> None:
             )
             log.warning("License info will be UNKNOWN for all modules.")
         except RuntimeError:
-            log.warning("go-licenses failed for %s, license info will be UNKNOWN.", rel_dir)
+            log.warning(
+                "go-licenses failed for %s, license info will be UNKNOWN.", rel_dir
+            )
 
         # Merge: build entries for each module
         for mod_path, version in modules.items():
@@ -573,7 +579,9 @@ def main() -> None:
             for mod_path, mod_dir in partial.items():
                 if mod_path in unique_mods and mod_path not in module_dirs_map:
                     module_dirs_map[mod_path] = mod_dir
-        log.info("Resolved %d/%d module cache dirs", len(module_dirs_map), len(unique_mods))
+        log.info(
+            "Resolved %d/%d module cache dirs", len(module_dirs_map), len(unique_mods)
+        )
         write_attributions_md(deduplicated, args.attributions, module_dirs_map)
 
 

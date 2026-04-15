@@ -86,7 +86,9 @@ def get_cargo_metadata(manifest_path: Path, cargo_cmd: str) -> dict:
             manifest_path,
             result.stderr,
         )
-        raise RuntimeError(f"cargo metadata failed for {manifest_path}: {result.stderr}")
+        raise RuntimeError(
+            f"cargo metadata failed for {manifest_path}: {result.stderr}"
+        )
 
     return json.loads(result.stdout)
 
@@ -149,11 +151,11 @@ def _raw_license_url(repo_url: str, license_filename: str = "LICENSE") -> str:
     return repo_url
 
 
-def write_attributions_md(
-    packages: list[dict[str, str]], output_path: str
-) -> None:
+def write_attributions_md(packages: list[dict[str, str]], output_path: str) -> None:
     """Write a markdown attribution file following the ATTRIBUTIONS-Rust.md style."""
-    sorted_packages = sorted(packages, key=lambda p: (p["package_name"].lower(), p["version"]))
+    sorted_packages = sorted(
+        packages, key=lambda p: (p["package_name"].lower(), p["version"])
+    )
 
     lines = [_ATTRIBUTION_PREAMBLE]
     found = 0
@@ -203,7 +205,9 @@ def write_csv(packages: list[dict[str, str]], output_path: str | None) -> None:
             writer.writerows(sorted_packages)
         log.info("Wrote %d entries to %s", len(sorted_packages), output_path)
     else:
-        writer = csv.DictWriter(sys.stdout, fieldnames=FIELDNAMES, extrasaction="ignore")
+        writer = csv.DictWriter(
+            sys.stdout, fieldnames=FIELDNAMES, extrasaction="ignore"
+        )
         writer.writeheader()
         writer.writerows(sorted_packages)
 
