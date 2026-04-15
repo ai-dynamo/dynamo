@@ -464,7 +464,7 @@ trtllm_configs = {
             "1",
         ],
         marks=[
-            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 33.0 GiB
+            pytest.mark.gpu_1,  # 1 GPU(s) used, peak 20.0 GiB
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
             # Diffusion models don't use KV cache, so requested_trtllm_kv_tokens
@@ -473,13 +473,15 @@ trtllm_configs = {
             # diffusion engine itself, but the parallel scheduler requires one
             # of the KV/VRAM markers to accept the test.  We set it to the
             # profiled peak so the scheduler's VRAM budget is accurate.
-            pytest.mark.profiled_vram_gib(33.0),  # actual nvidia-smi peak 33.0 GiB
-            pytest.mark.requested_trtllm_vram_gib(33.0),
+            pytest.mark.profiled_vram_gib(
+                20.0
+            ),  # actual nvidia-smi peak 20.0 GiB [gluo FIXME] reprofil as new model is used
+            pytest.mark.requested_trtllm_vram_gib(20.0),
             pytest.mark.timeout(
                 600
             ),  # Image generation is slow even at small resolution
         ],
-        model="black-forest-labs/FLUX.1-dev",
+        model="black-forest-labs/FLUX.2-klein-4B",
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=300,
         delayed_start=5,

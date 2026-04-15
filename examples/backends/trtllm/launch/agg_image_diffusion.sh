@@ -14,8 +14,8 @@ source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_trtllm_override_args
 
 # Environment variables with defaults
 export DYNAMO_HOME=${DYNAMO_HOME:-"/workspace"}
-export MODEL_PATH=${MODEL_PATH:-"black-forest-labs/FLUX.1-dev"}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"black-forest-labs/FLUX.1-dev"}
+export MODEL_PATH=${MODEL_PATH:-"black-forest-labs/FLUX.2-klein-4B"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"black-forest-labs/FLUX.2-klein-4B"}
 export MEDIA_OUTPUT_FS_URL=${MEDIA_OUTPUT_FS_URL:-"file:///tmp/dynamo_media"}
 
 # Parse command line arguments
