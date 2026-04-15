@@ -27,18 +27,6 @@ logger = logging.getLogger(__name__)
 
 
 def get_gpu_memory_used(device: int = 0) -> int:
-    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible_devices:
-        selected_devices = [part.strip() for part in visible_devices.split(",")]
-        if 0 <= device < len(selected_devices):
-            try:
-                device = int(selected_devices[device])
-            except ValueError:
-                logger.debug(
-                    "Unable to map CUDA_VISIBLE_DEVICES=%s to an NVML index",
-                    visible_devices,
-                )
-
     pynvml.nvmlInit()
     try:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
