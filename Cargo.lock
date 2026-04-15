@@ -2356,7 +2356,6 @@ dependencies = [
  "async-trait",
  "axum 0.8.4",
  "dashmap",
- "derive-getters",
  "derive_builder",
  "dynamo-runtime",
  "dynamo-tokens",
