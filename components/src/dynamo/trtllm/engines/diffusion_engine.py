@@ -54,14 +54,14 @@ class DiffusionModality(str, Enum):
 _PIPELINE_MODALITY_MAP: dict[str, DiffusionModality] = {
     # Text-to-Video pipelines
     "WanPipeline": DiffusionModality.VIDEO,
-    "WanImageToVideoPipeline": DiffusionModality.VIDEO,
     "LTX2Pipeline": DiffusionModality.VIDEO,
     "LTX2TwoStagesPipeline": DiffusionModality.VIDEO,
+    # [gluo FIXME] Image-to-Video pipelines, should get it for free from
+    # text-to-video support once we connect image_reference.
+    "WanImageToVideoPipeline": DiffusionModality.VIDEO,
     # Text-to-Image pipelines
     "FluxPipeline": DiffusionModality.IMAGE,
     "Flux2Pipeline": DiffusionModality.IMAGE,
-    # Image-to-Video pipelines (defined in TRT-LLM's visual_gen module but not supported in Dynamo)
-    # "WanImageToVideoPipeline": DiffusionModality.TODO,
 }
 
 # Default when the pipeline is not yet loaded or the class name is unknown.

@@ -113,16 +113,14 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             ValueError: If width or height exceeds the configured maximum.
         """
         errors = []
-        if width > self.config.max_width:
-            errors.append(f"width {width} exceeds max_width {self.config.max_width}")
-        if height > self.config.max_height:
-            errors.append(
-                f"height {height} exceeds max_height {self.config.max_height}"
-            )
+        if not (1 <= width <= self.config.max_width):
+            errors.append(f"width {width} must be in [1, {self.config.max_width}]")
+        if not (1 <= height <= self.config.max_height):
+            errors.append(f"height {height} must be in [1, {self.config.max_height}]")
 
         if errors:
             raise ValueError(
-                f"Requested dimensions too large: {', '.join(errors)}. "
+                f"Requested dimensions out of range: {', '.join(errors)}. "
                 f"This is a safety check to prevent out-of-memory errors. "
                 f"To allow larger sizes, increase --max-width and/or --max-height."
             )

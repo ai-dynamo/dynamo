@@ -34,7 +34,7 @@ def encode_to_png_bytes(
     except ImportError:
         raise ImportError(
             "Pillow is required for PNG encoding. " "Install with: pip install Pillow"
-        )
+        ) from None
 
     logger.info(f"Encoding image of shape {image.shape} to PNG")
 

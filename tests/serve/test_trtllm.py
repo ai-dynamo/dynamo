@@ -61,6 +61,31 @@ class VideoGenerationPayload(BasePayload):
 
 
 @dataclass
+class ImageGenerationPayload(BasePayload):
+    """Payload for /v1/images/generations endpoint (TRT-LLM image diffusion)."""
+
+    endpoint: str = "/v1/images/generations"
+    timeout: int = 300
+
+    def response_handler(self, response: Any) -> str:
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            "data" in result
+        ), f"Missing 'data' in response. Keys: {list(result.keys())}"
+        assert len(result["data"]) > 0, "Empty data in video response"
+        entry = result["data"][0]
+        if "url" in entry:
+            assert entry["url"], "Video response url is empty"
+            return entry["url"]
+        assert entry.get("b64_json"), "Video response b64_json is empty"
+        return "b64_video_returned"
+
+    def validate(self, response: Any, content: str) -> None:
+        assert content, "Video response content is empty"
+
+
+@dataclass
 class TRTLLMConfig(EngineConfig):
     """Configuration for trtllm test scenarios"""
 
@@ -459,7 +484,7 @@ trtllm_configs = {
         timeout=300,
         delayed_start=5,
         request_payloads=[
-            VideoGenerationPayload(
+            ImageGenerationPayload(
                 body={
                     "prompt": "A golden retriever running on a beach",
                     "size": "256x256",

@@ -344,8 +344,8 @@ class ConcurrencyTracker:
 
         # Return a mock MediaOutput with a video tensor
         return SimpleNamespace(
-            video=torch.zeros((1, 4, 64, 64, 3), dtype=torch.uint8),
-            image=None,
+            video=None,
+            image=torch.zeros((1, 64, 64, 3), dtype=torch.uint8),
             audio=None,
         )
 
@@ -389,7 +389,7 @@ class TestVideoHandlerConcurrency:
 
     def _make_handler(self):
         """Create a ImageGenerationHandler with mock engine and config."""
-        from dynamo.trtllm.request_handlers.diffusion.video_handler import (
+        from dynamo.trtllm.request_handlers.diffusion.image_handler import (
             ImageGenerationHandler,
         )
 
@@ -427,6 +427,7 @@ class TestVideoHandlerConcurrency:
         async for _ in handler.generate(request, MagicMock()):
             pass
 
+    @pytest.mark.timeout(5)
     def test_concurrent_requests_are_serialized(self):
         """Fires 3 concurrent requests and asserts only one thread enters
         engine.generate() at a time (max_concurrent == 1).
@@ -477,8 +478,8 @@ class TestImageHandlerResponseFormats:
         )
 
         mock_output = SimpleNamespace(
-            video=torch.zeros((1, 4, 64, 64, 3), dtype=torch.uint8),
-            image=None,
+            video=None,
+            image=torch.zeros((1, 64, 64, 3), dtype=torch.uint8),
             audio=None,
         )
         mock_engine = MagicMock()

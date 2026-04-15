@@ -74,15 +74,15 @@ python -m dynamo.trtllm \
 
 #### API Endpoint
 
-Video generation uses the `/v1/images/generations` endpoint:
+Image generation uses the `/v1/images/generations` endpoint:
 
 ```bash
-curl -X POST http://localhost:8000/v1/videos \
+curl -X POST http://localhost:8000/v1/images/generations \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "A cat playing piano",
     "model": "black-forest-labs/FLUX.1-dev",
-    "size": "256x256",
+    "size": "256x256"
   }'
 ```
 
