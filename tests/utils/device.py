@@ -62,20 +62,14 @@ def get_gpu_memory_utilization(num_workers: int = 1, single_gpu: bool = False) -
         GPU memory utilization ratio (0.0-1.0)
 
     Notes:
-        - CUDA (e.g., L40S 48GB): 0.4 per worker is safe
-        - XPU (e.g., Intel 23GB): 0.3 per worker max when sharing GPU
-        - XPU with single_gpu=True and num_workers>1: reduce to 0.25 for safety margin
+        - CUDA (e.g., L40S 48GB): 0.45 per worker is safe in current CI coverage
+        - XPU (e.g., Intel 23GB): 0.3 is used for both shared-GPU and general cases
     """
     device = detect_target_device()
 
-    if device == "xpu" and single_gpu and num_workers > 1:
-        # XPU with multiple workers on same GPU: be conservative
-        # 0.25 × 2 workers = 50% total, leaves room for model + overhead
-        return 0.25
-
     if device == "xpu":
         # XPU general case (single worker or multi-GPU)
-        return 0.3
+        return 0.4
 
     # CUDA (default): more generous utilization
-    return 0.4
+    return 0.45

@@ -30,6 +30,7 @@ from tests.router.helper import (
 from tests.utils.constants import DefaultPort
 from tests.utils.device import (
     build_nixl_kv_transfer_config_json,
+    detect_target_device,
     get_default_vllm_block_size,
     get_device_visibility_env_var,
     get_gpu_memory_utilization,
@@ -50,6 +51,7 @@ pytestmark = [
 SPEEDUP_RATIO = 10.0
 BLOCK_SIZE = get_default_vllm_block_size()  # 64 on XPU (fmha requirement), 16 on CUDA
 _GPU_MEM_UTIL = get_gpu_memory_utilization(num_workers=2, single_gpu=True)
+_MAX_MODEL_LEN = 768 if detect_target_device() == "xpu" else 1024
 
 # Shared vLLM configuration for all tests
 # gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
@@ -57,14 +59,14 @@ VLLM_ARGS: Dict[str, Any] = {
     "block_size": BLOCK_SIZE,
     "model": MODEL_NAME,
     "gpu_memory_utilization": _GPU_MEM_UTIL,
-    "max_model_len": 1024,  # Limit context length to reduce KV cache size
+    "max_model_len": _MAX_MODEL_LEN,  # Limit context length to reduce KV cache size
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
 VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "model": MODEL_NAME,
     "gpu_memory_utilization": _GPU_MEM_UTIL,
-    "max_model_len": 1024,  # Limit context length to reduce KV cache size
+    "max_model_len": _MAX_MODEL_LEN,  # Limit context length to reduce KV cache size
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
@@ -176,14 +178,21 @@ class VLLMProcess(ManagedEngineProcessMixin):
         # Matches test.sh behavior:
         # - When data_parallel_size is set, launch one process per DP rank
         # - Each process gets --data-parallel-rank and --data-parallel-size
-        # - Each process runs on its own GPU via CUDA_VISIBLE_DEVICES
+        # - Each process runs on its assigned device visibility env var
         # - --kv-transfer-config enables KV cache transfer between ranks
 
         for worker_idx in range(num_workers):
+            visibility_env_var = get_device_visibility_env_var()
+            inherited_visibility = os.environ.get(visibility_env_var)
+
             # Calculate GPU device for this process
             if single_gpu:
-                # Force all processes to GPU 0 (for single-GPU testing)
-                gpu_device = str(gpu_start_index)
+                # On XPU, prefer externally pinned affinity when provided by CI/runtime,
+                # but do not override an explicit non-default gpu_start_index.
+                if visibility_env_var == "ZE_AFFINITY_MASK" and inherited_visibility:
+                    gpu_device = inherited_visibility
+                else:
+                    gpu_device = str(gpu_start_index)
             elif data_parallel_size is not None:
                 # Worker sees dp_rank GPUs (each DP rank gets its own GPU)
                 worker_start_gpu = gpu_start_index + worker_idx * data_parallel_size
@@ -270,7 +279,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
             command.extend(["--kv-events-config", json.dumps(kv_events_cfg)])
 
             env = os.environ.copy()  # Copy parent environment
-            visibility_env_var = get_device_visibility_env_var()
             env_vars = {
                 visibility_env_var: gpu_device,
                 "DYN_NAMESPACE": self.namespace,
@@ -491,7 +499,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.xpu_1
-@pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
+@pytest.mark.timeout(
+    300
+)  # XPU CI observed >160s; raise timeout to reduce false failures
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_basic(
     request,

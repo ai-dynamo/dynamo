@@ -2,13 +2,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
 
 export VLLM_TARGET_DEVICE=xpu
+
+# Device affinity: Use auto-selected device via ZE_AFFINITY_MASK if set by test framework,
+# otherwise default to device 0
+ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0}
+export ZE_AFFINITY_MASK
+
+trap 'echo Cleaning up...; kill 0' EXIT
 
 # Parse command-line arguments for request plane mode
 REQUEST_PLANE="tcp"  # Default to TCP
@@ -61,6 +67,7 @@ python -m dynamo.frontend &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 DYN_HEALTH_CHECK_ENABLED=true \
+ZE_AFFINITY_MASK=$ZE_AFFINITY_MASK \
     python -m dynamo.vllm --model "$MODEL" --enforce-eager \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \

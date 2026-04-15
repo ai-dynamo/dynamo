@@ -9,6 +9,11 @@ export PROMETHEUS_MULTIPROC_DIR=${PROMETHEUS_MULTIPROC_DIR:-/tmp/prometheus_mult
 rm -rf "$PROMETHEUS_MULTIPROC_DIR"
 mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
 
+# Device affinity: Use auto-selected device via ZE_AFFINITY_MASK if set by test framework,
+# otherwise default to device 0
+ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0}
+export ZE_AFFINITY_MASK
+
 # Cleanup function to remove the directory on exit
 cleanup() {
     echo "Cleaning up..."
@@ -38,10 +43,12 @@ python -m dynamo.frontend &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
   PROMETHEUS_MULTIPROC_DIR="$PROMETHEUS_MULTIPROC_DIR" \
+  ZE_AFFINITY_MASK=$ZE_AFFINITY_MASK \
   python -m dynamo.vllm --model "$MODEL" --enforce-eager \
   --max-model-len "$MAX_MODEL_LEN" \
   --max-num-seqs "$MAX_CONCURRENT_SEQS" \
   --block-size "${BLOCK_SIZE:-64}" \
+  --gpu-memory-utilization 0.75 \
   $GPU_MEM_ARGS \
   --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both","kv_buffer_device":"xpu"}' &
 
