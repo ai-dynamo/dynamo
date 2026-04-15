@@ -101,28 +101,7 @@ jobs:
         --ulimit stack=67108864
         --memory=6g
 
-    # MinIO as a native service container — replaces the manual `docker run minio` in pytest action.
-    services:
-      minio:
-        image: quay.io/minio/minio
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-          - 9001:9001
-        options: >-
-          --memory=256m
-          --health-cmd "curl -sf http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     env:
-      # Service containers are reachable by hostname on the job network.
-      AWS_ENDPOINT_URL: http://minio:9000
-      AWS_ACCESS_KEY_ID: minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       DYNAMO_TEST_FRAMEWORK: dynamo
       DYNAMO_TEST_PLATFORM: ${{ matrix.platform }}
