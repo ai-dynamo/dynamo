@@ -6,28 +6,17 @@ End-to-end steps for reproducing multimodal benchmarks: data generation, serving
 
 Use the JSONL generator in `benchmarks/multimodal/jsonl/`. Requires PR [#8201](https://github.com/ai-dynamo/dynamo/pull/8201) for sliding-window support.
 
-### Single-turn (independent requests)
+Each user has a causal session; the image window slides by 1 each turn, giving 4/5 overlap between consecutive requests from the same user:
+
+```
+user_0, turn 0: [img0, img1, img2, img3, img4]
+user_0, turn 1: [img1, img2, img3, img4, img5]   <- 4/5 overlap
+user_0, turn 2: [img2, img3, img4, img5, img6]   <- 4/5 overlap
+```
 
 ```bash
 cd benchmarks/multimodal/jsonl
 
-# 100 requests, 3 images each, 200-image pool, 300-word text, 512x512 PNGs
-python main.py single-turn \
-  -n 100 \
-  --images-per-request 3 \
-  --images-pool 200 \
-  --user-text-tokens 300 \
-  --image-size 512 512 \
-  --image-dir /dynamo-tmp/data/bench_images \
-  --seed 42
-# Output: 100req_3img_200pool_300word_base64.jsonl
-```
-
-### Sliding-window (multi-turn sessions with image overlap)
-
-Each user has a causal session; the image window slides by 1 each turn, giving 4/5 overlap between consecutive requests from the same user.
-
-```bash
 python main.py sliding-window \
   --num-users 10 \
   --turns-per-user 10 \
@@ -43,8 +32,9 @@ python main.py sliding-window \
 
 | Parameter | Description |
 |-----------|-------------|
-| `--images-pool` | Unique images in pool. Smaller = more reuse (tests embedding cache) |
-| `--window-size` | Images per request in sliding-window mode |
+| `--num-users` | Concurrent user sessions (default: 10) |
+| `--turns-per-user` | Requests per user (default: 20) |
+| `--window-size` | Images per request; window slides by 1 each turn (default: 5) |
 | `--image-size W H` | PNG dimensions in pixels (default: 512 512) |
 | `--image-mode` | `base64` (default, local PNGs) or `http` (COCO URLs) |
 | `--image-dir` | Where to store generated PNGs. Use a persistent path, not `/tmp` |
@@ -56,7 +46,7 @@ python main.py sliding-window \
 
 ## 2. Run vLLM Serve Baseline
 
-Plain `vllm serve` without Dynamo. Uses the embedding cache connector for fair comparison.
+Plain `vllm serve` without Dynamo. This is the primary baseline for comparison.
 
 ```bash
 vllm serve Qwen/Qwen3.5-397B-A17B-FP8 \
@@ -70,18 +60,18 @@ vllm serve Qwen/Qwen3.5-397B-A17B-FP8 \
   --port 8000
 ```
 
-To add Dynamo's embedding cache to vllm serve:
-
-```bash
-vllm serve Qwen/Qwen3.5-397B-A17B-FP8 \
-  ... \
-  --ec-transfer-config '{
-    "ec_role": "ec_both",
-    "ec_connector": "DynamoMultimodalEmbeddingCacheConnector",
-    "ec_connector_module_path": "dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
-    "ec_connector_extra_config": {"multimodal_embedding_cache_capacity_gb": 30}
-  }'
-```
+> **Note:** For now we focus on plain `vllm serve` as the baseline. The embedding cache comparison (`--ec-transfer-config`) is not needed yet but the command is here for reference:
+>
+> ```bash
+> vllm serve Qwen/Qwen3.5-397B-A17B-FP8 \
+>   ... \
+>   --ec-transfer-config '{
+>     "ec_role": "ec_both",
+>     "ec_connector": "DynamoMultimodalEmbeddingCacheConnector",
+>     "ec_connector_module_path": "dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector",
+>     "ec_connector_extra_config": {"multimodal_embedding_cache_capacity_gb": 30}
+>   }'
+> ```
 
 ## 3. Run Dynamo Serve (Aggregated + Embedding Cache)
 
