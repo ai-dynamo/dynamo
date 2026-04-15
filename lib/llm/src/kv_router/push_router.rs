@@ -90,6 +90,11 @@ struct RequestGuard {
     expected_output_tokens: Option<u32>,
     /// Deferred session close action (fires after generation completes)
     deferred_close: Option<SessionCloseAction>,
+    /// True once inner.direct() has returned Ok — guards record_metrics() so
+    /// that a dispatch failure does not emit metrics for a request that never
+    /// reached the backend (spurious requests_total increment, OSL histogram
+    /// zeros, premature tracker.record_finish()).
+    dispatched: bool,
 }
 
 impl RequestGuard {
@@ -183,7 +188,10 @@ impl RequestGuard {
     }
 
     fn record_metrics(&mut self) {
-        if self.metrics_recorded {
+        // Skip metrics for requests that never reached the backend (dispatch
+        // failure before direct() returned Ok). Recording here would emit
+        // spurious requests_total increments and OSL-histogram zeros.
+        if self.metrics_recorded || !self.dispatched {
             return;
         }
         self.metrics_recorded = true;
@@ -638,7 +646,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         //
         // All guard fields are available here (deferred_close was just obtained;
         // isl_tokens/block_size/tracker were set before request.into_parts()).
-        let guard = RequestGuard {
+        let mut guard = RequestGuard {
             chooser: chooser.clone(),
             scheduler_tracked,
             context_id: context_id.clone(),
@@ -655,6 +663,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             block_size,
             expected_output_tokens,
             deferred_close,
+            dispatched: false,
         };
 
         let mut response_stream = self
@@ -669,8 +678,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 phase = ?phase,
             ))
             .await?;
-        // If direct() returned Err above, guard drops here →
-        // RequestGuard::Drop fires → chooser.free() + deferred_close.execute().
+        // direct() succeeded — mark dispatched so record_metrics() fires.
+        // If direct() returned Err above, guard drops here with dispatched=false
+        // → RequestGuard::Drop fires → chooser.free() + deferred_close.execute()
+        //   but record_metrics() is suppressed (no backend work was done).
+        guard.dispatched = true;
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
