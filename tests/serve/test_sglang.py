@@ -89,6 +89,26 @@ sglang_configs = {
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),
+    "aggregated_unified": SGLangConfig(
+        name="aggregated_unified",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        script_args=["--unified"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(3.7),
+            pytest.mark.requested_sglang_kv_tokens(96),
+            pytest.mark.timeout(195),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "disaggregated": SGLangConfig(
         name="disaggregated",
         directory=sglang_dir,

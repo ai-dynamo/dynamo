@@ -263,7 +263,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0
       gpu_test_markers: pre_merge and vllm and gpu_1
-      gpu_test_timeout_minutes: 35
+      gpu_test_timeout_minutes: 45
     secrets: inherit
 
   vllm-multi-gpu-test:

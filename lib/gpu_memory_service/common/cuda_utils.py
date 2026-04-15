@@ -24,6 +24,20 @@ except ImportError:
     cuda = _MissingCuda()
 
 
+def list_devices() -> list[int]:
+    """Return list of CUDA device indices visible to this process via NVML."""
+    import pynvml
+
+    pynvml.nvmlInit()
+    try:
+        count = pynvml.nvmlDeviceGetCount()
+    finally:
+        pynvml.nvmlShutdown()
+    if count == 0:
+        raise SystemExit("no nvidia devices found")
+    return list(range(count))
+
+
 def cuda_check_result(result: cuda.CUresult, name: str) -> None:
     if result != cuda.CUresult.CUDA_SUCCESS:
         err_result, err_str = cuda.cuGetErrorString(result)

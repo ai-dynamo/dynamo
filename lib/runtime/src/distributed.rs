@@ -94,6 +94,10 @@ impl MetricsHierarchy for DistributedRuntime {
     fn get_metrics_registry(&self) -> &MetricsRegistry {
         &self.metrics_registry
     }
+
+    fn connection_id(&self) -> Option<u64> {
+        Some(self.discovery_client.instance_id())
+    }
 }
 
 impl std::fmt::Debug for DistributedRuntime {

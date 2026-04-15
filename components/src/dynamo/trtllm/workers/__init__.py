@@ -34,6 +34,7 @@ async def init_worker(
     config: Config,
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
+    engine_holder: Optional[list] = None,
 ) -> None:
     """Initialize the appropriate worker based on modality.
 
@@ -45,6 +46,9 @@ async def init_worker(
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
         shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
+        engine_holder: Optional mutable list; when provided, init_llm_worker will
+            append the TensorRTLLMEngine instance so that the drain callback
+            (installed earlier by main.py) can access it at signal time.
     """
     logging.info(f"Initializing worker with modality={config.modality}")
 
@@ -72,7 +76,13 @@ async def init_worker(
         raise ValueError(f"Unsupported diffusion modality: {modality}")
 
     # LLM modalities (text, multimodal)
-    await init_llm_worker(runtime, config, shutdown_event, shutdown_endpoints)
+    await init_llm_worker(
+        runtime,
+        config,
+        shutdown_event,
+        shutdown_endpoints,
+        engine_holder=engine_holder,
+    )
 
 
 __all__ = ["init_worker"]
