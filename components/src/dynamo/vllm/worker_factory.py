@@ -391,16 +391,12 @@ class WorkerFactory:
             vllm_config,
         )
 
-        is_multimodal_decode = (
-            config.disaggregation_mode == DisaggregationMode.DECODE
-            and model_type == ModelType.MULTIMODAL
-        )
-        if is_multimodal_decode:
-            # Multimodal decode workers need embedding_params from prefill.
-            # Skip canary to avoid crash.
+        if config.disaggregation_mode == DisaggregationMode.DECODE:
+            # Disagg decode workers may need params from prefill (e.g., embedding_params
+            # for multimodal). Skip canary health check to prevent incompatible requests.
             health_check_payload = None
             logger.info(
-                "Multimodal decode worker: skipping canary health check payload"
+                "Disagg decode worker: skipping canary health check payload"
             )
         else:
             health_check_payload = VllmHealthCheckPayload(
