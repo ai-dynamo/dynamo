@@ -2266,6 +2266,7 @@ mod tests {
                 namespace: "default".to_string(),
                 instance_id: 1,
                 transport: TransportType::Tcp(tcp_addr),
+                device_type: None,
             }])
             .unwrap();
 
