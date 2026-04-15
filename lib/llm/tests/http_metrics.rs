@@ -383,7 +383,7 @@ mod integration_tests {
 
         // Spawn watcher task to discover models
         let _watcher_task = tokio::spawn(async move {
-            model_watcher
+            Arc::new(model_watcher)
                 .watch(discovery_stream, NamespaceFilter::Global)
                 .await;
         });
