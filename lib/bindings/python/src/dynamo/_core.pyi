@@ -51,7 +51,6 @@ class DistributedRuntime:
         event_loop: Any,
         discovery_backend: str,
         request_plane: str,
-        enable_nats: Optional[bool] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -60,9 +59,6 @@ class DistributedRuntime:
             event_loop: The asyncio event loop
             discovery_backend: Discovery backend ("kubernetes", "etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp", "http", or "nats")
-            enable_nats: Whether to enable NATS for KV events. Defaults to True.
-                        If request_plane is "nats", NATS is always enabled.
-                        Pass False to disable NATS initialization (e.g., for approximate routing).
         """
         ...
 
@@ -1132,6 +1128,7 @@ class RouterMode:
     KV: "RouterMode"
     Direct: "RouterMode"
     LeastLoaded: "RouterMode"
+    DeviceAwareWeighted: "RouterMode"
     ...
 
 class RouterConfig:
@@ -1152,7 +1149,7 @@ class RouterConfig:
         Create a RouterConfig.
 
         Args:
-            mode: The router mode (RoundRobin, Random, KV, Direct, or LeastLoaded)
+            mode: The router mode (RoundRobin, Random, KV, Direct, LeastLoaded, or DeviceAwareWeighted)
             config: Optional KV router configuration (used when mode is KV)
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection

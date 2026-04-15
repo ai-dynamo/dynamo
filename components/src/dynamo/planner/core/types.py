@@ -134,6 +134,7 @@ class EngineCapabilities:
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
+    max_kv_tokens: Optional[int] = None
 
 
 @dataclass
