@@ -97,7 +97,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:num_p_workers{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_num_prefill_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Prefill Workers",
               "range": true,
               "refId": "A"
@@ -156,7 +156,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:num_d_workers{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_num_decode_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Decode Workers",
               "range": true,
               "refId": "A"
@@ -216,7 +216,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:gpu_hours{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_gpu_hours{namespace=~\"$namespace\"}",
               "legendFormat": "GPU Hours",
               "range": true,
               "refId": "A"
@@ -339,14 +339,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:num_p_workers{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_num_prefill_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Prefill Workers",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "planner:num_d_workers{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_num_decode_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Decode Workers",
               "range": true,
               "refId": "B"
@@ -497,14 +497,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:observed_ttft{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_observed_ttft_ms{namespace=~\"$namespace\"}",
               "legendFormat": "TTFT",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "planner:observed_itl{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_observed_itl_ms{namespace=~\"$namespace\"}",
               "legendFormat": "ITL",
               "range": true,
               "refId": "B"
@@ -641,14 +641,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:observed_request_rate{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_observed_requests_per_second{namespace=~\"$namespace\"}",
               "legendFormat": "Request Rate",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "planner:observed_request_duration{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_observed_request_duration_seconds{namespace=~\"$namespace\"}",
               "legendFormat": "Request Duration",
               "range": true,
               "refId": "B"
@@ -770,14 +770,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:observed_isl{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_observed_input_sequence_tokens{namespace=~\"$namespace\"}",
               "legendFormat": "ISL",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "planner:observed_osl{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_observed_output_sequence_tokens{namespace=~\"$namespace\"}",
               "legendFormat": "OSL",
               "range": true,
               "refId": "B"
@@ -901,7 +901,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:predicted_request_rate{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_predicted_requests_per_second{namespace=~\"$namespace\"}",
               "legendFormat": "Predicted Request Rate",
               "range": true,
               "refId": "A"
@@ -1027,14 +1027,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:predicted_isl{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_predicted_input_sequence_tokens{namespace=~\"$namespace\"}",
               "legendFormat": "Predicted ISL",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "planner:predicted_osl{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_predicted_output_sequence_tokens{namespace=~\"$namespace\"}",
               "legendFormat": "Predicted OSL",
               "range": true,
               "refId": "B"
@@ -1161,14 +1161,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:predicted_num_p{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_predicted_num_prefill_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Predicted Prefill",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "planner:predicted_num_d{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_predicted_num_decode_replicas{namespace=~\"$namespace\"}",
               "legendFormat": "Predicted Decode",
               "range": true,
               "refId": "B"
@@ -1250,7 +1250,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:p_correction_factor{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_p_correction_factor{namespace=~\"$namespace\"}",
               "legendFormat": "Prefill CF",
               "range": true,
               "refId": "A"
@@ -1319,7 +1319,7 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:d_correction_factor{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_d_correction_factor{namespace=~\"$namespace\"}",
               "legendFormat": "Decode CF",
               "range": true,
               "refId": "A"
@@ -1449,14 +1449,14 @@ data:
           "targets": [
             {
               "editorMode": "code",
-              "expr": "planner:p_correction_factor{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_p_correction_factor{namespace=~\"$namespace\"}",
               "legendFormat": "Prefill CF",
               "range": true,
               "refId": "A"
             },
             {
               "editorMode": "code",
-              "expr": "planner:d_correction_factor{namespace=~\"$namespace\"}",
+              "expr": "dynamo_planner_d_correction_factor{namespace=~\"$namespace\"}",
               "legendFormat": "Decode CF",
               "range": true,
               "refId": "B"
@@ -1494,14 +1494,14 @@ data:
               "type": "prometheus",
               "uid": "${datasource}"
             },
-            "definition": "label_values(planner:num_p_workers, namespace)",
+            "definition": "label_values(dynamo_planner_num_prefill_replicas, namespace)",
             "hide": 0,
             "includeAll": true,
             "label": "Namespace",
             "multi": true,
             "name": "namespace",
             "options": [],
-            "query": "label_values(planner:num_p_workers, namespace)",
+            "query": "label_values(dynamo_planner_num_prefill_replicas, namespace)",
             "refresh": 2,
             "regex": "",
             "skipUrlSync": false,

@@ -342,7 +342,8 @@ mod integration_tests {
             distributed_runtime.clone(),
             service.state().manager_clone(),
             dynamo_llm::entrypoint::RouterConfig::default(),
-            0, // migration_limit
+            0,    // migration_limit
+            None, // migration_max_seq_len
             None,
             None,
             service.state().metrics_clone(),

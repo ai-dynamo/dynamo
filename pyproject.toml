@@ -44,7 +44,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc9",
+    "tensorrt-llm==1.3.0rc11",
 ]
 
 vllm = [
@@ -62,7 +62,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.9",
+    "sglang[diffusion]==0.5.10.post1",
     "nixl[cu12]<=0.10.1",
     "cupy-cuda12x>=13.0.0",
 ]
@@ -181,6 +181,11 @@ filterwarnings = [
     "error",
     # CUDA deprecation warnings from tensorrt_llm
     "ignore:.*cuda*:DeprecationWarning",
+    # cuda.cudart/cuda.nvrtc deprecated in favor of cuda.bindings.* (cuda-python >=13)
+    # Triggered by flashinfer 0.6.7+ during import of comm/mnnvl.py
+    "ignore:The cuda\\..*module is deprecated:FutureWarning",
+    # SGLang GGUF quantization emits UserWarning on non-CUDA platforms (arm64 CPU-only CI)
+    "ignore:Only CUDA.*support GGUF quantization:UserWarning",
     # protobuf C extension warning
     "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning",
     # unclosed socket/event loop warnings
@@ -210,6 +215,8 @@ filterwarnings = [
     "ignore:Triton is not supported on current platform.*:UserWarning",
     # torch.jit.script_method deprecation from torch.utils.mkldnn
     "ignore:.*torch\\.jit\\.script_method.*is deprecated.*:DeprecationWarning",
+    # torch.jit.script deprecation from modelopt.torch.quantization
+    "ignore:`torch.jit.script` is deprecated:DeprecationWarning",
     # nvidia-modelopt warning about transformers version (transitive dep from TRT-LLM)
     "ignore:transformers version .* is incompatible with nvidia-modelopt.*:UserWarning",
     # SGLang quantization warnings on CPU-only runners

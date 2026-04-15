@@ -55,6 +55,15 @@ class PlannerConfig(BaseModel):
     )
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = SLAPlannerDefaults.backend
     mode: Literal["disagg", "prefill", "decode", "agg"] = SLAPlannerDefaults.mode
+    optimization_target: Literal["throughput", "latency", "sla"] = Field(
+        default="throughput",
+        description=(
+            "Scaling optimization target. "
+            "'throughput' (default) and 'latency' use static thresholds on queue "
+            "depth and KV cache utilization — no SLA targets or profiling needed. "
+            "'sla' uses regression-based scaling that targets specific ttft/itl values."
+        ),
+    )
 
     no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
@@ -126,8 +135,38 @@ class PlannerConfig(BaseModel):
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
+    # Diagnostics report settings
+    report_interval_hours: Optional[float] = Field(
+        default=24.0,
+        description=(
+            "Generate an HTML diagnostics report every N hours (simulated time). "
+            "Set to None to disable periodic report generation."
+        ),
+    )
+    report_output_dir: str = Field(
+        default="./planner_reports",
+        description="Directory for HTML diagnostics reports.",
+    )
+    live_dashboard_port: int = Field(
+        default=8080,
+        description=(
+            "Port for the live diagnostics dashboard HTTP server. "
+            "Set to 0 to disable. When enabled, visit http://host:port/ "
+            "to view a real-time Plotly report of accumulated snapshots."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_config(self) -> "PlannerConfig":
+        if self.report_interval_hours is not None:
+            if (
+                not math.isfinite(self.report_interval_hours)
+                or self.report_interval_hours <= 0
+            ):
+                raise ValueError(
+                    "report_interval_hours must be a positive finite number or None"
+                )
+
         sqrt = math.isqrt(self.fpm_sample_bucket_size)
         if sqrt * sqrt != self.fpm_sample_bucket_size:
             raise ValueError(
@@ -140,6 +179,20 @@ class PlannerConfig(BaseModel):
                 "global_planner_namespace is required when environment='global-planner'. "
                 "Please specify the namespace where GlobalPlanner is running."
             )
+
+        # Easy mode: force load scaling on, throughput scaling off
+        if self.optimization_target != "sla":
+            self.enable_load_scaling = True
+            self.enable_throughput_scaling = False
+            if (
+                self.ttft != SLAPlannerDefaults.ttft
+                or self.itl != SLAPlannerDefaults.itl
+            ):
+                logger.warning(
+                    "optimization_target=%s ignores ttft/itl values; "
+                    "set optimization_target='sla' to use SLA-based scaling",
+                    self.optimization_target,
+                )
 
         # At least one scaling mode must be enabled
         if not self.enable_throughput_scaling and not self.enable_load_scaling:

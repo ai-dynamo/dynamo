@@ -107,6 +107,7 @@ func CreateOrGetAutoCheckpoint(
 	namespace string,
 	identity nvidiacomv1alpha1.DynamoCheckpointIdentity,
 	podTemplate corev1.PodTemplateSpec,
+	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	hash, err := ComputeIdentityHash(identity)
 	if err != nil {
@@ -125,7 +126,8 @@ func CreateOrGetAutoCheckpoint(
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
+			Identity:         identity,
+			GPUMemoryService: gpuMemoryService,
 			Job: nvidiacomv1alpha1.DynamoCheckpointJobConfig{
 				PodTemplateSpec: podTemplate,
 			},
