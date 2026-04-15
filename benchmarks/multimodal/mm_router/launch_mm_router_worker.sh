@@ -234,7 +234,6 @@ env "${COMMON_ENV[@]}" \
     "DYN_SYSTEM_PORT=${MM_ROUTER_SYSTEM_PORT}" \
     "MM_ROUTER_REWRITE_IMAGE_URLS=${MM_ROUTER_REWRITE_IMAGE_URLS}" \
     'DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS=["generate"]' \
-    DYN_LOG=debug \
     "${PYTHON_BIN}" -m examples.backends.vllm.mm_router_worker \
         --model "${MODEL}" \
         --namespace "${NAMESPACE}" \
@@ -252,7 +251,6 @@ echo
 echo "=== Starting frontend ==="
 env "${COMMON_ENV[@]}" \
     "PYTHONPATH=${DYNAMO_ROOT}/components/src" \
-    DYN_LOG=debug \
     "${PYTHON_BIN}" -m dynamo.frontend \
         --http-port "${HTTP_PORT}" \
         --router-mode round-robin \
