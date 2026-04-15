@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import asyncio
 import base64
@@ -142,6 +130,10 @@ class ImageLoader:
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:
         parsed_url = urlparse(image_url)
+        if parsed_url.scheme in ("", "file"):
+            raise ValueError(
+                "Invalid image source scheme: local file access is not allowed"
+            )
 
         if parsed_url.scheme in ("http", "https"):
             key = image_url.lower()
@@ -164,8 +156,8 @@ class ImageLoader:
             # shield so cancelling THIS caller doesn't cancel the shared task
             return await asyncio.shield(self._inflight[key])
 
-        try:
-            if parsed_url.scheme == "data":
+        if parsed_url.scheme == "data":
+            try:
                 with _nvtx.annotate("mm:img:base64_decode", color="lime"):
                     if not parsed_url.path.startswith("image/"):
                         raise ValueError("Data URL must be an image type")
@@ -179,24 +171,13 @@ class ImageLoader:
                     except binascii.Error as e:
                         raise ValueError(f"Invalid base64 encoding: {e}") from e
                     image_data = BytesIO(image_bytes)
+                return await self._open_image(image_data)
+            except Exception as e:
+                logger.error(f"{type(e).__name__} decoding image: '{image_url}': {e}")
+                raise ValueError(f"Failed to decoding image: '{image_url}': {e}") from e
 
-            elif parsed_url.scheme in ("", "file"):
-                path = image_url if parsed_url.scheme == "" else parsed_url.path
-
-                def _read_local_file(p: str) -> bytes:
-                    with open(p, "rb") as f:
-                        return f.read()
-
-                image_bytes = await asyncio.to_thread(_read_local_file, path)
-                image_data = BytesIO(image_bytes)
-            else:
-                raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
-
-            return await self._open_image(image_data)
-
-        except Exception as e:
-            logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
-            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
+        # It's not file:, http:, https:, or data:
+        raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
     async def load_image_batch(
         self,

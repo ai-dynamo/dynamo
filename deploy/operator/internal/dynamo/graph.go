@@ -1183,10 +1183,18 @@ func GenerateBasePodSpec(
 	}
 
 	// Inject GMS sidecar with DRA shared GPU access when GPU memory service is enabled.
-	if isGMSEnabled(component) {
+	if IsGMSEnabled(component) {
 		claimTemplateName := GMSResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
-		if err := applyGPUMemoryService(&podSpec, component, claimTemplateName); err != nil {
+		if err := ApplyGPUMemoryService(&podSpec, component, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply GPU memory service: %w", err)
+		}
+	}
+
+	// Clone main container into two engine containers (active + standby) for failover.
+	// Runs after GMS so the main container already has DRA claims and shared volume.
+	if isFailoverEnabled(component) {
+		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
+			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
 	}
 

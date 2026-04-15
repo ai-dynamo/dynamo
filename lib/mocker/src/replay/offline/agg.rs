@@ -16,11 +16,11 @@ use super::state::OfflineWorkerSnapshot;
 use super::{
     components::{
         AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-        ScheduledWorkerCompletion, WorkerAdmission,
+        ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
     },
     state::AggRequestState,
 };
-use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector};
 use anyhow::bail;
@@ -59,7 +59,7 @@ struct AggRuntimeSnapshot {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct AggRuntimeStats;
 
-pub(super) struct AggRuntime {
+pub(in crate::replay) struct AggRuntime {
     now_ms: f64,
     next_worker_idx: usize,
     next_event_seq: u64,
@@ -71,6 +71,10 @@ pub(super) struct AggRuntime {
     router: Option<OfflineReplayRouter>,
     progress: ReplayProgress,
     stats: AggRuntimeStats,
+    /// Forward pass metrics accumulated between planner ticks.
+    fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    /// Traffic statistics accumulated between planner ticks.
+    traffic: TrafficAccumulator,
     #[cfg(test)]
     worker_active_requests: Vec<Vec<Uuid>>,
     #[cfg(test)]
@@ -79,7 +83,7 @@ pub(super) struct AggRuntime {
 
 impl AggRuntime {
     /// Create an aggregated offline runtime seeded from an explicit request queue.
-    pub(super) fn new(
+    pub(in crate::replay) fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -99,7 +103,7 @@ impl AggRuntime {
     }
 
     /// Create an aggregated offline runtime whose admissions come from a workload driver.
-    pub(super) fn new_workload(
+    pub(in crate::replay) fn new_workload(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -139,7 +143,7 @@ impl AggRuntime {
             )?),
         };
         let capture_kv_events = router.is_some();
-        let engine = EngineComponent::new(
+        let mut engine = EngineComponent::new(
             SimulationWorkerStage::Aggregated,
             EnginePassMode::Visible,
             (0..num_workers)
@@ -152,6 +156,7 @@ impl AggRuntime {
                 })
                 .collect(),
         );
+        engine.set_scaling_args(args, capture_kv_events);
 
         Ok(Self {
             now_ms: 0.0,
@@ -168,6 +173,8 @@ impl AggRuntime {
             stats: AggRuntimeStats::default(),
             #[cfg(not(test))]
             stats: AggRuntimeStats,
+            fpm_buffer: Vec::new(),
+            traffic: TrafficAccumulator::new(),
             #[cfg(test)]
             worker_active_requests: vec![Vec::new(); num_workers],
             #[cfg(test)]
@@ -208,11 +215,13 @@ impl AggRuntime {
         }
     }
 
-    /// Pick the next worker in round-robin order.
+    /// Pick the next active worker in round-robin order.
     fn next_worker(&mut self) -> usize {
-        let worker_idx = self.next_worker_idx;
-        self.next_worker_idx = (self.next_worker_idx + 1) % self.engine.worker_count();
-        worker_idx
+        let active = self.engine.active_worker_ids();
+        debug_assert!(!active.is_empty(), "no active workers for round-robin");
+        let idx = self.next_worker_idx % active.len();
+        self.next_worker_idx = idx + 1;
+        active[idx]
     }
 
     /// Record which worker accepted a request and refresh in-flight stats.
@@ -281,7 +290,10 @@ impl AggRuntime {
         );
 
         if self.router.is_none() {
-            self.requests.insert(uuid, AggRequestState::new_running());
+            self.requests.insert(
+                uuid,
+                AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
+            );
             let worker_idx = self.next_worker();
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
@@ -346,9 +358,11 @@ impl AggRuntime {
                 }
                 self.record_router_pending();
             }
-            self.requests.remove(&signal.uuid).ok_or_else(|| {
+            let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
+            self.traffic
+                .on_request(removed_state.input_tokens, removed_state.output_tokens);
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
             self.progress.inc_completed();
@@ -465,6 +479,7 @@ impl AggRuntime {
     }
 
     fn handle_engine_effects(&mut self, effects: EngineEffects) -> anyhow::Result<()> {
+        self.fpm_buffer.extend(effects.fpm_snapshots);
         self.apply_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
             let payload = self.engine.on_scheduled_completion(payload)?;
@@ -496,8 +511,92 @@ impl AggRuntime {
         Ok(())
     }
 
+    // ------------------------------------------------------------------
+    // Planner integration: step-based execution
+    // ------------------------------------------------------------------
+
+    /// Advance the simulation up to `until_ms` simulated time, then pause.
+    /// Returns `true` if the replay is done (no more work).
+    pub(in crate::replay) fn advance_to(&mut self, until_ms: f64) -> anyhow::Result<bool> {
+        self.drain_current_timestamp()?;
+
+        while !self.is_done() {
+            let Some(next_timestamp_ms) = self.next_timestamp() else {
+                bail!(
+                    "offline replay reached a dead end with {} in-flight requests remaining",
+                    self.cluster_in_flight()
+                );
+            };
+
+            if next_timestamp_ms > until_ms {
+                break;
+            }
+
+            self.now_ms = next_timestamp_ms;
+            self.drain_current_timestamp()?;
+        }
+
+        Ok(self.is_done())
+    }
+
+    /// Current simulated time in milliseconds.
+    pub(in crate::replay) fn now_ms(&self) -> f64 {
+        self.now_ms
+    }
+
+    /// Number of active (non-pending-removal) workers.
+    pub(in crate::replay) fn active_worker_count(&self) -> usize {
+        self.engine.active_worker_ids().len()
+    }
+
+    /// Total worker count including pending-removal.
+    pub(in crate::replay) fn total_worker_count(&self) -> usize {
+        self.engine.worker_count()
+    }
+
+    /// Drain accumulated FPM snapshots since the last drain.
+    pub(in crate::replay) fn drain_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
+        std::mem::take(&mut self.fpm_buffer)
+    }
+
+    /// Drain accumulated traffic stats since the last drain.
+    pub(in crate::replay) fn drain_traffic(&mut self) -> (f64, usize, f64, f64) {
+        self.traffic.drain(self.now_ms)
+    }
+
+    /// Apply a scaling decision: set the target number of workers.
+    /// Scale-up is immediate; scale-down removes the worker from the router
+    /// immediately (so no new requests land on it) and lets it drain in-flight
+    /// work in the engine.
+    pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
+        let (added, newly_marked) = self.engine.apply_target_count(target_workers);
+        if let Some(router) = self.router.as_mut() {
+            for id in added {
+                router.add_worker(id)?;
+            }
+            for id in newly_marked {
+                router.remove_worker(id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Finalize the replay: finish progress bar, return collector and stats.
+    pub(in crate::replay::offline) fn finalize(self) -> (TraceCollector, AggRuntimeStats) {
+        self.progress.finish();
+        (self.collector, self.stats)
+    }
+
+    /// Finalize the replay and return the simulation report directly.
+    pub(in crate::replay) fn finalize_report(self) -> crate::replay::TraceSimulationReport {
+        let (collector, _stats) = self.finalize();
+        collector.finish()
+    }
+
     /// Run the aggregated offline replay until all arrivals and worker work are exhausted.
-    pub(super) fn run(mut self) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
+    pub(in crate::replay::offline) fn run(
+        mut self,
+    ) -> anyhow::Result<(TraceCollector, AggRuntimeStats)> {
         self.drain_current_timestamp()?;
 
         while !self.is_done() {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -63,14 +64,14 @@ func gmsBasePodSpec() corev1.PodSpec {
 
 func TestApplyGPUMemoryService_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
+	err := ApplyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
 func TestApplyGPUMemoryService_MainContainerTransformed(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
+	err := ApplyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	main := ps.Containers[0]
@@ -82,53 +83,56 @@ func TestApplyGPUMemoryService_MainContainerTransformed(t *testing.T) {
 
 	// Should have DRA claim
 	require.Len(t, main.Resources.Claims, 1)
-	assert.Equal(t, gmsDRAClaimName, main.Resources.Claims[0].Name)
+	assert.Equal(t, gmsruntime.DRAClaimName, main.Resources.Claims[0].Name)
 
 	// Should have shared volume mount
 	var hasSharedMount bool
 	for _, vm := range main.VolumeMounts {
-		if vm.Name == gmsSharedVolumeName && vm.MountPath == gmsSharedMountPath {
+		if vm.Name == gmsruntime.SharedVolumeName && vm.MountPath == gmsruntime.SharedMountPath {
 			hasSharedMount = true
 		}
 	}
 	assert.True(t, hasSharedMount, "main container should have gms-shared volume mount")
 
-	// Should have TMPDIR
+	// Should have TMPDIR and GMS_SOCKET_DIR
 	envMap := envToMap(main.Env)
-	assert.Equal(t, gmsSharedMountPath, envMap["TMPDIR"])
+	assert.Equal(t, gmsruntime.SharedMountPath, envMap["TMPDIR"])
+	assert.Equal(t, gmsruntime.SharedMountPath, envMap["GMS_SOCKET_DIR"])
 }
 
 func TestApplyGPUMemoryService_GMSSidecarInjected(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
+	err := ApplyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	require.Len(t, ps.InitContainers, 1)
 	gms := ps.InitContainers[0]
-	assert.Equal(t, "gms-weights", gms.Name)
+	assert.Equal(t, gmsruntime.ServerContainerName, gms.Name)
 	assert.Equal(t, "test-image:latest", gms.Image)
-	assert.Equal(t, []string{"bash", "-c"}, gms.Command)
-	assert.Contains(t, gms.Args[0], "gpu_memory_service --device")
+	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, gms.Command)
 	assert.NotNil(t, gms.RestartPolicy)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gms.RestartPolicy)
+	require.NotNil(t, gms.StartupProbe)
+	assert.Equal(t, int32(1), gms.StartupProbe.PeriodSeconds)
+	assert.Equal(t, int32(300), gms.StartupProbe.FailureThreshold)
 
-	// GMS sidecar should have DRA claim
+	// GMS sidecar should have DRA claim copied from main
 	require.Len(t, gms.Resources.Claims, 1)
-	assert.Equal(t, gmsDRAClaimName, gms.Resources.Claims[0].Name)
+	assert.Equal(t, gmsruntime.DRAClaimName, gms.Resources.Claims[0].Name)
 
 	// GMS sidecar should have TMPDIR
 	gmsEnv := envToMap(gms.Env)
-	assert.Equal(t, gmsSharedMountPath, gmsEnv["TMPDIR"])
+	assert.Equal(t, gmsruntime.SharedMountPath, gmsEnv["TMPDIR"])
 }
 
 func TestApplyGPUMemoryService_SharedVolume(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
+	err := ApplyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	var found bool
 	for _, v := range ps.Volumes {
-		if v.Name == gmsSharedVolumeName {
+		if v.Name == gmsruntime.SharedVolumeName {
 			assert.NotNil(t, v.EmptyDir)
 			found = true
 		}
@@ -138,7 +142,7 @@ func TestApplyGPUMemoryService_SharedVolume(t *testing.T) {
 
 func TestApplyGPUMemoryService_GPUToleration(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
+	err := ApplyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	var found bool
@@ -153,17 +157,17 @@ func TestApplyGPUMemoryService_GPUToleration(t *testing.T) {
 
 func TestApplyGPUMemoryService_DRAResourceClaim(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
+	err := ApplyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	require.Len(t, ps.ResourceClaims, 1)
-	assert.Equal(t, gmsDRAClaimName, ps.ResourceClaims[0].Name)
+	assert.Equal(t, gmsruntime.DRAClaimName, ps.ResourceClaims[0].Name)
 	assert.Equal(t, "myapp-worker-gpu", *ps.ResourceClaims[0].ResourceClaimTemplateName)
 }
 
 func TestApplyGPUMemoryService_PreservesExistingEnv(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
+	err := ApplyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	main := ps.Containers[0]
@@ -174,38 +178,32 @@ func TestApplyGPUMemoryService_PreservesExistingEnv(t *testing.T) {
 
 func TestApplyGPUMemoryService_SingleContainer(t *testing.T) {
 	ps := gmsBasePodSpec()
-	err := applyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
+	err := ApplyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
 	require.NoError(t, err)
 
-	// Should still have exactly 1 regular container (no duplication)
 	assert.Len(t, ps.Containers, 1)
 	assert.Equal(t, "main", ps.Containers[0].Name)
 }
 
-// --- GMS sidecar helpers ---
+func TestApplyGPUMemoryService_ResolvesMainByName(t *testing.T) {
+	ps := gmsBasePodSpec()
+	// Prepend a sidecar so main is NOT Containers[0]
+	sidecar := corev1.Container{Name: "sidecar", Image: "sidecar:latest"}
+	ps.Containers = append([]corev1.Container{sidecar}, ps.Containers...)
+	require.Equal(t, "sidecar", ps.Containers[0].Name)
 
-func TestGmsWrapperScript_TwoTagsPerDevice(t *testing.T) {
-	script := gmsWrapperScript(3)
-	assert.Contains(t, script, "for dev in 0 1 2")
-	assert.Contains(t, script, "--tag weights")
-	assert.Contains(t, script, "--tag kv_cache")
-	assert.Contains(t, script, "trap 'kill 0")
-	assert.Contains(t, script, "wait -n")
-}
+	err := ApplyGPUMemoryService(&ps, gmsComponent(2), "myapp-worker-gpu")
+	require.NoError(t, err)
 
-func TestGmsReadyCheckCommand_TwoSocketsPerGPU(t *testing.T) {
-	cmd := gmsReadyCheckCommand(2)
-	assert.Equal(t, "sh", cmd[0])
-	assert.Equal(t, "-c", cmd[1])
-	assert.Contains(t, cmd[2], "gms_*.sock")
-	// 2 GPUs * 2 tags = 4 sockets
-	assert.Contains(t, cmd[2], "-ge 4")
-}
+	// Sidecar should be untouched
+	assert.Equal(t, "sidecar", ps.Containers[0].Name)
+	assert.Empty(t, ps.Containers[0].Resources.Claims)
 
-func TestGmsReadyCheckCommand_SingleGPU(t *testing.T) {
-	cmd := gmsReadyCheckCommand(1)
-	// 1 GPU * 2 tags = 2 sockets
-	assert.Contains(t, cmd[2], "-ge 2")
+	// Main should have DRA claim
+	main := ps.Containers[1]
+	assert.Equal(t, "main", main.Name)
+	require.Len(t, main.Resources.Claims, 1)
+	assert.Equal(t, gmsruntime.DRAClaimName, main.Resources.Claims[0].Name)
 }
 
 // --- GenerateGMSResourceClaimTemplate ---
@@ -268,13 +266,13 @@ func TestGMSResourceClaimTemplateName(t *testing.T) {
 // --- isGMSEnabled ---
 
 func TestIsGMSEnabled(t *testing.T) {
-	assert.True(t, isGMSEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	assert.True(t, IsGMSEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
 		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
 	}))
-	assert.False(t, isGMSEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+	assert.False(t, IsGMSEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
 		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: false},
 	}))
-	assert.False(t, isGMSEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
+	assert.False(t, IsGMSEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
 }
 
 // --- getGPUCount ---
