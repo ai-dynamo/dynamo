@@ -72,6 +72,7 @@ def teardown_module(module):
         else:
             os.environ[key] = prev
 
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.integration,
