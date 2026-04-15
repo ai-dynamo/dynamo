@@ -348,16 +348,21 @@ impl ConnectorLeader {
 // These tests exercise `reconcile_state` and `compute_outcome` directly via a
 // minimal `TestLeader` stub of the `Leader` trait. They cover Cases A/B/C/D
 // from the design and the multi-shard walk + first-hole semantics. Async
-// shard variants use `AsyncSessionResult::new_complete_for_test` /
-// `new_pending_for_test` to construct terminal/pending states without a
-// real session.
+// shard variants construct `AsyncSessionResult`s directly from the public
+// `::new` constructor with pre-filled status/blocks, so the tests don't
+// require the kvbm-engine `testing` feature.
 
 #[cfg(test)]
 mod reconcile_tests {
     use super::*;
-    use kvbm_engine::leader::{AsyncSessionResult, FindMatchesResult, MatchBreakdown, ReadyResult};
+    use kvbm_engine::leader::{
+        AsyncSessionResult, FindMatchesResult, MatchBreakdown, OnboardingStatus, ReadyResult,
+        SessionId,
+    };
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
-    use tokio::sync::watch;
+    use tokio::sync::{Mutex as TokioMutex, watch};
+    use uuid::Uuid;
 
     const BS: usize = 4;
 
@@ -420,21 +425,32 @@ mod reconcile_tests {
     /// the watch channel. The blocks vec is empty (only the count matters
     /// for reconciliation/walk logic).
     fn complete_async(matched: usize) -> FindMatchesResult {
-        FindMatchesResult::AsyncSession(AsyncSessionResult::new_complete_for_test(
-            matched,
-            vec![],
-            MatchBreakdown::default(),
+        // Drop the sender so the channel stays at its latest value; receivers
+        // will still observe `Complete { matched_blocks: matched }`.
+        let (status_tx, status_rx) =
+            watch::channel(OnboardingStatus::Complete { matched_blocks: matched });
+        drop(status_tx);
+        FindMatchesResult::AsyncSession(AsyncSessionResult::new(
+            SessionId::from(Uuid::nil()),
+            status_rx,
+            Arc::new(TokioMutex::new(Some(Vec::new()))),
+            Arc::new(TokioMutex::new(MatchBreakdown::default())),
+            None,
         ))
     }
 
     /// Construct a pending AsyncSession (status = Searching). Returns the
     /// session and the watch sender so tests can transition it later.
-    fn pending_async() -> (
-        FindMatchesResult,
-        watch::Sender<kvbm_engine::leader::OnboardingStatus>,
-    ) {
-        let (session, tx) = AsyncSessionResult::new_pending_for_test();
-        (FindMatchesResult::AsyncSession(session), tx)
+    fn pending_async() -> (FindMatchesResult, watch::Sender<OnboardingStatus>) {
+        let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
+        let session = AsyncSessionResult::new(
+            SessionId::from(Uuid::nil()),
+            status_rx,
+            Arc::new(TokioMutex::new(None)),
+            Arc::new(TokioMutex::new(MatchBreakdown::default())),
+            None,
+        );
+        (FindMatchesResult::AsyncSession(session), status_tx)
     }
 
     /// Build a fresh `OnboardingState` with a single shard.
