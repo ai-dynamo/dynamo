@@ -603,7 +603,18 @@ async def init_llm_worker(
             )
 
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+        if config.disaggregation_mode == DisaggregationMode.DECODE:
+            # Decode workers cannot process canary inference requests —
+            # they require disaggregated_params (KV cache state from prefill).
+            # Skip health check payload so canary doesn't target them.
+            health_check_payload = None
+            logging.info(
+                "Decode worker: skipping canary health check payload registration"
+            )
+        else:
+            health_check_payload = TrtllmHealthCheckPayload(
+                tokenizer=tokenizer
+            ).to_dict()
 
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to
