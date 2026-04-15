@@ -104,6 +104,24 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),
+    "aggregated_unified": VLLMConfig(
+        name="aggregated_unified",
+        directory=vllm_dir,
+        script_name="agg.sh",
+        script_args=["--unified"],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(3.8),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "aggregated_logprobs": VLLMConfig(
         name="aggregated_logprobs",
         directory=vllm_dir,
@@ -148,10 +166,6 @@ vllm_configs = {
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="lmcache does not support CUDA 13 as of v0.3.11",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -174,10 +188,6 @@ vllm_configs = {
             ),  # KV cache cap (2x safety over min=559_693_824)
             pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="lmcache does not support CUDA 13 as of v0.3.11",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -403,16 +413,12 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(14.9),  # actual profiled peak with kv-bytes
+            pytest.mark.profiled_vram_gib(19.2),  # actual profiled peak with kv-bytes
             pytest.mark.requested_vllm_kv_cache_bytes(
-                922_354_000
-            ),  # KV cache cap (2x safety over min=461_176_832)
-            pytest.mark.timeout(
-                300
-            ),  # ~7x observed 42.7s; 7B model loads ~48s on CI (A10G/L4)
+                4_318_854_000
+            ),  # KV cache cap (2x safety over min=2_159_426_560)
+            pytest.mark.timeout(360),  # 7B model; L4 machines need more headroom
             pytest.mark.nightly,
-            # https://github.com/ai-dynamo/dynamo/issues/4501
-            pytest.mark.xfail(strict=False),
         ],
         model="llava-hf/llava-1.5-7b-hf",
         script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
@@ -511,6 +517,7 @@ vllm_configs = {
                     ],
                     "tool_choice": "required",
                     "max_tokens": 1024,
+                    "temperature": 0,
                 },
                 repeat_count=1,
                 expected_response=[
@@ -524,16 +531,6 @@ vllm_configs = {
             )
         ],
     ),
-    # TODO: Enable this test case when we have 4 GPUs runners.
-    # "multimodal_disagg": VLLMConfig(
-    #     name="multimodal_disagg",
-    #     directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
-    #     script_name="disagg.sh",
-    #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
-    #     model="llava-hf/llava-1.5-7b-hf",
-    #     delayed_start=45,
-    #     script_args=["--model", "llava-hf/llava-1.5-7b-hf"],
-    # ),
     "completions_only": VLLMConfig(
         name="completions_only",
         directory=vllm_dir,
@@ -821,9 +818,12 @@ def lora_chat_payload(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.timeout(600)
+@pytest.mark.profiled_vram_gib(4.0)  # actual nvidia-smi peak with kv-bytes cap
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    941_712_000
+)  # 2x safety over min=470_855_680
+@pytest.mark.timeout(300)  # LoRA setup adds overhead; L4 machines are slower
 @pytest.mark.post_merge
-@pytest.mark.skip(reason="DYN-2260")
 def test_lora_aggregated(
     request,
     runtime_services_dynamic_ports,

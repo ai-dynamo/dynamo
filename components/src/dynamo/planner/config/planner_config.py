@@ -137,7 +137,7 @@ class PlannerConfig(BaseModel):
 
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
-        default=None,
+        default=24.0,
         description=(
             "Generate an HTML diagnostics report every N hours (simulated time). "
             "Set to None to disable periodic report generation."
@@ -146,6 +146,14 @@ class PlannerConfig(BaseModel):
     report_output_dir: str = Field(
         default="./planner_reports",
         description="Directory for HTML diagnostics reports.",
+    )
+    live_dashboard_port: int = Field(
+        default=8080,
+        description=(
+            "Port for the live diagnostics dashboard HTTP server. "
+            "Set to 0 to disable. When enabled, visit http://host:port/ "
+            "to view a real-time Plotly report of accumulated snapshots."
+        ),
     )
 
     @model_validator(mode="after")
