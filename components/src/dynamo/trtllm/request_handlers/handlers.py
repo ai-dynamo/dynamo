@@ -17,6 +17,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
 )
+from dynamo.trtllm.request_handlers.prefill_decode_handler import PrefillDecodeHandler
 
 configure_dynamo_logging()
 
@@ -28,6 +29,7 @@ class RequestHandlerFactory:
             "decode": DecodeHandler,
             "encode": EncodeHandler,
             "prefill_and_decode": AggregatedHandler,
+            "prefill_decode": PrefillDecodeHandler,
         }
 
     def get_request_handler(self, config: RequestHandlerConfig) -> HandlerBase:

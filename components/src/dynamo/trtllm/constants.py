@@ -16,6 +16,7 @@ class DisaggregationMode(Enum):
     PREFILL = "prefill"
     DECODE = "decode"
     ENCODE = "encode"
+    PREFILL_DECODE = "prefill_decode"
 
 
 class Modality(Enum):

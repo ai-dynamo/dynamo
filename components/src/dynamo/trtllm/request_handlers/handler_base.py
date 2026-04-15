@@ -598,7 +598,8 @@ class HandlerBase(BaseGenerativeHandler):
         )
 
         if (
-            self.disaggregation_mode == DisaggregationMode.DECODE
+            self.disaggregation_mode
+            in (DisaggregationMode.DECODE, DisaggregationMode.PREFILL_DECODE)
             and has_prefill_metadata
         ):
             # Use prompt/token_ids from PREFILL, skip image re-processing
@@ -797,6 +798,9 @@ class HandlerBase(BaseGenerativeHandler):
             logging.error(f"DECODE: Request keys: {list(request.keys())}")
             raise ValueError("Disaggregated params are required for decode mode")
 
+        # PREFILL_DECODE mode: disaggregated_params is None when prefill was
+        # skipped (conditional prefill). The engine runs as aggregated in that case.
+
         num_output_tokens_so_far = 0
 
         sampling_params = self._override_sampling_params(
@@ -897,11 +901,17 @@ class HandlerBase(BaseGenerativeHandler):
             )
 
             # In disagg decode mode, wrap abort() to defer until first token
-            # (KV transfer complete).
+            # (KV transfer complete). For PREFILL_DECODE, only defer when
+            # disaggregated_params is set (prefill was done, KV transfer in flight).
+            needs_deferred_abort = (
+                self.disaggregation_mode == DisaggregationMode.DECODE
+                or (
+                    self.disaggregation_mode == DisaggregationMode.PREFILL_DECODE
+                    and disaggregated_params is not None
+                )
+            )
             abort_guard = (
-                _DeferredAbort(generation_result)
-                if self.disaggregation_mode == DisaggregationMode.DECODE
-                else None
+                _DeferredAbort(generation_result) if needs_deferred_abort else None
             )
 
             # Monitor for cancellation triggers and cancel by calling abort()

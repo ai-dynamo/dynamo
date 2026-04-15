@@ -14,7 +14,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
-use super::{InnerPrefillRouter, PrefillRouter};
+use super::{ConditionalPrefillStrategy, InnerPrefillRouter, PrefillRouter};
 use crate::{
     discovery::ModelManager,
     kv_router::KvPushRouter,
@@ -44,6 +44,7 @@ impl PrefillRouter {
             is_eagle: false,
             deactivated: std::sync::atomic::AtomicBool::new(false),
             activated: std::sync::atomic::AtomicBool::new(false),
+            conditional_strategy: None,
         })
     }
 
@@ -59,6 +60,7 @@ impl PrefillRouter {
         model_name: String,
         namespace: String,
         is_eagle: bool,
+        conditional_strategy: Option<Arc<dyn ConditionalPrefillStrategy>>,
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -76,6 +78,7 @@ impl PrefillRouter {
             is_eagle,
             deactivated: std::sync::atomic::AtomicBool::new(false),
             activated: std::sync::atomic::AtomicBool::new(false),
+            conditional_strategy,
         });
 
         // Spawn background task to wait for activation

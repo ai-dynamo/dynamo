@@ -248,6 +248,7 @@ async def async_main():
         active_prefill_tokens_threshold=config.active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac=config.active_prefill_tokens_threshold_frac,
         enforce_disagg=config.enforce_disagg,
+        conditional_prefill_max_effective_isl=config.conditional_prefill_max_effective_isl,
     )
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,

@@ -25,11 +25,13 @@ use crate::{
 };
 
 mod activation;
+pub mod conditional;
 mod execution;
 mod inner;
 mod types;
 
 use inner::InnerPrefillRouter;
+pub use conditional::ConditionalPrefillStrategy;
 pub use types::PrefillError;
 use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override};
 
@@ -61,6 +63,8 @@ pub struct PrefillRouter {
     /// Used by `can_serve_requests()` to gate enforce_disagg readiness so a cold-started
     /// strict-disagg model isn't listed before the prefill has rendezvoused.
     activated: AtomicBool,
+    /// Optional per-request heuristic to skip prefill and route directly to decode.
+    conditional_strategy: Option<Arc<dyn ConditionalPrefillStrategy>>,
 }
 
 impl Drop for PrefillRouter {
@@ -100,6 +104,60 @@ impl
                 return Err(anyhow::anyhow!(PrefillError::NotActivated));
             }
             return next.generate(context.map(|_| req)).await;
+        }
+
+        // Check conditional prefill heuristic: if the strategy says to skip prefill,
+        // route directly to decode as an aggregated request.
+        if let Some(strategy) = &self.conditional_strategy {
+            // If the strategy needs KV overlap info, query the prefill-side indexer
+            // and store effective ISL in extra_args for the strategy to read.
+            if strategy.needs_kv_overlap() {
+                if let Some(InnerPrefillRouter::KvRouter(kv_router)) =
+                    self.prefill_router.get()
+                {
+                    let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
+                    if let Ok((_worker, overlap_blocks)) = kv_router
+                        .chooser
+                        .find_best_match(
+                            None, // no context_id
+                            routing_token_ids,
+                            block_mm_infos,
+                            req.router_config_override.as_ref(),
+                            false, // update_states: read-only query
+                            None,  // lora_name
+                            0.0,   // priority_jump
+                            None,  // expected_output_tokens
+                            None,  // pinned_worker
+                            None,  // allowed_worker_ids
+                        )
+                        .await
+                    {
+                        let block_size = kv_router.chooser.block_size() as usize;
+                        let cached_tokens = overlap_blocks as usize * block_size;
+                        let effective_isl = req.token_ids.len().saturating_sub(cached_tokens);
+
+                        let extra = req.extra_args.get_or_insert_with(|| serde_json::json!({}));
+                        if let Some(obj) = extra.as_object_mut() {
+                            obj.insert(
+                                conditional::EFFECTIVE_ISL_KEY.to_string(),
+                                serde_json::Value::from(effective_isl),
+                            );
+                        }
+                    }
+                }
+            }
+
+            if strategy.should_skip_prefill(&req) {
+                tracing::debug!(
+                    strategy = ?strategy,
+                    token_count = req.token_ids.len(),
+                    effective_isl = req.extra_args.as_ref()
+                        .and_then(|a| a.get(conditional::EFFECTIVE_ISL_KEY))
+                        .and_then(|v| v.as_u64()),
+                    "Conditional prefill: skipping prefill, routing directly to decode"
+                );
+                return next.generate(context.map(|_| req)).await;
+            }
         }
 
         // Ensure tracker exists for routing decisions in disaggregated mode.

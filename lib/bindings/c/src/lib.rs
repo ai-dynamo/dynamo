@@ -788,6 +788,7 @@ pub unsafe extern "C" fn create_routers(
             model_name.clone(),
             actual_namespace.clone(),
             enable_eagle,
+            None, // conditional_strategy: not exposed via C bindings for now
         );
 
         // Spawn background discovery watcher for prefill workers.

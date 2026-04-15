@@ -417,7 +417,8 @@ async def init_llm_worker(
         # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
         runtime_config.enable_local_indexer = (
             config.enable_local_indexer
-            and config.disaggregation_mode != DisaggregationMode.DECODE
+            and config.disaggregation_mode
+            not in (DisaggregationMode.DECODE, DisaggregationMode.PREFILL_DECODE)
         )
         # Set data_parallel_size for attention DP mode
         # This enables the router's scheduler to correctly iterate over all dp_ranks

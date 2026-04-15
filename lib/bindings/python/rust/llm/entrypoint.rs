@@ -17,6 +17,7 @@ use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::ChatEngineFactoryCallback;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
+use dynamo_llm::kv_router::prefill_router::conditional::IslThresholdStrategy;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
@@ -246,12 +247,14 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     enforce_disagg: bool,
+    /// If set, skip prefill for requests with effective ISL (after KV cache overlap) below this threshold
+    conditional_prefill_max_effective_isl: Option<usize>,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, conditional_prefill_max_effective_isl=None))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -259,6 +262,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
+        conditional_prefill_max_effective_isl: Option<usize>,
     ) -> Self {
         Self {
             router_mode: mode,
@@ -267,12 +271,17 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             enforce_disagg,
+            conditional_prefill_max_effective_isl,
         }
     }
 }
 
 impl From<RouterConfig> for RsRouterConfig {
     fn from(rc: RouterConfig) -> RsRouterConfig {
+        let conditional_strategy = rc
+            .conditional_prefill_max_effective_isl
+            .map(|max_isl| IslThresholdStrategy::new(max_isl));
+
         RsRouterConfig {
             router_mode: rc.router_mode.into(),
             kv_router_config: rc.kv_router_config.inner,
@@ -282,6 +291,7 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
             enforce_disagg: rc.enforce_disagg,
+            conditional_strategy,
         }
     }
 }

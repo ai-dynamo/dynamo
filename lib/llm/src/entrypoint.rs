@@ -17,7 +17,8 @@ use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
-    local_model::LocalModel, model_card::ModelDeploymentCard,
+    kv_router::prefill_router::ConditionalPrefillStrategy, local_model::LocalModel,
+    model_card::ModelDeploymentCard,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
@@ -39,6 +40,8 @@ pub struct RouterConfig {
     /// Load threshold configuration for busy detection
     pub load_threshold_config: LoadThresholdConfig,
     pub enforce_disagg: bool,
+    /// Optional per-request heuristic to skip prefill and route directly to decode.
+    pub conditional_strategy: Option<Arc<dyn ConditionalPrefillStrategy>>,
 }
 
 impl RouterConfig {
@@ -48,6 +51,7 @@ impl RouterConfig {
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
+            conditional_strategy: None,
         }
     }
 
@@ -58,6 +62,14 @@ impl RouterConfig {
 
     pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
         self.enforce_disagg = enforce_disagg;
+        self
+    }
+
+    pub fn with_conditional_strategy(
+        mut self,
+        strategy: Option<Arc<dyn ConditionalPrefillStrategy>>,
+    ) -> Self {
+        self.conditional_strategy = strategy;
         self
     }
 }

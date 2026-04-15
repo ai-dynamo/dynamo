@@ -60,6 +60,7 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
     enforce_disagg: bool
+    conditional_prefill_max_effective_isl: Optional[int]
 
     migration_limit: int
     migration_max_seq_len: Optional[int]
@@ -297,6 +298,22 @@ class FrontendArgGroup(ArgGroup):
                 "has not activated yet (e.g., prefill workers still registering). This is stricter "
                 "than the default: without this flag, requests arriving before prefill workers are "
                 "discovered fall through to aggregated decode-only routing."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--conditional-prefill-max-effective-isl",
+            env_var="DYN_CONDITIONAL_PREFILL_MAX_EFFECTIVE_ISL",
+            arg_type=int,
+            default=None,
+            dest="conditional_prefill_max_effective_isl",
+            help=(
+                "Enable conditional prefill: skip the remote prefill worker for requests with "
+                "effective input sequence length (ISL after KV cache overlap) below this "
+                "threshold (in tokens). Short-prompt or high-cache-overlap requests are routed "
+                "directly to decode as aggregated requests, avoiding KV transfer overhead. "
+                "Only effective in disaggregated mode with KV routing."
             ),
         )
 

@@ -529,6 +529,7 @@ impl ModelWatcher {
                         model_name.clone(),
                         namespace.clone(),
                         card.runtime_config.enable_eagle,
+                        self.router_config.conditional_strategy.clone(),
                     )
                 });
 
