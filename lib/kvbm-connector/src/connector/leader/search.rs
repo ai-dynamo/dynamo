@@ -427,8 +427,9 @@ mod reconcile_tests {
     fn complete_async(matched: usize) -> FindMatchesResult {
         // Drop the sender so the channel stays at its latest value; receivers
         // will still observe `Complete { matched_blocks: matched }`.
-        let (status_tx, status_rx) =
-            watch::channel(OnboardingStatus::Complete { matched_blocks: matched });
+        let (status_tx, status_rx) = watch::channel(OnboardingStatus::Complete {
+            matched_blocks: matched,
+        });
         drop(status_tx);
         FindMatchesResult::AsyncSession(AsyncSessionResult::new(
             SessionId::from(Uuid::nil()),
