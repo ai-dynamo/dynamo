@@ -64,7 +64,9 @@ DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 
 async def get_engine_runtime_config(
-    engine: TensorRTLLMEngine, config: Config
+    engine: TensorRTLLMEngine,
+    config: Config,
+    engine_args: Optional[dict] = None,
 ) -> ModelRuntimeConfig:
     """Retrieve runtime configuration from TensorRT-LLM engine."""
     runtime_config = ModelRuntimeConfig()
@@ -79,11 +81,17 @@ async def get_engine_runtime_config(
         )
 
         # Extract max number of sequences
-        runtime_config.max_num_seqs = config.max_batch_size
+        # Use engine_args when available so that --extra-engine-args /
+        # --override-engine-args overrides are respected.
+        runtime_config.max_num_seqs = (engine_args or {}).get(
+            "max_batch_size", config.max_batch_size
+        )
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
 
-        # Get max_num_batched_tokens from config
-        runtime_config.max_num_batched_tokens = config.max_num_tokens
+        # Get max_num_batched_tokens from resolved engine args
+        runtime_config.max_num_batched_tokens = (engine_args or {}).get(
+            "max_num_tokens", config.max_num_tokens
+        )
         logging.info(
             f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
         )
@@ -415,8 +423,12 @@ async def init_llm_worker(
         # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
         # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
         # Both parameters control the same thing: how many requests can be processed simultaneously
-        runtime_config.max_num_seqs = config.max_batch_size
-        runtime_config.max_num_batched_tokens = config.max_num_tokens
+        runtime_config.max_num_seqs = engine_args.get(
+            "max_batch_size", config.max_batch_size
+        )
+        runtime_config.max_num_batched_tokens = engine_args.get(
+            "max_num_tokens", config.max_num_tokens
+        )
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.exclude_tools_when_tool_choice_none = (
