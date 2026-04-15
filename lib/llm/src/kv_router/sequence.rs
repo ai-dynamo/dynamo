@@ -143,35 +143,58 @@ pub async fn create_multi_worker_sequences(
 mod tests {
     use super::*;
     use dynamo_runtime::{DistributedRuntime, Runtime};
+    use tokio::time::Instant;
 
     #[test]
     fn test_active_sequences_shared_blocks() {
         let block_size = 4;
         let mut seq_manager = ActiveSequences::new(block_size);
+        let decay_now = Instant::now();
 
-        seq_manager.add_request("request_1".to_string(), Some(vec![1, 2, 3]), 12, 0, None);
+        seq_manager.add_request(
+            "request_1".to_string(),
+            Some(vec![1, 2, 3]),
+            12,
+            0,
+            None,
+            decay_now,
+        );
         assert_eq!(seq_manager.active_blocks(), 3);
-        assert_eq!(seq_manager.active_tokens(), 12);
+        assert_eq!(seq_manager.active_tokens(decay_now), 12);
 
-        seq_manager.add_request("request_2".to_string(), Some(vec![4]), 4, 0, None);
+        seq_manager.add_request(
+            "request_2".to_string(),
+            Some(vec![4]),
+            4,
+            0,
+            None,
+            decay_now,
+        );
         assert_eq!(seq_manager.active_blocks(), 4);
-        assert_eq!(seq_manager.active_tokens(), 16);
+        assert_eq!(seq_manager.active_tokens(decay_now), 16);
 
-        seq_manager.add_request("request_3".to_string(), Some(vec![1, 2, 3, 4]), 16, 16, None);
+        seq_manager.add_request(
+            "request_3".to_string(),
+            Some(vec![1, 2, 3, 4]),
+            16,
+            16,
+            None,
+            decay_now,
+        );
         assert_eq!(seq_manager.active_blocks(), 4);
-        assert_eq!(seq_manager.active_tokens(), 16);
+        assert_eq!(seq_manager.active_tokens(decay_now), 16);
 
-        seq_manager.free(&"request_2".to_string());
+        seq_manager.free(&"request_2".to_string(), decay_now);
         assert_eq!(seq_manager.active_blocks(), 4);
-        assert_eq!(seq_manager.active_tokens(), 12);
+        assert_eq!(seq_manager.active_tokens(decay_now), 12);
 
-        seq_manager.free(&"request_3".to_string());
+        seq_manager.free(&"request_3".to_string(), decay_now);
         assert_eq!(seq_manager.active_blocks(), 3);
-        assert_eq!(seq_manager.active_tokens(), 12);
+        assert_eq!(seq_manager.active_tokens(decay_now), 12);
 
-        seq_manager.free(&"request_1".to_string());
+        seq_manager.free(&"request_1".to_string(), decay_now);
         assert_eq!(seq_manager.active_blocks(), 0);
-        assert_eq!(seq_manager.active_tokens(), 0);
+        assert_eq!(seq_manager.active_tokens(decay_now), 0);
     }
 
     #[tokio::test]
@@ -225,6 +248,7 @@ mod tests {
                 cached_tokens: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
+                prefill_load_hint: None,
                 worker: WorkerWithDpRank::new(0, 0),
                 lora_name: None,
             })
@@ -238,6 +262,7 @@ mod tests {
                 cached_tokens: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
+                prefill_load_hint: None,
                 worker: WorkerWithDpRank::new(0, 1),
                 lora_name: None,
             })
@@ -251,6 +276,7 @@ mod tests {
                 cached_tokens: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
+                prefill_load_hint: None,
                 worker: WorkerWithDpRank::new(1, 0),
                 lora_name: None,
             })
@@ -259,7 +285,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         let blocks_phase1 = seq_manager_1.active_blocks();
-        let tokens_phase1 = seq_manager_1.active_tokens();
+        let tokens_phase1 = seq_manager_1.active_tokens(Instant::now());
 
         let worker_0_dp0 = WorkerWithDpRank::new(0, 0);
         let worker_0_dp1 = WorkerWithDpRank::new(0, 1);
@@ -290,15 +316,15 @@ mod tests {
             "Worker 1 dp_rank 0 should have 16 active tokens (from request_2 added by seq_manager_2)"
         );
 
-        seq_manager_1.free(&"request_2".to_string())?;
+        seq_manager_1.free(&"request_2".to_string(), Instant::now())?;
 
-        seq_manager_2.free(&"request_0".to_string())?;
-        seq_manager_2.free(&"request_1".to_string())?;
+        seq_manager_2.free(&"request_0".to_string(), Instant::now())?;
+        seq_manager_2.free(&"request_1".to_string(), Instant::now())?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         let blocks_phase2 = seq_manager_2.active_blocks();
-        let tokens_phase2 = seq_manager_2.active_tokens();
+        let tokens_phase2 = seq_manager_2.active_tokens(Instant::now());
 
         let all_workers = vec![
             WorkerWithDpRank::new(0, 0),
@@ -378,6 +404,7 @@ mod tests {
                 cached_tokens: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
+                prefill_load_hint: None,
                 worker: WorkerWithDpRank::from_worker_id(0),
                 lora_name: None,
             })
@@ -391,6 +418,7 @@ mod tests {
                 cached_tokens: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
+                prefill_load_hint: None,
                 worker: WorkerWithDpRank::from_worker_id(1),
                 lora_name: None,
             })
@@ -404,6 +432,7 @@ mod tests {
                 cached_tokens: 0,
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
+                prefill_load_hint: None,
                 worker: WorkerWithDpRank::from_worker_id(2),
                 lora_name: None,
             })
@@ -411,7 +440,7 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
-        let tokens_phase1 = seq_manager_1.active_tokens();
+        let tokens_phase1 = seq_manager_1.active_tokens(Instant::now());
 
         let worker_0 = WorkerWithDpRank::from_worker_id(0);
         let worker_1 = WorkerWithDpRank::from_worker_id(1);
@@ -430,17 +459,17 @@ mod tests {
             "Worker 2 should have 16 active tokens (from request_2 added by seq_manager_2)"
         );
 
-        seq_manager_1.mark_prefill_completed(&"request_2".to_string())?;
-        seq_manager_1.free(&"request_2".to_string())?;
+        seq_manager_1.mark_prefill_completed(&"request_2".to_string(), Instant::now())?;
+        seq_manager_1.free(&"request_2".to_string(), Instant::now())?;
 
-        seq_manager_2.mark_prefill_completed(&"request_0".to_string())?;
-        seq_manager_2.mark_prefill_completed(&"request_1".to_string())?;
-        seq_manager_2.free(&"request_0".to_string())?;
-        seq_manager_2.free(&"request_1".to_string())?;
+        seq_manager_2.mark_prefill_completed(&"request_0".to_string(), Instant::now())?;
+        seq_manager_2.mark_prefill_completed(&"request_1".to_string(), Instant::now())?;
+        seq_manager_2.free(&"request_0".to_string(), Instant::now())?;
+        seq_manager_2.free(&"request_1".to_string(), Instant::now())?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
-        let tokens_phase2 = seq_manager_2.active_tokens();
+        let tokens_phase2 = seq_manager_2.active_tokens(Instant::now());
 
         for worker_id in 0..=2 {
             let worker = WorkerWithDpRank::from_worker_id(worker_id);

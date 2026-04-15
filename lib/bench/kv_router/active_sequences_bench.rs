@@ -366,6 +366,7 @@ async fn apply_entry(
     worker: WorkerWithDpRank,
     entry: SequenceTraceEntry,
 ) {
+    let decay_now = tokio::time::Instant::now();
     match entry {
         SequenceTraceEntry::Add {
             request_id,
@@ -392,10 +393,10 @@ async fn apply_entry(
                 .await;
         }
         SequenceTraceEntry::PrefillComplete { request_id } => {
-            let _ = multi.mark_prefill_completed(&request_id);
+            let _ = multi.mark_prefill_completed(&request_id, decay_now);
         }
         SequenceTraceEntry::Free { request_id } => {
-            let _ = multi.free(&request_id);
+            let _ = multi.free(&request_id, decay_now);
         }
     }
 }

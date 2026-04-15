@@ -40,7 +40,7 @@ pub use self::multi_worker_sequence::{
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
-pub use config::{KvRouterConfig, RouterConfigOverride, RouterQueuePolicy};
+pub use config::{KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy};
 pub use indexer::{LowerTierContinuation, LowerTierIndexer, MaybeError, SyncIndexer, ThreadPoolIndexer};
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
@@ -50,6 +50,7 @@ pub use protocols::{
 pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;
 pub use scheduling::LocalScheduler;
+pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
 pub use selector::{DefaultWorkerSelector, WorkerSelector};

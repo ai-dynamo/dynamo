@@ -21,6 +21,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -121,52 +122,39 @@ func (v *LeaseAwareValidator) shouldSkipValidation(obj runtime.Object) bool {
 	return false
 }
 
-// DGDReplicasModifierSuffixes defines suffixes for service accounts that are authorized
-// to modify DGD replicas when scaling adapter is enabled.
-// Service accounts matching any of these suffixes are allowed regardless of namespace.
-var DGDReplicasModifierSuffixes = []string{
-	// Dynamo operator controller manager (handles DGDSA reconciliation)
-	// Example: "dynamo-platform-dynamo-operator-controller-manager"
-	"-dynamo-operator-controller-manager",
-
-	// Planner service account (manages DGD replicas for autoscaling)
-	// Example: "planner-serviceaccount"
-	"planner-serviceaccount",
-}
-
 // CanModifyDGDReplicas checks if the request comes from a service account authorized
 // to modify DGD replicas when scaling adapter is enabled.
-// Service accounts are identified by username format: system:serviceaccount:<namespace>:<name>
 //
-// Authorized service accounts (by suffix):
-// - *-dynamo-operator-controller-manager (for DGDSA reconciliation)
-// - *planner-serviceaccount (for Planner autoscaling)
-func CanModifyDGDReplicas(userInfo authenticationv1.UserInfo) bool {
+// operatorPrincipal is the full Kubernetes username
+// (system:serviceaccount:<namespace>:<name>) of the operator's own service account,
+// auto-detected at startup via the Kubernetes Downward API. It may be empty if
+// the Downward API env vars were not set.
+//
+// Authorization is checked in two ways:
+//  1. Exact match against operatorPrincipal.
+//  2. Name-only match for the planner SA, which the operator creates in every DGD
+//     namespace with a well-known constant name. Because the namespace is only known
+//     at runtime, it cannot be enumerated statically.
+func CanModifyDGDReplicas(operatorPrincipal string, userInfo authenticationv1.UserInfo) bool {
 	username := userInfo.Username
 
-	// Service accounts have username format: system:serviceaccount:<namespace>:<name>
 	if !strings.HasPrefix(username, "system:serviceaccount:") {
 		return false
 	}
 
-	// Parse: system:serviceaccount:<namespace>:<name>
-	parts := strings.Split(username, ":")
-	if len(parts) != 4 {
-		return false
+	if operatorPrincipal != "" && username == operatorPrincipal {
+		webhookCommonLog.V(1).Info("allowing DGD replicas modification",
+			"username", username,
+			"matchType", "operatorPrincipal")
+		return true
 	}
 
-	namespace := parts[2]
-	saName := parts[3]
-
-	// Check against authorized suffixes
-	for _, suffix := range DGDReplicasModifierSuffixes {
-		if strings.HasSuffix(saName, suffix) {
-			webhookCommonLog.V(1).Info("allowing DGD replicas modification",
-				"serviceAccount", saName,
-				"namespace", namespace,
-				"matchedSuffix", suffix)
-			return true
-		}
+	parts := strings.Split(username, ":")
+	if len(parts) == 4 && parts[3] == consts.PlannerServiceAccountName {
+		webhookCommonLog.V(1).Info("allowing DGD replicas modification",
+			"username", username,
+			"matchType", "plannerSA")
+		return true
 	}
 
 	return false

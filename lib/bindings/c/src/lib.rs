@@ -404,6 +404,10 @@ pub struct CRoutingResult {
     pub prefill_worker_id: u64,
     /// Decode worker ID
     pub decode_worker_id: u64,
+    /// Data parallel rank selected for the prefill worker
+    pub prefill_dp_rank: u32,
+    /// Data parallel rank selected for the decode worker
+    pub decode_dp_rank: u32,
     /// Token IDs (needed for add_request callback)
     pub token_ids: *mut u32,
     /// Number of tokens in the request
@@ -416,6 +420,8 @@ impl Default for CRoutingResult {
             is_disaggregated: false,
             prefill_worker_id: 0,
             decode_worker_id: 0,
+            prefill_dp_rank: 0,
+            decode_dp_rank: 0,
             token_ids: ptr::null_mut(),
             token_count: 0,
         }
@@ -449,7 +455,7 @@ impl RouterHandles {
         lora_name: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
-    ) -> Result<u64, QueryRouterResult> {
+    ) -> Result<(u64, Option<u32>), QueryRouterResult> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
         }
@@ -464,7 +470,6 @@ impl RouterHandles {
                 allowed_worker_ids,
             )
             .await
-            .map(|(worker_id, _dp_rank)| worker_id)
             .map_err(|e| {
                 tracing::error!(error = ?e, "Prefill query failed");
                 QueryRouterResult::ErrQueryFailed
@@ -514,6 +519,7 @@ impl RouterHandles {
                 false,
                 None,
                 0.0,
+                None,
                 None,
                 allowed_worker_ids,
             )
@@ -711,6 +717,7 @@ pub unsafe extern "C" fn create_routers(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
+                None,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
@@ -776,6 +783,7 @@ pub unsafe extern "C" fn create_routers(
             RouterMode::KV,
             block_size,
             Some(prefill_config),
+            None,
             enforce_disagg,
             model_name.clone(),
             actual_namespace.clone(),
@@ -1203,25 +1211,29 @@ pub unsafe extern "C" fn route_prefill_request(
     let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
 
     let result = handles.runtime.secondary().block_on(async {
-        let prefill_worker_id = handles
+        let (prefill_worker_id, prefill_dp_rank) = handles
             .query_prefill_worker(&tokens, None, false, None, 0.0, allowed_worker_ids)
             .await?;
 
+        let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
+
         tracing::info!(
             prefill_worker_id = prefill_worker_id,
+            prefill_dp_rank = prefill_dp_rank,
             token_count = tokens.len(),
             "Routed prefill request"
         );
 
-        Ok(prefill_worker_id)
+        Ok((prefill_worker_id, prefill_dp_rank))
     });
 
     match result {
-        Ok(prefill_worker_id) => {
+        Ok((prefill_worker_id, prefill_dp_rank)) => {
             let out = unsafe { &mut *out_result };
             *out = CRoutingResult::default();
             out.is_disaggregated = true;
             out.prefill_worker_id = prefill_worker_id;
+            out.prefill_dp_rank = prefill_dp_rank;
             write_tokens_to_result(&tokens, out);
             QueryRouterResult::Ok
         }
@@ -1290,6 +1302,7 @@ pub unsafe extern "C" fn route_decode_request(
             *out = CRoutingResult::default();
             out.is_disaggregated = is_disaggregated;
             out.decode_worker_id = decode_worker.worker_id;
+            out.decode_dp_rank = decode_worker.dp_rank;
             write_tokens_to_result(&tokens, out);
             QueryRouterResult::Ok
         }

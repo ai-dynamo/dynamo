@@ -28,7 +28,7 @@ use derive_builder::Builder;
 use dynamo_runtime::config::env_is_truthy;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::Discovery;
-use dynamo_runtime::logging::make_request_span;
+use dynamo_runtime::logging::{make_inference_request_span, make_system_request_span};
 use dynamo_runtime::metrics::{
     frontend_perf::ensure_frontend_perf_metrics_registered_prometheus,
     request_plane::ensure_request_plane_metrics_registered_prometheus,
@@ -39,6 +39,19 @@ use std::net::SocketAddr;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
+
+/// Middleware that echoes `x-request-id` from request to response headers.
+async fn echo_request_id_header(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let x_request_id = request.headers().get("x-request-id").cloned();
+    let mut response = next.run(request).await;
+    if let Some(value) = x_request_id {
+        response.headers_mut().insert("x-request-id", value);
+    }
+    response
+}
 
 /// HTTP service shared state
 pub struct State {
@@ -491,69 +504,73 @@ impl HttpServiceConfigBuilder {
             tracing::warn!("Failed to register transport metrics: {}", e);
         }
 
-        let mut router = axum::Router::new();
-
         let mut all_docs = Vec::new();
 
-        let mut routes = vec![
+        // Shared on_response callback for both system and inference routes
+        let on_response = |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
+            let status = response.status();
+            let latency_ms = latency.as_millis();
+            if status.is_server_error() || status.is_client_error() {
+                tracing::error!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
+            } else {
+                tracing::info!(status = %status.as_u16(), latency_ms = %latency_ms, "http response sent");
+            }
+        };
+
+        // System routes (health, metrics, models) — debug-level spans
+        let system_routes = vec![
             metrics::router(
                 registry,
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
                 config.drt_metrics,
             ),
-            super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
+            if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+                super::anthropic::anthropic_models_router(
+                    state.clone(),
+                    var(HTTP_SVC_MODELS_PATH_ENV).ok(),
+                )
+            } else {
+                super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok())
+            },
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
-
-        let endpoint_routes =
-            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config.request_template);
-        routes.extend(endpoint_routes);
-        for (route_docs, route) in routes {
-            router = router.merge(route);
+        let mut system_router = axum::Router::new();
+        for (route_docs, route) in system_routes {
+            system_router = system_router.merge(route);
             all_docs.extend(route_docs);
         }
+        // Inference routes (completions, chat, embeddings, etc.) — info-level spans
+        let endpoint_routes =
+            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config.request_template);
+        let mut inference_router = axum::Router::new();
+        for (route_docs, route) in endpoint_routes {
+            inference_router = inference_router.merge(route);
+            all_docs.extend(route_docs);
+        }
+        inference_router = inference_router.layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_inference_request_span)
+                .on_response(on_response),
+        );
 
-        // Add OpenAPI documentation routes (must be after all other routes so it can document them)
-        // Note: The path parameter is currently unused as SwaggerUi requires static paths
+        // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
             super::openapi_docs::openapi_router(all_docs.clone(), None);
-        router = router.merge(openapi_route);
+        system_router = system_router.merge(openapi_route);
         all_docs.extend(openapi_docs);
 
-        // Add span for tracing
-        // Add on_response callback for logging response status code
-        router = router.layer(
+        system_router = system_router.layer(
             TraceLayer::new_for_http()
-                .make_span_with(make_request_span)
-                .on_response(
-                    |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
-                        let status = response.status();
-                        let latency_ms = latency.as_millis();
-
-                        if status.is_server_error() {
-                            tracing::error!(
-                                status = %status.as_u16(),
-                                latency_ms = %latency_ms,
-                                "request completed with server error"
-                            );
-                        } else if status.is_client_error() {
-                            tracing::warn!(
-                                status = %status.as_u16(),
-                                latency_ms = %latency_ms,
-                                "request completed with client request error"
-                            );
-                        } else {
-                            tracing::debug!(
-                                status = %status.as_u16(),
-                                latency_ms = %latency_ms,
-                                "request completed"
-                            );
-                        }
-                    },
-                ),
+                .make_span_with(make_system_request_span)
+                .on_response(on_response),
         );
+
+        let router = system_router.merge(inference_router);
+
+        // Echo x-request-id from request to response headers for client correlation
+        let router = router.layer(axum::middleware::from_fn(echo_request_id_header));
 
         Ok(HttpService {
             state,

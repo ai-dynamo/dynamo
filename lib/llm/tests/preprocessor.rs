@@ -76,7 +76,11 @@ async fn maybe_download_model(local_path: &str, model: &str, revision: &str) -> 
     let repo = Repo::with_revision(String::from(model), RepoType::Model, String::from(revision));
 
     let files_to_download = vec!["config.json", "tokenizer.json", "tokenizer_config.json"];
-    let optional_files = vec!["generation_config.json", "chat_template.jinja"];
+    let optional_files = vec![
+        "generation_config.json",
+        "chat_template.jinja",
+        "chat_template.json",
+    ];
     let repo_builder = api.repo(repo);
 
     let mut downloaded_path = PathBuf::new();

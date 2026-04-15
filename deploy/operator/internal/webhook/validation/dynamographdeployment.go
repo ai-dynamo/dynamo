@@ -98,6 +98,11 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 		return nil, err
 	}
 
+	// Validate that failover-enabled services have the required discovery mode annotation
+	if err := v.validateFailoverRequiresDiscoveryMode(); err != nil {
+		return nil, err
+	}
+
 	var allWarnings admission.Warnings
 
 	// Validate each service
@@ -115,8 +120,9 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 // ValidateUpdate performs stateful validation comparing old and new DynamoGraphDeployment.
 // userInfo is used for identity-based validation (replica protection).
 // If userInfo is nil, replica changes for DGDSA-enabled services are rejected (fail closed).
+// operatorPrincipal is the full Kubernetes SA username of the operator for authorization.
 // Returns warnings and error.
-func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo, operatorPrincipal string) (admission.Warnings, error) {
 	var warnings admission.Warnings
 
 	// Validate immutable fields
@@ -131,7 +137,7 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 
 	// Validate replicas changes for services with scaling adapter enabled
 	// Pass userInfo (may be nil - will fail closed for DGDSA-enabled services)
-	if err := v.validateReplicasChanges(old, userInfo); err != nil {
+	if err := v.validateReplicasChanges(old, userInfo, operatorPrincipal); err != nil {
 		return warnings, err
 	}
 
@@ -224,9 +230,9 @@ func (v *DynamoGraphDeploymentValidator) validateServiceTopology(old *nvidiacomv
 // validateReplicasChanges checks if replicas were changed for services with scaling adapter enabled.
 // Only authorized service accounts (operator controller, planner) can modify these fields.
 // If userInfo is nil, all replica changes for DGDSA-enabled services are rejected (fail closed).
-func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo) error {
+func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv1alpha1.DynamoGraphDeployment, userInfo *authenticationv1.UserInfo, operatorPrincipal string) error {
 	// If the request comes from an authorized service account, allow the change
-	if userInfo != nil && internalwebhook.CanModifyDGDReplicas(*userInfo) {
+	if userInfo != nil && internalwebhook.CanModifyDGDReplicas(operatorPrincipal, *userInfo) {
 		return nil
 	}
 
@@ -463,6 +469,17 @@ func (v *DynamoGraphDeploymentValidator) validateAnnotations() error {
 		default:
 			errs = append(errs, fmt.Errorf("annotation %s has invalid value %q: must be \"mp\" or \"ray\"",
 				consts.KubeAnnotationVLLMDistributedExecutorBackend, value))
+		}
+	}
+
+	// Validate kube discovery mode
+	if value, exists := annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists {
+		switch value {
+		case "pod", "container":
+			// valid
+		default:
+			errs = append(errs, fmt.Errorf("annotation %s has invalid value %q: must be \"pod\" or \"container\"",
+				consts.KubeAnnotationDynamoKubeDiscoveryMode, value))
 		}
 	}
 
@@ -774,6 +791,32 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 
 	if oldID != newID {
 		return fmt.Errorf("spec.restart.id cannot be changed while a rolling update is %s", phase)
+	}
+
+	return nil
+}
+
+// validateFailoverRequiresDiscoveryMode checks that when any service has
+// failover enabled, the DGD carries the nvidia.com/dynamo-kube-discovery-mode
+// annotation set to "container". Failover pods produce multiple engine
+// containers that each need their own discovery identity.
+func (v *DynamoGraphDeploymentValidator) validateFailoverRequiresDiscoveryMode() error {
+	hasFailover := false
+	for _, svc := range v.deployment.Spec.Services {
+		if svc != nil && svc.Failover != nil && svc.Failover.Enabled {
+			hasFailover = true
+			break
+		}
+	}
+	if !hasFailover {
+		return nil
+	}
+
+	annotations := v.deployment.GetAnnotations()
+	if annotations == nil || annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode] != "container" {
+		return fmt.Errorf(
+			"failover requires per-container K8s discovery; set annotation %q to %q on the DynamoGraphDeployment",
+			consts.KubeAnnotationDynamoKubeDiscoveryMode, "container")
 	}
 
 	return nil

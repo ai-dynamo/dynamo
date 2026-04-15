@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,6 +40,8 @@ const (
 
 	WorkerIDHeader        = "x-worker-instance-id"
 	PrefillWorkerIDHeader = "x-prefill-instance-id"
+	DpRankHeader          = "x-dp-rank"
+	PrefillDpRankHeader   = "x-prefill-dp-rank"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
 
 	// decodeStateKey is the key used to store routing state in PluginState
@@ -55,6 +58,7 @@ var _ rc.ResponseComplete = &DynDecodeScorer{}
 // DecodeRoutingState holds routing information passed from Score() to PreRequest().
 type DecodeRoutingState struct {
 	WorkerID        string
+	DpRank          uint32
 	PrefillWorkerID string
 	TokenData       []int64
 }
@@ -66,6 +70,7 @@ func (s *DecodeRoutingState) Clone() plugins.StateData {
 	}
 	clone := &DecodeRoutingState{
 		WorkerID:        s.WorkerID,
+		DpRank:          s.DpRank,
 		PrefillWorkerID: s.PrefillWorkerID,
 	}
 	if s.TokenData != nil {
@@ -157,8 +162,10 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	}
 
 	workerIDStr := fmt.Sprintf("%d", result.WorkerID)
+	dpRankStr := strconv.FormatUint(uint64(result.DpRank), 10)
 	logger.V(logutil.DEFAULT).Info("DynDecodeScorer: decode worker selected",
 		"decodeWorkerID", workerIDStr,
+		"decodeDpRank", result.DpRank,
 		"isDisaggregated", isDisaggregated,
 		"tokenCount", len(result.TokenData))
 
@@ -167,6 +174,7 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 		req.Headers = map[string]string{}
 	}
 	req.Headers[WorkerIDHeader] = workerIDStr
+	req.Headers[DpRankHeader] = dpRankStr
 
 	if isDisaggregated {
 		req.Headers[RoutingModeHeader] = "disaggregated"
@@ -188,6 +196,7 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	if req.RequestId != "" {
 		routingState := &DecodeRoutingState{
 			WorkerID:  workerIDStr,
+			DpRank:    result.DpRank,
 			TokenData: result.TokenData,
 		}
 		s.pluginState.Write(req.RequestId, plugins.StateKey(decodeStateKey), routingState)
@@ -226,7 +235,7 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.LL
 		return
 	}
 
-	if addErr := dynscorer.CallAddRequest(request.RequestId, state.TokenData, workerIDUint, 0); addErr != nil {
+	if addErr := dynscorer.CallAddRequest(request.RequestId, state.TokenData, workerIDUint, state.DpRank); addErr != nil {
 		logger.V(logutil.DEFAULT).Error(addErr, "DynDecodeScorer PreRequest: failed to add request",
 			"requestID", request.RequestId)
 		return
@@ -235,6 +244,7 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.LL
 	logger.V(logutil.VERBOSE).Info("DynDecodeScorer PreRequest: registered request",
 		"requestID", request.RequestId,
 		"workerID", state.WorkerID,
+		"dpRank", state.DpRank,
 		"tokenCount", len(state.TokenData))
 }
 

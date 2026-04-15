@@ -60,9 +60,9 @@ impl SchedulingPolicy for LcfsPolicy {
 
 /// Weighted Shortest Processing Time (Smith's rule):
 /// key = (1 + priority_jump) / new_tokens, where new_tokens estimates the
-/// actual prefill cost by subtracting the max KV cache overlap from ISL.
-/// We use max because the downstream selector routes to the best-overlap
-/// worker, so the realized overlap is well-approximated by the best available.
+/// actual prefill cost by subtracting the effective KV cache overlap from ISL.
+/// Unpinned requests use the best available overlap. Pinned requests use only
+/// the overlap for their exact target worker so queue ordering matches routing.
 ///
 /// Optimizes for average TTFT — minimizes total weighted completion time
 /// (Smith 1956). Short or high-priority requests are scheduled before
@@ -159,6 +159,7 @@ mod tests {
             lora_name: None,
             priority_jump,
             expected_output_tokens: None,
+            pinned_worker: None,
             allowed_worker_ids: None,
             resp_tx: None,
         }
@@ -304,6 +305,28 @@ mod tests {
         );
         let key = policy.enqueue_key(Duration::ZERO, &req);
         let expected = OrderedFloat(1.0 / 64.0);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn wspt_uses_pinned_worker_overlap_when_present() {
+        let policy = WsptPolicy { block_size: 16 };
+        let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60), (1, 1)]));
+        req.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+
+        let key = policy.enqueue_key(Duration::ZERO, &req);
+        let expected = OrderedFloat(1.0 / 1008.0);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn wspt_missing_pinned_overlap_uses_zero() {
+        let policy = WsptPolicy { block_size: 16 };
+        let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
+        req.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+
+        let key = policy.enqueue_key(Duration::ZERO, &req);
+        let expected = OrderedFloat(1.0 / 1024.0);
         assert_eq!(key, expected);
     }
 

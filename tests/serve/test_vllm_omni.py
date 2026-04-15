@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import dataclasses
 import logging
 import os
-import tempfile
 from dataclasses import dataclass, field
+from io import BytesIO
 from typing import Any
 
 import pytest
@@ -91,15 +92,13 @@ class VideoGenerationPayload(BasePayload):
 class I2VPayload(VideoGenerationPayload):
     """Payload for image-to-video via /v1/videos with input_reference."""
 
-    _tmp_dir: Any = field(default=None, init=False, repr=False, compare=False)
-
     def __post_init__(self):
         from PIL import Image
 
-        self._tmp_dir = tempfile.TemporaryDirectory()
-        path = os.path.join(self._tmp_dir.name, "input.png")
-        Image.new("RGB", (64, 64), color="red").save(path)
-        self.body["input_reference"] = path
+        image_buffer = BytesIO()
+        Image.new("RGB", (64, 64), color="red").save(image_buffer, format="PNG")
+        image_b64 = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+        self.body["input_reference"] = f"data:image/png;base64,{image_b64}"
 
 
 @dataclass
@@ -144,6 +143,32 @@ class VLLMOmniConfig(EngineConfig):
 
 
 vllm_omni_configs = {
+    "omni_disagg_t2i": VLLMOmniConfig(
+        name="omni_disagg_t2i",
+        directory=vllm_dir,
+        script_name="disagg_omni_glm_image.sh",
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(1200),
+            pytest.mark.skip(
+                reason="zai-org/GLM-Image requires ~23GB per GPU across 2 GPUs, exceeds CI capacity"
+            ),
+        ],
+        model="zai-org/GLM-Image",
+        request_payloads=[
+            ImageGenerationPayload(
+                body={
+                    "prompt": "A red apple on a white table",
+                    "size": "1024x1024",
+                    "response_format": "url",
+                },
+                repeat_count=1,
+                expected_response=[],
+                expected_log=[],
+            ),
+        ],
+    ),
     "omni_text": VLLMOmniConfig(
         name="omni_text",
         directory=vllm_dir,

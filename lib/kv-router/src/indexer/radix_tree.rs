@@ -71,6 +71,14 @@ impl RadixBlock {
             recent_uses: VecDeque::new(),
         }
     }
+
+    #[inline]
+    fn drop_worker(&mut self, worker: WorkerWithDpRank) {
+        self.workers.remove(&worker);
+        if self.workers.is_empty() {
+            self.children.clear();
+        }
+    }
 }
 
 pub struct RadixTree {
@@ -476,12 +484,7 @@ impl RadixTree {
                         }
                     };
 
-                    let mut guard = entry.borrow_mut();
-                    guard.workers.remove(&worker);
-                    if guard.workers.is_empty() {
-                        // if no workers are using this block, that is true for all children
-                        guard.children.clear();
-                    }
+                    entry.borrow_mut().drop_worker(worker);
                     // remove the block from the worker's lookup table
                     worker_lookup.remove(&block);
                 }
@@ -509,11 +512,7 @@ impl RadixTree {
         for worker in workers {
             if let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) {
                 for (_, block) in blocks {
-                    block.borrow_mut().workers.remove(&worker);
-                    // If no workers are using this block, that is true for all children
-                    if block.borrow().workers.is_empty() {
-                        block.borrow_mut().children.clear();
-                    }
+                    block.borrow_mut().drop_worker(worker);
                 }
 
                 if keep_worker {
@@ -532,10 +531,7 @@ impl RadixTree {
         let key = WorkerWithDpRank { worker_id, dp_rank };
         if let Some(blocks) = self.lookup.remove(&key) {
             for (_, block) in blocks {
-                block.borrow_mut().workers.remove(&key);
-                if block.borrow().workers.is_empty() {
-                    block.borrow_mut().children.clear();
-                }
+                block.borrow_mut().drop_worker(key);
             }
         }
     }

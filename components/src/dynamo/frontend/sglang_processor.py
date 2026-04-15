@@ -35,9 +35,20 @@ from .sglang_prepost import (
     create_parsers,
     preprocess_chat_request,
 )
-from .utils import PreprocessError, random_uuid, worker_warmup
+from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
 
 logger = logging.getLogger(__name__)
+
+
+def _runtime_config_parser_name(
+    mdc: ModelDeploymentCard,
+    key: str,
+) -> str | None:
+    runtime_config = mdc.runtime_config()
+    if not isinstance(runtime_config, dict):
+        return None
+    value = runtime_config.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _unsupported_n_error(n: int) -> dict[str, Any]:
@@ -173,7 +184,7 @@ def _build_dynamo_preproc(
     elif top_logprobs not in (None, 0):
         logprobs_val = top_logprobs
 
-    return {
+    preproc = {
         "model": model_name,
         "token_ids": prompt_token_ids,
         "stop_conditions": {
@@ -202,7 +213,15 @@ def _build_dynamo_preproc(
         },
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],
+        "routing": request.get("routing"),
     }
+
+    # Forward multimodal URLs so the backend handler can load the media.
+    mm_data = extract_mm_urls(request.get("messages", []))
+    if mm_data:
+        preproc["multi_modal_data"] = mm_data
+
+    return preproc
 
 
 class SglangProcessor:
@@ -403,6 +422,7 @@ class SglangProcessor:
                     stop_conditions=dynamo_preproc["stop_conditions"],
                     sampling_options=dynamo_preproc["sampling_options"],
                     output_options=dynamo_preproc["output_options"],
+                    multi_modal_data=dynamo_preproc.get("multi_modal_data"),
                 )
             else:
                 dynamo_stream = await self.router.generate(
@@ -544,8 +564,14 @@ class SglangEngineFactory:
 
         eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
-        tool_call_parser_name = self.tool_call_parser_name
-        reasoning_parser_name = self.reasoning_parser_name
+        tool_call_parser_name = (
+            self.tool_call_parser_name
+            or _runtime_config_parser_name(mdc, "tool_call_parser")
+        )
+        reasoning_parser_name = (
+            self.reasoning_parser_name
+            or _runtime_config_parser_name(mdc, "reasoning_parser")
+        )
 
         if tool_call_parser_name:
             logger.info("SGLang tool call parser: %s", tool_call_parser_name)

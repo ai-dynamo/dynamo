@@ -10,8 +10,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
 
 use crate::common::protocols::DirectRequest;
-use crate::replay::router::ReplayRouter;
 
+use super::ReplayRouter;
 use super::state::{
     LiveReplayMode, RequestRegistry, RequestState, SharedLiveRuntimeStats, WorkloadDispatchState,
     now_ms, request_uuid,

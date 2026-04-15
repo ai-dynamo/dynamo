@@ -14,9 +14,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
-use zeromq::{PubSocket, Socket, SocketSend};
 
 use super::tracker::{CacheStatusTracker, ConsolidatedEvent};
+use crate::utils::zmq::{bind_pub_socket, send_multipart};
 
 /// Event batch structure matching vLLM's format (array_like=True)
 /// Format: [timestamp, [events], data_parallel_rank]
@@ -185,9 +185,7 @@ impl KvEventConsolidatorPublisher {
         tracing::info!("Starting consolidated event publisher on {}", endpoint);
 
         // Create ZMQ PUB socket and bind
-        let mut socket = PubSocket::new();
-        socket
-            .bind(&endpoint)
+        let socket = bind_pub_socket(&endpoint)
             .await
             .with_context(|| format!("Failed to bind publisher to {}", endpoint))?;
 
@@ -263,16 +261,9 @@ impl KvEventConsolidatorPublisher {
                 Bytes::from(seq_bytes.to_vec()),
                 Bytes::from(payload),
             ];
+            let frames = frames.into_iter().map(|frame| frame.to_vec()).collect();
 
-            let msg = match zeromq::ZmqMessage::try_from(frames) {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::error!("Failed to create multipart ZMQ message: {:?}", e);
-                    continue;
-                }
-            };
-
-            if let Err(e) = socket.send(msg).await {
+            if let Err(e) = send_multipart(&socket, frames).await {
                 tracing::error!("Failed to send consolidated events: {}", e);
             } else {
                 tracing::debug!(

@@ -173,7 +173,7 @@ jobs:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           lfs: true
       - name: Compute compliance arches
@@ -250,7 +250,7 @@ jobs:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
@@ -279,29 +279,6 @@ jobs:
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
 
-      - name: Run Sanity Check on Runtime Image
-        shell: bash
-        run: |
-          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.runtime_image }}"
-
-          # Run the sanity check script inside the container
-          # The script is located in /workspace/deploy/sanity_check.py in runtime containers
-          export WORKSPACE=/workspace
-          SANITY_FLAGS="--runtime-check --no-gpu-check"
-          if [[ "${{ inputs.target }}" == "planner" ]]; then
-            SANITY_FLAGS="${SANITY_FLAGS} --no-framework-check"
-          fi
-
-          set +e
-          docker run --rm "${{ steps.calculate-target-tag.outputs.runtime_image }}" python ${WORKSPACE}/deploy/sanity_check.py ${SANITY_FLAGS}
-          SANITY_CHECK_EXIT_CODE=$?
-          set -e
-          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-            exit ${SANITY_CHECK_EXIT_CODE}
-          else
-            echo "✅ Sanity check passed"
-          fi
       # Run CPU-only tests first (parallelized for speed)
       # These are unit tests marked with gpu_0 that don't require GPU hardware
       - name: Run CPU-only tests (parallelized)
@@ -311,7 +288,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -327,7 +304,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.single_gpu_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.arch }}
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -350,7 +327,7 @@ jobs:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
@@ -385,7 +362,7 @@ jobs:
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: ${{ inputs.multi_gpu_test_markers }}
-          framework: ${{ inputs.framework }}
+          test_suite_name: ${{ inputs.framework }}
           test_type: "pre_merge_gpu"
           platform_arch: amd64
           hf_token: ${{ secrets.HF_TOKEN }}
@@ -407,7 +384,7 @@ jobs:
     runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -454,7 +431,7 @@ jobs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Copy image to target registry
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}

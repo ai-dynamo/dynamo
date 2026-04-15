@@ -8,11 +8,12 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # gpu_gb_to_total_fraction
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_vllm_gpu_mem_args
 source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default model
 MODEL="Qwen/Qwen3-0.6B"
+USE_UNIFIED=false
 
 # Parse command line arguments
 EXTRA_ARGS=()
@@ -21,6 +22,20 @@ while [[ $# -gt 0 ]]; do
         --model)
             MODEL="$2"
             shift 2
+            ;;
+        --unified)
+            USE_UNIFIED=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --model <name>       Specify model (default: $MODEL)"
+            echo "  --unified            Use unified_main entry point (Worker)"
+            echo "  -h, --help           Show this help message"
+            echo ""
+            echo "Any additional options are passed through to dynamo.vllm."
+            exit 0
             ;;
         *)
             EXTRA_ARGS+=("$1")
@@ -33,7 +48,10 @@ done
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 
-GPU_MEM_FRACTION=$(build_gpu_mem_args vllm --model "$MODEL" --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_CONCURRENT_SEQS")
+# Default KV cache cap from profiling (2x safety over min=560 MiB); ~3.8 GiB peak VRAM
+# Profiler/test framework overrides via env
+: "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=1119388000}"
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated Serving (1 GPU)" "$MODEL" "$HTTP_PORT"
@@ -44,11 +62,16 @@ python -m dynamo.frontend &
 
 # run worker
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
+WORKER_MODULE="dynamo.vllm"
+if [ "$USE_UNIFIED" = true ]; then
+    WORKER_MODULE="dynamo.vllm.unified_main"
+fi
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --model "$MODEL" --enforce-eager \
+    python -m "$WORKER_MODULE" --model "$MODEL" --enforce-eager \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
-    ${GPU_MEM_FRACTION:+--gpu-memory-utilization "$GPU_MEM_FRACTION"} "${EXTRA_ARGS[@]}" &
+    $GPU_MEM_ARGS \
+    "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

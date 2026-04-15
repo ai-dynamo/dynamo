@@ -1,44 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
-import base64
 import logging
-import tempfile
-import time
-import uuid
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
 import PIL.Image
-from diffusers.utils import export_to_video
 from fsspec.implementations.dirfs import DirFileSystem
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
-from dynamo.common.protocols.image_protocol import (
-    ImageData,
-    NvCreateImageRequest,
-    NvImagesResponse,
-)
-from dynamo.common.protocols.video_protocol import (
-    NvCreateVideoRequest,
-    NvVideosResponse,
-    VideoData,
-)
-from dynamo.common.storage import upload_to_fs
-from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.protocols.image_protocol import NvCreateImageRequest
+from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
-from dynamo.common.utils.video_utils import (
-    compute_num_frames,
-    normalize_video_frames,
-    parse_size,
-)
+from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
+from dynamo.vllm.omni.output_formatter import OutputFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +84,13 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
+
+        self.output_formatter = OutputFormatter(
+            model_name=config.served_model_name or config.model,
+            media_fs=media_output_fs,
+            media_http_url=media_output_http_url,
+            default_fps=getattr(config, "default_video_fps", 16),
+        )
 
         # Audio/TTS handler — composition, not inheritance.
         self.audio = AudioGenerationHandler(
@@ -189,55 +177,23 @@ class OmniHandler(BaseOmniHandler):
                 async for stage_output in self.engine_client.generate(
                     **generate_kwargs,
                 ):
-                    if (
-                        stage_output.final_output_type == "text"
-                        and stage_output.request_output
-                    ):
-                        chunk = self._format_text_chunk(
-                            stage_output.request_output,
-                            request_id,
-                            previous_text,
-                        )
-                        if chunk:
-                            output = stage_output.request_output.outputs[0]
-                            previous_text = output.text
-                            yield chunk
-
-                    elif (
-                        stage_output.final_output_type == "image"
-                        and stage_output.images
-                    ):
-                        # vllm-omni uses final_output_type="image" for both
-                        # image and video diffusion outputs. Use the parsed
-                        # request type to route to the correct formatter.
-                        if inputs.request_type == RequestType.VIDEO_GENERATION:
-                            chunk = await self._format_video_chunk(
-                                stage_output.images,
-                                request_id,
-                                fps=inputs.fps,
-                            )
-                        else:
-                            chunk = await self._format_image_chunk(
-                                stage_output.images,
-                                request_id,
-                                response_format=inputs.response_format,
-                                request_type=inputs.request_type,
-                            )
-                        if chunk:
-                            yield chunk
-
-                    elif stage_output.final_output_type == "audio":
-                        mm_output = stage_output.multimodal_output
-                        if mm_output:
-                            chunk = await self.audio.format_output(
-                                mm_output,
-                                request_id,
-                                response_format=inputs.response_format,
-                                request_type=inputs.request_type,
-                                speed=inputs.speed,
-                            )
-                            if chunk:
-                                yield chunk
+                    chunk = await self.output_formatter.format(
+                        stage_output,
+                        request_id,
+                        request_type=inputs.request_type,
+                        fps=inputs.fps,
+                        response_format=inputs.response_format,
+                        previous_text=previous_text,
+                        speed=inputs.speed,
+                    )
+                    if chunk:
+                        # Track text state for streaming delta
+                        if (
+                            stage_output.final_output_type == "text"
+                            and stage_output.request_output
+                        ):
+                            previous_text = stage_output.request_output.outputs[0].text
+                        yield chunk
 
             except EngineShutdown:
                 logger.info(f"Request {request_id} aborted due to shutdown")
@@ -404,220 +360,3 @@ class OmniHandler(BaseOmniHandler):
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
         )
-
-    async def _prepare_image_output(
-        self, images: list, request_id: str, response_format: str | None = None
-    ) -> list:
-        """Prepare image output for response.
-
-        Args:
-            images: List of PIL Image objects.
-            request_id: Unique request identifier.
-            response_format: Response format ("url" or "b64_json").
-
-        Returns:
-            List of image URLs or base64 data-URL strings.
-        """
-        outlist = []
-
-        for img in images:
-            buffer = BytesIO()
-            img.save(buffer, format="PNG")
-            image_bytes = buffer.getvalue()
-
-            if response_format == "url":
-                storage_path = f"images/{request_id}/{uuid.uuid4()}.png"
-                url = await upload_to_fs(
-                    self.media_output_fs,
-                    storage_path,
-                    image_bytes,
-                    self.media_output_http_url,
-                )
-                outlist.append(url)
-            elif response_format == "b64_json" or response_format is None:
-                img_base64 = base64.b64encode(image_bytes).decode("utf-8")
-                data_url = f"data:image/png;base64,{img_base64}"
-                outlist.append(data_url)
-            else:
-                raise ValueError(f"Invalid response format: {response_format}")
-        return outlist
-
-    async def _format_image_chunk(
-        self,
-        images: list,
-        request_id: str,
-        response_format: str | None = None,
-        request_type: RequestType = RequestType.IMAGE_GENERATION,
-    ) -> Dict[str, Any] | None:
-        """Format image output for the appropriate endpoint response.
-
-        Args:
-            images: List of PIL Image objects generated by AsyncOmni engine.
-            request_id: Unique request identifier.
-            response_format: Response format (url, b64_json, None).
-            request_type: Request type (chat completion, image generation).
-
-        Returns:
-            Formatted response dict, or None if no images generated.
-        """
-        if not images:
-            return self._error_chunk(request_id, "No images generated")
-
-        data_urls = await self._prepare_image_output(
-            images, request_id, response_format
-        )
-
-        if request_type == RequestType.CHAT_COMPLETION:
-            chunk = {
-                "id": request_id,
-                "created": int(time.time()),
-                "object": "chat.completion.chunk",
-                "model": self.config.served_model_name or self.config.model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "role": "assistant",
-                            "content": [
-                                {"type": "image_url", "image_url": {"url": data_url}}
-                                for data_url in data_urls
-                            ],
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-            }
-            return chunk
-        elif request_type == RequestType.IMAGE_GENERATION:
-            image_data_list = []
-            for data_url in data_urls:
-                if response_format == "url":
-                    image_data_list.append(ImageData(url=data_url))
-                elif response_format == "b64_json" or response_format is None:
-                    if data_url.startswith("data:image"):
-                        _, b64_part = data_url.split(",", 1)
-                        image_data_list.append(ImageData(b64_json=b64_part))
-                    else:
-                        image_data_list.append(ImageData(b64_json=data_url))
-                else:
-                    raise ValueError(f"Invalid response format: {response_format}")
-
-            output = NvImagesResponse(created=int(time.time()), data=image_data_list)
-            return output.model_dump()
-        else:
-            return None
-
-    async def _format_video_chunk(
-        self,
-        images: list,
-        request_id: str,
-        fps: int,
-    ) -> Dict[str, Any] | None:
-        """Convert diffusion output frames to MP4 and return as NvVideosResponse.
-
-        Args:
-            images: List of PIL Image frames from the diffusion stage.
-            request_id: Unique request identifier.
-            fps: Frames per second for the output video.
-
-        Returns:
-            ``NvVideosResponse.model_dump()`` dict, or ``None`` if no frames.
-        """
-        if not images:
-            return None
-
-        try:
-            start_time = time.time()
-
-            frame_list = normalize_video_frames(images)
-
-            logger.info(
-                f"Encoding {len(frame_list)} frames to MP4 for request {request_id} "
-                f"(fps={fps})"
-            )
-
-            # Encode frames to MP4 via temp file, then read bytes for upload
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as tmp:
-                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
-                video_bytes = tmp.read()
-
-            # Upload via filesystem
-            storage_path = f"videos/{request_id}.mp4"
-            video_url = await upload_to_fs(
-                self.media_output_fs,
-                storage_path,
-                video_bytes,
-                self.media_output_http_url,
-            )
-
-            logger.info(f"Video uploaded to {video_url} for request {request_id}")
-
-            inference_time = time.time() - start_time
-
-            response = NvVideosResponse(
-                id=request_id,
-                object="video",
-                model=self.config.served_model_name or self.config.model,
-                status="completed",
-                progress=100,
-                created=int(time.time()),
-                data=[VideoData(url=video_url)],
-                inference_time_s=inference_time,
-            )
-            return response.model_dump()
-
-        except Exception as e:
-            logger.error(f"Failed to encode video for request {request_id}: {e}")
-            error_response = NvVideosResponse(
-                id=request_id,
-                object="video",
-                model=self.config.served_model_name or self.config.model,
-                status="failed",
-                progress=0,
-                created=int(time.time()),
-                data=[],
-                error=str(e),
-            )
-            return error_response.model_dump()
-
-    def _format_text_chunk(
-        self,
-        request_output,
-        request_id: str,
-        previous_text: str,
-    ) -> Dict[str, Any] | None:
-        """Format text output as OpenAI chat completion chunk."""
-        if not request_output.outputs:
-            return self._error_chunk(request_id, "No outputs from engine")
-
-        output = request_output.outputs[0]
-
-        # Calculate delta text (new text since last chunk)
-        delta_text = output.text[len(previous_text) :]
-
-        chunk = {
-            "id": request_id,
-            "created": int(time.time()),
-            "object": "chat.completion.chunk",
-            "model": self.config.served_model_name or self.config.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": delta_text,
-                    },
-                    "finish_reason": (
-                        normalize_finish_reason(output.finish_reason)
-                        if output.finish_reason
-                        else None
-                    ),
-                }
-            ],
-        }
-
-        # Add usage on final chunk
-        if output.finish_reason:
-            chunk["usage"] = self._build_completion_usage(request_output)
-
-        return chunk

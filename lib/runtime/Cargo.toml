@@ -12,6 +12,9 @@ homepage.workspace = true
 repository.workspace = true
 description = "Dynamo Runtime Library"
 
+[package.metadata.cargo-machete]
+ignored = ["mio"]
+
 [features]
 default = []
 integration = []
@@ -29,8 +32,7 @@ anyhow = { workspace = true }
 async-nats = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-async_zmq = { workspace = true }
-zmq = { workspace = true }
+tmq = { workspace = true }
 lru = { version = "0.12" }
 axum = { workspace = true }
 blake3 = { workspace = true }
@@ -57,6 +59,7 @@ tokio-util = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto"] }
+mio = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 opentelemetry = { workspace = true }

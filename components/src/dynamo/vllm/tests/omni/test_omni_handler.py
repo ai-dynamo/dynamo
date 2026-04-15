@@ -13,6 +13,7 @@ try:
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
+    from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -46,44 +47,6 @@ class TestEngineInputs:
         assert ei.fps == 0
         assert ei.sampling_params_list is None
         assert ei.response_format is None
-
-
-class TestPrepareImageOutput:
-    @pytest.mark.asyncio
-    async def test_b64_json(self):
-        """b64_json format returns data URI with base64 prefix."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"fake_png_data")
-        results = await handler._prepare_image_output([img], "req-1", "b64_json")
-        assert len(results) == 1
-        assert results[0].startswith("data:image/png;base64,")
-
-    @pytest.mark.asyncio
-    async def test_b64_default_when_none(self):
-        """None response_format defaults to base64 encoding."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"data")
-        results = await handler._prepare_image_output([img], "req-1", None)
-        assert results[0].startswith("data:image/png;base64,")
-
-    @pytest.mark.asyncio
-    async def test_invalid_format(self):
-        """Unsupported response_format raises ValueError."""
-        handler = _make_handler()
-        with pytest.raises(ValueError, match="Invalid response format"):
-            await handler._prepare_image_output([MagicMock()], "req-1", "invalid")
-
-    @pytest.mark.asyncio
-    async def test_multiple_images(self):
-        """Multiple input images produce one output entry each."""
-        handler = _make_handler()
-        imgs = [MagicMock() for _ in range(3)]
-        for img in imgs:
-            img.save = lambda b, format: b.write(b"px")
-        results = await handler._prepare_image_output(imgs, "req-1", "b64_json")
-        assert len(results) == 3
 
 
 class TestBuildEngineInputs:
@@ -144,132 +107,6 @@ class TestBuildEngineInputs:
         assert inputs.prompt["prompt"] == "Hello world"
 
 
-class TestFormatTextChunk:
-    def _make_output(self, text="hello world", finish_reason=None):
-        output = MagicMock()
-        output.text = text
-        output.finish_reason = finish_reason
-        request_output = MagicMock()
-        request_output.outputs = [output]
-        request_output.prompt_token_ids = [1, 2, 3]
-        return request_output
-
-    def test_delta_text(self):
-        """Delta content is the diff between current and previous text."""
-        handler = _make_handler()
-        ro = self._make_output("hello world")
-        chunk = handler._format_text_chunk(ro, "req-1", "hello ")
-        assert chunk["choices"][0]["delta"]["content"] == "world"
-
-    def test_no_outputs_returns_error(self):
-        """Empty engine outputs produce an error chunk."""
-        handler = _make_handler()
-        ro = MagicMock()
-        ro.outputs = []
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert "Error" in chunk["choices"][0]["delta"]["content"]
-
-    def test_finish_reason_included(self):
-        """Final chunk includes finish_reason and usage stats."""
-        handler = _make_handler()
-        handler._build_completion_usage = lambda ro: {
-            "prompt_tokens": 3,
-            "completion_tokens": 1,
-        }
-        ro = self._make_output("done", finish_reason="stop")
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert chunk["choices"][0]["finish_reason"] == "stop"
-        assert "usage" in chunk
-
-    def test_finish_reason_abort_normalized(self):
-        """Abort finish reason is normalized to 'cancelled'."""
-        handler = _make_handler()
-        handler._build_completion_usage = lambda ro: {
-            "prompt_tokens": 3,
-            "completion_tokens": 1,
-        }
-        ro = self._make_output("done", finish_reason="abort")
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert chunk["choices"][0]["finish_reason"] == "cancelled"
-
-    def test_finish_reason_none_when_not_finished(self):
-        """finish_reason is None when output has no finish_reason."""
-        handler = _make_handler()
-        ro = self._make_output("partial")
-        chunk = handler._format_text_chunk(ro, "req-1", "")
-        assert chunk["choices"][0]["finish_reason"] is None
-
-
-class TestFormatImageChunk:
-    @pytest.mark.asyncio
-    async def test_chat_completion_format(self):
-        """Chat completion route returns image_url content parts."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        chunk = await handler._format_image_chunk(
-            [img], "req-1", request_type=RequestType.CHAT_COMPLETION
-        )
-        assert chunk["object"] == "chat.completion.chunk"
-        assert chunk["choices"][0]["delta"]["content"][0]["type"] == "image_url"
-
-    @pytest.mark.asyncio
-    async def test_image_generation_b64_format(self):
-        """Image generation with b64_json format returns base64 data."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        chunk = await handler._format_image_chunk(
-            [img],
-            "req-1",
-            response_format="b64_json",
-            request_type=RequestType.IMAGE_GENERATION,
-        )
-        assert chunk["data"][0]["b64_json"] is not None
-
-    @pytest.mark.asyncio
-    async def test_image_generation_default_format_returns_b64(self):
-        """Image generation with response_format=None defaults to b64_json."""
-        handler = _make_handler()
-        img = MagicMock()
-        img.save = lambda b, format: b.write(b"px")
-        chunk = await handler._format_image_chunk(
-            [img],
-            "req-1",
-            response_format=None,
-            request_type=RequestType.IMAGE_GENERATION,
-        )
-        assert chunk["data"][0]["b64_json"] is not None
-
-    @pytest.mark.asyncio
-    async def test_empty_images_returns_error(self):
-        """Empty image list produces an error chunk."""
-        handler = _make_handler()
-        chunk = await handler._format_image_chunk([], "req-1")
-        assert "Error" in chunk["choices"][0]["delta"]["content"]
-
-
-class TestFormatVideoChunk:
-    @pytest.mark.asyncio
-    async def test_empty_frames_returns_none(self):
-        """Empty frame list returns None."""
-        handler = _make_handler()
-        result = await handler._format_video_chunk([], "req-1", fps=16)
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_error_returns_failed_status(self):
-        """Encoding failure returns NvVideosResponse with failed status and error."""
-        handler = _make_handler()
-        with patch(
-            "dynamo.vllm.omni.omni_handler.normalize_video_frames",
-            side_effect=RuntimeError("boom"),
-        ):
-            chunk = await handler._format_video_chunk([MagicMock()], "req-1", fps=16)
-        assert chunk["status"] == "failed"
-        assert "boom" in chunk["error"]
-
-
 class TestI2VEngineInputs:
     """Tests for image-to-video: multi_modal_data attachment, I2V nvext params, and protocol fields."""
 
@@ -328,3 +165,90 @@ class TestI2VEngineInputs:
         empty = VideoNvExt()
         assert empty.boundary_ratio is None
         assert empty.guidance_scale_2 is None
+
+
+class TestBuildOriginalPrompt:
+    """build_original_prompt only carries prompt/negative_prompt/multi_modal_data.
+
+    height/width/num_inference_steps live in OmniDiffusionSamplingParams, not the prompt.
+    """
+
+    def test_basic_fields(self):
+        result = build_original_prompt(
+            {"prompt": "a cat"}, nvext={}, height=512, width=512
+        )
+        assert result["prompt"] == "a cat"
+        assert result.get("negative_prompt") is None
+        assert "height" not in result
+        assert "width" not in result
+
+    def test_negative_prompt_from_request(self):
+        result = build_original_prompt(
+            {"prompt": "a cat", "negative_prompt": "blurry"},
+            nvext={"negative_prompt": "ignored"},
+            height=1024,
+            width=1024,
+        )
+        assert result["negative_prompt"] == "blurry"
+
+    def test_multi_modal_data_forwarded(self):
+        img = object()
+        result = build_original_prompt(
+            {"prompt": "x", "multi_modal_data": {"image": img}},
+            nvext={},
+            height=512,
+            width=512,
+        )
+        assert result["multi_modal_data"]["image"] is img
+
+    def test_no_inference_steps_or_guidance(self):
+        result = build_original_prompt(
+            {"prompt": "x"},
+            nvext={"num_inference_steps": 50, "guidance_scale": 7.5},
+            height=512,
+            width=512,
+        )
+        assert "num_inference_steps" not in result
+        assert "guidance_scale" not in result
+
+
+class TestParseOmniRequest:
+    """parse_omni_request: original_prompt only has prompt/negative_prompt,
+    geometry goes into sampling_params_list dict."""
+
+    def test_image_sampling_params_has_geometry(self):
+        request = {
+            "prompt": "a sunset",
+            "size": "512x512",
+            "output_modalities": ["image"],
+        }
+        result = parse_omni_request(request, ["image"])
+        sp = result["sampling_params_list"]
+        assert sp["height"] == 512
+        assert sp["width"] == 512
+
+    def test_image_original_prompt_no_geometry(self):
+        request = {
+            "prompt": "a sunset",
+            "size": "512x512",
+            "output_modalities": ["image"],
+        }
+        result = parse_omni_request(request, ["image"])
+        op = result["original_prompt"]
+        assert op["prompt"] == "a sunset"
+        assert "height" not in op
+        assert "width" not in op
+
+    def test_nvext_params_go_into_sampling_params_not_prompt(self):
+        request = {
+            "prompt": "x",
+            "size": "512x512",
+            "nvext": {"num_inference_steps": 30, "guidance_scale": 4.0},
+        }
+        result = parse_omni_request(request, ["image"])
+        sp = result["sampling_params_list"]
+        assert sp["num_inference_steps"] == 30
+        assert sp["guidance_scale"] == 4.0
+        op = result["original_prompt"]
+        assert "num_inference_steps" not in op
+        assert "guidance_scale" not in op

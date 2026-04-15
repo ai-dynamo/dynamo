@@ -7,6 +7,7 @@ use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
 use dashmap::DashSet;
+use dynamo_kv_router::PrefillLoadEstimator;
 use futures::StreamExt;
 
 use dynamo_runtime::{
@@ -71,9 +72,11 @@ pub struct ModelWatcher {
     drt: DistributedRuntime,
     router_config: RouterConfig,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     metrics: Arc<Metrics>,
     /// Guards against concurrent pipeline construction for the same (model, namespace).
     registering_worker_sets: DashSet<String>,
@@ -112,12 +115,15 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
 }
 
 impl ModelWatcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
         migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
         Self {
@@ -125,9 +131,11 @@ impl ModelWatcher {
             drt: runtime,
             router_config,
             migration_limit,
+            migration_max_seq_len,
             notify_on_model: Notify::new(),
             model_update_tx: None,
             chat_engine_factory,
+            prefill_load_estimator,
             metrics,
             registering_worker_sets: DashSet::new(),
         }
@@ -328,6 +336,15 @@ impl ModelWatcher {
                     "Removed WorkerSet (no remaining instances in namespace)"
                 );
             }
+
+            // If the removed component was a prefill worker, deactivate the decode-side
+            // prefill router so requests fall back to aggregated mode (or fail cleanly
+            // with enforce_disagg). The decode WorkerSet's namespace matches the
+            // deployment namespace, not the ws_key.
+            if card.model_type.supports_prefill() {
+                self.manager
+                    .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
+            }
         }
 
         // Check if the Model still has instances in any namespace
@@ -465,6 +482,7 @@ impl ModelWatcher {
                             &endpoint,
                             card.kv_cache_block_size,
                             Some(self.router_config.kv_router_config.clone()),
+                            self.prefill_load_estimator.clone(),
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
                             card.runtime_config.enable_eagle,
@@ -506,6 +524,7 @@ impl ModelWatcher {
                         self.router_config.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
+                        self.prefill_load_estimator.clone(),
                         self.router_config.enforce_disagg,
                         model_name.clone(),
                         namespace.clone(),
@@ -532,9 +551,12 @@ impl ModelWatcher {
                 self.router_config.load_threshold_config.clone(),
             ));
 
-            // Store KV router and worker monitor on the WorkerSet
+            // Store KV router, worker monitor, and prefill router on the WorkerSet.
+            // The prefill router is stored so the watcher can deactivate/reactivate it
+            // when prefill workers die or rejoin.
             worker_set.kv_router = kv_chooser.clone();
             worker_set.worker_monitor = worker_monitor.clone();
+            worker_set.prefill_router = prefill_chooser.clone();
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
@@ -571,6 +593,7 @@ impl ModelWatcher {
                         prefill_chooser.clone(),
                         self.router_config.enforce_disagg,
                         self.migration_limit,
+                        self.migration_max_seq_len,
                         self.metrics.clone(),
                     )
                     .await
@@ -604,6 +627,7 @@ impl ModelWatcher {
                         prefill_chooser,
                         self.router_config.enforce_disagg,
                         self.migration_limit,
+                        self.migration_max_seq_len,
                         self.metrics.clone(),
                     )
                     .await

@@ -31,13 +31,15 @@ const (
 	DynamoCheckpointPhasePending DynamoCheckpointPhase = "Pending"
 	// DynamoCheckpointPhaseCreating indicates the checkpoint Job is running
 	DynamoCheckpointPhaseCreating DynamoCheckpointPhase = "Creating"
-	// DynamoCheckpointPhaseReady indicates the checkpoint tar file is available on the PVC
+	// DynamoCheckpointPhaseReady indicates the checkpoint artifact is available
 	DynamoCheckpointPhaseReady DynamoCheckpointPhase = "Ready"
 	// DynamoCheckpointPhaseFailed indicates the checkpoint creation failed
 	DynamoCheckpointPhaseFailed DynamoCheckpointPhase = "Failed"
 )
 
-// DynamoCheckpointStorageType defines the supported storage backends for checkpoints
+// Deprecated: StorageType is retained for compatibility with older
+// DynamoCheckpoint status consumers. The current checkpoint flow publishes
+// PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
 // +kubebuilder:validation:Enum=pvc;s3;oci
 type DynamoCheckpointStorageType string
 
@@ -109,10 +111,10 @@ type DynamoCheckpointJobConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
-	// TTLSecondsAfterFinished specifies how long to keep the Job after completion
+	// Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
+	// 300 second TTL.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:default=300
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
@@ -121,6 +123,12 @@ type DynamoCheckpointSpec struct {
 	// Identity defines the inputs that determine checkpoint equivalence
 	// +kubebuilder:validation:Required
 	Identity DynamoCheckpointIdentity `json:"identity"`
+
+	// GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
+	// It is intentionally outside spec.identity, so it does not affect the
+	// checkpoint identity hash or deduplication.
+	// +optional
+	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
 	// Job defines the configuration for the checkpoint creation Job
 	// +kubebuilder:validation:Required
@@ -148,14 +156,13 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 
-	// Location is the full URI/path to the checkpoint in the storage backend
-	// For PVC: same as TarPath (e.g., /checkpoints/{hash}.tar)
-	// For S3: s3://bucket/prefix/{hash}.tar
-	// For OCI: oci://registry/repo:{hash}
+	// Deprecated: Location is ignored and no longer populated. It is retained
+	// only so older objects continue to validate.
 	// +optional
 	Location string `json:"location,omitempty"`
 
-	// StorageType indicates the storage backend type used for this checkpoint
+	// Deprecated: StorageType is ignored and no longer populated. It is retained
+	// only so older objects continue to validate.
 	// +optional
 	StorageType DynamoCheckpointStorageType `json:"storageType,omitempty"`
 
@@ -163,7 +170,7 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
-	// CreatedAt is the timestamp when the checkpoint tar was created
+	// CreatedAt is the timestamp when the checkpoint became ready
 	// +optional
 	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
 

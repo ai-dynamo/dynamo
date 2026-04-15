@@ -4,6 +4,8 @@
 use futures::{Stream, StreamExt};
 use std::collections::HashMap;
 
+use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
+
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
 use crate::protocols::{
     Annotated,
@@ -75,11 +77,11 @@ fn convert_tool_chunk_to_message_tool_call(
     chunk: &dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
 ) -> Option<dynamo_protocols::types::ChatCompletionMessageToolCall> {
     // Convert ChatCompletionMessageToolCallChunk to ChatCompletionMessageToolCall
-    if let (Some(id), Some(r#type), Some(function)) = (&chunk.id, &chunk.r#type, &chunk.function) {
+    if let (Some(id), Some(function)) = (&chunk.id, &chunk.function) {
         if let (Some(name), Some(arguments)) = (&function.name, &function.arguments) {
             Some(dynamo_protocols::types::ChatCompletionMessageToolCall {
                 id: id.clone(),
-                r#type: r#type.clone(),
+                r#type: dynamo_protocols::types::FunctionType::Function,
                 function: dynamo_protocols::types::FunctionCall {
                     name: name.clone(),
                     arguments: arguments.clone(),
@@ -120,9 +122,9 @@ impl DeltaAggregator {
     /// * `Err(String)` if an error occurs during processing.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
-        _parsing_options: ParsingOptions,
+        parsing_options: ParsingOptions,
     ) -> Result<NvCreateChatCompletionResponse, String> {
-        let aggregator = stream
+        let mut aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
                 // Attempt to unwrap the delta, capturing any errors.
                 let delta = match delta.ok() {
@@ -254,6 +256,37 @@ impl DeltaAggregator {
         // Return early if an error was encountered.
         if let Some(error) = aggregator.error {
             return Err(error);
+        }
+
+        if let Some(parser) = parsing_options.tool_call_parser.as_deref() {
+            for choice in aggregator.choices.values_mut() {
+                if choice
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+                    || choice.text.is_empty()
+                {
+                    continue;
+                }
+
+                let (tool_calls, content) =
+                    match try_tool_call_parse_aggregate(&choice.text, Some(parser), None).await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            tracing::debug!(
+                                error = %error,
+                                parser,
+                                "failed to parse aggregated chat tool calls"
+                            );
+                            continue;
+                        }
+                    };
+
+                if !tool_calls.is_empty() {
+                    choice.tool_calls = Some(tool_calls);
+                    choice.text = content.unwrap_or_default();
+                }
+            }
         }
 
         // Extract aggregated choices and sort them by index.
@@ -405,7 +438,7 @@ mod tests {
                 dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                     index: 0,
                     id: Some("test_id".to_string()),
-                    r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
+                    r#type: Some(dynamo_protocols::types::FunctionType::Function),
                     function: Some(dynamo_protocols::types::FunctionCallStream {
                         name: tool_calls["name"].as_str().map(|s| s.to_string()),
                         arguments: Some(serde_json::to_string(&tool_calls["arguments"]).unwrap()),
@@ -788,6 +821,10 @@ mod tests {
         assert!(choice.message.tool_calls.is_some());
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].r#type,
+            dynamo_protocols::types::FunctionType::Function
+        );
 
         // Most importantly, verify that finish reason was overridden to ToolCalls despite original being Stop
         assert_eq!(
@@ -831,6 +868,10 @@ mod tests {
         assert!(choice.message.tool_calls.is_some());
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].r#type,
+            dynamo_protocols::types::FunctionType::Function
+        );
 
         // Verify that finish reason was overridden to ToolCalls despite original being Length
         assert_eq!(
@@ -1072,5 +1113,76 @@ mod tests {
         let tool_calls = choice.message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
+    }
+
+    #[tokio::test]
+    async fn test_parses_aggregated_tool_call_text_into_tool_calls() {
+        let annotated_delta = create_test_delta(
+            0,
+            "<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"location\":\"SF\"}}\n</tool_call>",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("hermes".to_string()), None),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+        assert_eq!(choice.message.content, None);
+        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].r#type,
+            dynamo_protocols::types::FunctionType::Function
+        );
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, "{\"location\":\"SF\"}");
+    }
+
+    #[tokio::test]
+    async fn test_preserves_non_tool_content_when_parsing_aggregated_tool_calls() {
+        let annotated_delta = create_test_delta(
+            0,
+            "hello\n<tool_call>\n{\"name\":\"get_weather\",\"arguments\":{\"location\":\"SF\"}}\n</tool_call>",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("hermes".to_string()), None),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text("hello".to_string()))
+        );
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+        assert_eq!(
+            choice.message.tool_calls.as_ref().unwrap()[0].r#type,
+            dynamo_protocols::types::FunctionType::Function
+        );
     }
 }

@@ -27,7 +27,7 @@ If your workload consists entirely of unique images, the cache provides no benef
 | **TRT-LLM** | ❌ | ✅ | Dynamo `MultimodalEmbeddingCacheManager` in PD worker |
 | **SGLang** | ❌ | ❌ | Not supported yet |
 
-This support requires vLLM `0.18.0` or newer.
+This support requires vLLM `0.17.0` or newer.
 
 ## How It Works
 

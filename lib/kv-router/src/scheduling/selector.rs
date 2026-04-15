@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rand::Rng;
 
 use super::config::KvRouterConfig;
-use super::types::{KvSchedulerError, SchedulingRequest};
+use super::types::{KvSchedulerError, SchedulingRequest, pinned_worker_config};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// A trait that users can implement to define custom selection logic.
@@ -98,11 +98,55 @@ pub struct DefaultWorkerSelector {
     pub worker_type: &'static str,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WorkerScore {
+    overlap_blocks: u32,
+    logit: f64,
+}
+
 impl DefaultWorkerSelector {
     pub fn new(kv_router_config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
         Self {
             kv_router_config: kv_router_config.unwrap_or_default(),
             worker_type,
+        }
+    }
+
+    fn worker_score(
+        &self,
+        request: &SchedulingRequest,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+        overlap_weight: f64,
+        formula_name: &'static str,
+    ) -> WorkerScore {
+        let isl = request.isl_tokens;
+        let overlap_blocks = request.overlaps.scores.get(&worker).copied().unwrap_or(0);
+        let default_prefill_token = if request.track_prefill_tokens { isl } else { 0 };
+        let prefill_token = request
+            .prefill_tokens
+            .get(&worker)
+            .copied()
+            .unwrap_or(default_prefill_token);
+        let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
+        let decode_block = request
+            .decode_blocks
+            .get(&worker)
+            .copied()
+            .unwrap_or(potential_prefill_block.floor() as usize) as f64;
+        let logit = overlap_weight * potential_prefill_block + decode_block;
+
+        tracing::debug!(
+            "{formula_name} for worker_id={} dp_rank={:?} with {overlap_blocks} cached blocks: {logit:.3} \
+             = {overlap_weight:.1} * prefill_blocks + decode_blocks \
+             = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
+            worker.worker_id,
+            worker.dp_rank
+        );
+
+        WorkerScore {
+            overlap_blocks,
+            logit,
         }
     }
 }
@@ -115,12 +159,16 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
+        request.validate_worker_constraints()?;
 
         let allowed_ids = request.allowed_worker_ids.as_ref();
+        let pinned_worker = request.pinned_worker;
 
-        if allowed_ids.map_or(workers.is_empty(), |ids| {
-            !workers.keys().any(|wid| ids.contains(wid))
-        }) {
+        if pinned_worker.is_none()
+            && allowed_ids.map_or(workers.is_empty(), |ids| {
+                !workers.keys().any(|wid| ids.contains(wid))
+            })
+        {
             return Err(KvSchedulerError::NoEndpoints);
         }
 

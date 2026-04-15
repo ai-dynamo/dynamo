@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Shared Copy Image
+
+on:
+  workflow_call:
+    inputs:
+      target_tag_plain:
+        description: 'Plain runtime image tag prefix from the build workflow'
+        required: true
+        type: string
+      cuda_version:
+        description: 'CUDA versions to copy as a JSON array'
+        required: true
+        type: string
+      copy_timeout_minutes:
+        description: 'Timeout in minutes for the copy step'
+        required: false
+        type: number
+        default: 10
+      override_arch:
+        description: 'Override architecture for the copied image (e.g., "amd64")'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+
+jobs:
+  copy-to-acr:
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda_version: ${{ fromJson(inputs.cuda_version) }}
+    name: Copy to ACR cuda${{ matrix.cuda_version }}${{ inputs.override_arch != '' && format(', {0}', inputs.override_arch) || '' }}
+    runs-on: prod-default-small-v2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        env:
+          ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
+        run: |
+          CUDA_VERSION="${{ matrix.cuda_version }}"
+          CUDA_MAJOR=${CUDA_VERSION%%.*}
+          if [[ "${{ inputs.target_tag_plain }}" == *"planner"* ]]; then
+            IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}
+          else
+            IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}-cuda${CUDA_MAJOR}
+          fi
+
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+      - name: Copy image to target registry
+        timeout-minutes: ${{ inputs.copy_timeout_minutes }}
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ steps.calculate-target-tag.outputs.image_tag }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          override_arch: ${{ inputs.override_arch }} # We are using AMD64 images only on the rest of the clusters.

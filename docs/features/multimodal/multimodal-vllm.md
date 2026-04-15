@@ -7,102 +7,54 @@ title: vLLM Multimodal
 This document provides a comprehensive guide for multimodal inference using vLLM backend in Dynamo.
 
 <Warning>
-**Security Requirement**: All multimodal workers require the `--enable-multimodal` flag to be explicitly set at startup. This is a security feature to prevent unintended processing of multimodal data from untrusted sources. Workers will fail at startup if multimodal flags (e.g., `--multimodal-worker`, `--multimodal-processor`) are used without `--enable-multimodal`.
-This flag is analogous to `--enable-mm-embeds` in vllm serve but also extends it to all multimodal content (url, embeddings, b64).
+**Security Requirement**: All multimodal workers require the `--enable-multimodal` flag to be explicitly set at startup. This is a security feature to prevent unintended processing of multimodal data from untrusted sources. Workers will fail at startup if a multimodal worker mode is enabled without `--enable-multimodal`. This flag is analogous to `--enable-mm-embeds` in vllm serve but also extends it to all multimodal content (url, embeddings, b64).
 </Warning>
 
 ## Support Matrix
 
-| Modality | Input Format | Aggregated | Disaggregated | Notes |
-|----------|--------------|------------|---------------|-------|
-| **Image** | HTTP/HTTPS URL | Yes | Yes | Full support for all image models |
-| **Image** | Data URL (Base64) | Yes | Yes | Inline base64-encoded images |
-| **Video** | HTTP/HTTPS URL | Yes | Yes | Frame extraction and processing |
-| **Audio** | HTTP/HTTPS URL | Yes | Yes | Experimental - requires audio dependencies |
+| Modality                 | Aggregated | Disaggregated |
+| ------------------------ | ---------- | ------------- |
+| **Image**                | Yes        | Yes           |
+| **Video**                | Yes        | Yes           |
+| **Audio**                | Yes        | No            |
 
 ### Supported URL Formats
 
-| Format | Example | Description |
-|--------|---------|-------------|
-| **HTTP/HTTPS** | `http://example.com/image.jpg` | Remote media files |
-| **Data URL** | `data:image/jpeg;base64,/9j/4AAQ...` | Base64-encoded inline data |
+| Format         | Example                              | Description                |
+| -------------- | ------------------------------------ | -------------------------- |
+| **HTTP/HTTPS** | `http://example.com/image.jpg`       | Remote media files         |
+| **Data URL**   | `data:image/jpeg;base64,/9j/4AAQ...` | Base64-encoded inline data |
 
 ## Deployment Patterns
 
-vLLM supports all multimodal deployment patterns. See [Architecture Patterns](README.md#architecture-patterns) for detailed explanations.
+The main multimodal vLLM launchers in this repo are:
 
-| Pattern | Supported | Launch Script | Notes |
-|---------|-----------|---------------|-------|
-| EPD (Simple Aggregated) | ✅ | `agg_multimodal.sh` | Easiest setup |
-| E/PD (Encode Separate) | ✅ | `agg_multimodal_epd.sh` | Separate encode worker |
-| E/P/D (Full Disaggregation) | ✅ | `disagg_multimodal_epd.sh` | All stages separate |
-| EP/D (Traditional Disaggregated) | ✅ | `disagg_multimodal_llama.sh` | For Llama 4 models |
+| Pattern                     | Launch Script               | Best For                                                                            |
+| --------------------------- | --------------------------- | ----------------------------------------------------------------------------------- |
+| Aggregated                  | `agg_multimodal.sh`         | Simplest image/video serving from a single multimodal worker                        |
+| E/PD (Encode + PD)          | `disagg_multimodal_e_pd.sh` | Simple example of separating encoder, good for testing embedding-cache workflows    |
+| E/P/D (Full Disaggregation) | `disagg_multimodal_epd.sh`  | Disaggregated image/video serving with separate encode, prefill, and decode workers |
 
-### Component Flags
+## Image/Video Serving
 
-| Component | Flag | Purpose |
-|-----------|------|---------|
-| Processor | `--multimodal-processor` | HTTP entry, tokenization |
-| Encode Worker | `--multimodal-encode-worker` | Media encoding |
-| PD Worker | `--multimodal-worker` | Prefill + Decode |
-| Prefill Worker | `--multimodal-worker --disaggregation-mode prefill` | Prefill only |
-| Decode Worker | `--multimodal-decode-worker` | Decode only |
+Dynamo supports multimodal image and video requests for Vision Language Models (VLMs). `Qwen/Qwen3-VL-2B-Instruct` is a good example because the same model can handle both `image_url` and `video_url` requests through the standard OpenAI chat endpoint.
 
-## Use the Latest Release
+### Aggregated Serving
 
-We recommend using the latest stable release of dynamo to avoid breaking changes:
-
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-
-You can find the [latest release](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
-
-```bash
-git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
-```
-
-## Image Serving
-
-### E/PD Serving (Encode Separate)
-
-**Components:**
-
-- workers: [EncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) for encoding and [DecodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/handlers.py) for prefilling and decoding.
-- processor: Tokenizes the prompt and passes it to the EncodeWorkerHandler.
-- frontend: HTTP endpoint to handle incoming requests.
-
-**Workflow:**
-
-The EncodeWorkerHandler encodes the image and passes the embeddings to the DecodeWorkerHandler via NATS and RDMA. The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
-
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --image_url--> encode_worker
-  encode_worker --> processor
-  encode_worker --embeddings--> pd_worker
-  pd_worker --> encode_worker
-```
-
-> **Note:** Aggregated serving supports LLaVA 1.5 7B and Qwen2.5-VL-7B-Instruct. Disaggregated serving is currently only confirmed for LLaVA.
-
-**Launch:**
+Use the single-worker aggregated launcher for the simplest image/video setup:
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
-# Serve a LLaVA 1.5 7B model:
-bash launch/agg_multimodal_epd.sh --model llava-hf/llava-1.5-7b-hf
-# Serve a Qwen2.5-VL model:
-bash launch/agg_multimodal_epd.sh --model Qwen/Qwen2.5-VL-7B-Instruct
+bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct
 ```
 
-**Client:**
+**Image request:**
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-      "model": "llava-hf/llava-1.5-7b-hf",
+      "model": "Qwen/Qwen3-VL-2B-Instruct",
       "messages": [
         {
           "role": "user",
@@ -120,165 +72,19 @@ curl http://localhost:8000/v1/chat/completions \
           ]
         }
       ],
-      "max_tokens": 300,
+      "max_tokens": 64,
       "temperature": 0.0,
       "stream": false
     }'
 ```
 
-### E/P/D Serving (Full Disaggregation)
-
-**Components:**
-
-- workers: [EncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) for encoding, [DecodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/handlers.py) for decoding, and [PrefillWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/handlers.py) for prefilling.
-- processor: Tokenizes the prompt and passes it to the EncodeWorkerHandler.
-- frontend: HTTP endpoint to handle incoming requests.
-
-**Workflow:**
-
-For the LLaVA model, embeddings are only required during the prefill stage. The EncodeWorkerHandler is connected directly to the prefill worker, encoding the image and passing embeddings via NATS and RDMA. The prefill worker performs the prefilling step and forwards the KV cache to the decode worker.
-
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --image_url--> encode_worker
-  encode_worker --> processor
-  encode_worker --embeddings--> prefill_worker
-  prefill_worker --> encode_worker
-  prefill_worker --> decode_worker
-  decode_worker --> prefill_worker
-```
-
-**Launch:**
-
-```bash
-cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/disagg_multimodal_epd.sh --model llava-hf/llava-1.5-7b-hf
-```
-
-<Note>
-Disaggregation is currently only confirmed to work with LLaVA. Qwen2.5-VL is not confirmed to be supported.
-</Note>
-
-## Llama 4 Serving
-
-The Llama 4 model family is natively multimodal. Unlike LLaVA, they do not directly consume image embeddings as input (see the [vLLM support matrix](https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation_1)). Therefore, the encoder worker is not used and encoding is done alongside prefill.
-
-Example model: `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8` on H100x8.
-
-### Llama 4 Aggregated Serving
-
-**Workflow:**
-
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --image_url--> pd_worker
-  pd_worker --> processor
-```
-
-**Launch:**
-
-```bash
-cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/agg_multimodal.sh --model meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8
-```
-
-**Client:**
+**Video request:**
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-      "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
-      "messages": [
-        {
-          "role": "user",
-          "content": [
-            {
-              "type": "text",
-              "text": "What is in this image?"
-            },
-            {
-              "type": "image_url",
-              "image_url": {
-                "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
-              }
-            }
-          ]
-        }
-      ],
-      "max_tokens": 300,
-      "temperature": 0.0,
-      "stream": false
-    }'
-```
-
-### Llama 4 Disaggregated Serving
-
-**Workflow:**
-
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --image_url--> prefill_worker
-  prefill_worker --> processor
-  prefill_worker --> decode_worker
-  decode_worker --> prefill_worker
-```
-
-**Launch:**
-
-```bash
-cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/disagg_multimodal_llama.sh --head-node
-
-# On a separate node with NATS_SERVER and ETCD_ENDPOINTS pointing to head node:
-cd $DYNAMO_HOME/examples/backends/vllm
-bash launch/disagg_multimodal_llama.sh
-```
-
-## Video Serving
-
-### Video Aggregated Serving
-
-**Components:**
-
-- workers: [VideoEncodeWorker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/video_encode_worker.py) for decoding video into frames, and [VllmPDWorker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/worker.py) for prefilling and decoding.
-- processor: Tokenizes the prompt and passes it to the VideoEncodeWorker.
-- frontend: HTTP endpoint to handle incoming requests.
-
-**Workflow:**
-
-The VideoEncodeWorker decodes the video into frames. Unlike the image pipeline which generates embeddings, this pipeline passes raw frames directly to the VllmPDWorker via NATS and RDMA.
-
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --video_url--> video_encode_worker
-  video_encode_worker --> processor
-  video_encode_worker --frames--> pd_worker
-  pd_worker --> video_encode_worker
-```
-
-**Launch:**
-
-```bash
-cd $DYNAMO_HOME/examples/multimodal
-bash launch/video_agg.sh
-```
-
-**Client:**
-
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-      "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+      "model": "Qwen/Qwen3-VL-2B-Instruct",
       "messages": [
         {
           "role": "user",
@@ -290,86 +96,90 @@ curl http://localhost:8000/v1/chat/completions \
             {
               "type": "video_url",
               "video_url": {
-                "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+                "url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
               }
             }
           ]
         }
       ],
-      "max_tokens": 300,
+      "max_tokens": 64,
       "stream": false
     }' | jq
 ```
 
-### Video Disaggregated Serving
+### E/PD Serving (Encode + PD)
 
-**Workflow:**
+Use `disagg_multimodal_e_pd.sh` when you want a separate encode worker and a combined prefill/decode worker. This path is primarily useful for image-centric workloads and embedding-cache experiments.
 
-For the LLaVA-NeXT-Video-7B model, frames are only required during the prefill stage. The VideoEncodeWorker is connected directly to the prefill worker, decoding the video into frames and passing them via RDMA.
-
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --video_url--> video_encode_worker
-  video_encode_worker --> processor
-  video_encode_worker --frames--> prefill_worker
-  prefill_worker --> video_encode_worker
-  prefill_worker --> decode_worker
-  decode_worker --> prefill_worker
-```
-
-**Launch:**
+<Warning>
+When a separate encode worker is deployed with the current vLLM path, only `image_url` inputs are routed to it. `video_url` inputs are still processed on the combined PD worker.
+</Warning>
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
-bash launch/video_disagg.sh
+cd $DYNAMO_HOME/examples/backends/vllm
+
+# Multi-GPU deployment
+bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct
+
+# Single-GPU (functional testing with small models)
+bash launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
+
+```
+
+### E/P/D Serving (Full Disaggregation)
+
+Use `disagg_multimodal_epd.sh` when you want separate encode, prefill, and decode workers for multimodal workloads.
+
+<Warning>
+In the current vLLM implementation, the separate encode worker is only used for `image_url` inputs. `video_url` inputs are still processed on the prefill worker, not on the encode worker.
+</Warning>
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+
+# Multi-GPU deployment
+bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct
+
+# Single-GPU (functional testing with small models)
+bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu
 ```
 
 ## Audio Serving
 
-### Audio Aggregated Serving
+Dynamo supports `audio_url` requests for audio-capable models. Audio is loaded by the backend worker via vLLM's `AudioMediaIO` at native sample rate — vLLM's model-specific processor handles resampling and feature extraction internally. Omni models can handle `image_url`, `video_url`, and `audio_url` in the same request.
 
-**Components:**
+### Aggregated Serving
 
-- workers: [AudioEncodeWorker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/audio_encode_worker.py) for decoding audio into embeddings, and [VllmPDWorker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/worker.py) for prefilling and decoding.
-- processor: Tokenizes the prompt and passes it to the AudioEncodeWorker.
-- frontend: HTTP endpoint to handle incoming requests.
+Use the same aggregated multimodal launcher with an audio-capable model:
 
-**Workflow:**
+```bash
+pip install 'vllm[audio]'  # installs librosa and other audio dependencies
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg_multimodal.sh --model Qwen/Qwen3-Omni-30B-A3B-Instruct
+```
 
 ```mermaid
 flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --audio_url--> audio_encode_worker
-  audio_encode_worker --> processor
-  audio_encode_worker --embeddings--> pd_worker
-  pd_worker --> audio_encode_worker
+  HTTP --> frontend
+  frontend --> HTTP
+  frontend --audio_url--> vllm_worker
+  vllm_worker --> frontend
 ```
 
-**Launch:**
-
-```bash
-pip install 'vllm[audio]' accelerate # multimodal audio models dependency
-cd $DYNAMO_HOME/examples/multimodal
-bash launch/audio_agg.sh
-```
-
-**Client:**
+**Audio request:**
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-      "model": "Qwen/Qwen2-Audio-7B-Instruct",
+      "model": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
       "messages": [
         {
           "role": "user",
           "content": [
             {
               "type": "text",
-              "text": "What is recited in the audio?"
+              "text": "What sound is this?"
             },
             {
               "type": "audio_url",
@@ -380,50 +190,23 @@ curl http://localhost:8000/v1/chat/completions \
           ]
         }
       ],
-      "max_tokens": 6000,
-      "temperature": 0.8,
+      "max_tokens": 100,
       "stream": false
     }' | jq
-```
-
-### Audio Disaggregated Serving
-
-**Workflow:**
-
-For the Qwen2-Audio model, audio embeddings are only required during the prefill stage. The AudioEncodeWorker is connected directly to the prefill worker.
-
-```mermaid
-flowchart LR
-  HTTP --> processor
-  processor --> HTTP
-  processor --audio_url--> audio_encode_worker
-  audio_encode_worker --> processor
-  audio_encode_worker --embeddings--> prefill_worker
-  prefill_worker --> audio_encode_worker
-  prefill_worker --> decode_worker
-  decode_worker --> prefill_worker
-```
-
-**Launch:**
-
-```bash
-pip install 'vllm[audio]' accelerate # multimodal audio models dependency
-cd $DYNAMO_HOME/examples/multimodal
-bash launch/audio_disagg.sh
 ```
 
 ## Embedding Cache
 
 Dynamo supports embedding cache in both aggregated and disaggregated settings:
 
-| Setting | Implementation | Launch Script |
-|---------|---------------|---------------|
+| Setting                   | Implementation                                                 | Launch Script               |
+| ------------------------- | -------------------------------------------------------------- | --------------------------- |
+| **Aggregated**            | Supported via vLLM ECConnector in vLLM 0.17+                   | `agg_multimodal.sh` (or with `vllm serve` directly) |
 | **Disaggregated encoder** | Dynamo-managed cache in the worker layer on top of vLLM engine | `disagg_multimodal_e_pd.sh` |
-| **Aggregated** | Experimental via vLLM git patches | N/A |
 
 ### Aggregated Worker
 
-A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely. Experimental — requires vLLM patches (see below).
+A single vLLM instance caches encoded embeddings on CPU so repeated images skip encoding entirely. Supported natively with vLLM 0.17+.
 
 ```mermaid
 ---
@@ -438,22 +221,20 @@ flowchart LR
   encode -- save: GPU → CPU --> store[(CPU Embedding Cache<br/>LRU)]
 ```
 
-**Launch:**
+**Launch with Dynamo:**
 
 ```bash
+bash examples/backends/vllm/launch/agg_multimodal.sh \
+    --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
+    --multimodal-embedding-cache-capacity-gb 10
+```
 
-cd /opt/dynamo/venv/lib/python3.12/site-packages
+`dynamo.vllm` automatically configures `ec_both` mode with the `DynamoMultimodalEmbeddingCacheConnector` when the capacity is > 0.
 
-curl -sL https://github.com/vllm-project/vllm/pull/34182.diff | patch -p1
+**Launch with `vllm serve` (standalone, no Dynamo):**
 
-curl -sL https://github.com/vllm-project/vllm/pull/34783.diff | python3 -c "
-import sys
-chunks = sys.stdin.read().split('diff --git ')
-filtered = [c for c in chunks if c.startswith('a/vllm/')]
-print(''.join('diff --git ' + c for c in filtered))
-" | patch -p1
-
-vllm serve $model \
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
     --ec-transfer-config "{
         \"ec_role\": \"ec_both\",
         \"ec_connector\": \"DynamoMultimodalEmbeddingCacheConnector\",
@@ -462,7 +243,7 @@ vllm serve $model \
     }"
 ```
 
-This configures `vllm serve` with `ec_role=ec_both` and the `DynamoMultimodalEmbeddingCacheConnector` automatically. The capacity parameter controls the CPU-side LRU cache size in GB (0 = disabled).
+The `multimodal_embedding_cache_capacity_gb` parameter controls the CPU-side LRU cache size in GB (0 = disabled). Requires vLLM 0.17+.
 
 ### Disaggregated Encoder (Embedding Cache in Prefill Worker)
 
@@ -492,48 +273,7 @@ cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/disagg_multimodal_e_pd.sh --multimodal-embedding-cache-capacity-gb 10
 ```
 
-**Client:** Same as [E/PD Serving](#epd-serving-encode-separate)
-
-## NIXL Usage
-
-| Use Case | Script | NIXL Used? | Data Transfer |
-|----------|--------|------------|---------------|
-| EPD (Simple Aggregated) | `agg_multimodal.sh` | No | All in one worker |
-| E/PD (Encode Separate) | `agg_multimodal_epd.sh` | Yes | Encoder → PD (embeddings) |
-| E/P/D (Full Disaggregation) | `disagg_multimodal_epd.sh` | Yes | Encoder → Prefill (embeddings), Prefill → Decode (KV cache) |
-| EP/D (Llama 4) | `disagg_multimodal_llama.sh` | Yes | Prefill → Decode (KV cache) |
-| EC Both (Local Node) | `vllm_serve_embedding_cache.sh` | No | ECConnector via CPU Embedding Cache |
-
-## ModelInput Types and Registration
-
-Dynamo's Rust SDK supports two input types that determine how the HTTP frontend preprocesses requests:
-
-| ModelInput Type | Preprocessing | Use Case |
-|-----------------|---------------|----------|
-| `ModelInput.Text` | None (raw text passed through) | Components that tokenize themselves |
-| `ModelInput.Tokens` | Rust SDK would tokenize (but bypassed in multimodal) | Components expecting pre-tokenized input |
-
-**Registration Pattern:**
-
-```python
-# Processor - Entry point from HTTP frontend
-await register_model(
-    ModelInput.Text,        # Frontend sends raw text
-    ModelType.Chat,
-    generate_endpoint,
-    model_name,
-    ...
-)
-
-# Workers - Internal components
-await register_model(
-    ModelInput.Tokens,      # Expect pre-tokenized input
-    ModelType.Chat,         # or ModelType.Prefill for prefill workers
-    generate_endpoint,
-    model_name,
-    ...
-)
-```
+**Client:** Use the same `image_url` request format shown in [Aggregated Serving](#aggregated-serving).
 
 ## LoRA Adapters on Multimodal Workers
 
@@ -611,61 +351,6 @@ curl -X POST http://<decode-worker>/load_lora \
 
 If a LoRA is loaded on the prefill worker but not on the decode worker, the decode worker will fall back to the base model for that request.
 
-## Profiling
-
-Dynamo's multimodal workers include NVTX markers for `nsys` profiling. They are disabled by default (zero overhead) and enabled by setting `DYN_NVTX=1`.
-
-```bash
-cd $DYNAMO_HOME/examples/backends/vllm
-DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o profile.nsys-rep \
-    bash launch/agg_multimodal.sh ...
-```
-
-| ENV Variable | Default | Description |
-|---|---|---|
-| `DYN_NVTX` | `0` | Set to `1` to enable NVTX range/mark annotations in encode, prefill, and decode workers for `nsys` profiling |
-
-Key NVTX ranges emitted:
-
-| Range | Worker | Description |
-|-------|--------|-------------|
-| `mm:encode_worker_generate` | Encode | Full encode request lifetime |
-| `mm:enc:cache_check` | Encode | Embedding cache lookup |
-| `mm:enc:image_load` | Encode | Image download/load |
-| `mm:enc:image_preprocess` | Encode | Image processor (CPU) |
-| `mm:enc:vision_encode` | Encode | ViT + projector GPU forward |
-| `mm:enc:embedding_transfer` | Encode | RDMA embedding staging |
-| `mm:pd_worker_generate` | PD | Full PD request lifetime |
-| `mm:pd:ttft` | PD | Worker-side TTFT: from request arrival at the PD worker to first output token (excludes client→frontend→worker network transit) |
-| `mm:pd:load_multimodal` | PD | Fetch embeddings from encode worker |
-| `mm:pd:disagg_prefill` | PD (disagg) | Prefill-only engine call |
-| `mm:pd:disagg_remote_decode` | PD (disagg) | Remote decode round-trip |
-| `mm:decode_worker_generate` | Decode | Full decode request lifetime |
-| `mm:decode:first_token` | Decode | Time to first output token |
-
-## Known Limitations
-
-- **Disaggregated flows require Python Processor** - All multimodal disaggregation requires the Python Processor component (`ModelInput.Text`).
-
 ## Supported Models
 
-The following models have been tested with Dynamo's vLLM multimodal backend:
-
-- **Qwen2.5-VL** - `Qwen/Qwen2.5-VL-7B-Instruct`
-- **Qwen3-VL** - `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8`
-- **LLaVA 1.5** - `llava-hf/llava-1.5-7b-hf`
-- **Llama 4 Maverick** - `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`
-- **LLaVA Next Video** - `llava-hf/LLaVA-NeXT-Video-7B-hf`
-- **Qwen2-Audio** - `Qwen/Qwen2-Audio-7B-Instruct`
-
-For a complete list of multimodal models supported by vLLM, see [vLLM Supported Multimodal Models](https://docs.vllm.ai/en/latest/models/supported_models/#list-of-multimodal-language-models). Models listed there should work with Simple Aggregated Mode but may not be explicitly tested.
-
-## Key Files
-
-| File | Description |
-|------|-------------|
-| `components/src/dynamo/vllm/main.py` | Worker initialization and setup |
-| `components/src/dynamo/vllm/args.py` | Command-line argument parsing |
-| `components/src/dynamo/vllm/multimodal_handlers/processor_handler.py` | Processor implementation |
-| `components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py` | Encode worker implementations (custom and vLLM-native) |
-| `components/src/dynamo/vllm/multimodal_handlers/worker_handler.py` | PD/Prefill/Decode worker implementation |
+For a list of multimodal models supported by vLLM, see [vLLM Supported Multimodal Models](https://docs.vllm.ai/en/latest/models/supported_models/#list-of-multimodal-language-models). Models listed there should generally work with aggregated serving, though they may not all be explicitly tested in this repo.

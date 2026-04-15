@@ -34,9 +34,13 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
 
-    /// Data parallel rank for the request
+    /// Data parallel rank for the decode worker
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_rank: Option<u32>,
+
+    /// Data parallel rank for the prefill worker in disaggregated serving
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_dp_rank: Option<u32>,
 
     /// Expected number of output tokens for this request.
     /// Used as a hint for routing decisions to estimate resource requirements.
@@ -62,6 +66,11 @@ pub struct RoutingHints {
     /// When set, only workers in this set are considered during scoring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+
+    /// Session control for subagent KV isolation and sticky routing.
+    /// Contains session_id (for affinity) and optional action (open/close).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
