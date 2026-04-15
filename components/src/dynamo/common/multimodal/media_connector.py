@@ -91,19 +91,18 @@ try:
             """Async image fetch via dynamo's ImageLoader with LRU cache."""
             try:
                 img = await self._image_loader.load_image(image_url)
-                # Ensure correct mode (ImageLoader always returns RGB,
-                # but respect the caller's request)
-                if image_mode != "RGB" and img.mode != image_mode:
-                    img = img.convert(image_mode)
-                return img
-            except Exception:
-                # Fall back to parent's implementation for unsupported URLs
-                # (e.g., local file paths that ImageLoader doesn't handle well)
+            except (ValueError, FileNotFoundError, OSError) as exc:
+                # Fall back to parent for unsupported URL schemes or local
+                # file paths that ImageLoader doesn't handle.
                 logger.debug(
-                    "DynamoMediaConnector: falling back to parent for %s",
+                    "DynamoMediaConnector: falling back to parent for %s (%s)",
                     image_url[:80],
+                    exc,
                 )
                 return await super().fetch_image_async(image_url, image_mode=image_mode)
+            if image_mode != "RGB" and img.mode != image_mode:
+                img = img.convert(image_mode)
+            return img
 
     logger.debug("Registered 'dynamo' MediaConnector with vLLM")
 
