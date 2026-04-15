@@ -86,6 +86,7 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
     exclude_tools_when_tool_choice_none: bool
     preprocess_workers: int
     tokenizer_backend: str
+    trust_remote_code: bool
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens"}
 
@@ -561,4 +562,15 @@ class FrontendArgGroup(ArgGroup):
                 "Decoding always uses HuggingFace. Has no effect on TikToken models."
             ),
             choices=["default", "fastokens"],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--trust-remote-code",
+            env_var="DYN_TRUST_REMOTE_CODE",
+            default=False,
+            help=(
+                "Trust remote code when loading the tokenizer. Required for models "
+                "that ship custom tokenizer code (e.g. Qwen, Falcon)."
+            ),
         )

@@ -10,7 +10,11 @@ Parallels test_vllm_unit.py for the vLLM backend.
 """
 
 
+import json
+
 import pytest
+from sglang.srt.function_call.function_call_parser import FunctionCallParser
+from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 import dynamo.frontend.sglang_processor as sglang_processor_module
@@ -18,6 +22,8 @@ from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
     _normalize_prompt_token_ids,
+    _parse_json_array_buffer,
+    build_tool_call_guided_decoding,
     convert_tools,
     create_parsers,
     preprocess_chat_request,
@@ -118,6 +124,18 @@ class TestBuildDynamoPreproc:
         assert sampling["frequency_penalty"] == 0.2
         assert sampling["repetition_penalty"] == 1.1
         assert sampling["seed"] == 42
+
+    def test_guided_decoding_passthrough(self):
+        result = _build_dynamo_preproc(
+            {"model": "test"},
+            prompt_token_ids=[1, 2, 3],
+            model_name="test",
+            eos_token_id=None,
+            guided_decoding={"json": {"type": "object"}},
+        )
+        assert result["sampling_options"]["guided_decoding"] == {
+            "json": {"type": "object"}
+        }
 
     def test_stop_conditions_string(self):
         """Single stop string is wrapped in a list."""
@@ -368,6 +386,92 @@ class TestCreateParsers:
         assert tcp is None
         assert rp is not None
 
+
+class TestBuildToolCallGuidedDecoding:
+    def test_none_when_no_tools(self):
+        assert (
+            build_tool_call_guided_decoding(
+                {"tool_choice": "auto"},
+                tool_call_parser_name="hermes",
+                sglang_tools=None,
+            )
+            is None
+        )
+
+    def test_none_when_tool_choice_none(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+        )
+        assert (
+            build_tool_call_guided_decoding(
+                {"tool_choice": "none"},
+                tool_call_parser_name="hermes",
+                sglang_tools=tools,
+            )
+            is None
+        )
+
+    def test_required_tool_choice_builds_json_schema_guidance(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ]
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "required"},
+            tool_call_parser_name="hermes",
+            sglang_tools=tools,
+        )
+
+        assert isinstance(guided, dict)
+        assert "json" in guided
+
+    def test_auto_strict_tools_can_build_structural_tag_guidance(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "strict": True,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ]
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {"tool_choice": "auto"},
+            tool_call_parser_name="kimi_k2",
+            sglang_tools=tools,
+        )
+
+        assert isinstance(guided, dict)
+        assert "structural_tag" in guided
+
     def test_tool_parser_requires_tools(self):
         """Tool parser is not created if no tools in request."""
         tcp, rp = create_parsers(
@@ -436,6 +540,170 @@ class TestCreateParsers:
         )
         assert tcp is not None
         assert rp is not None
+
+    def test_required_creates_json_array_parser(self):
+        """tool_choice='required' creates JsonArrayParser, not FunctionCallParser."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "description": "d",
+                        "parameters": {},
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        }
+        tcp, _ = create_parsers(
+            request, tool_call_parser_name="hermes", reasoning_parser_name=None
+        )
+        assert isinstance(tcp, JsonArrayParser)
+
+    def test_named_tool_choice_creates_json_array_parser(self):
+        """Named tool_choice creates JsonArrayParser."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {},
+                    },
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        }
+        tcp, _ = create_parsers(
+            request, tool_call_parser_name="hermes", reasoning_parser_name=None
+        )
+        assert isinstance(tcp, JsonArrayParser)
+
+    def test_auto_creates_function_call_parser(self):
+        """tool_choice='auto' creates FunctionCallParser."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "description": "d",
+                        "parameters": {},
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+        }
+        tcp, _ = create_parsers(
+            request, tool_call_parser_name="hermes", reasoning_parser_name=None
+        )
+        assert isinstance(tcp, FunctionCallParser)
+
+    def test_required_without_parser_name_still_creates_json_array_parser(self):
+        """tool_choice='required' doesn't need tool_call_parser_name."""
+        request = {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "f",
+                        "description": "d",
+                        "parameters": {},
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        }
+        tcp, _ = create_parsers(
+            request, tool_call_parser_name=None, reasoning_parser_name=None
+        )
+        assert isinstance(tcp, JsonArrayParser)
+
+
+# ---------------------------------------------------------------------------
+# _parse_json_array_buffer
+# ---------------------------------------------------------------------------
+
+
+class TestParseJsonArrayBuffer:
+    """Test JSON array fallback parser for constrained decoding output."""
+
+    def test_single_tool_call(self):
+        buffer = json.dumps([{"name": "get_weather", "parameters": {"city": "NYC"}}])
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "get_weather"
+        assert calls[0].tool_index == 0
+        assert json.loads(calls[0].parameters) == {"city": "NYC"}
+
+    def test_multiple_tool_calls(self):
+        buffer = json.dumps(
+            [
+                {"name": "get_weather", "parameters": {"city": "NYC"}},
+                {"name": "search", "parameters": {"q": "hello"}},
+            ]
+        )
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 2
+        assert calls[0].name == "get_weather"
+        assert calls[0].tool_index == 0
+        assert calls[1].name == "search"
+        assert calls[1].tool_index == 1
+
+    def test_arguments_key_also_accepted(self):
+        """Some formats use 'arguments' instead of 'parameters'."""
+        buffer = json.dumps([{"name": "f", "arguments": {"x": 1}}])
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert json.loads(calls[0].parameters) == {"x": 1}
+
+    def test_string_parameters_preserved(self):
+        buffer = json.dumps([{"name": "f", "parameters": "already_a_string"}])
+        calls = _parse_json_array_buffer(buffer)
+        assert calls[0].parameters == "already_a_string"
+
+    def test_invalid_json_returns_empty(self):
+        assert _parse_json_array_buffer("not json") == []
+
+    def test_non_array_returns_empty(self):
+        assert _parse_json_array_buffer('{"name": "f"}') == []
+
+    def test_empty_buffer_returns_empty(self):
+        assert _parse_json_array_buffer("") == []
+
+    def test_non_dict_items_skipped(self):
+        buffer = json.dumps(["not_a_dict", {"name": "f", "parameters": {}}])
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "f"
+        assert calls[0].tool_index == 1
+
+    def test_trailing_special_token(self):
+        """Trailing EOS/special tokens should not break parsing."""
+        buffer = '[{"name": "f", "parameters": {"x": 1}}]<|endoftext|>'
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "f"
+        assert json.loads(calls[0].parameters) == {"x": 1}
+
+    def test_leading_text_with_array(self):
+        """Leading non-JSON text before the array should be tolerated."""
+        buffer = 'some preamble [{"name": "f", "parameters": {"x": 1}}]'
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "f"
+
+    def test_trailing_and_leading_noise(self):
+        """Both leading and trailing noise."""
+        buffer = 'text [{"name": "g", "parameters": {"y": 2}}] <|end|>'
+        calls = _parse_json_array_buffer(buffer)
+        assert len(calls) == 1
+        assert calls[0].name == "g"
 
 
 class TestNormalizePromptTokenIds:

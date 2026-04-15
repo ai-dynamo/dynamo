@@ -153,6 +153,52 @@ class TestSingleToolCall:
         assert tc[0]["index"] == 0
 
 
+class TestKimiToolCallIds:
+    def test_kimi_uses_history_adjusted_ids(self):
+        class DummyTokenizer:
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "".join(chr(x) for x in token_ids)
+
+        class DummyToolCall:
+            def __init__(self, tool_index, name, parameters):
+                self.tool_index = tool_index
+                self.name = name
+                self.parameters = parameters
+
+        class DummyParser:
+            tool_call_parser = "kimi_k2"
+            detector = type("Detector", (), {"_buffer": ""})()
+
+            def parse_stream_chunk(self, text):
+                return "", [
+                    DummyToolCall(0, "get_weather", '{"city":"Paris"}'),
+                    DummyToolCall(
+                        1, "search_gutenberg_books", '{"search_terms":["Joyce"]}'
+                    ),
+                ]
+
+        post = SglangStreamingPostProcessor(
+            tokenizer=DummyTokenizer(),
+            tool_call_parser=DummyParser(),
+            reasoning_parser=None,
+            history_tool_calls_count=3,
+            tool_call_parser_name="kimi_k2",
+        )
+
+        choice = post.process_output(
+            {
+                "token_ids": [ord("x")],
+                "finish_reason": "stop",
+            }
+        )
+
+        tc = choice["delta"]["tool_calls"]
+        assert [item["id"] for item in tc] == [
+            "functions.get_weather:3",
+            "functions.search_gutenberg_books:4",
+        ]
+
+
 # ---------------------------------------------------------------------------
 # No reasoning parser
 # ---------------------------------------------------------------------------
@@ -276,3 +322,83 @@ class TestNoToolCalls:
             c = r.get("delta", {}).get("content", "")
             content += c
         assert "Hello, world!" in content
+
+
+# ---------------------------------------------------------------------------
+# Single-chunk tool calls (finish-time re-parse fallback)
+# ---------------------------------------------------------------------------
+
+
+class TestSingleChunkFallback:
+    """When all tool call tokens + finish arrive in one batch, the streaming
+    parser only processes one event.  The finish-time re-parse must recover
+    arguments and any additional tool calls."""
+
+    TEXT = (
+        "<think>\nLet me search for books.\n</think>\n\n"
+        '<tool_call>\n{"name": "search_gutenberg_books", '
+        '"arguments": {"search_terms": ["James Joyce"]}}\n</tool_call>'
+    )
+
+    def test_all_tokens_plus_finish_in_one_batch(self, tokenizer):
+        """Entire response + finish in a single process_output call."""
+        tcp = FunctionCallParser(tools=TOOLS, tool_call_parser="hermes")
+        rp = ReasoningParser(model_type="qwen3", stream_reasoning=True)
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=tcp,
+            reasoning_parser=rp,
+        )
+        token_ids = tokenizer.encode(self.TEXT)
+        # Feed ALL tokens at once with finish_reason
+        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
+        assert choice is not None
+        tc = choice.get("delta", {}).get("tool_calls", [])
+        assert len(tc) == 1, f"Expected 1 tool call, got {len(tc)}"
+        assert tc[0]["function"]["name"] == "search_gutenberg_books"
+        args = json.loads(tc[0]["function"]["arguments"])
+        assert args == {"search_terms": ["James Joyce"]}
+
+    def test_multiple_tools_single_chunk(self, tokenizer):
+        """Multiple tool calls in one chunk -- re-parse must find all."""
+        text = (
+            "<think>\nI'll search and check weather.\n</think>\n\n"
+            '<tool_call>\n{"name": "search_gutenberg_books", '
+            '"arguments": {"search_terms": ["Joyce"]}}\n</tool_call>\n'
+            '<tool_call>\n{"name": "get_weather", '
+            '"arguments": {"city": "London"}}\n</tool_call>'
+        )
+        tcp = FunctionCallParser(tools=TOOLS, tool_call_parser="hermes")
+        rp = ReasoningParser(model_type="qwen3", stream_reasoning=True)
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=tcp,
+            reasoning_parser=rp,
+        )
+        token_ids = tokenizer.encode(text)
+        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
+        assert choice is not None
+        tc = choice.get("delta", {}).get("tool_calls", [])
+        assert len(tc) == 2, f"Expected 2 tool calls, got {len(tc)}"
+        names = {t["function"]["name"] for t in tc}
+        assert names == {"search_gutenberg_books", "get_weather"}
+        for t in tc:
+            args = json.loads(t["function"]["arguments"])
+            assert args, f"Arguments should not be empty for {t['function']['name']}"
+
+    def test_finish_reason_rewritten_to_tool_calls(self, tokenizer):
+        """finish_reason should be 'tool_calls' when re-parse finds calls."""
+        tcp = FunctionCallParser(tools=TOOLS, tool_call_parser="hermes")
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=tcp,
+            reasoning_parser=None,
+        )
+        text = (
+            '<tool_call>\n{"name": "get_weather", '
+            '"arguments": {"city": "NYC"}}\n</tool_call>'
+        )
+        token_ids = tokenizer.encode(text)
+        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
+        assert choice is not None
+        assert choice["finish_reason"] == "tool_calls"
