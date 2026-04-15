@@ -38,23 +38,16 @@ pub(super) struct PromptRegistry {
     // suboptimal routing. We accept that gap temporarily to remove the coarse global registry
     // lock; restoring a coherent published snapshot is still a follow-up item.
     block_workers: DashMap<SequenceHash, FxHashSet<WorkerWithDpRank>>,
-    worker_blocks: DashMap<WorkerWithDpRank, FxHashSet<SequenceHash>>,
     workers: DashMap<WorkerWithDpRank, WorkerLoadSnapshot>,
 }
 
 impl PromptRegistry {
     fn ensure_worker_entries(&self, worker: WorkerWithDpRank) {
         self.workers.entry(worker).or_default();
-        self.worker_blocks.entry(worker).or_default();
     }
 
     fn apply_block_delta(&self, worker: WorkerWithDpRank, block_delta: BlockPresenceDelta) {
-        self.worker_blocks.entry(worker).or_default();
         for hash in block_delta.blocks_became_absent {
-            if let Some(mut worker_blocks) = self.worker_blocks.get_mut(&worker) {
-                worker_blocks.remove(&hash);
-            }
-
             if let Entry::Occupied(mut entry) = self.block_workers.entry(hash) {
                 entry.get_mut().remove(&worker);
                 if entry.get().is_empty() {
@@ -64,7 +57,6 @@ impl PromptRegistry {
         }
 
         for hash in block_delta.blocks_became_present {
-            self.worker_blocks.entry(worker).or_default().insert(hash);
             self.block_workers.entry(hash).or_default().insert(worker);
         }
     }
@@ -100,11 +92,14 @@ impl PromptRegistry {
     pub(super) fn apply_topology_change(&self, change: WorkerTopologyChange) {
         for worker in change.removed {
             self.workers.remove(&worker);
-            let Some((_, blocks)) = self.worker_blocks.remove(&worker) else {
-                continue;
-            };
+            let stale_hashes: Vec<_> = self
+                .block_workers
+                .iter()
+                .filter(|entry| entry.value().contains(&worker))
+                .map(|entry| *entry.key())
+                .collect();
 
-            for hash in blocks {
+            for hash in stale_hashes {
                 if let Entry::Occupied(mut entry) = self.block_workers.entry(hash) {
                     entry.get_mut().remove(&worker);
                     if entry.get().is_empty() {
@@ -316,11 +311,6 @@ impl PromptRegistry {
             .iter()
             .map(|entry| (*entry.key(), *entry.value()))
             .collect();
-        let actual_worker_blocks: FxHashMap<_, _> = self
-            .worker_blocks
-            .iter()
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect();
         let actual_block_workers: FxHashMap<_, _> = self
             .block_workers
             .iter()
@@ -329,10 +319,6 @@ impl PromptRegistry {
         assert_eq!(
             actual_loads, *expected_loads,
             "prompt registry worker loads drifted from per-worker state",
-        );
-        assert_eq!(
-            actual_worker_blocks, *expected_blocks,
-            "prompt registry worker block membership drifted from per-worker state",
         );
         assert_eq!(
             actual_block_workers, expected_block_workers,
