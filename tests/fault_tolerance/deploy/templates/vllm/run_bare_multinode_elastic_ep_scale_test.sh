@@ -182,6 +182,11 @@ scale() {
   }
   echo "--- response ---"
   echo "$RESP"
+  SCALE_STATUS=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null)
+  if [ "$SCALE_STATUS" != "ok" ]; then
+    echo "ERROR: scale_elastic_ep to dp=$to_dp failed: $RESP" >&2
+    exit 1
+  fi
   snapshot "after dp=$to_dp"
   infer "dp=$to_dp"
 }

@@ -100,6 +100,10 @@ for i in $(seq 1 60); do
   fi
   sleep 5
 done
+if [ "$CODE" != "200" ]; then
+  echo "ERROR: inference endpoint never became ready (last HTTP code: ${CODE:-none})" >&2
+  exit 1
+fi
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -166,6 +170,12 @@ scale() {
     2>&1)
   echo "--- scale response ---"
   echo "$RESP"
+  SCALE_STATUS=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null)
+  SCALE_DP=$(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('new_data_parallel_size',''))" 2>/dev/null)
+  if [ "$SCALE_STATUS" != "ok" ] || [ "$SCALE_DP" != "$to_dp" ]; then
+    echo "ERROR: scale to dp=$to_dp failed: $RESP" >&2
+    exit 1
+  fi
   snapshot "after dp=$to_dp"
   infer "dp=$to_dp"
 }

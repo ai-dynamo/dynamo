@@ -15,13 +15,13 @@ import (
 )
 
 const (
-	VLLMPort                     = "6379"
-	dataParallelRPCPort          = "13445"
-	tensorParallelSizeFlag       = "--tensor-parallel-size"
-	pipelineParallelSizeFlag     = "--pipeline-parallel-size"
-	dataParallelSizeFlag         = "--data-parallel-size"
-	dataParallelSizeLocalFlag    = "--data-parallel-size-local"
-	enableElasticEPFlag          = "--enable-elastic-ep"
+	VLLMPort                  = "6379"
+	dataParallelRPCPort       = "13445"
+	tensorParallelSizeFlag    = "--tensor-parallel-size"
+	pipelineParallelSizeFlag  = "--pipeline-parallel-size"
+	dataParallelSizeFlag      = "--data-parallel-size"
+	dataParallelSizeLocalFlag = "--data-parallel-size-local"
+	enableElasticEPFlag       = "--enable-elastic-ep"
 )
 
 type VLLMBackend struct {
@@ -400,7 +400,7 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 // health-gate ensuring only the leader is in Ray at vLLM startup, vLLM
 // naturally places all --data-parallel-size workers on the leader node.
 //
-// Leader: ray start --head --port=6379 --block & sleep 8 && <vllm cmd>
+// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready> && <vllm cmd>
 // Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
 func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
 	switch role {
@@ -414,7 +414,10 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 			quotedArgs[i] = shellQuoteForBashC(arg)
 		}
 		container.Args = []string{fmt.Sprintf(
-			"ray start --head --port=%s --block & sleep 8 && %s %s",
+			`ray start --head --port=%s --block & `+
+				`until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
+				`do sleep 2; done && %s %s`,
+			VLLMPort,
 			VLLMPort,
 			strings.Join(quotedCmd, " "),
 			strings.Join(quotedArgs, " "),

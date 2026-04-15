@@ -60,7 +60,7 @@ spec:
       sizeLimit: 8Gi
   containers:
   - name: main
-    image: nvcr.io/nvidian/dynamo-dev/tzulingk-vllm:main
+    image: ${IMAGE}
     imagePullPolicy: Always
     resources:
       limits:
@@ -173,7 +173,7 @@ spec:
       sizeLimit: 8Gi
   containers:
   - name: main
-    image: nvcr.io/nvidian/dynamo-dev/tzulingk-vllm:main
+    image: ${IMAGE}
     imagePullPolicy: Always
     resources:
       limits:
