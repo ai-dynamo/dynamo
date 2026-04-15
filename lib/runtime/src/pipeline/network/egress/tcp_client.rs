@@ -172,6 +172,41 @@ impl Drop for InflightGuard {
     }
 }
 
+/// RAII guard that resets the `connecting` CAS gate on drop.
+///
+/// After winning the CAS (`connecting` set to `true`), two subsequent
+/// await points in `ensure_capacity_or_heal` are cancellation-unsafe:
+///
+/// 1. `connect_limiter.acquire().await` — if the enclosing Tokio future is
+///    dropped here, `connecting` stays `true` forever and the existing
+///    `map_err` closure only runs when the `Semaphore` is *closed*, not on
+///    cancellation.
+/// 2. `TcpConnection::connect(...).await` — if cancelled here, the explicit
+///    `self.connecting.store(false)` below the await is never reached.
+///
+/// In both cases callers that lost the CAS race will block on
+/// `connect_notify.notified()` until their `connect_timeout` expires, then
+/// retry the CAS — but `connecting` is still `true`, so they time out again,
+/// permanently stalling pool growth for the affected host.
+///
+/// Fix: construct this guard immediately after the CAS succeeds. Its Drop
+/// unconditionally resets `connecting` and wakes waiters, covering every exit
+/// path: normal return (Ok/Err), `?` propagation, and future cancellation.
+/// Double-reset (store false when already false) and double-notify (wake an
+/// empty waiter set) are both no-ops, so explicit cleanup calls in the success
+/// and error branches are left in place for readability without any risk.
+struct ConnectingGuard<'a> {
+    connecting: &'a AtomicBool,
+    notify: &'a tokio::sync::Notify,
+}
+
+impl Drop for ConnectingGuard<'_> {
+    fn drop(&mut self) {
+        self.connecting.store(false, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
 /// TCP connection with lock-free submit and batched write/read tasks.
 ///
 /// Design: SegQueue submit → batched writer task → reader task → oneshot response
@@ -817,12 +852,20 @@ impl HostPool {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                // Won the CAS gate. Acquire global connect permit to limit total connect bursts.
-                let _permit = connect_limiter.acquire().await.map_err(|_| {
-                    self.connecting.store(false, Ordering::Release);
-                    self.connect_notify.notify_waiters();
-                    anyhow::anyhow!("Global connect limiter closed")
-                })?;
+                // Won the CAS gate. Guard resets it (and wakes waiters) on ALL
+                // exit paths — normal return, ?, and future cancellation.
+                let _connecting_guard = ConnectingGuard {
+                    connecting: &self.connecting,
+                    notify: &self.connect_notify,
+                };
+
+                // Acquire global connect permit to limit total connect bursts.
+                // If this await is cancelled, _connecting_guard drops and
+                // resets the gate — no manual cleanup needed.
+                let _permit = connect_limiter
+                    .acquire()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Global connect limiter closed"))?;
 
                 let connect_result =
                     TcpConnection::connect(self.addr, self.connect_timeout, self.channel_buffer)
