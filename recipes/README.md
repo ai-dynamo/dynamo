@@ -65,7 +65,8 @@ These recipes are under active development and may require additional setup step
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|------|------|------------|-------|
-| **[nvidia/Kimi-K2.5-NVFP4](kimi-k2.5/trtllm/agg/nvidia/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | Text only — MoE model, TP8×EP8, reasoning + tool calling. Requires [container patch](kimi-k2.5/trtllm/agg/nvidia/patch/). Vision input not yet functional with the patch. |
+| **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill. Requires [custom container build](glm-5-nvfp4/). |
+| **[nvidia/Kimi-K2.5-NVFP4](kimi-k2.5/trtllm/agg/nvidia/)** | TensorRT-LLM | Aggregated | 8x B200 | ✅ | Text only — MoE model, TP8×EP8, reasoning + tool calling. Vision input not yet functional. |
 
 ## Recipe Structure
 
