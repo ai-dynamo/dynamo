@@ -40,7 +40,7 @@ spec:
         nodeSelector:
           karpenter.sh/nodepool: general-medium-storage
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/tzulingk-dynamo-vllm:elastic_ep_scale_lock
+          image: ${IMAGE}
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -83,7 +83,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/tzulingk-dynamo-vllm:elastic_ep_scale_lock
+          image: ${IMAGE}
           imagePullPolicy: Always
           workingDir: /workspace/examples/backends/vllm
           volumeMounts:

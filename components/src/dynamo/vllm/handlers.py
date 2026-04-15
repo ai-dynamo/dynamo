@@ -543,6 +543,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": f"new_data_parallel_size must be an integer, got: {new_dp_size!r}",
             }
+        if new_dp_size < 2:
+            return {
+                "status": "error",
+                "message": (
+                    "new_data_parallel_size must be >= 2 when elastic EP/ePLB is enabled"
+                ),
+            }
 
         logger.info(f"[ElasticEP] Scaling to new_data_parallel_size={new_dp_size}")
 

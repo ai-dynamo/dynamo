@@ -222,6 +222,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 		initialContainer  *corev1.Container
 		gpuCount          int64 // GPU count for the test case
 		expectedArgs      []string
+		description       string
 	}{
 		{
 			name:              "single node shell command not modified",
@@ -230,7 +231,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{"python3 -m dynamo.vllm"}},
 			gpuCount:          0,
-			expectedArgs: []string{"python3 -m dynamo.vllm"},
+			expectedArgs:      []string{"python3 -m dynamo.vllm"},
+			description:       "Single node should not modify shell commands",
 		},
 		{
 			name:              "multinode shell command with regex injection",
@@ -239,7 +241,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}},
 			gpuCount:          4,
-			expectedArgs: []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-rpc-port 13445 --data-parallel-size 8"},
+			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-rpc-port 13445 --data-parallel-size 8"},
+			description:       "Shell commands should use regex injection for python commands",
 		},
 		{
 			name:              "multinode shell command with complex pipeline",
@@ -248,7 +251,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("echo blah | wc -l && python3 -m dynamo.vllm %s 8 && ls -al", dataParallelSizeFlag)}},
 			gpuCount:          4,
-			expectedArgs: []string{"echo blah | wc -l && python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-rpc-port 13445 --data-parallel-size 8 && ls -al"},
+			expectedArgs:      []string{"echo blah | wc -l && python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-rpc-port 13445 --data-parallel-size 8 && ls -al"},
+			description:       "Complex shell commands should inject flags only into python part",
 		},
 		{
 			name:              "shell command with LWS deployer",
@@ -257,7 +261,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8", dataParallelSizeFlag)}},
 			gpuCount:          4,
-			expectedArgs: []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $LWS_LEADER_ADDRESS --data-parallel-rpc-port 13445 --data-parallel-size 8"},
+			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $LWS_LEADER_ADDRESS --data-parallel-rpc-port 13445 --data-parallel-size 8"},
+			description:       "LWS shell commands should use LWS variables",
 		},
 		{
 			name:              "shell command with pipes",
@@ -266,7 +271,8 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer:  &corev1.Container{Command: []string{"sh", "-c"}, Args: []string{fmt.Sprintf("python3 -m dynamo.vllm %s 8 | tee /tmp/log", dataParallelSizeFlag)}},
 			gpuCount:          4,
-			expectedArgs: []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-rpc-port 13445 --data-parallel-size 8 | tee /tmp/log"},
+			expectedArgs:      []string{"python3 -m dynamo.vllm --data-parallel-hybrid-lb --data-parallel-size-local 4 --data-parallel-start-rank 0 --data-parallel-address $(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE) --data-parallel-rpc-port 13445 --data-parallel-size 8 | tee /tmp/log"},
+			description:       "Shell commands with pipes should inject flags before pipe",
 		},
 	}
 
@@ -411,6 +417,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 		annotations       map[string]string // nil = legacy (no annotations)
 		expectedArgs      []string
 		expectNotModified bool
+		description       string
 	}{
 		{
 			name:              "leader uses ray (nil annotations = legacy)",
@@ -524,14 +531,14 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 		// Elastic EP tests: --enable-elastic-ep must use Ray cluster path,
 		// never the --data-parallel-hybrid-lb RPC path.
 		//
-		// Leader: ray start --head & sleep 8 && <vllm cmd>  (no --data-parallel-size-local injected)
+		// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready> && <vllm cmd>  (no --data-parallel-size-local injected)
 		// Worker: health-gate on DynamoSystemPort (9090) && ray start --address=<leader> --block
 		//
 		// The health-gate ensures the worker only joins Ray after dynamo.vllm is fully
 		// serving, so create_dp_placement_groups sees only the leader node and places all
 		// initial DP workers there (warm standby).
 		{
-			name:              "elastic EP leader: injects Ray head + vllm serve without --data-parallel-size-local",
+			name:              "elastic EP leader Grove: ray head start + vllm serve",
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer: &corev1.Container{
@@ -541,12 +548,13 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			gpuCount:    2,
 			annotations: nil,
 			expectedArgs: []string{fmt.Sprintf(
-				"ray start --head --port=%s --block & sleep 8 && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s",
-				VLLMPort, dataParallelSizeFlag, enableElasticEPFlag,
+				`ray start --head --port=%s --block & until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do sleep 2; done && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s`,
+				VLLMPort, VLLMPort, dataParallelSizeFlag, enableElasticEPFlag,
 			)},
+			description: "Operator prepends ray head start and TCP readiness poll; --data-parallel-hybrid-lb and --data-parallel-size-local are NOT injected (elastic EP uses Ray for GPU assignment, not the RPC path)",
 		},
 		{
-			name:              "elastic EP worker Grove: health-gate on /live HTTP then joins Ray",
+			name:              "elastic EP worker Grove: health-gate then ray join",
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer: &corev1.Container{
@@ -562,9 +570,10 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 				"$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)",
 				VLLMPort,
 			)},
+			description: "Operator replaces the entire command with a /live HTTP health-gate then ray join; vllm does NOT run on the worker (worker provides idle GPUs for warm standby, claimed on scale-up)",
 		},
 		{
-			name:              "elastic EP leader: user-specified --data-parallel-size-local is preserved (operator does not inject it)",
+			name:              "elastic EP leader Grove: user-specified --data-parallel-size-local preserved",
 			role:              RoleLeader,
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialContainer: &corev1.Container{
@@ -574,12 +583,13 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			gpuCount:    2,
 			annotations: nil,
 			expectedArgs: []string{fmt.Sprintf(
-				"ray start --head --port=%s --block & sleep 8 && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s %s 2",
-				VLLMPort, dataParallelSizeFlag, enableElasticEPFlag, dataParallelSizeLocalFlag,
+				`ray start --head --port=%s --block & until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do sleep 2; done && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s %s 2`,
+				VLLMPort, VLLMPort, dataParallelSizeFlag, enableElasticEPFlag, dataParallelSizeLocalFlag,
 			)},
+			description: "Operator prepends ray head start but does not override a user-specified --data-parallel-size-local",
 		},
 		{
-			name:              "elastic EP worker LWS: health-gate on /live HTTP then joins Ray",
+			name:              "elastic EP worker LWS: health-gate then ray join",
 			role:              RoleWorker,
 			multinodeDeployer: &LWSMultinodeDeployer{},
 			initialContainer: &corev1.Container{
@@ -595,6 +605,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 				"$LWS_LEADER_ADDRESS",
 				VLLMPort,
 			)},
+			description: "Same as Grove worker but uses $LWS_LEADER_ADDRESS instead of the Grove-specific DNS address",
 		},
 	}
 
@@ -748,6 +759,56 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			expectInitContainer: true,
 			expectedInitImage:   "vllm:latest",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+		},
+		// Elastic EP regression: UpdatePodSpec must NOT inject the MP init container
+		// when --enable-elastic-ep is present in ExtraPodSpec.MainContainer. The elastic
+		// EP path uses a Ray cluster, not the MP coordinator; the MP init container waits
+		// on VLLMMpMasterPort (29500) which never opens in the elastic EP path.
+		{
+			name:          "elastic EP worker Grove: no MP init container injected",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag},
+					},
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:latest"},
+				},
+			},
+			expectInitContainer: false,
+		},
+		{
+			name:          "elastic EP worker LWS: no MP init container injected",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+				},
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Command: []string{"python3", "-m", "dynamo.vllm"},
+						Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag},
+					},
+				},
+			},
+			multinodeDeployer: &LWSMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "main", Image: "vllm:v2"},
+				},
+			},
+			expectInitContainer: false,
 		},
 	}
 
