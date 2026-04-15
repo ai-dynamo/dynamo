@@ -546,7 +546,9 @@ async def init_llm_worker(
             )
 
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
-        health_check_payload = TrtllmHealthCheckPayload(tokenizer=tokenizer).to_dict()
+        health_check_payload = TrtllmHealthCheckPayload(
+            tokenizer=tokenizer
+        ).to_dict_if_enabled()
 
         if config.publish_events_and_metrics:
             # Initialize and pass in the publisher to the request handler to

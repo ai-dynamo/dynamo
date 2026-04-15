@@ -94,22 +94,31 @@ class HealthCheckPayload:
 
         self._payload = None
 
-    def to_dict(self) -> Optional[Dict[str, Any]]:
+    def to_dict(self) -> Dict[str, Any]:
         """
-        Get the health check payload as a dictionary, or None if canary is disabled.
+        Get the health check payload as a dictionary.
 
-        Returns None if DYN_HEALTH_CHECK_ENABLED is not 'true' — this means
-        no health check target will be registered, and the transport layer
-        will set the endpoint to Ready on registration (default behavior).
-
-        When canary is enabled, returns the environment override if
-        DYN_HEALTH_CHECK_PAYLOAD is set, otherwise returns the default payload.
+        Returns the environment override if DYN_HEALTH_CHECK_PAYLOAD is set,
+        otherwise returns the default payload.
         """
-        if not is_health_check_enabled():
-            return None
         if self._payload is None:
             self._payload = load_health_check_from_env() or self.default_payload
         return self._payload
+
+    def to_dict_if_enabled(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the payload only if canary health checks are enabled.
+
+        Returns None if DYN_HEALTH_CHECK_ENABLED is not 'true', meaning
+        no health check target will be registered and the transport layer
+        will set the endpoint to Ready on registration (default behavior).
+
+        Use this when passing to serve_endpoint(health_check_payload=...).
+        Use to_dict() directly when you need the payload regardless of config.
+        """
+        if not is_health_check_enabled():
+            return None
+        return self.to_dict()
 
     def __repr__(self) -> str:
         """Return a string representation of the health check payload."""

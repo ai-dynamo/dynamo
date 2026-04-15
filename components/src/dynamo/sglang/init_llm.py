@@ -113,11 +113,11 @@ async def init_decode(
     if config.serving_mode == DisaggregationMode.DECODE:
         health_check_payload = SglangDisaggHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
-        ).to_dict()
+        ).to_dict_if_enabled()
     else:
         health_check_payload = SglangHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
-        ).to_dict()
+        ).to_dict_if_enabled()
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
@@ -246,7 +246,7 @@ async def init_prefill(
     )
     handler.register_engine_routes(runtime)
 
-    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+    health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict_if_enabled()
 
     ready_event = asyncio.Event()
 
