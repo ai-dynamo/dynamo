@@ -152,12 +152,22 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         librdmacm-devel \
         numactl-devel \
         # Libfabric support
-        hwloc \
-        hwloc-devel \
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
         zlib-devel
+
+# Build hwloc from source (>= 2.3 required by nixl >= v1.0.0 for hwloc_location API)
+ARG HWLOC_VERSION=2.12.0
+RUN cd /tmp && \
+    curl --retry 3 -LO https://download.open-mpi.org/release/hwloc/v2.12/hwloc-${HWLOC_VERSION}.tar.gz && \
+    tar xf hwloc-${HWLOC_VERSION}.tar.gz && \
+    cd hwloc-${HWLOC_VERSION} && \
+    ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/hwloc-*
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
