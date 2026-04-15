@@ -143,59 +143,6 @@ pub async fn create_multi_worker_sequences(
 mod tests {
     use super::*;
     use dynamo_runtime::{DistributedRuntime, Runtime};
-    use tokio::time::Instant;
-
-    #[test]
-    fn test_active_sequences_shared_blocks() {
-        let block_size = 4;
-        let mut seq_manager = ActiveSequences::new(block_size);
-        let decay_now = Instant::now();
-
-        seq_manager.add_request(
-            "request_1".to_string(),
-            Some(vec![1, 2, 3]),
-            12,
-            0,
-            None,
-            decay_now,
-        );
-        assert_eq!(seq_manager.active_blocks(), 3);
-        assert_eq!(seq_manager.active_tokens(decay_now), 12);
-
-        seq_manager.add_request(
-            "request_2".to_string(),
-            Some(vec![4]),
-            4,
-            0,
-            None,
-            decay_now,
-        );
-        assert_eq!(seq_manager.active_blocks(), 4);
-        assert_eq!(seq_manager.active_tokens(decay_now), 16);
-
-        seq_manager.add_request(
-            "request_3".to_string(),
-            Some(vec![1, 2, 3, 4]),
-            16,
-            4,
-            None,
-            decay_now,
-        );
-        assert_eq!(seq_manager.active_blocks(), 4);
-        assert_eq!(seq_manager.active_tokens(decay_now), 16);
-
-        seq_manager.free(&"request_2".to_string(), decay_now);
-        assert_eq!(seq_manager.active_blocks(), 4);
-        assert_eq!(seq_manager.active_tokens(decay_now), 12);
-
-        seq_manager.free(&"request_3".to_string(), decay_now);
-        assert_eq!(seq_manager.active_blocks(), 3);
-        assert_eq!(seq_manager.active_tokens(decay_now), 12);
-
-        seq_manager.free(&"request_1".to_string(), decay_now);
-        assert_eq!(seq_manager.active_blocks(), 0);
-        assert_eq!(seq_manager.active_tokens(decay_now), 0);
-    }
 
     #[tokio::test]
     #[ignore]

@@ -289,6 +289,8 @@ async fn run_benchmark(
         all_latencies.extend(task.await??);
     }
 
+    multi.assert_completely_drained(Instant::now());
+
     if progress.elapsed() > Duration::from_millis(benchmark_duration_ms * 11 / 10) {
         eprintln!(
             "WARNING: Benchmarker could not keep up. Rerun with a larger --benchmark-duration-ms."
@@ -311,10 +313,13 @@ async fn run_benchmark(
     };
 
     println!(
-        "Ops Throughput: {} ops/s (potential_blocks_and_tokens + add + prefill_complete + free)",
-        ops_throughput
+        "Ops Throughput: offered={} ops/s achieved={} ops/s (potential_blocks_and_tokens + add + prefill_complete + free)",
+        offered_ops_throughput, ops_throughput
     );
-    println!("Block Throughput: {} block ops/s", block_throughput);
+    println!(
+        "Block Throughput: offered={} block ops/s achieved={} block ops/s",
+        offered_block_throughput, block_throughput
+    );
     println!("Latency p99: {}us", latency_p99_us);
 
     Ok(BenchmarkResults {

@@ -342,7 +342,7 @@ impl PromptRegistry {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub(super) fn is_block_index_empty(&self) -> bool {
         self.inner.read().block_workers.is_empty()
     }

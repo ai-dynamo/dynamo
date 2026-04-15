@@ -12,13 +12,15 @@
 use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
-use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+
+#[cfg(any(test, debug_assertions))]
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::single::{ActiveSequences, BlockPresenceDelta, RequestId};
@@ -181,6 +183,41 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     fn validate_registry(&self) {
         #[cfg(any(test, debug_assertions))]
         self.assert_registry_consistent();
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub fn assert_completely_drained(&self, decay_now: Instant) {
+        let active_blocks = self.active_blocks();
+        assert!(
+            active_blocks.values().all(|&count| count == 0),
+            "expected all workers to have zero active blocks, got {active_blocks:?}",
+        );
+
+        let active_tokens = self.active_tokens(decay_now);
+        assert!(
+            active_tokens.values().all(|&count| count == 0),
+            "expected all workers to have zero active tokens, got {active_tokens:?}",
+        );
+
+        assert!(
+            self.request_to_worker.is_empty(),
+            "expected no active request-to-worker mappings, found {}",
+            self.request_to_worker.len(),
+        );
+        assert!(
+            self.request_to_lora.is_empty(),
+            "expected no active request-to-lora mappings, found {}",
+            self.request_to_lora.len(),
+        );
+        assert!(
+            self.get_active_lora_counts().is_empty(),
+            "expected no active LoRA counts, found {:?}",
+            self.get_active_lora_counts(),
+        );
+        assert!(
+            self.prompt_registry.is_block_index_empty(),
+            "expected reverse block index to be empty after drain",
+        );
     }
 
     fn publish_worker_load_snapshot(

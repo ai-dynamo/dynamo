@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -144,8 +144,10 @@ impl PrefillLoadTracker {
 
     #[cfg(any(test, debug_assertions))]
     pub(super) fn assert_consistent(&self) {
-        let active_prefills: HashSet<RequestId> = self.prefills.keys().cloned().collect();
-        let ordered_prefills: HashSet<RequestId> = self.prefill_order.iter().cloned().collect();
+        let active_prefills: std::collections::HashSet<RequestId> =
+            self.prefills.keys().cloned().collect();
+        let ordered_prefills: std::collections::HashSet<RequestId> =
+            self.prefill_order.iter().cloned().collect();
         let recomputed_prefill_sum: usize = self
             .prefills
             .values()

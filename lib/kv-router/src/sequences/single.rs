@@ -20,12 +20,14 @@
 
 use derive_getters::Getters;
 use dynamo_tokens::SequenceHash;
-use rustc_hash::FxHashSet;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
+
+#[cfg(any(test, debug_assertions))]
+use rustc_hash::FxHashSet;
 
 use super::block_tracker::BlockTracker;
 use super::prefill_tracker::{
