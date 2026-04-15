@@ -36,8 +36,11 @@ fi
 # FastVideo's pyproject uses uv package sources for torch that prefer CUDA 12.8
 # wheels. Ignore uv package sources during this install so resolution follows
 # the CUDA backend selected for the Dynamo image.
+# flash-attn requires torch during wheel build but does not declare it as a
+# build dependency, so disable build isolation to use the environment torch.
 uv pip install \
     --no-sources \
+    --no-build-isolation-package flash-attn \
     --index-strategy unsafe-best-match \
     --torch-backend "${TORCH_BACKEND}" \
     --requirement "${REQUIREMENTS_FILE}"
