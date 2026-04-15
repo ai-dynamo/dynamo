@@ -15,7 +15,16 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["HealthCheckPayload", "load_health_check_from_env"]
+__all__ = [
+    "HealthCheckPayload",
+    "load_health_check_from_env",
+    "is_health_check_enabled",
+]
+
+
+def is_health_check_enabled() -> bool:
+    """Check if active canary health checks are enabled via DYN_HEALTH_CHECK_ENABLED."""
+    return os.environ.get("DYN_HEALTH_CHECK_ENABLED", "").lower() == "true"
 
 
 def load_health_check_from_env(
@@ -85,15 +94,20 @@ class HealthCheckPayload:
 
         self._payload = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> Optional[Dict[str, Any]]:
         """
-        Get the health check payload as a dictionary.
+        Get the health check payload as a dictionary, or None if canary is disabled.
 
-        Returns the environment override if DYN_HEALTH_CHECK_PAYLOAD is set,
-        otherwise returns the default payload.
+        Returns None if DYN_HEALTH_CHECK_ENABLED is not 'true' — this means
+        no health check target will be registered, and the transport layer
+        will set the endpoint to Ready on registration (default behavior).
+
+        When canary is enabled, returns the environment override if
+        DYN_HEALTH_CHECK_PAYLOAD is set, otherwise returns the default payload.
         """
+        if not is_health_check_enabled():
+            return None
         if self._payload is None:
-            # Check for environment override
             self._payload = load_health_check_from_env() or self.default_payload
         return self._payload
 

@@ -330,10 +330,16 @@ impl SharedTcpServer {
         // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
 
-        // THEN set health status to Ready (after handler is registered and ready)
-        system_health
+        // Only set Ready if no health check target is registered for this endpoint.
+        if system_health
             .lock()
-            .set_endpoint_health_status(&endpoint_name, crate::HealthStatus::Ready);
+            .get_health_check_target(&endpoint_name)
+            .is_none()
+        {
+            system_health
+                .lock()
+                .set_endpoint_health_status(&endpoint_name, crate::HealthStatus::Ready);
+        }
 
         tracing::info!(
             "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
