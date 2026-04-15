@@ -2,9 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import base64
-import binascii
-import io
 import logging
 import os
 import tempfile
@@ -13,6 +10,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
@@ -20,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
@@ -1105,44 +1104,28 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         Decode base64-encoded prompt embeddings in PyTorch format.
 
+        Use vllm's safe loader to prevent out-of-bounds writes from maliciously crafted tensors.
+
         Format: PyTorch tensor serialized with torch.save() and base64-encoded.
 
         Args:
             prompt_embeds_base64: Base64-encoded PyTorch tensor
 
         Returns:
-            torch.Tensor: Decoded prompt embeddings with preserved shape and dtype
+            torch.Tensor: Decoded prompt embeddings with dim == 2
 
         Raises:
             ValueError: If decoding fails or format is invalid
         """
-        try:
-            # Step 1: Decode base64 to bytes
-            embeds_bytes = base64.b64decode(prompt_embeds_base64)
-
-            # Step 2: Load PyTorch tensor from bytes
-            buffer = io.BytesIO(embeds_bytes)
-            embeddings_tensor = torch.load(buffer, weights_only=True)
-
-            # Step 3: Validate it's a tensor
-            if not isinstance(embeddings_tensor, torch.Tensor):
-                raise ValueError(
-                    f"prompt_embeds must be a torch.Tensor, got {type(embeddings_tensor)}"
-                )
-
-            logger.debug(
-                f"Decoded PyTorch format embeddings: shape={embeddings_tensor.shape}, "
-                f"dtype={embeddings_tensor.dtype}, size={len(embeds_bytes)} bytes"
+        if not isinstance(prompt_embeds_base64, str):
+            raise ValueError(
+                f"Prompt embeds must be base64 encoded string. Got {type(prompt_embeds_base64)}."
             )
 
-            return embeddings_tensor
-
-        except binascii.Error as e:
-            logger.error(f"Invalid base64 encoding in prompt_embeds: {e}")
-            raise ValueError(f"Invalid base64 encoding in prompt_embeds: {e}")
-        except Exception as e:
-            logger.error(f"Failed to decode prompt_embeds: {e}")
-            raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
+        # We don't know whether this is enabled on the server or not.
+        # We only get here if the users' request has set prompt_embeds, so trust them.
+        model_config = SimpleNamespace(enable_prompt_embeds=True)
+        return safe_load_prompt_embeds(model_config, prompt_embeds_base64.encode())
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str
@@ -1163,16 +1146,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             ValueError: If decoding fails or tensor is invalid
         """
         embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
+        if embeddings_tensor.dim() != 2:
+            raise ValueError(
+                f"prompt embeds should have dim 2 after vllm processing, but found dim {embeddings_tensor.dim()}"
+            )
 
         # Extract sequence length from tensor shape for usage reporting
-        # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
-        if embeddings_tensor.dim() == 2:
-            sequence_length = embeddings_tensor.shape[0]
-        elif embeddings_tensor.dim() == 3:
-            sequence_length = embeddings_tensor.shape[1]
-        else:
-            # Fallback for unexpected shapes
-            sequence_length = embeddings_tensor.shape[0]
+        sequence_length = embeddings_tensor.shape[0]
 
         # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
         prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
