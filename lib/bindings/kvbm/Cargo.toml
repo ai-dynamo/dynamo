@@ -23,7 +23,13 @@ crate-type = ["cdylib", "rlib"]
 default = ["v1", "v2"]
 dynamo = ["dep:dynamo-runtime"]
 v1 = ["dynamo", "dep:dynamo-llm", "dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
-v2 = ["dep:kvbm-connector", "kvbm-connector/static-kernels"]
+v2 = [
+    "dep:kvbm-connector",
+    "kvbm-connector/static-kernels",
+    "dep:kvbm-logical",
+    "dep:kvbm-engine",
+    "dep:dynamo-tokens",
+]
 kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell"]
 nccl = ["v1", "dynamo-llm/nccl", "cudarc/nccl"]
 
@@ -34,6 +40,9 @@ dynamo-runtime = { path = "../../runtime", optional = true }
 
 # v2 deps (optional)
 kvbm-connector = { path = "../../kvbm-connector", optional = true }
+kvbm-logical = { path = "../../kvbm-logical", optional = true }
+kvbm-engine = { path = "../../kvbm-engine", optional = true }
+dynamo-tokens = { path = "../../tokens", optional = true }
 
 # kernels deps (optional)
 kvbm-kernels = { path = "../../kvbm-kernels", optional = true }

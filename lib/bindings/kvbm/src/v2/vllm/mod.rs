@@ -4,4 +4,6 @@
 //! vLLM integration Python bindings.
 
 pub mod config;
+pub mod kv_cache_manager;
 pub use config::PyKvbmVllmConfig;
+pub use kv_cache_manager::PyRustKvCacheManager;
