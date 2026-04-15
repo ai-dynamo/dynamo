@@ -4,6 +4,7 @@
 """Base handler for vLLM-Omni multi-stage pipelines."""
 
 import asyncio
+import dataclasses
 import logging
 import time
 from typing import Any, AsyncGenerator, Dict
@@ -74,38 +75,17 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if config.stage_configs_path:
             omni_kwargs["stage_configs_path"] = config.stage_configs_path
 
-        # Diffusion engine-level params — read directly from config namespace
-        diffusion_fields = [
-            "enable_layerwise_offload",
-            "layerwise_num_gpu_layers",
-            "vae_use_slicing",
-            "vae_use_tiling",
-            "boundary_ratio",
-            "flow_shift",
-            "cache_backend",
-            "cache_config",
-            "enable_cache_dit_summary",
-            "enable_cpu_offload",
-            "enforce_eager",
-        ]
-        for field in diffusion_fields:
-            value = getattr(config, field, None)
+        for field, value in dataclasses.asdict(config.diffusion).items():
             if value is not None:
                 omni_kwargs[field] = value
 
-        # Build DiffusionParallelConfig if available
+        # tensor_parallel_size comes from engine_args (vLLM's --tensor-parallel-size)
         if DiffusionParallelConfig is not None:
             parallel_config = DiffusionParallelConfig(
                 tensor_parallel_size=getattr(
                     config.engine_args, "tensor_parallel_size", 1
                 ),
-                ulysses_degree=getattr(config, "ulysses_degree", 1),
-                ring_degree=getattr(config, "ring_degree", 1),
-                cfg_parallel_size=getattr(config, "cfg_parallel_size", 1),
-                vae_patch_parallel_size=getattr(config, "vae_patch_parallel_size", 1),
-                use_hsdp=getattr(config, "use_hsdp", False),
-                hsdp_shard_size=getattr(config, "hsdp_shard_size", 2),
-                hsdp_replicate_size=getattr(config, "hsdp_replicate_size", 1),
+                **dataclasses.asdict(config.parallel),
             )
             omni_kwargs["parallel_config"] = parallel_config
         else:

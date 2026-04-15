@@ -4,6 +4,7 @@
 """Omni-specific argument parsing for python -m dynamo.vllm.omni."""
 
 import argparse
+import dataclasses
 import logging
 from typing import Optional
 
@@ -24,14 +25,49 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 logger = logging.getLogger(__name__)
 
 
-class OmniArgGroup(ArgGroup):
-    """Diffusion pipeline kwargs passed through to AsyncOmni() constructor.
+@dataclasses.dataclass
+class OmniDiffusionKwargs:
+    """AsyncOmni constructor kwargs for diffusion engine configuration.
 
-    These are NOT part of OmniEngineArgs (which handles vLLM engine-level
-    args like model, tp, max_model_len). Instead they are direct constructor
-    kwargs for AsyncOmni and need Dynamo-side env-var (DYN_OMNI_*) support,
-    so we define them here rather than relying on the upstream arg parser.
+    Every field here is passed directly to AsyncOmni(**kwargs) and consumed by
+    _create_default_diffusion_stage_cfg() in vllm-omni. Adding a new vllm-omni
+    diffusion flag only requires adding it here and to OmniArgGroup — the
+    passthrough in base_handler is automatic.
     """
+
+    enable_layerwise_offload: bool = False
+    layerwise_num_gpu_layers: int = 1
+    vae_use_slicing: bool = False
+    vae_use_tiling: bool = False
+    boundary_ratio: float = 0.875
+    flow_shift: Optional[float] = None
+    cache_backend: Optional[str] = None
+    cache_config: Optional[str] = None
+    enable_cache_dit_summary: bool = False
+    enable_cpu_offload: bool = False
+    enforce_eager: bool = False
+
+
+@dataclasses.dataclass
+class OmniParallelKwargs:
+    """Diffusion parallelism configuration passed to DiffusionParallelConfig.
+
+    Every field here maps 1:1 to a DiffusionParallelConfig field (excluding
+    tensor_parallel_size which comes from engine_args, and fixed/derived fields).
+    Adding a new parallelism field only requires adding it here and to OmniArgGroup.
+    """
+
+    ulysses_degree: int = 1
+    ring_degree: int = 1
+    cfg_parallel_size: int = 1
+    vae_patch_parallel_size: int = 1
+    use_hsdp: bool = False
+    hsdp_shard_size: int = -1
+    hsdp_replicate_size: int = 1
+
+
+class OmniArgGroup(ArgGroup):
+    """CLI argument definitions for Dynamo vLLM-Omni."""
 
     name = "dynamo-omni"
 
@@ -49,7 +85,6 @@ class OmniArgGroup(ArgGroup):
             help="Path to vLLM-Omni stage configuration YAML file (optional).",
         )
 
-        # Video encoding
         add_argument(
             g,
             flag_name="--default-video-fps",
@@ -59,7 +94,7 @@ class OmniArgGroup(ArgGroup):
             help="Default frames per second for generated videos.",
         )
 
-        # Layerwise offloading
+        # OmniDiffusionKwargs fields
         add_negatable_bool_argument(
             g,
             flag_name="--enable-layerwise-offload",
@@ -75,8 +110,6 @@ class OmniArgGroup(ArgGroup):
             arg_type=int,
             help="Number of ready layers (blocks) to keep on GPU during generation.",
         )
-
-        # VAE optimization
         add_negatable_bool_argument(
             g,
             flag_name="--vae-use-slicing",
@@ -91,8 +124,6 @@ class OmniArgGroup(ArgGroup):
             default=False,
             help="Enable VAE tiling for memory optimization in diffusion models.",
         )
-
-        # Diffusion scheduling
         add_argument(
             g,
             flag_name="--boundary-ratio",
@@ -113,8 +144,6 @@ class OmniArgGroup(ArgGroup):
             arg_type=float,
             help="Scheduler flow_shift parameter (5.0 for 720p, 12.0 for 480p).",
         )
-
-        # Cache acceleration
         add_argument(
             g,
             flag_name="--cache-backend",
@@ -141,8 +170,6 @@ class OmniArgGroup(ArgGroup):
             default=False,
             help="Enable cache-dit summary logging after diffusion forward passes.",
         )
-
-        # Execution mode
         add_negatable_bool_argument(
             g,
             flag_name="--enable-cpu-offload",
@@ -204,7 +231,7 @@ class OmniArgGroup(ArgGroup):
             help="Maximum size in bytes for reference audio files (default: 50MB).",
         )
 
-        # Diffusion parallel configuration
+        # OmniParallelKwargs fields
         add_argument(
             g,
             flag_name="--ulysses-degree",
@@ -245,17 +272,16 @@ class OmniArgGroup(ArgGroup):
             default=False,
             help=(
                 "Enable Hybrid Sharded Data Parallel (HSDP) for diffusion models. "
-                "Shards model weights across GPUs to reduce per-GPU memory usage. "
-                "Use --hsdp-shard-size to set the number of GPUs to shard across."
+                "Shards model weights across GPUs to reduce per-GPU memory usage."
             ),
         )
         add_argument(
             g,
             flag_name="--hsdp-shard-size",
             env_var="DYN_OMNI_HSDP_SHARD_SIZE",
-            default=2,
+            default=-1,
             arg_type=int,
-            help="Number of GPUs to shard model weights across when using HSDP (default: 2).",
+            help="Number of GPUs to shard model weights across when using HSDP (-1 = auto).",
         )
         add_argument(
             g,
@@ -279,7 +305,6 @@ class OmniArgGroup(ArgGroup):
                 "Requires --stage-configs-path."
             ),
         )
-
         add_negatable_bool_argument(
             g,
             flag_name="--omni-router",
@@ -298,34 +323,18 @@ class OmniConfig(DynamoRuntimeConfig):
     component: str = "backend"
     endpoint: Optional[str] = None
 
-    # mirror vLLM
     model: str
     served_model_name: Optional[str] = None
-
-    # vLLM-Omni engine args
     engine_args: OmniEngineArgs
 
-    # OmniArgGroup fields (populated by from_cli_args)
     stage_configs_path: Optional[str] = None
     default_video_fps: int = 16
-    enable_layerwise_offload: bool = False
-    layerwise_num_gpu_layers: int = 1
-    vae_use_slicing: bool = False
-    vae_use_tiling: bool = False
-    boundary_ratio: float = 0.875
-    flow_shift: Optional[float] = None
-    cache_backend: Optional[str] = None
-    cache_config: Optional[str] = None
-    enable_cache_dit_summary: bool = False
-    enable_cpu_offload: bool = False
-    enforce_eager: bool = False
-    ulysses_degree: int = 1
-    ring_degree: int = 1
-    cfg_parallel_size: int = 1
-    vae_patch_parallel_size: int = 1
-    use_hsdp: bool = False
-    hsdp_shard_size: int = -1
-    hsdp_replicate_size: int = 1
+
+    # Nested structs — each group of fields has a clear destination
+    diffusion: OmniDiffusionKwargs = dataclasses.field(
+        default_factory=OmniDiffusionKwargs
+    )
+    parallel: OmniParallelKwargs = dataclasses.field(default_factory=OmniParallelKwargs)
 
     # TTS parameters
     tts_max_instructions_length: int = 500
@@ -338,15 +347,32 @@ class OmniConfig(DynamoRuntimeConfig):
     stage_id: Optional[int] = None
     omni_router: bool = False
 
+    @classmethod
+    def from_cli_args(cls, args: argparse.Namespace) -> "OmniConfig":
+        config = super().from_cli_args(args)
+        config.diffusion = OmniDiffusionKwargs(
+            **{
+                f.name: getattr(args, f.name, f.default)
+                for f in dataclasses.fields(OmniDiffusionKwargs)
+            }
+        )
+        config.parallel = OmniParallelKwargs(
+            **{
+                f.name: getattr(args, f.name, f.default)
+                for f in dataclasses.fields(OmniParallelKwargs)
+            }
+        )
+        return config
+
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         if self.default_video_fps <= 0:
             raise ValueError("--default-video-fps must be > 0")
-        if self.ulysses_degree <= 0:
+        if self.parallel.ulysses_degree <= 0:
             raise ValueError("--ulysses-degree must be > 0")
-        if self.ring_degree <= 0:
+        if self.parallel.ring_degree <= 0:
             raise ValueError("--ring-degree must be > 0")
-        if not (0 < self.boundary_ratio <= 1):
+        if not (0 < self.diffusion.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
         if self.stage_configs_path is None:
             if self.stage_id is not None:
@@ -373,7 +399,6 @@ def parse_omni_args() -> OmniConfig:
     dynamo_runtime_argspec.add_arguments(parser)
     omni_argspec.add_arguments(parser)
 
-    # Add vLLM-Omni engine args
     vg = parser.add_argument_group(
         "vLLM-Omni Engine Options. Please refer to vLLM-Omni documentation for more details."
     )
@@ -388,7 +413,6 @@ def parse_omni_args() -> OmniConfig:
     args, unknown = parser.parse_known_args()
     config = OmniConfig.from_cli_args(args)
 
-    # Default endpoint to "generate" if not explicitly provided by user
     if config.endpoint is None:
         config.endpoint = "generate"
 
