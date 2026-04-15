@@ -186,13 +186,13 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     env "${COMMON_ENV[@]}" \
         "CUDA_VISIBLE_DEVICES=${gpu_id}" \
         "DYN_SYSTEM_PORT=${system_port}" \
-        "DYN_VLLM_KV_EVENT_PORT=${kv_port}" \
         "${PYTHON_BIN}" -m dynamo.vllm \
             --model "${MODEL}" \
             --served-model-name "${served_name}" \
             --enable-prefix-caching \
             --enable-multimodal \
             --block-size "${BLOCK_SIZE}" \
+            --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${kv_port}\",\"enable_kv_cache_events\":true}" \
             --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
             --max-model-len "${MAX_MODEL_LEN}" \
             --max-num-seqs "${MAX_NUM_SEQS}" \
@@ -234,6 +234,7 @@ env "${COMMON_ENV[@]}" \
     "DYN_SYSTEM_PORT=${MM_ROUTER_SYSTEM_PORT}" \
     "MM_ROUTER_REWRITE_IMAGE_URLS=${MM_ROUTER_REWRITE_IMAGE_URLS}" \
     'DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS=["generate"]' \
+    DYN_LOG=debug \
     "${PYTHON_BIN}" -m examples.backends.vllm.mm_router_worker \
         --model "${MODEL}" \
         --namespace "${NAMESPACE}" \
@@ -251,6 +252,7 @@ echo
 echo "=== Starting frontend ==="
 env "${COMMON_ENV[@]}" \
     "PYTHONPATH=${DYNAMO_ROOT}/components/src" \
+    DYN_LOG=debug \
     "${PYTHON_BIN}" -m dynamo.frontend \
         --http-port "${HTTP_PORT}" \
         --router-mode round-robin \
