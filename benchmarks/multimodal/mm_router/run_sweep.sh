@@ -139,10 +139,10 @@ diff_worker_requests() {
         echo ""
         echo "=== Per-worker prefix cache hit rate ==="
         for i in $(seq 1 "${NUM_WORKERS}"); do
-            local queries=$(_worker_section "${after}" "${i}" | grep '^vllm:prefix_cache_queries_total ' | head -1 | awk '{print $NF}')
-            local hits=$(_worker_section "${after}" "${i}" | grep '^vllm:prefix_cache_hits_total ' | head -1 | awk '{print $NF}')
-            local b_queries=$(_worker_section "${before}" "${i}" | grep '^vllm:prefix_cache_queries_total ' | head -1 | awk '{print $NF}')
-            local b_hits=$(_worker_section "${before}" "${i}" | grep '^vllm:prefix_cache_hits_total ' | head -1 | awk '{print $NF}')
+            local queries=$(_worker_section "${after}" "${i}" | grep '^vllm:prefix_cache_queries_total' | head -1 | awk '{print $NF}')
+            local hits=$(_worker_section "${after}" "${i}" | grep '^vllm:prefix_cache_hits_total' | head -1 | awk '{print $NF}')
+            local b_queries=$(_worker_section "${before}" "${i}" | grep '^vllm:prefix_cache_queries_total' | head -1 | awk '{print $NF}')
+            local b_hits=$(_worker_section "${before}" "${i}" | grep '^vllm:prefix_cache_hits_total' | head -1 | awk '{print $NF}')
             queries=${queries:-0}; hits=${hits:-0}; b_queries=${b_queries:-0}; b_hits=${b_hits:-0}
             local dq=$(python3 -c "print(float(${queries})-float(${b_queries}))" 2>/dev/null || echo "0")
             local dh=$(python3 -c "print(float(${hits})-float(${b_hits}))" 2>/dev/null || echo "0")
@@ -153,10 +153,10 @@ diff_worker_requests() {
         echo ""
         echo "=== Per-worker MM cache (hit/query) ==="
         for i in $(seq 1 "${NUM_WORKERS}"); do
-            local queries=$(_worker_section "${after}" "${i}" | grep '^vllm:mm_cache_queries_total ' | head -1 | awk '{print $NF}')
-            local hits=$(_worker_section "${after}" "${i}" | grep '^vllm:mm_cache_hits_total ' | head -1 | awk '{print $NF}')
-            local b_queries=$(_worker_section "${before}" "${i}" | grep '^vllm:mm_cache_queries_total ' | head -1 | awk '{print $NF}')
-            local b_hits=$(_worker_section "${before}" "${i}" | grep '^vllm:mm_cache_hits_total ' | head -1 | awk '{print $NF}')
+            local queries=$(_worker_section "${after}" "${i}" | grep '^vllm:mm_cache_queries_total' | head -1 | awk '{print $NF}')
+            local hits=$(_worker_section "${after}" "${i}" | grep '^vllm:mm_cache_hits_total' | head -1 | awk '{print $NF}')
+            local b_queries=$(_worker_section "${before}" "${i}" | grep '^vllm:mm_cache_queries_total' | head -1 | awk '{print $NF}')
+            local b_hits=$(_worker_section "${before}" "${i}" | grep '^vllm:mm_cache_hits_total' | head -1 | awk '{print $NF}')
             queries=${queries:-0}; hits=${hits:-0}; b_queries=${b_queries:-0}; b_hits=${b_hits:-0}
             local dq=$(python3 -c "print(float(${queries})-float(${b_queries}))" 2>/dev/null || echo "0")
             local dh=$(python3 -c "print(float(${hits})-float(${b_hits}))" 2>/dev/null || echo "0")
