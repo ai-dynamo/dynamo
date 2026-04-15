@@ -117,6 +117,12 @@ jobs:
         run: |
           set +e
 
+          # Activate the virtualenv from the test image
+          export PATH="/opt/dynamo/venv/bin:${PATH}"
+          export VIRTUAL_ENV="/opt/dynamo/venv"
+          # Add source paths so pytest can discover test modules
+          export PYTHONPATH="${GITHUB_WORKSPACE}/components/src:${GITHUB_WORKSPACE}:${PYTHONPATH}"
+
           case "${{ inputs.parallel_mode }}" in
             "auto")   PARALLEL_OPTS="-n auto" ;;
             "none"|"0") PARALLEL_OPTS="-n 0" ;;
