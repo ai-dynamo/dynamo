@@ -75,17 +75,7 @@ echo "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
 echo "VLLM_SYSTEM_PORT_BASE=${VLLM_SYSTEM_PORT_BASE}"
 echo
 
-PIDS=()
-
-cleanup() {
-    echo
-    echo "Cleaning up background processes..."
-    for pid in "${PIDS[@]:-}"; do
-        kill "${pid}" 2>/dev/null || true
-    done
-    wait 2>/dev/null || true
-}
-trap cleanup EXIT INT TERM
+trap 'echo; echo "Cleaning up..."; kill 0' EXIT INT TERM
 
 wait_ready() {
     local url="$1"
@@ -160,7 +150,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
             $GPU_MEM_ARGS \
             --max-model-len "${MAX_MODEL_LEN}" \
             ${VLLM_EXTRA_ARGS} &
-    PIDS+=($!)
+    # trap 'kill 0' handles cleanup
     # Wait for this worker before starting the next one to avoid ZMQ port races.
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
 done
@@ -215,7 +205,7 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
             ${SYNC_ARGS} \
             --model-name "${MODEL}" \
             ${FRONTEND_EXTRA_ARGS} &
-    PIDS+=($!)
+    # trap 'kill 0' handles cleanup
     wait_frontend_models "http://127.0.0.1:${FE_HTTP_PORT}/v1/models" 300
 done
 
@@ -243,8 +233,8 @@ echo "=== All services are ready ==="
 for f in $(seq 1 "${NUM_FRONTENDS}"); do
     echo "Frontend ${f}: http://127.0.0.1:$((HTTP_PORT + f - 1))"
 done
-for i in $(seq 0 $((NUM_WORKERS - 1))); do
-    echo "Worker $i: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + i))/health"
+for i in $(seq 1 "${NUM_WORKERS}"); do
+    echo "Worker $i: http://127.0.0.1:$((18079 + i * 2))/health"
 done
 echo
 echo "Architecture: ${NUM_FRONTENDS}x Frontend (vLLM processor + KvRouter) -> ${NUM_WORKERS}x vLLM backend"

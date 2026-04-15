@@ -76,7 +76,10 @@ try:
             cache = self._image_loader._image_cache
             if key in cache:
                 cache.move_to_end(key)
-                return cache[key]
+                cached = cache[key]
+                if cached.mode != image_mode:
+                    return cached.convert(image_mode)
+                return cached
             return super().fetch_image(image_url, image_mode=image_mode)
 
         async def fetch_image_async(

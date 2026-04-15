@@ -91,6 +91,7 @@ Key environment variables:
 | `NUM_WORKERS` | `2` | Number of backend workers |
 | `BLOCK_SIZE` | `16` | KV cache block size (must match backend) |
 | `GPU_MEMORY_UTILIZATION` | `0.40` | Per-worker GPU memory fraction |
+| `SINGLE_GPU` | `false` | Pack all workers onto GPU 0 (for single-GPU testing) |
 
 ### TRT-LLM
 

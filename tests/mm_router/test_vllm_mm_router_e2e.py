@@ -182,7 +182,8 @@ def start_vllm_mm_services(
     frontend_port, vllm_port, kv_event_port = allocate_ports(count=3, start_port=10000)
 
     with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
-        time.sleep(10)
+        # Worker health check passed; wait briefly for ZMQ publisher to bind.
+        time.sleep(2)
         with FrontendProcess(request, frontend_port=frontend_port) as frontend_proc:
             yield frontend_port, frontend_proc
 
