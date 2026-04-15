@@ -374,6 +374,8 @@ impl DisaggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
+        self.traffic
+            .record_arrival(request.tokens.len(), request.max_output_tokens);
         let queued_request = request.clone();
         self.requests
             .insert(uuid, DisaggRequestState::new(request, arrival_time_ms));
@@ -497,11 +499,6 @@ impl DisaggRuntime {
                 .transition_log
                 .push(DisaggTransition::WorkloadCompleted { uuid: signal.uuid });
         }
-        let state = self.state(signal.uuid)?;
-        let original = state.original_request()?;
-        let input_tokens = original.tokens.len();
-        let output_tokens = original.max_output_tokens;
-        self.traffic.on_request(input_tokens, output_tokens);
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {
@@ -791,23 +788,32 @@ impl DisaggRuntime {
         target_decode: usize,
     ) -> Result<()> {
         let (added, newly_marked) = self.prefill_engine.apply_target_count(target_prefill);
-        if let Some(router) = self.prefill_router.as_mut() {
+        let prefill_admissions = if let Some(router) = self.prefill_router.as_mut() {
             for id in added {
                 router.add_worker(id)?;
             }
             for id in newly_marked {
                 router.remove_worker(id)?;
             }
-        }
+            router.on_topology_changed(self.now_ms)?.admissions
+        } else {
+            Vec::new()
+        };
         let (added, newly_marked) = self.decode_engine.apply_target_count(target_decode);
-        if let Some(router) = self.decode_router.as_mut() {
+        let decode_admissions = if let Some(router) = self.decode_router.as_mut() {
             for id in added {
                 router.add_worker(id)?;
             }
             for id in newly_marked {
                 router.remove_worker(id)?;
             }
-        }
+            router.on_topology_changed(self.now_ms)?.admissions
+        } else {
+            Vec::new()
+        };
+        self.record_router_pending();
+        self.dispatch_prefill_admissions(prefill_admissions)?;
+        self.dispatch_decode_admissions(decode_admissions)?;
         Ok(())
     }
 
@@ -872,6 +878,8 @@ fn derive_decode_router_config(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::super::entrypoints::{
         run_concurrency_collect, run_concurrency_workload_collect, run_trace_collect,
         run_trace_workload_collect,
@@ -940,9 +948,40 @@ mod tests {
         config
     }
 
+    fn planner_staged_args(worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(64)
+            .num_gpu_blocks(512)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(8))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1.0)
+            .decode_speedup_ratio(1.0)
+            .worker_type(worker_type)
+            .build()
+            .unwrap()
+    }
+
+    fn planner_disagg_config() -> OfflineDisaggReplayConfig {
+        OfflineDisaggReplayConfig {
+            prefill_args: planner_staged_args(WorkerType::Prefill),
+            decode_args: planner_staged_args(WorkerType::Decode),
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        }
+    }
+
     fn router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_queue_threshold: Some(1.25),
+            ..KvRouterConfig::default()
+        }
+    }
+
+    fn planner_router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            router_queue_threshold: Some(0.5),
             ..KvRouterConfig::default()
         }
     }
@@ -1233,6 +1272,55 @@ mod tests {
         );
         assert!(queued_idx < enqueued_idx);
         assert!(delayed_stats.handoff_ms[&uuid] >= 120.0);
+    }
+
+    #[test]
+    fn test_apply_scaling_drains_prefill_router_pending_immediately() {
+        let config = planner_disagg_config();
+        let mut runtime = DisaggRuntime::new(
+            &config,
+            Some(planner_router_config()),
+            None,
+            VecDeque::from([request(1, 64, 8, 0.0), request(2, 64, 8, 0.0)]),
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap();
+
+        runtime.advance_to(0.0).unwrap();
+        assert_eq!(
+            runtime.state(Uuid::from_u128(2)).unwrap().phase,
+            DisaggPhase::QueuedPrefill
+        );
+
+        runtime.apply_scaling(2, 1).unwrap();
+
+        assert_eq!(
+            runtime.state(Uuid::from_u128(2)).unwrap().phase,
+            DisaggPhase::RunningPrefill
+        );
+        assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
+    }
+
+    #[test]
+    fn test_planner_traffic_counts_external_arrivals_before_completion() {
+        let config = planner_disagg_config();
+        let mut runtime = DisaggRuntime::new(
+            &config,
+            None,
+            None,
+            VecDeque::from([request(1, 512, 128, 0.0), request(2, 512, 128, 0.1)]),
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        runtime.advance_to(0.1).unwrap();
+        let (_, num_req, avg_isl, avg_osl) = runtime.drain_traffic();
+
+        assert_eq!(num_req, 2);
+        assert_eq!(avg_isl, 512.0);
+        assert_eq!(avg_osl, 128.0);
     }
 
     #[test]

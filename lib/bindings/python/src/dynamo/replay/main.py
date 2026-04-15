@@ -254,7 +254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--planner-config",
-        help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay (offline agg only)",
+        help="path to planner config YAML/JSON or inline JSON; enables planner-in-the-loop replay for offline agg or disagg",
     )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
