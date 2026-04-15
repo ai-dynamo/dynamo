@@ -36,6 +36,7 @@ pub(super) struct SglangConfig {
     pub(super) decode_speedup_ratio: f64,
     pub(super) worker_type: WorkerType,
     pub(super) block_size: usize,
+    pub(super) total_kv_tokens: usize,
     pub(super) kv_bytes_per_token: Option<usize>,
     pub(super) kv_transfer_bandwidth: Option<f64>,
 }
@@ -83,6 +84,7 @@ impl SglangConfig {
             decode_speedup_ratio: args.decode_speedup_ratio,
             worker_type: args.worker_type,
             block_size: args.block_size,
+            total_kv_tokens: args.num_gpu_blocks * args.block_size,
             kv_bytes_per_token: args.kv_bytes_per_token,
             kv_transfer_bandwidth: args.kv_transfer_bandwidth,
         }

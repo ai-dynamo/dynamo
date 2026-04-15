@@ -15,6 +15,7 @@ from gpu_memory_service.server.fsm import ServerState
 from tests.gpu_memory_service.common.runtime import (
     GMSProcessManager,
     SGLangWithGMSProcess,
+    TRTLLMWithGMSProcess,
     VLLMWithGMSProcess,
     get_gpu_memory_used,
 )
@@ -26,6 +27,7 @@ from tests.gpu_memory_service.flow_assertions import (
     quiesce_engine,
     wait_for_active_layout,
     wait_for_resumed_layout,
+    wait_for_weights_state,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
@@ -321,3 +323,133 @@ def test_gms_shadow_engine_failover_sglang(
     request, runtime_services_dynamic_ports, predownload_models
 ):
     _run_shadow_failover_test(request, SGLangWithGMSProcess)
+
+
+# ---------------------------------------------------------------------------
+# TRT-LLM standalone failover test (weights-only GMS, no KV cache GMS)
+# ---------------------------------------------------------------------------
+
+
+def _trtllm_quiesce(
+    weights_gms,
+    engine,
+    *,
+    label: str,
+    expected_hash: str | None = None,
+):
+    """Quiesce a weights-only TRT-LLM engine and return state tuple."""
+    wait_for_weights_state(
+        weights_gms,
+        ServerState.RO,
+        expected_hash=expected_hash,
+        timeout=60.0,
+    )
+    mem_before = get_gpu_memory_used()
+    assert engine.quiesce()["status"] == "ok"
+    mem_after = get_gpu_memory_used()
+    released = mem_before - mem_after
+    logger.info(
+        "%s: %.2f -> %.2f GiB (freed %.0f MB)",
+        label,
+        mem_before / (1 << 30),
+        mem_after / (1 << 30),
+        released / (1 << 20),
+    )
+    assert released > 0
+    ws = wait_for_weights_state(weights_gms, ServerState.COMMITTED)
+    return ws, released, mem_after
+
+
+@pytest.mark.trtllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
+def test_gms_shadow_engine_failover_trtllm(
+    request, runtime_services_dynamic_ports, predownload_models
+):
+    """Weights-only shadow failover for TRT-LLM (no KV cache GMS)."""
+    with GMSProcessManager(request, TRTLLMWithGMSProcess, tags=("weights",)) as manager:
+        frontend_port = manager.frontend_port
+        weights_gms = manager.weights_gms
+
+        # Shadow A publishes weights, then quiesces.
+        shadow_a = manager.start_engine("shadow-a")
+        assert_completion_ok(
+            frontend_port,
+            "Hello",
+            failure_message="Shadow A inference failed",
+            success_message="Shadow A inference OK",
+        )
+        ws_a, released_a, _ = _trtllm_quiesce(
+            weights_gms, shadow_a, label="Shadow A quiesce"
+        )
+        weights_hash = ws_a.memory_layout_hash
+
+        # Shadow B starts RO, then quiesces.
+        shadow_b = manager.start_engine("shadow-b", read_only_weights=True)
+        assert_completion_ok(
+            frontend_port,
+            "Hello",
+            failure_message="Shadow B inference failed",
+            success_message="Shadow B inference OK",
+        )
+        _, _, mem_after_b = _trtllm_quiesce(
+            weights_gms,
+            shadow_b,
+            label="Shadow B quiesce",
+            expected_hash=weights_hash,
+        )
+        assert_weights_published_once(weights_gms.get_event_history().events)
+
+        # Primary starts RO.
+        primary = manager.start_engine("primary", read_only_weights=True)
+        assert_completion_ok(
+            frontend_port,
+            "Primary test",
+            failure_message="Primary inference failed",
+            success_message="Primary inference OK",
+        )
+        primary_mem = get_gpu_memory_used()
+        assert_memory_restored_after_quiesce(
+            "Primary active",
+            mem_after_b,
+            primary_mem,
+            released_a,
+            min_fraction=0.6,
+        )
+        wait_for_weights_state(
+            weights_gms,
+            ServerState.RO,
+            expected_hash=weights_hash,
+            min_ro_sessions=1,
+        )
+
+        # Kill primary, resume shadow A immediately (no KV blocking).
+        _kill_process_group(primary)
+        resume_result = shadow_a.resume(timeout=180)
+        assert resume_result["status"] == "ok"
+
+        shadow_mem = get_gpu_memory_used()
+        assert_memory_restored_after_quiesce(
+            "Shadow A resume",
+            mem_after_b,
+            shadow_mem,
+            released_a,
+            min_fraction=0.6,
+        )
+        wait_for_weights_state(
+            weights_gms,
+            ServerState.RO,
+            expected_hash=weights_hash,
+            min_ro_sessions=1,
+        )
+        assert_weights_published_once(weights_gms.get_event_history().events)
+
+        assert_completion_ok(
+            frontend_port,
+            "Post failover",
+            failure_message="Shadow after failover failed",
+            success_message="Shadow after failover OK",
+            retry_timeout=30.0,
+        )

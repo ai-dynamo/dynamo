@@ -1465,11 +1465,17 @@ impl Drop for ResponseMetricCollector {
                 .observe(avg_detokenize_latency_ms);
         }
 
-        // Publish final OSL when the collector is dropped
-        self.metrics
-            .output_sequence_length
-            .with_label_values(&[&self.model])
-            .observe(self.osl as f64);
+        // Publish final OSL when the collector is dropped, but only for
+        // requests that actually produced output tokens. Recording zero for
+        // failed/cancelled requests would corrupt histogram averages (sum/count)
+        // and percentiles. Failures are already tracked by requests_total with
+        // status and error_type labels.
+        if self.osl > 0 {
+            self.metrics
+                .output_sequence_length
+                .with_label_values(&[&self.model])
+                .observe(self.osl as f64);
+        }
 
         // Record request summary on the enclosing span.
         // InflightGuard::Drop and on_response logs will inherit these.
