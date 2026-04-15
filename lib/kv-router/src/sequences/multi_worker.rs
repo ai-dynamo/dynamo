@@ -12,7 +12,7 @@
 use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
@@ -20,7 +20,8 @@ use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use super::single::{ActiveSequences, PromptPresenceDelta, RequestId};
+use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
+use super::single::{ActiveSequences, BlockPresenceDelta, RequestId};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, PrefillLoadHint,
     WorkerWithDpRank,
@@ -101,55 +102,6 @@ pub struct SequenceRequest {
     pub lora_name: Option<String>,
 }
 
-#[derive(Debug)]
-enum WorkerSetEntry {
-    Single(WorkerWithDpRank),
-    Multi(FxHashSet<WorkerWithDpRank>),
-}
-
-impl WorkerSetEntry {
-    fn insert(&mut self, worker: WorkerWithDpRank) {
-        match self {
-            Self::Single(existing) if *existing == worker => {}
-            Self::Single(existing) => {
-                let mut workers = FxHashSet::with_capacity_and_hasher(2, FxBuildHasher);
-                workers.insert(*existing);
-                workers.insert(worker);
-                *self = Self::Multi(workers);
-            }
-            Self::Multi(workers) => {
-                workers.insert(worker);
-            }
-        }
-    }
-
-    fn remove(&mut self, worker: WorkerWithDpRank) -> bool {
-        match self {
-            Self::Single(existing) => *existing == worker,
-            Self::Multi(workers) => {
-                if !workers.remove(&worker) {
-                    return false;
-                }
-
-                if workers.is_empty() {
-                    return true;
-                }
-
-                if workers.len() == 1 {
-                    let only_worker = workers
-                        .iter()
-                        .next()
-                        .copied()
-                        .expect("workers.len() == 1 implies one worker remains");
-                    *self = Self::Single(only_worker);
-                }
-
-                false
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // WorkerTable
 // ---------------------------------------------------------------------------
@@ -192,7 +144,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     workers: RwLock<WorkerTable>,
     request_to_worker: DashMap<RequestId, WorkerWithDpRank>,
     request_to_lora: DashMap<RequestId, String>,
-    active_prompt_workers: DashMap<SequenceHash, WorkerSetEntry, FxBuildHasher>,
+    prompt_registry: PromptRegistry,
     block_size: usize,
     router_id: u64,
     publisher: Arc<P>,
@@ -215,12 +167,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> Self {
         assert!(block_size > 1, "block_size must be greater than 1");
         let (remote_state_updates, _) = watch::channel(());
+        let workers = WorkerTable::new(block_size, &dp_range);
+        let prompt_registry = PromptRegistry::new(workers.slots.iter().map(|(worker, _)| *worker));
 
         Self {
-            workers: RwLock::new(WorkerTable::new(block_size, &dp_range)),
+            workers: RwLock::new(workers),
             request_to_worker: DashMap::new(),
             request_to_lora: DashMap::new(),
-            active_prompt_workers: DashMap::with_hasher(FxBuildHasher),
+            prompt_registry,
             block_size,
             router_id,
             publisher: Arc::new(publisher),
@@ -230,78 +184,68 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
     }
 
-    fn apply_prompt_delta(&self, worker: WorkerWithDpRank, prompt_delta: PromptPresenceDelta) {
-        for hash in prompt_delta.prompt_became_present {
-            match self.active_prompt_workers.entry(hash) {
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    entry.insert(WorkerSetEntry::Single(worker));
-                }
-                dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                    entry.get_mut().insert(worker);
-                }
-            }
-        }
-
-        for hash in prompt_delta.prompt_became_absent {
-            if let dashmap::mapref::entry::Entry::Occupied(mut entry) =
-                self.active_prompt_workers.entry(hash)
-                && entry.get_mut().remove(worker)
-            {
-                entry.remove();
-            }
-        }
-
-        self.validate_prompt_index();
-    }
-
-    fn remove_worker_prompt_hashes(
-        &self,
-        worker: WorkerWithDpRank,
-        hashes: impl IntoIterator<Item = SequenceHash>,
-    ) {
-        self.apply_prompt_delta(
-            worker,
-            PromptPresenceDelta {
-                prompt_became_present: Vec::new(),
-                prompt_became_absent: hashes.into_iter().collect(),
-            },
-        );
-    }
-
     #[cfg(any(test, debug_assertions))]
-    fn assert_prompt_index_consistent(&self) {
+    fn assert_registry_consistent(&self) {
         let table = self.workers.read();
-        let mut expected = FxHashMap::<SequenceHash, FxHashSet<WorkerWithDpRank>>::default();
-        for (worker, lock) in &table.slots {
-            for hash in lock.read().active_prompt_hashes() {
-                expected.entry(hash).or_default().insert(*worker);
-            }
-        }
-        drop(table);
+        let worker_guards: Vec<_> = table
+            .slots
+            .iter()
+            .map(|(worker, lock)| (*worker, lock.read()))
+            .collect();
+        let expected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadSnapshot> = worker_guards
+            .iter()
+            .map(|(worker, seq)| (*worker, seq.worker_load_snapshot()))
+            .collect();
+        let expected_blocks: FxHashMap<WorkerWithDpRank, FxHashSet<SequenceHash>> = worker_guards
+            .iter()
+            .map(|(worker, seq)| (*worker, seq.active_block_hashes()))
+            .collect();
 
-        let mut actual = FxHashMap::<SequenceHash, FxHashSet<WorkerWithDpRank>>::default();
-        for entry in self.active_prompt_workers.iter() {
-            let workers = actual.entry(*entry.key()).or_default();
-            match entry.value() {
-                WorkerSetEntry::Single(worker) => {
-                    workers.insert(*worker);
-                }
-                WorkerSetEntry::Multi(worker_set) => {
-                    workers.extend(worker_set.iter().copied());
-                }
-            }
-        }
-
-        assert_eq!(
-            actual, expected,
-            "active_prompt_workers drifted from per-worker prompt state",
-        );
+        self.prompt_registry
+            .assert_consistent_with_workers(&expected_loads, &expected_blocks);
     }
 
     #[inline]
-    fn validate_prompt_index(&self) {
+    fn validate_registry(&self) {
         #[cfg(any(test, debug_assertions))]
-        self.assert_prompt_index_consistent();
+        self.assert_registry_consistent();
+    }
+
+    fn publish_worker_load_snapshot(
+        &self,
+        worker: WorkerWithDpRank,
+        load: WorkerLoadSnapshot,
+        decay_now: Instant,
+    ) {
+        let active_blocks = load.active_blocks;
+        let active_tokens = load.active_tokens(decay_now);
+
+        self.publisher
+            .observe_load(&worker, self.worker_type, active_blocks, active_tokens);
+
+        let active_load = ActiveLoad {
+            worker_id: worker.worker_id,
+            dp_rank: worker.dp_rank,
+            active_decode_blocks: Some(active_blocks as u64),
+            active_prefill_tokens: Some(active_tokens as u64),
+            kv_used_blocks: None,
+        };
+
+        self.publisher.publish_load(active_load);
+    }
+
+    fn apply_worker_block_delta_and_load(
+        &self,
+        worker: WorkerWithDpRank,
+        delta: BlockPresenceDelta,
+        load: WorkerLoadSnapshot,
+    ) {
+        self.prompt_registry
+            .apply_block_delta_and_load(worker, delta, load);
+    }
+
+    fn replace_worker_load_state(&self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) {
+        self.prompt_registry.replace_worker_load_state(worker, load);
     }
 
     fn spawn_publish_event(&self, event: ActiveSequenceEvent) {
@@ -393,10 +337,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
                             let table = self.workers.read();
                             if let Some(&idx) = table.index.get(&event.worker) {
-                                let outcome = table.slots[idx]
-                                    .1
-                                    .write()
-                                    .add_request_with_prefill_tracking(
+                                let (expired_request_ids, load) = {
+                                    let mut seq = table.slots[idx].1.write();
+                                    let outcome = seq.add_request_with_prefill_tracking(
                                         event.request_id.clone(),
                                         token_sequence.clone(),
                                         *isl,
@@ -406,12 +349,21 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                         *prefill_load_hint,
                                         decay_now,
                                     );
+                                    let load = seq.worker_load_snapshot();
+                                    self.apply_worker_block_delta_and_load(
+                                        event.worker,
+                                        outcome.block_delta,
+                                        load,
+                                    );
+                                    (outcome.expired_request_ids, load)
+                                };
                                 drop(table);
-                                self.apply_prompt_delta(event.worker, outcome.prompt_delta);
-                                for expired_id in &outcome.expired_request_ids {
+                                self.validate_registry();
+                                for expired_id in &expired_request_ids {
                                     self.request_to_worker.remove(expired_id);
                                     self.request_to_lora.remove(expired_id);
                                 }
+                                self.publish_worker_load_snapshot(event.worker, load, decay_now);
                                 continue;
                             } else {
                                 tracing::warn!(
@@ -426,10 +378,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             {
                                 let table = self.workers.read();
                                 if let Some(&idx) = table.index.get(&worker) {
-                                    let prompt_delta =
-                                        table.slots[idx].1.write().free(&event.request_id, decay_now);
+                                    let load = {
+                                        let mut seq = table.slots[idx].1.write();
+                                        let delta = seq.free(&event.request_id, decay_now);
+                                        let load = seq.worker_load_snapshot();
+                                        self.apply_worker_block_delta_and_load(worker, delta, load);
+                                        load
+                                    };
                                     drop(table);
-                                    self.apply_prompt_delta(worker, prompt_delta);
+                                    self.validate_registry();
+                                    self.publish_worker_load_snapshot(worker, load, decay_now);
                                     remote_capacity_changed = true;
                                 }
                             }
@@ -441,10 +399,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             if let Some(worker) = worker {
                                 let table = self.workers.read();
                                 if let Some(&idx) = table.index.get(&worker) {
-                                    table.slots[idx]
-                                        .1
-                                        .write()
-                                        .mark_prefill_completed(&event.request_id, decay_now);
+                                    {
+                                        let mut seq = table.slots[idx].1.write();
+                                        seq.mark_prefill_completed(&event.request_id, decay_now);
+                                        let load = seq.worker_load_snapshot();
+                                        self.replace_worker_load_state(worker, load);
+                                    }
+                                    drop(table);
+                                    self.validate_registry();
                                     remote_capacity_changed = true;
                                 }
                             }
@@ -477,6 +439,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// lifecycle events (not yet implemented). TODO (atchernych) once we upgrade to GAIE latest.
     pub fn register_external_workers(&self, dp_range: &HashMap<u64, (u32, u32)>) {
         let mut table = self.workers.write();
+        let mut added_workers = Vec::new();
         for (&worker_id, &(dp_start, dp_size)) in dp_range {
             for dp_rank in dp_start..(dp_start + dp_size) {
                 let worker = WorkerWithDpRank::new(worker_id, dp_rank);
@@ -487,16 +450,23 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         .slots
                         .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
                     table.index.insert(worker, idx);
+                    added_workers.push(worker);
                 }
             }
         }
+        drop(table);
+
+        for worker in added_workers {
+            self.prompt_registry.insert_empty_worker(worker);
+        }
+        self.validate_registry();
     }
 
     /// Update the set of workers, adding and removing as needed.
     ///
     /// `new_dp_range` maps worker IDs to their data-parallel range (start, size).
     pub fn update_workers(&self, new_dp_range: &HashMap<u64, (u32, u32)>) {
-        let removed_prompt_hashes = {
+        let (removed_workers, added_workers) = {
             let mut table = self.workers.write();
 
             let mut target_workers: HashSet<WorkerWithDpRank> = HashSet::new();
@@ -538,17 +508,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 .collect();
             table.index.clear();
 
-            let removed_prompt_hashes: Vec<_> = removed_workers
-                .iter()
-                .filter_map(|worker| {
-                    old.get(worker)
-                        .map(|seq| (*worker, seq.active_prompt_hashes()))
-                })
-                .collect();
+            let mut added_workers = Vec::new();
 
             for worker in target_workers {
                 if !old.contains_key(&worker) {
                     tracing::warn!("Adding worker {:?}", worker);
+                    added_workers.push(worker);
                 }
                 let idx = table.slots.len();
                 let seq = old
@@ -558,12 +523,38 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 table.index.insert(worker, idx);
             }
 
-            removed_prompt_hashes
+            (removed_workers, added_workers)
         };
 
-        for (worker, hashes) in removed_prompt_hashes {
-            self.remove_worker_prompt_hashes(worker, hashes);
+        for worker in removed_workers {
+            self.prompt_registry.remove_worker(worker);
         }
+        for worker in added_workers {
+            self.prompt_registry.insert_empty_worker(worker);
+        }
+        self.validate_registry();
+    }
+
+    fn ensure_worker_registered(&self, worker: WorkerWithDpRank) {
+        if self.workers.read().index.contains_key(&worker) {
+            return;
+        }
+
+        let mut table = self.workers.write();
+        if table.index.contains_key(&worker) {
+            return;
+        }
+
+        tracing::debug!(?worker, "Lazily registering worker in slot tracker");
+        let idx = table.slots.len();
+        table
+            .slots
+            .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
+        table.index.insert(worker, idx);
+        drop(table);
+
+        self.prompt_registry.insert_empty_worker(worker);
+        self.validate_registry();
     }
 
     fn add_request_local(
@@ -583,20 +574,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             lora_name,
         } = req;
 
-        if !self.workers.read().index.contains_key(&worker) {
-            // The selector already picked this worker from the discovery watch,
-            // but the slot tracker hasn't been updated yet. Lazily register it
-            // so we don't drop tracking for this request.
-            let mut table = self.workers.write();
-            if !table.index.contains_key(&worker) {
-                tracing::debug!(?worker, "Lazily registering worker in slot tracker");
-                let idx = table.slots.len();
-                table
-                    .slots
-                    .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
-                table.index.insert(worker, idx);
-            }
-        }
+        self.ensure_worker_registered(worker);
 
         if let Some(existing_worker) = self.request_to_worker.get(&request_id) {
             return Err(SequenceError::DuplicateRequest {
@@ -611,14 +589,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.request_to_lora.insert(request_id.clone(), lora);
         }
 
-        let outcome = {
+        let (expired_request_ids, load) = {
             let table = self.workers.read();
             let &idx = table
                 .index
                 .get(&worker)
                 .ok_or(SequenceError::WorkerNotFound { worker })?;
             let mut seq = table.slots[idx].1.write();
-            seq.add_request_with_prefill_tracking(
+            let outcome = seq.add_request_with_prefill_tracking(
                 request_id,
                 token_sequence,
                 isl,
@@ -627,17 +605,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 track_prefill_tokens,
                 prefill_load_hint,
                 decay_now,
-            )
+            );
+            let load = seq.worker_load_snapshot();
+            self.apply_worker_block_delta_and_load(worker, outcome.block_delta, load);
+            (outcome.expired_request_ids, load)
         };
+        self.validate_registry();
 
-        self.apply_prompt_delta(worker, outcome.prompt_delta);
-
-        for expired_id in &outcome.expired_request_ids {
+        for expired_id in &expired_request_ids {
             self.request_to_worker.remove(expired_id);
             self.request_to_lora.remove(expired_id);
         }
 
-        self.publish_active_load_for_worker(worker, decay_now);
+        self.publish_worker_load_snapshot(worker, load, decay_now);
 
         Ok(())
     }
@@ -664,13 +644,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.add_request_local(req, decay_now)
     }
 
-    /// Send a mutation to the worker assigned to a request, optionally publishing
-    /// a replica-sync event and cleaning up request mappings afterward.
-    fn mutate_request_worker_local(
+    fn mutate_request_worker_prompt_state_local(
         &self,
         request_id: &RequestId,
         decay_now: Instant,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptPresenceDelta,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> BlockPresenceDelta,
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
         let worker = self
@@ -681,34 +659,69 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 request_id: request_id.clone(),
             })?;
 
-        let prompt_delta = {
+        let load = {
             let table = self.workers.read();
             let &idx = table
                 .index
                 .get(&worker)
                 .ok_or(SequenceError::WorkerNotFound { worker })?;
             let mut seq = table.slots[idx].1.write();
-            mutate_fn(&mut seq, request_id, decay_now)
+            let delta = mutate_fn(&mut seq, request_id, decay_now);
+            let load = seq.worker_load_snapshot();
+            self.apply_worker_block_delta_and_load(worker, delta, load);
+            load
         };
-
-        self.apply_prompt_delta(worker, prompt_delta);
+        self.validate_registry();
 
         if remove_mapping {
             self.request_to_worker.remove(request_id);
             self.request_to_lora.remove(request_id);
         }
 
-        self.publish_active_load_for_worker(worker, decay_now);
+        self.publish_worker_load_snapshot(worker, load, decay_now);
 
         Ok(())
     }
 
-    fn mutate_request_worker(
+    fn mutate_request_worker_load_state_local(
+        &self,
+        request_id: &RequestId,
+        decay_now: Instant,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
+    ) -> Result<(), SequenceError> {
+        let worker = self
+            .request_to_worker
+            .get(request_id)
+            .map(|entry| *entry)
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
+
+        let load = {
+            let table = self.workers.read();
+            let &idx = table
+                .index
+                .get(&worker)
+                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            let mut seq = table.slots[idx].1.write();
+            mutate_fn(&mut seq, request_id, decay_now);
+            let load = seq.worker_load_snapshot();
+            self.replace_worker_load_state(worker, load);
+            load
+        };
+        self.validate_registry();
+
+        self.publish_worker_load_snapshot(worker, load, decay_now);
+
+        Ok(())
+    }
+
+    fn mutate_request_worker_prompt_state(
         &self,
         request_id: &RequestId,
         decay_now: Instant,
         event_data: ActiveSequenceEventData,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptPresenceDelta,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> BlockPresenceDelta,
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
         let worker = self
@@ -731,7 +744,42 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             lora_name,
         });
 
-        self.mutate_request_worker_local(request_id, decay_now, mutate_fn, remove_mapping)
+        self.mutate_request_worker_prompt_state_local(
+            request_id,
+            decay_now,
+            mutate_fn,
+            remove_mapping,
+        )
+    }
+
+    fn mutate_request_worker_load_state(
+        &self,
+        request_id: &RequestId,
+        decay_now: Instant,
+        event_data: ActiveSequenceEventData,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
+    ) -> Result<(), SequenceError> {
+        let worker = self
+            .request_to_worker
+            .get(request_id)
+            .map(|entry| *entry)
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
+
+        let lora_name = self
+            .request_to_lora
+            .get(request_id)
+            .map(|entry| entry.value().clone());
+        self.spawn_publish_event(ActiveSequenceEvent {
+            request_id: request_id.clone(),
+            worker,
+            data: event_data,
+            router_id: self.router_id,
+            lora_name,
+        });
+
+        self.mutate_request_worker_load_state_local(request_id, decay_now, mutate_fn)
     }
 
     /// Free all blocks associated with a request.
@@ -748,7 +796,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             return Ok(());
         }
 
-        self.mutate_request_worker(
+        self.mutate_request_worker_prompt_state(
             request_id,
             decay_now,
             ActiveSequenceEventData::Free,
@@ -766,15 +814,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         request_id: &RequestId,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        self.mutate_request_worker(
+        self.mutate_request_worker_load_state(
             request_id,
             decay_now,
             ActiveSequenceEventData::MarkPrefillCompleted,
             |seqs, rid, decay_now| {
                 seqs.mark_prefill_completed(rid, decay_now);
-                PromptPresenceDelta::default()
             },
-            false,
         )
     }
 
@@ -797,51 +843,34 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 request_id: request_id.clone(),
             })?;
 
-        let success = {
+        let load = {
             let table = self.workers.read();
             let &idx = table
                 .index
                 .get(&worker)
                 .ok_or(SequenceError::WorkerNotFound { worker })?;
             let mut seq = table.slots[idx].1.write();
-            seq.add_output_block(request_id, decay_fraction)
+            let Some(new_block_hash) = seq.add_output_block(request_id, decay_fraction) else {
+                return Err(SequenceError::RequestNotFound {
+                    request_id: request_id.clone(),
+                });
+            };
+            let load = seq.worker_load_snapshot();
+            self.apply_worker_block_delta_and_load(
+                worker,
+                BlockPresenceDelta {
+                    blocks_became_present: vec![new_block_hash],
+                    blocks_became_absent: Vec::new(),
+                },
+                load,
+            );
+            load
         };
+        self.validate_registry();
 
-        if !success {
-            return Err(SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            });
-        }
-
-        self.publish_active_load_for_worker(worker, Instant::now());
+        self.publish_worker_load_snapshot(worker, load, Instant::now());
 
         Ok(())
-    }
-
-    /// Read active blocks/tokens from a worker and publish ActiveLoad metrics.
-    fn publish_active_load_for_worker(&self, worker: WorkerWithDpRank, decay_now: Instant) {
-        let (active_blocks, active_tokens) = {
-            let table = self.workers.read();
-            let Some(&idx) = table.index.get(&worker) else {
-                tracing::warn!("Worker {worker:?} not found when publishing ActiveLoad");
-                return;
-            };
-            let seq = table.slots[idx].1.read();
-            (seq.active_blocks(), seq.active_tokens(decay_now))
-        };
-
-        self.publisher
-            .observe_load(&worker, self.worker_type, active_blocks, active_tokens);
-
-        let active_load = ActiveLoad {
-            worker_id: worker.worker_id,
-            dp_rank: worker.dp_rank,
-            active_decode_blocks: Some(active_blocks as u64),
-            active_prefill_tokens: Some(active_tokens as u64),
-            kv_used_blocks: None,
-        };
-
-        self.publisher.publish_load(active_load);
     }
 
     /// Get the number of workers.
@@ -911,62 +940,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
-        let table = self.workers.read();
-
         #[cfg(feature = "bench")]
-        let num_workers = table.slots.len();
+        let num_workers = self.num_workers();
 
-        let mut base_blocks = FxHashMap::default();
-        let mut base_tokens = FxHashMap::default();
-        for (worker, lock) in &table.slots {
-            let seq = lock.read();
-            base_blocks.insert(*worker, seq.active_blocks());
-            base_tokens.insert(*worker, seq.active_tokens(decay_now));
-        }
-        drop(table);
-
-        let mut deepest_prompt_match = FxHashMap::default();
-        if let Some(prompt) = token_sequence {
-            for (idx, hash) in prompt.iter().enumerate() {
-                if let Some(entry) = self.active_prompt_workers.get(hash) {
-                    match entry.value() {
-                        WorkerSetEntry::Single(worker) => {
-                            deepest_prompt_match.insert(*worker, idx + 1);
-                        }
-                        WorkerSetEntry::Multi(workers) => {
-                            for worker in workers.iter().copied() {
-                                deepest_prompt_match.insert(worker, idx + 1);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let prompt_len = token_sequence.map_or(0, |prompt| prompt.len());
-        let mut potential_blocks = HashMap::with_capacity(base_blocks.len());
-        let mut potential_tokens = HashMap::with_capacity(base_tokens.len());
-        for (&worker, &active_blocks) in &base_blocks {
-            let prompt_overlap_depth = deepest_prompt_match.get(&worker).copied().unwrap_or(0);
-            let new_prompt_blocks = prompt_len.saturating_sub(prompt_overlap_depth);
-            let active_tokens = base_tokens.get(&worker).copied().unwrap_or(0);
-            let overlap = *overlaps.scores.get(&worker).unwrap_or(&0);
-            let added_tokens = if track_prefill_tokens {
-                let cached_tokens = overlap as usize * self.block_size;
-                isl.checked_sub(cached_tokens).unwrap_or_else(|| {
-                    tracing::error!(
-                        "prefill_tokens < 0 with ISL {isl} < cached_tokens {cached_tokens} (overlap {overlap} * block_size {}), returning 0",
-                        self.block_size
-                    );
-                    0
-                })
-            } else {
-                0
-            };
-
-            potential_blocks.insert(worker, active_blocks + new_prompt_blocks);
-            potential_tokens.insert(worker, active_tokens + added_tokens);
-        }
+        let (potential_blocks, potential_tokens) = self
+            .prompt_registry
+            .potential_blocks_and_tokens_with_prefill_tracking(
+                token_sequence,
+                isl,
+                &overlaps,
+                track_prefill_tokens,
+                self.block_size,
+                decay_now,
+            );
 
         #[cfg(feature = "bench")]
         {
@@ -983,37 +969,22 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     /// Query all workers for their current number of active blocks.
     pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
-        let table = self.workers.read();
-        let mut results = HashMap::with_capacity(table.slots.len());
-        for (worker, lock) in &table.slots {
-            results.insert(*worker, lock.read().active_blocks());
-        }
-        results
+        self.prompt_registry.active_blocks()
     }
 
     /// Query all workers for their current number of active tokens.
     pub fn active_tokens(&self, decay_now: Instant) -> HashMap<WorkerWithDpRank, usize> {
-        let table = self.workers.read();
-        let mut results = HashMap::with_capacity(table.slots.len());
-        for (worker, lock) in &table.slots {
-            results.insert(*worker, lock.read().active_tokens(decay_now));
-        }
-        results
+        self.prompt_registry.active_tokens(decay_now)
     }
 
     /// Return true if any worker satisfies the provided predicate on active token count.
     pub fn any_worker_matches_active_tokens(
         &self,
         decay_now: Instant,
-        mut predicate: impl FnMut(WorkerWithDpRank, usize) -> bool,
+        predicate: impl FnMut(WorkerWithDpRank, usize) -> bool,
     ) -> bool {
-        let table = self.workers.read();
-        for (worker, lock) in &table.slots {
-            if predicate(*worker, lock.read().active_tokens(decay_now)) {
-                return true;
-            }
-        }
-        false
+        self.prompt_registry
+            .any_worker_matches_active_tokens(decay_now, predicate)
     }
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
@@ -1036,17 +1007,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let now = Instant::now();
         let table = self.workers.read();
         let mut removed_request_count = 0;
+        let mut registry_changed = false;
         for (worker, lock) in &table.slots {
-            let outcome = lock.write().force_expiry();
+            let mut seq = lock.write();
+            let outcome = seq.force_expiry();
             if !outcome.expired_request_ids.is_empty() {
-                self.apply_prompt_delta(*worker, outcome.prompt_delta);
+                let load = seq.worker_load_snapshot();
+                self.apply_worker_block_delta_and_load(*worker, outcome.block_delta, load);
+                registry_changed = true;
                 for expired_id in &outcome.expired_request_ids {
                     self.request_to_worker.remove(expired_id);
                     self.request_to_lora.remove(expired_id);
                     removed_request_count += 1;
                 }
-                self.publish_active_load_for_worker(*worker, now);
+                self.publish_worker_load_snapshot(*worker, load, now);
             }
+        }
+        drop(table);
+        if registry_changed {
+            self.validate_registry();
         }
         let duration = now.elapsed();
         tracing::debug!(
@@ -1120,6 +1099,17 @@ mod tests {
         )
     }
 
+    fn make_multi_dp_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
+        ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 2_u32))]),
+            false,
+            0,
+            "test",
+        )
+    }
+
     fn naive_potential_loads(
         sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
         token_sequence: Option<&[SequenceHash]>,
@@ -1135,18 +1125,24 @@ mod tests {
         let mut potential_blocks = HashMap::with_capacity(table.slots.len());
         let mut potential_tokens = HashMap::with_capacity(table.slots.len());
         for (worker, lock) in &table.slots {
+            let seq = lock.read();
+            let overlap_depth = token_sequence.map_or(0, |query| {
+                let active_hashes = seq.active_block_hashes();
+                query
+                    .iter()
+                    .position(|hash| !active_hashes.contains(hash))
+                    .unwrap_or(query.len())
+            });
+            let new_blocks =
+                token_sequence.map_or(0, |query| query.len().saturating_sub(overlap_depth));
             let overlap = *overlaps.scores.get(worker).unwrap_or(&0);
-            let (blocks, tokens) = lock
-                .read()
-                .potential_blocks_and_tokens_with_prefill_tracking(
-                    token_sequence,
-                    isl,
-                    overlap,
-                    track_prefill_tokens,
-                    decay_now,
-                );
-            potential_blocks.insert(*worker, blocks);
-            potential_tokens.insert(*worker, tokens);
+            let added_tokens = if track_prefill_tokens {
+                seq.new_tokens(isl, overlap)
+            } else {
+                0
+            };
+            potential_blocks.insert(*worker, seq.active_blocks() + new_blocks);
+            potential_tokens.insert(*worker, seq.active_tokens(decay_now) + added_tokens);
         }
         (potential_blocks, potential_tokens)
     }
@@ -1205,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_membership_index_matches_naive_loads_with_output_blocks_and_prefill_updates() {
+    fn block_membership_index_matches_naive_loads_with_output_blocks_and_prefill_updates() {
         let sequences = make_multi_sequences();
         let worker_a = WorkerWithDpRank::new(1, 0);
         let worker_b = WorkerWithDpRank::new(2, 0);
@@ -1351,7 +1347,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn force_expiry_clears_prompt_membership_index() {
+    async fn force_expiry_clears_block_membership_index() {
         let sequences = make_multi_sequences();
         let worker = WorkerWithDpRank::new(1, 0);
 
@@ -1377,12 +1373,74 @@ mod tests {
 
         assert!(sequences.request_to_worker.is_empty());
         assert!(sequences.request_to_lora.is_empty());
-        assert!(sequences.active_prompt_workers.is_empty());
+        assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn expiry_then_immediate_readd_preserves_block_membership() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-1".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    isl: 12,
+                    overlap: 0,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+
+        tokio::time::advance(Duration::from_secs(331)).await;
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-2".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    isl: 12,
+                    overlap: 0,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                Instant::now(),
+            )
+            .unwrap();
+
+        assert!(!sequences.prompt_registry.is_block_index_empty());
+        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
+
+        let expected = naive_potential_loads(
+            &sequences,
+            Some(&[1, 2, 3]),
+            12,
+            &OverlapScores::default(),
+            false,
+            Instant::now(),
+        );
+        let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+            Some(&[1, 2, 3]),
+            12,
+            OverlapScores::default(),
+            false,
+            Instant::now(),
+        );
+        assert_eq!(actual, expected);
+    }
+
     #[tokio::test]
-    async fn replica_sync_add_and_free_keep_prompt_membership_consistent() {
+    async fn replica_sync_add_and_free_keep_block_membership_consistent() {
         let sequences = ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             4,
@@ -1425,8 +1483,88 @@ mod tests {
 
         assert!(sequences.request_to_worker.is_empty());
         assert!(sequences.request_to_lora.is_empty());
-        assert!(sequences.active_prompt_workers.is_empty());
+        assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+    }
+
+    #[test]
+    fn worker_removal_then_readd_starts_with_empty_registry_state() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let decay_now = Instant::now();
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-1".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    isl: 12,
+                    overlap: 0,
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                decay_now,
+            )
+            .unwrap();
+
+        sequences.update_workers(&HashMap::new());
+        assert!(sequences.prompt_registry.is_block_index_empty());
+        assert!(sequences.active_blocks().is_empty());
+        assert!(sequences.request_to_worker.is_empty());
+
+        sequences.update_workers(&HashMap::from([(1_u64, (0_u32, 1_u32))]));
+        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert!(sequences.prompt_registry.is_block_index_empty());
+    }
+
+    #[test]
+    fn dp_ranks_with_same_worker_id_remain_isolated_in_registry() {
+        let sequences = make_multi_dp_sequences();
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(1, 1);
+        let decay_now = Instant::now();
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-a".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    isl: 12,
+                    overlap: 0,
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker: worker_a,
+                    lora_name: None,
+                },
+                decay_now,
+            )
+            .unwrap();
+
+        let expected = naive_potential_loads(
+            &sequences,
+            Some(&[1, 2, 3]),
+            12,
+            &OverlapScores::default(),
+            false,
+            decay_now,
+        );
+        let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
+            Some(&[1, 2, 3]),
+            12,
+            OverlapScores::default(),
+            false,
+            decay_now,
+        );
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.0.get(&worker_a).copied(), Some(3));
+        assert_eq!(actual.0.get(&worker_b).copied(), Some(3));
+        assert_eq!(sequences.active_blocks().get(&worker_a).copied(), Some(3));
+        assert_eq!(sequences.active_blocks().get(&worker_b).copied(), Some(0));
     }
 
     #[test]

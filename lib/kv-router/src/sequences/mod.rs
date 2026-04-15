@@ -4,6 +4,7 @@
 mod block_tracker;
 pub mod multi_worker;
 mod prefill_tracker;
+mod prompt_registry;
 pub mod single;
 
 pub use multi_worker::*;
