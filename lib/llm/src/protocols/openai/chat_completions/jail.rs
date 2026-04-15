@@ -800,7 +800,12 @@ impl JailedStream {
                 // parallel tool calls instead of splitting at the first end tag.
                 // Fall back to Path 1 when parsing fails (e.g. malformed content).
                 if early_exit {
-                    // For early exit, find where the complete tool call ends
+                    // For early exit, find where the complete tool call ends.
+                    // `find_tool_call_end_position` returns `None` when the
+                    // section wrapper isn't closed (e.g. kimi_k2 without
+                    // section_end). In that case, don't early-exit — more
+                    // parallel calls may follow. The calls will be recovered
+                    // by `finalize()` at stream end.
                     if let Some(parser) = &self.tool_call_parser {
                         let tools_slice = self.tool_definitions.as_deref();
                         if let Ok((_, _)) = try_tool_call_parse_aggregate(
@@ -810,9 +815,13 @@ impl JailedStream {
                         )
                         .await
                         {
-                            let split_pos =
-                                find_tool_call_end_position(accumulated_content, Some(parser));
-                            (true, split_pos)
+                            if let Some(split_pos) =
+                                find_tool_call_end_position(accumulated_content, Some(parser))
+                            {
+                                (true, split_pos)
+                            } else {
+                                (false, accumulated_content.len())
+                            }
                         } else {
                             (false, accumulated_content.len())
                         }

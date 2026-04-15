@@ -164,7 +164,12 @@ pub fn detect_tool_call_start(chunk: &str, parser_str: Option<&str>) -> anyhow::
     }
 }
 
-pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usize {
+/// Returns the byte offset immediately after the last complete tool-call
+/// section in `chunk`. Returns `None` when the parser detects that the section
+/// is not properly closed (e.g. kimi_k2 without `section_end`), signalling
+/// that the caller should NOT treat the current buffer as a complete result —
+/// more content may follow.
+pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Option<usize> {
     let parser_map = get_tool_parser_map();
     let parser_key = match parser_str {
         Some(s) if !s.is_empty() => s,
@@ -174,35 +179,32 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> usi
     match parser_map.get(parser_key) {
         Some(config) => match &config.parser_config {
             ParserConfig::Json(json_config) => {
-                // For "default", use "nemotron_deci" as the effective parser; otherwise, use the provided parser_key
                 let effective_parser = if parser_key == "default" {
                     "nemotron_deci"
                 } else {
                     parser_key
                 };
-                find_tool_call_end_position_json(chunk, effective_parser, json_config)
+                Some(find_tool_call_end_position_json(chunk, effective_parser, json_config))
             }
             ParserConfig::Harmony(json_config) => {
-                find_tool_call_end_position_harmony(chunk, json_config)
+                Some(find_tool_call_end_position_harmony(chunk, json_config))
             }
-            ParserConfig::Pythonic => find_tool_call_end_position_pythonic(chunk),
-            ParserConfig::Typescript => {
-                // Typescript parser not implemented
-                chunk.len()
+            ParserConfig::Pythonic => Some(find_tool_call_end_position_pythonic(chunk)),
+            ParserConfig::Typescript => Some(chunk.len()),
+            ParserConfig::Xml(xml_config) => {
+                Some(find_tool_call_end_position_xml(chunk, xml_config))
             }
-            ParserConfig::Xml(xml_config) => find_tool_call_end_position_xml(chunk, xml_config),
-            ParserConfig::Dsml(dsml_config) => find_tool_call_end_position_dsml(chunk, dsml_config),
+            ParserConfig::Dsml(dsml_config) => {
+                Some(find_tool_call_end_position_dsml(chunk, dsml_config))
+            }
             ParserConfig::Glm47(glm47_config) => {
-                find_tool_call_end_position_glm47(chunk, glm47_config)
+                Some(find_tool_call_end_position_glm47(chunk, glm47_config))
             }
             ParserConfig::KimiK2(kimi_config) => {
                 find_tool_call_end_position_kimi_k2(chunk, kimi_config)
             }
         },
-        None => {
-            // Unknown parser, return full content length
-            chunk.len()
-        }
+        None => Some(chunk.len()),
     }
 }
 // Tests
