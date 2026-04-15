@@ -392,6 +392,15 @@ pub mod zmq_broker {
     pub const ZMQ_BROKER_NAMESPACE: &str = "ZMQ_BROKER_NAMESPACE";
 }
 
+/// Discovery environment variables
+pub mod discovery {
+    /// Discovery backend: "kubernetes" or "etcd" (default)
+    pub const DYN_DISCOVERY_BACKEND: &str = "DYN_DISCOVERY_BACKEND";
+
+    /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
+    pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+}
+
 /// CUDA and GPU environment variables
 pub mod cuda {
     /// Path to custom CUDA fatbin file.
@@ -529,6 +538,9 @@ mod tests {
             zmq_broker::ZMQ_BROKER_XSUB_BIND,
             zmq_broker::ZMQ_BROKER_XPUB_BIND,
             zmq_broker::ZMQ_BROKER_NAMESPACE,
+            // Discovery
+            discovery::DYN_DISCOVERY_BACKEND,
+            discovery::DYN_KUBE_DISCOVERY_MODE,
             // CUDA
             cuda::DYN_FATBIN_PATH,
             // Build
