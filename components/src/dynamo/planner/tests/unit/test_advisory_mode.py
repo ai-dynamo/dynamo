@@ -131,9 +131,7 @@ class TestAdvisoryModeLogic:
         no_operation = False
 
         # _apply_scaling_targets guard (mirrors base.py)
-        scaling_skipped = (
-            no_operation or scaling_mode == ScalingMode.ADVISORY
-        )
+        scaling_skipped = no_operation or scaling_mode == ScalingMode.ADVISORY
         assert scaling_skipped is True
 
     def test_active_mode_applies_scaling(self):
@@ -141,9 +139,7 @@ class TestAdvisoryModeLogic:
         scaling_mode = ScalingMode.ACTIVE
         no_operation = False
 
-        scaling_skipped = (
-            no_operation or scaling_mode == ScalingMode.ADVISORY
-        )
+        scaling_skipped = no_operation or scaling_mode == ScalingMode.ADVISORY
         assert scaling_skipped is False
 
     def test_advisory_delta_calculation(self):
