@@ -302,14 +302,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             prefill_load_hint,
                         } => {
                             self.ensure_worker_registered(event.worker);
-                            self.request_index.set_request(
-                                event.request_id.clone(),
-                                event.worker,
-                                event.lora_name.clone(),
-                            );
-
                             let table = self.workers.read();
                             if let Some(&idx) = table.index.get(&event.worker) {
+                                self.request_index.set_request(
+                                    event.request_id.clone(),
+                                    event.worker,
+                                    event.lora_name.clone(),
+                                );
                                 let (expired_request_ids, load) = {
                                     let slot = &table.slots[idx];
                                     let mut seq = slot.sequences.write();
@@ -476,22 +475,21 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         self.ensure_worker_registered(worker);
 
-        if let Err(existing_worker) =
-            self.request_index
-                .try_insert_request(request_id.clone(), worker, lora_name)
-        {
-            return Err(SequenceError::DuplicateRequest {
-                request_id,
-                worker: existing_worker,
-            });
-        }
-
         let (expired_request_ids, load) = {
             let table = self.workers.read();
             let &idx = table
                 .index
                 .get(&worker)
                 .ok_or(SequenceError::WorkerNotFound { worker })?;
+            if let Err(existing_worker) =
+                self.request_index
+                    .try_insert_request(request_id.clone(), worker, lora_name)
+            {
+                return Err(SequenceError::DuplicateRequest {
+                    request_id,
+                    worker: existing_worker,
+                });
+            }
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
             let outcome = seq.add_request_with_prefill_tracking(
@@ -527,7 +525,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        self.spawn_publish_event(ActiveSequenceEvent {
+        let event = ActiveSequenceEvent {
             request_id: req.request_id.clone(),
             worker: req.worker,
             data: ActiveSequenceEventData::AddRequest {
@@ -540,29 +538,54 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             },
             router_id: self.router_id,
             lora_name: req.lora_name.clone(),
-        });
-        self.add_request_local(req, decay_now)
+        };
+        self.add_request_local(req, decay_now)?;
+        self.spawn_publish_event(event);
+        Ok(())
+    }
+
+    fn stale_request_not_found(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        operation: &'static str,
+    ) -> SequenceError {
+        if self.request_index.worker_for(request_id) == Some(worker) {
+            self.request_index.remove_request(request_id);
+            tracing::warn!(
+                %request_id,
+                ?worker,
+                operation,
+                "request index referenced a missing worker slot; removed stale mapping"
+            );
+        } else {
+            tracing::warn!(
+                %request_id,
+                ?worker,
+                operation,
+                "request worker slot disappeared before the mutation ran"
+            );
+        }
+
+        SequenceError::RequestNotFound {
+            request_id: request_id.clone(),
+        }
     }
 
     fn mutate_request_worker_prompt_state_local(
         &self,
+        worker: WorkerWithDpRank,
         request_id: &RequestId,
         decay_now: Instant,
         mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
-        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
-            SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            }
-        })?;
-
         let load = {
             let table = self.workers.read();
-            let &idx = table
-                .index
-                .get(&worker)
-                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                return Err(self.stale_request_not_found(request_id, worker, "free_or_mutate"));
+            };
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
             let delta = mutate_fn(&mut seq, request_id, decay_now);
@@ -582,22 +605,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     fn mutate_request_worker_load_state_local(
         &self,
+        worker: WorkerWithDpRank,
         request_id: &RequestId,
         decay_now: Instant,
         mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
     ) -> Result<(), SequenceError> {
-        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
-            SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            }
-        })?;
-
         let load = {
             let table = self.workers.read();
-            let &idx = table
-                .index
-                .get(&worker)
-                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                return Err(self.stale_request_not_found(request_id, worker, "load_only_mutate"));
+            };
             let mut seq = table.slots[idx].sequences.write();
             mutate_fn(&mut seq, request_id, decay_now);
             let load = seq.worker_load_snapshot();
@@ -625,6 +643,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         })?;
 
         let lora_name = self.request_index.lora_for(request_id);
+        self.mutate_request_worker_prompt_state_local(
+            worker,
+            request_id,
+            decay_now,
+            mutate_fn,
+            remove_mapping,
+        )?;
         self.spawn_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
@@ -632,13 +657,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             router_id: self.router_id,
             lora_name,
         });
-
-        self.mutate_request_worker_prompt_state_local(
-            request_id,
-            decay_now,
-            mutate_fn,
-            remove_mapping,
-        )
+        Ok(())
     }
 
     fn mutate_request_worker_load_state(
@@ -655,6 +674,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         })?;
 
         let lora_name = self.request_index.lora_for(request_id);
+        self.mutate_request_worker_load_state_local(worker, request_id, decay_now, mutate_fn)?;
         self.spawn_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
@@ -662,8 +682,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             router_id: self.router_id,
             lora_name,
         });
-
-        self.mutate_request_worker_load_state_local(request_id, decay_now, mutate_fn)
+        Ok(())
     }
 
     /// Free all blocks associated with a request.
@@ -675,18 +694,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// [`ActiveSequences::free`], so callers do not need to call
     /// [`Self::mark_prefill_completed`] before freeing a completed request.
     pub fn free(&self, request_id: &RequestId, decay_now: Instant) -> Result<(), SequenceError> {
-        if !self.request_index.contains(request_id) {
-            tracing::debug!("Request {request_id} not found, already freed (idempotent)");
-            return Ok(());
-        }
-
-        self.mutate_request_worker_prompt_state(
+        match self.mutate_request_worker_prompt_state(
             request_id,
             decay_now,
             ActiveSequenceEventData::Free,
             |seqs, rid, decay_now| seqs.free(rid, decay_now),
             true,
-        )
+        ) {
+            Ok(()) => Ok(()),
+            Err(SequenceError::RequestNotFound { .. }) => {
+                tracing::debug!("Request {request_id} not found, already freed (idempotent)");
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Mark prefill as completed for a request.
@@ -727,10 +748,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         let load = {
             let table = self.workers.read();
-            let &idx = table
-                .index
-                .get(&worker)
-                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                return Err(self.stale_request_not_found(request_id, worker, "add_output_block"));
+            };
             let mut seq = table.slots[idx].sequences.write();
             let Some(_new_block_hash) = seq.add_output_block(request_id, decay_fraction) else {
                 return Err(SequenceError::RequestNotFound {
@@ -1403,6 +1424,59 @@ mod tests {
         sequences.update_workers(&HashMap::from([(1_u64, (0_u32, 1_u32))]));
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
         assert!(sequences.prompt_registry.is_block_index_empty());
+    }
+
+    #[test]
+    fn free_is_idempotent_after_request_is_removed() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "req-1".to_string();
+        let decay_now = Instant::now();
+
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: request_id.clone(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    isl: 12,
+                    overlap: 0,
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                decay_now,
+            )
+            .unwrap();
+
+        sequences.free(&request_id, decay_now).unwrap();
+        sequences.free(&request_id, decay_now).unwrap();
+
+        assert!(sequences.request_index.is_empty());
+        assert!(sequences.prompt_registry.is_block_index_empty());
+        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+    }
+
+    #[test]
+    fn free_cleans_stale_request_mapping_when_worker_slot_is_missing() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let request_id = "stale-request".to_string();
+
+        sequences.request_index.set_request(
+            request_id.clone(),
+            worker,
+            Some("adapter".to_string()),
+        );
+        {
+            let mut table = sequences.workers.write();
+            *table = WorkerTable::new(sequences.block_size, &HashMap::new());
+        }
+
+        sequences.free(&request_id, Instant::now()).unwrap();
+
+        assert!(sequences.request_index.is_empty());
     }
 
     #[test]

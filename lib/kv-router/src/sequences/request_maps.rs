@@ -46,10 +46,6 @@ impl RequestIndex {
         }
     }
 
-    pub(super) fn contains(&self, request_id: &RequestId) -> bool {
-        self.request_to_worker.contains_key(request_id)
-    }
-
     pub(super) fn worker_for(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
         self.request_to_worker.get(request_id).map(|entry| *entry)
     }

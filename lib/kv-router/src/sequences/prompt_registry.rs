@@ -66,7 +66,6 @@ impl PromptRegistry {
         worker: WorkerWithDpRank,
         load: WorkerLoadSnapshot,
     ) {
-        self.ensure_worker_entries(worker);
         self.loads.insert(worker, load);
     }
 
@@ -77,7 +76,6 @@ impl PromptRegistry {
         delta: PromptMembershipDelta,
         load: WorkerLoadSnapshot,
     ) {
-        self.ensure_worker_entries(worker);
         for remove in delta.removes {
             self.membership.remove_chain(worker, lookup, &remove.hashes);
         }
