@@ -36,6 +36,7 @@ from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import assemble_final_config
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
+    DeviceType,
     DynamoGraphDeploymentRequestSpec,
     ProfilingPhase,
     XPUSKUType,
@@ -341,7 +342,7 @@ async def run_profile(
         ops.device_type = (
             dgdr.hardware.deviceType
             if dgdr.hardware and dgdr.hardware.deviceType
-            else "cuda"
+            else DeviceType.Cuda
         )
 
         if backend == "auto":
@@ -389,7 +390,7 @@ async def run_profile(
         # Inject device-specific env vars (e.g. VLLM_TARGET_DEVICE=xpu) into
         # the final picked DGD config so the generated deployment YAML is
         # immediately usable on the target hardware.
-        if dgd_config and ops.device_type != "cuda":
+        if dgd_config and ops.device_type != DeviceType.Cuda:
             _modifier = CONFIG_MODIFIERS.get(resolved_backend)
             if _modifier and hasattr(_modifier, "set_device_type"):
                 try:

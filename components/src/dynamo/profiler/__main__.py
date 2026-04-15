@@ -33,7 +33,10 @@ from pathlib import Path
 
 import yaml
 
-from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DeviceType,
+    DynamoGraphDeploymentRequestSpec,
+)
 
 from .profile_sla import run_profile
 from .utils.profile_common import (
@@ -137,7 +140,7 @@ def _parse_args() -> tuple[DynamoGraphDeploymentRequestSpec, ProfilerOperational
     device_type = (
         dgdr.hardware.deviceType
         if dgdr.hardware and dgdr.hardware.deviceType
-        else "cuda"
+        else DeviceType.Cuda
     )
     ops = ProfilerOperationalConfig(
         output_dir=args.output_dir,

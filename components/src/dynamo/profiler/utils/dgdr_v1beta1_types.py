@@ -57,6 +57,11 @@ class SearchStrategy(str, Enum):
     Thorough = "thorough"
 
 
+class DeviceType(str, Enum):
+    Cuda = "cuda"
+    Xpu = "xpu"
+
+
 class GPUSKUType(str, Enum):
     GB200SXM = "gb200_sxm"
     H200SXM = "h200_sxm"
@@ -67,10 +72,7 @@ class GPUSKUType(str, Enum):
 
 
 class XPUSKUType(str, Enum):
-    """Intel XPU SKU types. Enum values are AIC system identifiers directly."""
-
-    # Intel Arc discrete GPUs (only b60 is currently supported)
-    IntelArcProB60 = "b60"  # Intel Arc Pro B60 (Xe2 Battlemage, 0xe211)
+    IntelArcProB60 = "b60"
 
     @property
     def aic_system(self) -> str:
@@ -208,13 +210,17 @@ class FeaturesSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
 
-    deviceType: Optional[str] = Field(
+    deviceType: DeviceType = Field(
         default="cuda",
         description="DeviceType is the accelerator device category. Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel XPU). Defaults to 'cuda'.",
     )
     gpuSku: Optional[Union[GPUSKUType, XPUSKUType]] = Field(
         default=None,
-        description="SKU of the accelerator. Use GPUSKUType for NVIDIA GPUs and XPUSKUType for Intel XPU. When omitted, the operator auto-detects via cluster GPU node labels.",
+        description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
+    )
+    xpuSku: Optional[XPUSKUType] = Field(
+        default=None,
+        description="XPU SKU is the AIC hardware system identifier for the Intel XPU. When omitted, the operator auto-detects this via cluster XPU node labels.",
     )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."
@@ -239,8 +245,8 @@ class HardwareSpec(BaseModel):
         if isinstance(self.gpuSku, XPUSKUType):
             if "deviceType" not in self.model_fields_set:
                 # Not explicitly provided — auto-derive from XPU SKU.
-                self.deviceType = "xpu"
-            elif self.deviceType != "xpu":
+                self.deviceType = DeviceType.Xpu
+            elif self.deviceType != DeviceType.Xpu:
                 raise ValueError(
                     f"gpuSku '{self.gpuSku}' is an Intel XPU accelerator but deviceType is "
                     f"'{self.deviceType}'. Set deviceType to 'xpu' or omit it to auto-derive."

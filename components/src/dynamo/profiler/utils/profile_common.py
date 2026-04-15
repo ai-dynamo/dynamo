@@ -26,6 +26,7 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DeviceType,
     DynamoGraphDeploymentRequestSpec,
     ProfilingPhase,
 )
@@ -133,7 +134,7 @@ class ProfilerOperationalConfig:
     current_phase: ProfilingPhase = field(default=ProfilingPhase.Initializing)
     # Device type: "cuda" for NVIDIA GPUs, "xpu" for Intel GPUs/Gaudi.
     # Populated from hardware.deviceType in the DGDR spec.
-    device_type: str = "cuda"
+    device_type: DeviceType = DeviceType.Cuda
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ from dynamo.profiler.utils.defaults import (
     EngineType,
     resolve_deploy_path,
 )
+from dynamo.profiler.utils.dgdr_v1beta1_types import DeviceType
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -77,7 +78,12 @@ class VllmV1ConfigModifier(BaseConfigModifier):
           pod spec, following the pattern in
           ``examples/backends/vllm/deploy/agg_xpu_dra.yaml``.
         """
-        if str(device_type).lower() != "xpu":
+        device_str = (
+            device_type.value
+            if isinstance(device_type, DeviceType)
+            else str(device_type).lower()
+        )
+        if device_str != DeviceType.Xpu.value:
             return config
 
         cfg = Config.model_validate(config)

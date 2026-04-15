@@ -21,11 +21,13 @@ from aiconfigurator.webapp.components.profiling import (
     load_profiling_javascript,
 )
 
+from dynamo.profiler.utils.defaults import DeviceLabel
 from dynamo.profiler.utils.dgd_generation import (
     generate_decode_service_config_preview,
     generate_prefill_decode_services_config_preview,
     generate_prefill_service_config_preview,
 )
+from dynamo.profiler.utils.dgdr_v1beta1_types import DeviceType
 from dynamo.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
@@ -88,8 +90,15 @@ def _get_device_label(args: Any) -> str:
     """
     device_type = getattr(args, "device_type", None)
     if not device_type:
-        device_type = os.environ.get("VLLM_TARGET_DEVICE", "cuda")
-    return "XPU" if str(device_type).lower() == "xpu" else "GPU"
+        device_type = os.environ.get("VLLM_TARGET_DEVICE", DeviceType.Cuda)
+    # Compare using enum value — str(DeviceType.Xpu) returns 'DeviceType.Xpu'
+    # in Python 3.11+, not 'xpu', so we must normalise via str/lower on .value.
+    device_str = (
+        device_type.value
+        if isinstance(device_type, DeviceType)
+        else str(device_type).lower()
+    )
+    return DeviceLabel.XPU if device_str == DeviceType.Xpu.value else DeviceLabel.GPU
 
 
 def build_single_service_preview_header_lines(
@@ -261,7 +270,6 @@ def generate_config_data(
         "Action",
     ]
 
-    device_label = _get_device_label(args)
     data[PlotType.COST]["chart"][
         "title"
     ] = f"{device_label} Hours Per 1000 i{args.isl}o{args.osl} requests"

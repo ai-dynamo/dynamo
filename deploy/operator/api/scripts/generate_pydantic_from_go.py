@@ -79,6 +79,27 @@ _STRUCT_EXTRAS: dict = {
             raise ValueError("ttft and itl must both be provided together.")
         return self
 """,
+    "HardwareSpec": """\
+    @model_validator(mode="after")
+    def _derive_device_type_from_sku(self) -> "HardwareSpec":
+        \"\"\"Auto-derive deviceType from gpuSku when not explicitly set.
+
+        If gpuSku identifies an Intel XPU accelerator and deviceType was not
+        explicitly provided by the user, set deviceType to 'xpu'.  This
+        prevents the silent misconfiguration where a user specifies an Intel
+        SKU but the default 'cuda' deviceType bypasses all XPU-specific logic.
+        \"\"\"
+        if isinstance(self.gpuSku, XPUSKUType):
+            if "deviceType" not in self.model_fields_set:
+                # Not explicitly provided — auto-derive from XPU SKU.
+                self.deviceType = DeviceType.Xpu
+            elif self.deviceType != DeviceType.Xpu:
+                raise ValueError(
+                    f"gpuSku '{self.gpuSku}' is an Intel XPU accelerator but deviceType is "
+                    f"'{self.deviceType}'. Set deviceType to 'xpu' or omit it to auto-derive."
+                )
+        return self
+""",
 }
 
 # Per-field Python type overrides.  Maps (StructName, json_field_name) → Python type string.
@@ -87,6 +108,20 @@ _STRUCT_EXTRAS: dict = {
 _FIELD_TYPE_OVERRIDES: dict[tuple[str, str], str] = {
     # FeaturesSpec.planner is opaque in Go but strongly typed in Python.
     ("FeaturesSpec", "planner"): "Optional[PlannerConfig]",
+    # HardwareSpec.gpuSku accepts both NVIDIA GPU and Intel XPU SKUs in Python.
+    ("HardwareSpec", "gpuSku"): "Optional[Union[GPUSKUType, XPUSKUType]]",
+}
+
+# Extra Python code appended after the enum values for specific enum classes.
+# Used for properties or methods that cannot be expressed in Go.
+_ENUM_EXTRAS: dict[str, str] = {
+    "XPUSKUType": """\
+
+    @property
+    def aic_system(self) -> str:
+        \"\"\"Return the AIC system identifier (enum value is already the AIC name).\"\"\"
+        return self.value
+""",
 }
 
 _SPDX_HEADER = """\
@@ -471,7 +506,7 @@ class GoToPydanticConverter:
             '"""',
             "",
             "from enum import Enum",
-            "from typing import Any, Dict, List, Optional",
+            "from typing import Any, Dict, List, Optional, Union",
             "",
             "from pydantic import BaseModel, Field, model_validator",
             "",
@@ -509,6 +544,12 @@ class GoToPydanticConverter:
             else:
                 for const_name, const_value in enum.values:
                     lines.append(f'    {const_name} = "{const_value}"')
+
+            # Append any enum-specific extras (properties, methods)
+            enum_extra = _ENUM_EXTRAS.get(enum.name)
+            if enum_extra:
+                for extra_line in enum_extra.splitlines():
+                    lines.append(extra_line)
 
         # Generate struct models
         for struct in self.structs:
