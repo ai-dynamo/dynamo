@@ -1,3 +1,0 @@
-[2m2026-04-15T04:57:19.302397Z[0m [32m INFO[0m [2momni_handler._engine_inputs_from_video[0m[2m:[0m Video diffusion request: prompt='a drone...', size=832x480, frames=32, fps=16
-[2m2026-04-15T04:57:19.302523Z[0m [32m INFO[0m [2momni_handler._engine_inputs_from_video[0m[2m:[0m I2V: attached image (64x64) to multi_modal_data
-[2m2026-04-15T04:57:19.302595Z[0m [32m INFO[0m [2momni_handler._engine_inputs_from_video[0m[2m:[0m Video diffusion request: prompt='a drone...', size=832x480, frames=32, fps=16

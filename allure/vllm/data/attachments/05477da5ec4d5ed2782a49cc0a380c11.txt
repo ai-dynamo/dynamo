@@ -1,0 +1,3 @@
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:67 ScaleRequestHandler initialized for namespaces: ['other-ns-model-a', 'my-ns-model-b']
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:85 GPU budget enforcement DISABLED (unlimited)
+WARNING  dynamo.global_planner.scale_handler:scale_handler.py:106 Managed namespace 'other-ns-model-a' does not start with expected prefix 'my-ns-'; cannot derive DGD name

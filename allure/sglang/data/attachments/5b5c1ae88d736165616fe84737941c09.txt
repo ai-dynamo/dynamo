@@ -1,0 +1,3 @@
+Using NATS on default port 4222
+Using ETCD on default client port 2379
+NATS (4222) and ETCD (2379) services ready

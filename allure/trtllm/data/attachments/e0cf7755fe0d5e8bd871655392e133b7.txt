@@ -1,0 +1,2 @@
+INFO     dynamo.planner.connectors.kubernetes:kubernetes.py:646 Updating prefill component component1 to desired replica count 3
+INFO     dynamo.planner.connectors.kubernetes:kubernetes.py:655 decode component component2 already at desired replica count 2, skipping

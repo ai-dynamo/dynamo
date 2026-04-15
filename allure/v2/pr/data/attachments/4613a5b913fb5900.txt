@@ -1,0 +1,2 @@
+INFO     root:args.py:116 Loading disagg config section 'prefill' from /tmp/pytest_temp/test_disagg_config_rejects_dyn0/disagg.yaml
+INFO     root:args.py:153 Successfully wrote config section to temp file

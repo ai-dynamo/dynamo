@@ -1,0 +1,2 @@
+INFO     dynamo.profiler.utils.config_modifiers.protocol:protocol.py:766 Ignoring envelope field(s) ['apiVersion', 'kind'] from overrides.dgd — these are controlled by the deployment template and cannot be overridden.
+INFO     dynamo.profiler.utils.config_modifiers.protocol:protocol.py:784 Ignoring metadata identity field(s) ['name'] from overrides.dgd — use the DGD template to set these.

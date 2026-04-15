@@ -1,1 +1,0 @@
-{"id":"de3fd2c82e1a7d80073f1b8cc690ccd0","fullName":"tests.serve.test_disagg_logprobs_serialization.TestDisaggLogprobsSerializationRoundtrip#test_single_token_roundtrip","name":"test_single_token_roundtrip","status":"passed","testResultsByEnv":{"trtllm-amd64":"88bd09a973188c8b7bf1f2812f191bec"}}

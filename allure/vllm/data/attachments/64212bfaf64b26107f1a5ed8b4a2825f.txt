@@ -1,0 +1,1 @@
+[2m2026-04-15T20:19:19.104520Z[0m [32m INFO[0m [2mprofile_sla._extract_profiler_params[0m[2m:[0m Profiler config: model=Qwen/Qwen3-32B, backend=trtllm, system=h200_sxm, total_gpus=8, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=rapid, picking=default

@@ -1,0 +1,12 @@
+[2m2026-04-15T20:20:52.861969Z[0m [31mERROR[0m [2mprofile_sla.run_profile[0m[2m:[0m Profile job failed with error
+Traceback (most recent call last):
+  File "/workspace/components/src/dynamo/profiler/profile_sla.py", line 306, in run_profile
+    valid_dgdr_spec(dgdr)
+  File "/workspace/components/src/dynamo/profiler/utils/dgdr_validate.py", line 64, in valid_dgdr_spec
+    _validate_workload(dgdr.workload)
+  File "/workspace/components/src/dynamo/profiler/utils/dgdr_validate.py", line 97, in _validate_workload
+    raise ValueError(
+ValueError: Only one of 'concurrency' or 'requestRate' can be provided, not both.
+[2m2026-04-15T20:20:52.862441Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
+[2m2026-04-15T20:20:52.862502Z[0m [32m INFO[0m [2mdynamo_deployment.cleanup_remaining_deployments[0m[2m:[0m No deployments to clean up
+[2m2026-04-15T20:20:52.862542Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

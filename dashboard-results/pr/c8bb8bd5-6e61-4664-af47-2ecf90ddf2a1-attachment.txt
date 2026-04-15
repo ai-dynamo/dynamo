@@ -1,1 +1,0 @@
-INFO     dynamo.vllm.handlers:handlers.py:627 [Wake] Re-registered endpoint to discovery - worker added back to routing pool

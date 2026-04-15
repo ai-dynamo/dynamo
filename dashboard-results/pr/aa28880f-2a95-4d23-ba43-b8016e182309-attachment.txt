@@ -1,2 +1,0 @@
-INFO     dynamo.trtllm.engines.diffusion_engine:diffusion_engine.py:250 Generating: prompt='a golden retriever...', size=64x64, frames=4, steps=1
-INFO     dynamo.trtllm.engines.diffusion_engine:diffusion_engine.py:278 Generated video output with shape torch.Size([1, 4, 64, 64, 3])

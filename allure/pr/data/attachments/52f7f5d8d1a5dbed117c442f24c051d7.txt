@@ -1,1 +1,0 @@
-[2m2026-04-15T04:56:05.976420Z[0m [32m INFO[0m [2mhealth_check.__init__[0m[2m:[0m Disagg health check configured: bootstrap_host=2.2.2.2, bootstrap_port=0, bootstrap_room=0

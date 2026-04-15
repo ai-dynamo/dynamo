@@ -1,0 +1,2 @@
+INFO     dynamo.vllm.handlers:handlers.py:499 [Sleep] Unregistered endpoint from discovery - worker removed from routing pool
+INFO     dynamo.vllm.handlers:handlers.py:634 [Wake] Re-registered endpoint to discovery - worker added back to routing pool

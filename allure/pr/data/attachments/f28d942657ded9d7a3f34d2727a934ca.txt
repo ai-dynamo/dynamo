@@ -1,9 +1,0 @@
-[2m2026-04-15T04:56:57.857542Z[0m [32m INFO[0m [2mprofile_sla._extract_profiler_params[0m[2m:[0m Profiler config: model=deepseek-ai/DeepSeek-R1, backend=sglang, system=l40s, total_gpus=1, isl=4000, osl=1000, ttft=5000.0, itl=100.0, e2e_latency=None, strategy=thorough, picking=load_match
-[2m2026-04-15T04:56:58.096127Z[0m [32m INFO[0m [2mutils._infer_quantization_fields[0m[2m:[0m Quant inference result: quant_algo=fp8_block, kv_cache_quant_algo=None, quant_dynamic=True
-[2m2026-04-15T04:56:58.096282Z[0m [32m INFO[0m [2mutils.get_model_config_from_model_path[0m[2m:[0m Loaded model config for deepseek-ai/DeepSeek-R1: architecture=DeepseekV3ForCausalLM, layers=61, n=128, n_kv=128, d=56, hidden_size=7168, inter_size=18432, vocab=129280, context=163840, topk=8, num_experts=256, moe_inter_size=2048, extra_params=None
-[2m2026-04-15T04:56:58.142368Z[0m [32m INFO[0m [2mprofile_sla._execute_strategy[0m[2m:[0m Dry run mode — skipping deployment and benchmarking.
-[2m2026-04-15T04:56:58.142493Z[0m [32m INFO[0m [2mprofile_sla._execute_strategy[0m[2m:[0m Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1)
-[2m2026-04-15T04:56:58.143781Z[0m [33m WARN[0m [2mprofile_sla._write_final_output[0m[2m:[0m Dry run mode — no DGD config produced (expected).
-[2m2026-04-15T04:56:58.145097Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
-[2m2026-04-15T04:56:58.145184Z[0m [32m INFO[0m [2mdynamo_deployment.cleanup_remaining_deployments[0m[2m:[0m No deployments to clean up
-[2m2026-04-15T04:56:58.145226Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

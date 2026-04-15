@@ -1,0 +1,232 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4286 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4286
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4286
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2450 --advertise-client-urls http://0.0.0.0:2450 --listen-peer-urls http://0.0.0.0:2451 --initial-advertise-peer-urls http://localhost:2451 --initial-cluster default=http://localhost:2451 --data-dir /tmp/etcd_gtf4x5gy in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2450
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2450
+INFO     test_omni_serve_deployment[omni_audio]:common.py:43 Starting omni_audio test_deployment
+INFO     test_omni_serve_deployment[omni_audio]:common.py:49 Using model: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+INFO     test_omni_serve_deployment[omni_audio]:common.py:50 Script: agg_omni_audio.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/examples/backends/vllm/launch/agg_omni_audio.sh in /workspace/examples/backends/vllm
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8000/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=14, elapsed=20.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=24, elapsed=40.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=34, elapsed=60.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=44, elapsed=80.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+INFO     EngineProcess:managed_process.py:742 Still waiting for URL http://localhost:8000/v1/models (custom check failed) (attempt=54, elapsed=100.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 27
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /v1/models HTTP/1.1" 200 130
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8000/v1/models (attempt=59, elapsed=110.1s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "object": "model",
+      "created": 1776286937,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8000/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "GET /health HTTP/1.1" 200 247
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8000/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 1411770262655035401,
+      "transport": {
+        "tcp": "10.1.54.219:37861/13979d92f2036809/generate"
+      }
+    }
+  ]
+}
+INFO     test_omni_serve_deployment[omni_audio]:common.py:124 TESTING: Payload: AudioSpeechPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8000/v1/audio/speech" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "input": "Hello, this is a test of Dynamo audio generation.",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  "voice": "vivian",
+  "language": "English"
+}'
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8000
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8000 "POST /v1/audio/speech HTTP/1.1" 200 7724
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=52.78s
+DEBUG    tests.utils.client:client.py:118 Response headers: {'content-type': 'audio/wav', 'content-length': '7724', 'date': 'Wed, 15 Apr 2026 21:03:12 GMT'}
+DEBUG    chardet.charsetprober:sjisprober.py:65 SHIFT_JIS Japanese prober hit error at byte 3892
+DEBUG    chardet.charsetprober:eucjpprober.py:66 EUC-JP Japanese prober hit error at byte 25
+DEBUG    chardet.charsetprober:mbcharsetprober.py:64 GB2312 Chinese prober hit error at byte 30
+DEBUG    chardet.charsetprober:mbcharsetprober.py:64 EUC-KR Korean prober hit error at byte 25
+DEBUG    chardet.charsetprober:mbcharsetprober.py:64 CP949 Korean prober hit error at byte 28
+DEBUG    chardet.charsetprober:mbcharsetprober.py:64 Big5 Chinese prober hit error at byte 28
+DEBUG    chardet.charsetprober:mbcharsetprober.py:64 EUC-TW Taiwan prober hit error at byte 24
+DEBUG    chardet.charsetprober:mbcharsetprober.py:64 Johab Korean prober hit error at byte 28
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 windows-1251 Russian confidence = 0.15396943270660501
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 KOI8-R Russian confidence = 0.014828277438762867
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-5 Russian confidence = 0.04987230119690263
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 MacCyrillic Russian confidence = 0.1141484780748769
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 IBM866 Russian confidence = 0.04504810259636618
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 IBM855 Russian confidence = 0.06909738689241049
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-7 Greek confidence = 0.21465367230647756
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 windows-1253 Greek confidence = 0.21538585726273426
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-5 Bulgarian confidence = 0.043470702786026195
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 windows-1251 Bulgarian confidence = 0.13634434140981175
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 TIS-620 Thai confidence = 0.044837096343568805
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-9 Turkish confidence = 0.07173347424715572
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-8 Hebrew confidence = 0.0
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-8 Hebrew confidence = 0.18582773227225216
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-8 Hebrew confidence = 0.17465012431602644
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 windows-1251 Russian confidence = 0.15396943270660501
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 KOI8-R Russian confidence = 0.014828277438762867
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-5 Russian confidence = 0.04987230119690263
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 MacCyrillic Russian confidence = 0.1141484780748769
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 IBM866 Russian confidence = 0.04504810259636618
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 IBM855 Russian confidence = 0.06909738689241049
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-7 Greek confidence = 0.21465367230647756
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 windows-1253 Greek confidence = 0.21538585726273426
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-5 Bulgarian confidence = 0.043470702786026195
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 windows-1251 Bulgarian confidence = 0.13634434140981175
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 TIS-620 Thai confidence = 0.044837096343568805
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-9 Turkish confidence = 0.07173347424715572
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-8 Hebrew confidence = 0.0
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-8 Hebrew confidence = 0.18582773227225216
+DEBUG    chardet.charsetprober:charsetgroupprober.py:98 ISO-8859-8 Hebrew confidence = 0.17465012431602644
+DEBUG    tests.utils.client:client.py:138 Response body: RIFF$  WAVEfmt      ΐ]  €»    data                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               ... (truncated)
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+binary_audio_7724_bytes
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 11825
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 11827 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 11827 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 11826 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 11826 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 11813
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 11814 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 11814 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 11801
+INFO     NatsServer:managed_process.py:31 Terminating PID: 11802 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 11802 sed

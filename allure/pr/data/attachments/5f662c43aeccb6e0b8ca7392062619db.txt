@@ -1,0 +1,2 @@
+INFO     dynamo.planner.connectors.global_planner:global_planner.py:193 GlobalPlannerConnector: Skipping local deployment validation (GlobalPlanner will validate on its side)
+INFO     dynamo.planner.connectors.global_planner:global_planner.py:205 GlobalPlannerConnector: Skipping deployment ready check (GlobalPlanner manages deployment state)

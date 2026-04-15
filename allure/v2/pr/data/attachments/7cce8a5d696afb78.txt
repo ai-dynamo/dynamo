@@ -1,1 +1,0 @@
-✅ Prometheus metrics integration test passed

@@ -1,0 +1,2 @@
+INFO     dynamo.planner.connectors.kubernetes_api:kubernetes_api.py:235 [Attempt 1/2] (status: False, message: Deployment is not ready)
+INFO     dynamo.planner.connectors.kubernetes_api:kubernetes_api.py:235 [Attempt 2/2] (status: False, message: Deployment is not ready)

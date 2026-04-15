@@ -1,0 +1,110 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4315 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4315
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4315
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2416 --advertise-client-urls http://0.0.0.0:2416 --listen-peer-urls http://0.0.0.0:2417 --initial-advertise-peer-urls http://localhost:2417 --initial-cluster default=http://localhost:2417 --data-dir /tmp/etcd__ss_pc8j in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2416
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2416
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:300 Created vLLM worker 0 on GPU 0 (gpu_mem=0.4, system_port=8101) with endpoint: dyn://test-namespace-pkdwxtdapa.backend.generate
+INFO     tests.router.test_router_e2e_with_vllm:test_router_e2e_with_vllm.py:300 Created vLLM worker 1 on GPU 0 (gpu_mem=0.4, system_port=8102) with endpoint: dyn://test-namespace-pkdwxtdapa.backend.generate
+INFO     tests.router.e2e_harness:e2e_harness.py:57 [VLLMProcess] Starting 2 worker processes sequentially...
+INFO     tests.router.e2e_harness:e2e_harness.py:64 [VLLMProcess] Starting vLLM worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:79 [VLLMProcess] Launching process 0 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8174", "enable_kv_cache_events": true} in /workspace
+INFO     tests.router.e2e_harness:e2e_harness.py:85 [VLLMProcess] Worker 0 launched with PID: 4097
+INFO     tests.router.e2e_harness:e2e_harness.py:94 [VLLMProcess] Waiting 5s for worker 0 to initialize NIXL before starting next worker...
+INFO     tests.router.e2e_harness:e2e_harness.py:64 [VLLMProcess] Starting vLLM worker 1...
+INFO     tests.router.e2e_harness:e2e_harness.py:79 [VLLMProcess] Launching process 1 (pid will be assigned)...
+INFO     ManagedProcess:managed_process.py:437 Running command: python3 -m dynamo.vllm --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --block-size 16 --enforce-eager --gpu-memory-utilization 0.4 --max-model-len 1024 --kv-events-config {"publisher": "zmq", "topic": "kv-events", "endpoint": "tcp://*:8175", "enable_kv_cache_events": true} in /workspace
+INFO     tests.router.e2e_harness:e2e_harness.py:85 [VLLMProcess] Worker 1 launched with PID: 4152
+INFO     tests.router.e2e_harness:e2e_harness.py:117 [VLLMProcess] All 2 workers launched with sequential initialization.
+INFO     tests.router.e2e_harness:e2e_harness.py:122 [VLLMProcess] Waiting for health checks to complete...
+INFO     tests.router.e2e_harness:e2e_harness.py:127 [VLLMProcess] Checking health for worker 0...
+INFO     tests.router.e2e_harness:e2e_harness.py:134 [VLLMProcess] Worker 0 health checks passed
+INFO     tests.router.e2e_harness:e2e_harness.py:127 [VLLMProcess] Checking health for worker 1...
+INFO     tests.router.e2e_harness:e2e_harness.py:134 [VLLMProcess] Worker 1 health checks passed
+INFO     tests.router.e2e_harness:e2e_harness.py:144 [VLLMProcess] All workers started successfully and passed health checks!
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     tests.router.helper:helper.py:263 Waiting for workers to be ready
+INFO     tests.router.helper:helper.py:275 Found 2 instance(s): [2923009412049817869, 2923009412049817871]
+INFO     tests.router.helper:helper.py:291 Sending warmup request with 4 tokens
+DEBUG    tests.router.helper:helper.py:565 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.helper:helper.py:579 Request succeeded on attempt 1
+DEBUG    tests.router.helper:helper.py:611 Received 2 tokens: [850, 29906]
+DEBUG    tests.router.helper:helper.py:615 Stream finished with reason: length
+DEBUG    tests.router.helper:helper.py:635 Total generated tokens: 2
+DEBUG    tests.router.helper:helper.py:648 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.helper:helper.py:308 All 2 workers are ready
+INFO     tests.router.common:common.py:1637 Workers ready: [2923009412049817869, 2923009412049817871]
+INFO     tests.router.common:common.py:1655 Routing targets: worker_a=(id=2923009412049817869, dp_rank=None), worker_b=(id=2923009412049817871, dp_rank=None)
+INFO     tests.router.common:common.py:1698 Sending request 1/5 with 32 tokens - FORCING worker_id=2923009412049817869
+DEBUG    tests.router.helper:helper.py:565 Sending request to worker with worker_id=2923009412049817869 (attempt 1)
+DEBUG    tests.router.helper:helper.py:579 Request succeeded on attempt 1
+DEBUG    tests.router.helper:helper.py:611 Received 1 tokens: [701]
+DEBUG    tests.router.helper:helper.py:615 Stream finished with reason: None
+DEBUG    tests.router.helper:helper.py:611 Received 1 tokens: [4607]
+DEBUG    tests.router.helper:helper.py:615 Stream finished with reason: length
+DEBUG    tests.router.helper:helper.py:635 Total generated tokens: 2
+DEBUG    tests.router.helper:helper.py:648 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1716 Request 1 response: prefill_worker_id=2923009412049817869, decode_worker_id=2923009412049817869, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1698 Sending request 2/5 with 48 tokens - FORCING worker_id=2923009412049817869
+DEBUG    tests.router.helper:helper.py:565 Sending request to worker with worker_id=2923009412049817869 (attempt 1)
+DEBUG    tests.router.helper:helper.py:579 Request succeeded on attempt 1
+DEBUG    tests.router.helper:helper.py:611 Received 1 tokens: [10224]
+DEBUG    tests.router.helper:helper.py:615 Stream finished with reason: None
+DEBUG    tests.router.helper:helper.py:611 Received 1 tokens: [12929]
+DEBUG    tests.router.helper:helper.py:615 Stream finished with reason: length
+DEBUG    tests.router.helper:helper.py:635 Total generated tokens: 2
+DEBUG    tests.router.helper:helper.py:648 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1716 Request 2 response: prefill_worker_id=2923009412049817869, decode_worker_id=2923009412049817869, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1698 Sending request 3/5 with 48 tokens - FORCING worker_id=2923009412049817871
+DEBUG    tests.router.helper:helper.py:565 Sending request to worker with worker_id=2923009412049817871 (attempt 1)
+DEBUG    tests.router.helper:helper.py:579 Request succeeded on attempt 1
+DEBUG    tests.router.helper:helper.py:611 Received 1 tokens: [280]
+DEBUG    tests.router.helper:helper.py:615 Stream finished with reason: None
+DEBUG    tests.router.helper:helper.py:611 Received 1 tokens: [15197]
+DEBUG    tests.router.helper:helper.py:615 Stream finished with reason: length
+DEBUG    tests.router.helper:helper.py:635 Total generated tokens: 2
+DEBUG    tests.router.helper:helper.py:648 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1716 Request 3 response: prefill_worker_id=2923009412049817871, decode_worker_id=2923009412049817871, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1698 Sending request 4/5 with 64 tokens
+DEBUG    tests.router.helper:helper.py:565 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.helper:helper.py:579 Request succeeded on attempt 1
+DEBUG    tests.router.helper:helper.py:611 Received 2 tokens: [30119, 263]
+DEBUG    tests.router.helper:helper.py:615 Stream finished with reason: length
+DEBUG    tests.router.helper:helper.py:635 Total generated tokens: 2
+DEBUG    tests.router.helper:helper.py:648 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1716 Request 4 response: prefill_worker_id=2923009412049817869, decode_worker_id=2923009412049817869, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1698 Sending request 5/5 with 48 tokens
+DEBUG    tests.router.helper:helper.py:565 Sending request to the best available worker (attempt 1)
+DEBUG    tests.router.helper:helper.py:579 Request succeeded on attempt 1
+DEBUG    tests.router.helper:helper.py:611 Received 2 tokens: [29989, 29875]
+DEBUG    tests.router.helper:helper.py:615 Stream finished with reason: length
+DEBUG    tests.router.helper:helper.py:635 Total generated tokens: 2
+DEBUG    tests.router.helper:helper.py:648 Successfully verified 2 tokens generated as expected via KvRouter with ignore_eos=True
+INFO     tests.router.common:common.py:1716 Request 5 response: prefill_worker_id=2923009412049817871, decode_worker_id=2923009412049817871, prefill_dp_rank=0, decode_dp_rank=0
+INFO     tests.router.common:common.py:1770 Response routing verified: req4 → worker_a (id=2923009412049817869, dp_rank=None), req5 → worker_b (id=2923009412049817871, dp_rank=None)
+INFO     tests.router.common:common.py:1797 Stored blocks by (worker_id, dp_rank): [((2923009412049817869, 0), 5), ((2923009412049817871, 0), 4)]
+INFO     tests.router.common:common.py:1818 Successfully verified cross-worker routing: worker_a (2923009412049817869, 0) has 5 stored blocks, worker_b (2923009412049817871, 0) has 4 stored blocks
+INFO     tests.router.e2e_harness:e2e_harness.py:152 Stopping vLLM worker 0
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 4097
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 4099 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 4099 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 4098 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 4098 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:152 Stopping vLLM worker 1
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 4152
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 4154 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 4154 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 4153 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 4153 sed
+INFO     tests.router.e2e_harness:e2e_harness.py:155 Waiting for vLLM worker resources to fully clean up...
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 4084
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 4085 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 4085 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 4072
+INFO     NatsServer:managed_process.py:31 Terminating PID: 4073 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 4073 sed

@@ -1,0 +1,1 @@
+INFO     dynamo.planner.connectors.kubernetes:kubernetes.py:646 Updating prefill component component1 to desired replica count 3

@@ -1,0 +1,7 @@
+[2m2026-04-15T20:18:19.561949Z[0m [32m INFO[0m [2mimporting[0m[2m:[0m Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+[2m2026-04-15T20:18:19.562414Z[0m [32m INFO[0m [2mimporting[0m[2m:[0m Triton not installed or not compatible; certain GPU-related functions will not be available.
+[2m2026-04-15T20:18:19.815188Z[0m [33mWARNING[0m [2minterface.import_kernels[0m[2m:[0m Failed to import from vllm._C: ImportError('libcuda.so.1: cannot open shared object file: No such file or directory')
+[2m2026-04-15T20:18:24.123547Z[0m [32m INFO[0m [2m__init__._wrapper[0m[2m:[0m Registered model loader `<class 'gpu_memory_service.integrations.vllm.model_loader.register_gms_loader.<locals>.GMSModelLoader'>` with load format `gms`
+[2m2026-04-15T20:18:24.123678Z[0m [32m INFO[0m [2mpatches.patch_empty_cache[0m[2m:[0m [GMS] Patched torch.cuda.empty_cache
+[2m2026-04-15T20:18:24.123727Z[0m [32m INFO[0m [2mpatches.patch_memory_snapshot[0m[2m:[0m [GMS Patch] Patched MemorySnapshot.measure
+[2m2026-04-15T20:18:24.123784Z[0m [32m INFO[0m [2mworker[0m[2m:[0m [GMS] Worker module loaded - model loader registered, all patches applied

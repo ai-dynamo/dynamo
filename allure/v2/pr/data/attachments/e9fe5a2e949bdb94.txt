@@ -1,1 +1,0 @@
-[2m2026-04-15T05:05:41.686110Z[0m [32m INFO[0m [2moutput_formatter.format[0m[2m:[0m Audio encoded for request req-1: 4800 samples, sr=24000, 9644 bytes wav

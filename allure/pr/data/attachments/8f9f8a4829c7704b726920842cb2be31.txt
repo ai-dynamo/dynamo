@@ -1,8 +1,0 @@
-[2m2026-04-15T04:54:56.350283Z[0m [32m INFO[0m [2mimage_diffusion_handler.__init__[0m[2m:[0m Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
-[2m2026-04-15T04:54:56.352744Z[0m [32m INFO[0m [2mimage_diffusion_handler.generate[0m[2m:[0m Image diffusion request: {'prompt': 'A yellow square', 'model': 'test-model', 'size': '256x256', 'response_format': 'b64_json', 'user': 'test-user', 'nvext': {'num_inference_steps': 10, 'guidance_scale': 7.5, 'seed': 42, 'negative_prompt': 'negative'}}
-[2m2026-04-15T04:54:56.353454Z[0m [31mERROR[0m [2mimage_diffusion_handler.generate[0m[2m:[0m Error in diffusion generation: object list can't be used in 'await' expression
-Traceback (most recent call last):
-  File "/usr/local/lib/python3.12/dist-packages/dynamo/sglang/request_handlers/image_diffusion/image_diffusion_handler.py", line 103, in generate
-    images = await self._generate_images(
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-TypeError: object list can't be used in 'await' expression

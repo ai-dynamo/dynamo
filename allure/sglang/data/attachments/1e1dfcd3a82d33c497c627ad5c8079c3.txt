@@ -1,0 +1,1 @@
+INFO     dynamo.profiler.profile_sla:profile_sla.py:265 Final DGD config saved to /tmp/pytest_temp/popen-gw4/test_normal_config_writes_file0/out/final_config.yaml

@@ -1,0 +1,2 @@
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:58 Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:85 Image diffusion request: {'prompt': 'A red square', 'model': 'test-model', 'size': '256x256', 'response_format': 'url', 'user': 'test-user', 'nvext': {'num_inference_steps': 10, 'guidance_scale': 7.5, 'seed': 42, 'negative_prompt': None}}

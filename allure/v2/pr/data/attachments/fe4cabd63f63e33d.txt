@@ -1,2 +1,0 @@
-[2m2026-04-15T04:56:57.633898Z[0m [32m INFO[0m [2mglobal_planner.validate_deployment[0m[2m:[0m GlobalPlannerConnector: Skipping local deployment validation (GlobalPlanner will validate on its side)
-[2m2026-04-15T04:56:57.633966Z[0m [32m INFO[0m [2mglobal_planner.wait_for_deployment_ready[0m[2m:[0m GlobalPlannerConnector: Skipping deployment ready check (GlobalPlanner manages deployment state)

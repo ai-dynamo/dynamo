@@ -1,0 +1,6 @@
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:67 ScaleRequestHandler initialized for namespaces: ['app-ns']
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:85 GPU budget enforcement DISABLED (unlimited)
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:236 Processing scale request from app-ns for DGD dgd-1 in K8s namespace default
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:296 Successfully scaled dgd-1: {}
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:236 Processing scale request from app-ns for DGD dgd-2 in K8s namespace default
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:296 Successfully scaled dgd-2: {}

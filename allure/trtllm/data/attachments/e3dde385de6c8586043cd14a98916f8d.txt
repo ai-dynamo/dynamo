@@ -1,0 +1,2 @@
+Correction factor 0.0 test: Decode replicas=1
+Correction factor -1.0 test: Decode replicas=1

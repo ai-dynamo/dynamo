@@ -1,4 +1,0 @@
-[TEST] 2026-04-15T05:37:16 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Received generation request: b8a9a0fa-8169-4851-a2e5-3ef1d2e6f9cd
-[TEST] 2026-04-15T05:37:16 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request b8a9a0fa-8169-4851-a2e5-3ef1d2e6f9cd: prompt='a test video...', size=832x480, frames=81, steps=50
-[TEST] 2026-04-15T05:37:16 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request b8a9a0fa-8169-4851-a2e5-3ef1d2e6f9cd: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
-[TEST] 2026-04-15T05:37:16 INFO dynamo.trtllm.request_handlers.video_diffusion.video_handler: Request b8a9a0fa-8169-4851-a2e5-3ef1d2e6f9cd completed in 0.02s

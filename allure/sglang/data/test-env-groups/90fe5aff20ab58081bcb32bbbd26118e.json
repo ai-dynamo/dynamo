@@ -1,1 +1,1 @@
-{"id":"90fe5aff20ab58081bcb32bbbd26118e","fullName":"components.src.dynamo.planner.tests.unit.test_kube#test_update_service_replicas_uses_dgdsa_scale","name":"test_update_service_replicas_uses_dgdsa_scale","status":"passed","testResultsByEnv":{"default":"afc046d8c4b3493ed9dea5dafb3acdd2"}}
+{"id":"90fe5aff20ab58081bcb32bbbd26118e","fullName":"components.src.dynamo.planner.tests.unit.test_kube#test_update_service_replicas_uses_dgdsa_scale","name":"test_update_service_replicas_uses_dgdsa_scale","status":"passed","testResultsByEnv":{"default":"7da953ed764da2431748c98d07421314"}}

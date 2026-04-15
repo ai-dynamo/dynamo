@@ -1,9 +1,0 @@
-[2m2026-04-15T04:56:58.215268Z[0m [32m INFO[0m [2mprofile_sla._extract_profiler_params[0m[2m:[0m Profiler config: model=Qwen/Qwen2.5-0.5B, backend=vllm, system=l40s, total_gpus=4, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=rapid, picking=autoscale
-[2m2026-04-15T04:56:58.217152Z[0m [32m INFO[0m [2mrapid._run_naive_fallback[0m[2m:[0m AIC does not support this combo — falling back to naive config generation.
-[2m2026-04-15T04:56:58.219256Z[0m [32m INFO[0m [2mnaive._estimate_model_weight_bytes[0m[2m:[0m Estimated model weight size for Qwen/Qwen2.5-0.5B: 0.98 GiB (0.53B params)
-[2m2026-04-15T04:56:58.219322Z[0m [32m INFO[0m [2mnaive._calculate_min_tp[0m[2m:[0m TP calculation: model=0.98GiB, vram=44.99GiB, required=1.47GiB (1.5x), min_tp=1, selected_tp=1
-[2m2026-04-15T04:56:58.238385Z[0m [32m INFO[0m [2mprofile_sla._execute_strategy[0m[2m:[0m Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1)
-[2m2026-04-15T04:56:58.245135Z[0m [32m INFO[0m [2mprofile_sla._write_final_output[0m[2m:[0m Final DGD config saved to /tmp/pytest_temp/popen-gw5/test_planner_load_scaling_rapi0/profiling_results/final_config.yaml
-[2m2026-04-15T04:56:58.245712Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
-[2m2026-04-15T04:56:58.245806Z[0m [32m INFO[0m [2mdynamo_deployment.cleanup_remaining_deployments[0m[2m:[0m No deployments to clean up
-[2m2026-04-15T04:56:58.245862Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

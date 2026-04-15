@@ -1,0 +1,1 @@
+[2m2026-04-15T20:13:38.417685Z[0m [32m INFO[0m [2momni_handler._engine_inputs_from_video[0m[2m:[0m Video diffusion request: prompt='a drone...', size=832x480, frames=32, fps=16

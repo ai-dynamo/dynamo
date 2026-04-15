@@ -1,0 +1,1 @@
+[2m2026-04-15T20:19:19.104929Z[0m [33m WARN[0m [2mkubernetes.set_component_replicas[0m[2m:[0m Deployment test-graph is not ready, ignoring this scaling

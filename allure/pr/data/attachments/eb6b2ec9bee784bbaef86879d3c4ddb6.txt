@@ -1,4 +1,0 @@
-INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:188 Received generation request: 7cd88a7f-109b-4bea-84fe-d3df26d948d3
-INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:209 Request 7cd88a7f-109b-4bea-84fe-d3df26d948d3: prompt='a test video...', size=832x480, frames=81, steps=50
-INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:249 Request 7cd88a7f-109b-4bea-84fe-d3df26d948d3: encoding video output (shape=(4, 64, 64, 3)) to MP4 at 24 fps
-INFO     dynamo.trtllm.request_handlers.video_diffusion.video_handler:video_handler.py:304 Request 7cd88a7f-109b-4bea-84fe-d3df26d948d3 completed in 0.01s

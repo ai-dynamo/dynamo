@@ -1,2 +1,0 @@
-[2m2026-04-15T04:56:57.568094Z[0m [32m INFO[0m [2mscale_handler.__init__[0m[2m:[0m ScaleRequestHandler initialized (accepting all namespaces)
-[2m2026-04-15T04:56:57.568157Z[0m [32m INFO[0m [2mscale_handler.__init__[0m[2m:[0m GPU budget enforcement DISABLED (unlimited)

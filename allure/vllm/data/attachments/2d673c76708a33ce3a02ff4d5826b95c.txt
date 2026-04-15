@@ -1,0 +1,35 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4306 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4306
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4306
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2423 --advertise-client-urls http://0.0.0.0:2423 --listen-peer-urls http://0.0.0.0:2424 --initial-advertise-peer-urls http://localhost:2424 --initial-cluster default=http://localhost:2424 --data-dir /tmp/etcd_u2rfg8xt in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2423
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2423
+INFO     ManagedProcess:managed_process.py:437 Running command: vllm serve --block-size 16 --port 8019 --kv-transfer-config {"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "kvbm.vllm_integration.connector"} Qwen/Qwen3-0.6B --max-model-len 8000 --num-gpu-blocks-override 50 --max-num-batched-tokens 256 in /workspace
+INFO     ManagedProcess:managed_process.py:662 Checking Port: 8019
+INFO     ManagedProcess:managed_process.py:670 SUCCESS: Check Port: 8019
+INFO     ManagedProcess:managed_process.py:662 Checking Port: 6904
+INFO     ManagedProcess:managed_process.py:670 SUCCESS: Check Port: 6904
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8019
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8019 "POST /v1/chat/completions HTTP/1.1" 200 580
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:6904
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:6904 "GET /metrics HTTP/1.1" 200 1970
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8019
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8019 "POST /v1/chat/completions HTTP/1.1" 200 580
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:8019
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:8019 "POST /v1/chat/completions HTTP/1.1" 200 580
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:6904
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:6904 "GET /metrics HTTP/1.1" 200 1971
+INFO     ManagedProcess:managed_process.py:558 Sending SIGTERM to process group: 609
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 611 name: tee
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 611 tee
+INFO     ManagedProcess:managed_process.py:31 Terminating PID: 610 name: sed
+INFO     ManagedProcess:managed_process.py:36 Sending SIGTERM (kill): 610 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 596
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 597 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 597 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 584
+INFO     NatsServer:managed_process.py:31 Terminating PID: 585 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 585 sed

@@ -1,0 +1,4 @@
+[2m2026-04-15T20:19:19.040544Z[0m [32m INFO[0m [2mremote_client._ensure_client[0m[2m:[0m Attempting to connect to GlobalPlanner at central-ns.Planner (attempt 1/3)
+[2m2026-04-15T20:19:19.041006Z[0m [32m INFO[0m [2mremote_client._ensure_client[0m[2m:[0m Successfully connected to centralized planner at central-ns.Planner
+[2m2026-04-15T20:19:19.041085Z[0m [32m INFO[0m [2mremote_client.send_scale_request[0m[2m:[0m Sending scale request to centralized planner: prefill=[1], decode=[]
+[2m2026-04-15T20:19:19.041254Z[0m [32m INFO[0m [2mremote_client.send_scale_request[0m[2m:[0m Scale request response: ScaleStatus.ERROR - Namespace not authorized

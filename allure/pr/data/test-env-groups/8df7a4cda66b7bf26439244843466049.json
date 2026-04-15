@@ -1,1 +1,0 @@
-{"id":"8df7a4cda66b7bf26439244843466049","fullName":"tests.serve.test_disagg_logprobs_serialization.TestDisaggLogprobsSerializationRoundtrip#test_missing_field_noop","name":"test_missing_field_noop","status":"passed","testResultsByEnv":{"trtllm-amd64":"f07c2738edf49b1de329d734f0981aa1"}}

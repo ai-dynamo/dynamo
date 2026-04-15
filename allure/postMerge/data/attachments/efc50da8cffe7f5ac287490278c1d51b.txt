@@ -1,0 +1,1 @@
+[2m2026-04-15T20:19:19.025519Z[0m [32m INFO[0m [2mbudget._initialize_gpu_counts[0m[2m:[0m Using GPU counts from CLI: prefill=None, decode=4
