@@ -120,6 +120,17 @@ TEST_PAYLOAD: Dict[str, Any] = {
     "stream": True,
     "max_tokens": 10,
 }
+SOAK_TEST_PAYLOAD: Dict[str, Any] = {
+    "model": MODEL_NAME,
+    "messages": [
+        {
+            "role": "user",
+            "content": "one two three four five six seven eight nine ten",
+        }
+    ],
+    "stream": False,
+    "max_tokens": 1,
+}
 
 
 def _build_mocker_command(
@@ -818,6 +829,49 @@ def test_mocker_router(
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
+            request_plane=request_plane,
+            router_mode=router_mode,
+            min_initial_workers=mockers.num_workers,
+        )
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("router_mode", ["kv", "round-robin", "random"])
+@pytest.mark.parametrize(
+    "durable_kv_events", [False], ids=["nondurable"], indirect=True
+)
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+def test_mocker_router_single_worker_soak(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    router_mode,
+    durable_kv_events,
+    request_plane,
+):
+    mocker_args = {
+        "speedup_ratio": 1000.0,
+        "block_size": BLOCK_SIZE,
+        "durable_kv_events": durable_kv_events,
+    }
+
+    with MockerProcess(
+        request,
+        mocker_args=mocker_args,
+        num_mockers=1,
+        request_plane=request_plane,
+    ) as mockers:
+        frontend_port = get_unique_ports(
+            request, num_ports=1, request_plane=request_plane
+        )[0]
+
+        _test_router_basic(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=frontend_port,
+            test_payload=SOAK_TEST_PAYLOAD,
+            num_requests=1024,
             request_plane=request_plane,
             router_mode=router_mode,
             min_initial_workers=mockers.num_workers,
