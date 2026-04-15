@@ -3640,7 +3640,7 @@ dependencies = [
 [[package]]
 name = "modelexpress-client"
 version = "0.3.0"
-source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=756bee33c1698c208930ca23a1b511ddd1fc2146#756bee33c1698c208930ca23a1b511ddd1fc2146"
+source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=fb549152b78a9087a1dfb47e4808a84ba26db804#fb549152b78a9087a1dfb47e4808a84ba26db804"
 dependencies = [
  "anyhow",
  "clap 4.6.0",
@@ -3661,7 +3661,7 @@ dependencies = [
 [[package]]
 name = "modelexpress-common"
 version = "0.3.0"
-source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=756bee33c1698c208930ca23a1b511ddd1fc2146#756bee33c1698c208930ca23a1b511ddd1fc2146"
+source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=fb549152b78a9087a1dfb47e4808a84ba26db804#fb549152b78a9087a1dfb47e4808a84ba26db804"
 dependencies = [
  "anyhow",
  "async-trait",

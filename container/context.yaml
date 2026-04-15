@@ -72,7 +72,7 @@ vllm:
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   enable_modelexpress_p2p: "true"
-  modelexpress_ref: "756bee33c1698c208930ca23a1b511ddd1fc2146"
+  modelexpress_ref: "fb549152b78a9087a1dfb47e4808a84ba26db804"
 
 sglang:
   cuda12.9:
