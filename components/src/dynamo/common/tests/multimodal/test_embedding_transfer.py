@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for AsyncEncoderCache."""
+"""Unit tests for embedding transfer (local, NIXL write, NIXL read, ring buffer)."""
 
 import asyncio
 import logging
@@ -22,6 +22,14 @@ from dynamo.common.multimodal.embedding_transfer import (
 )
 
 logger = logging.getLogger(__name__)
+
+# GPU tier is set per-class/per-test below (gpu_0 for local/ring buffer, gpu_1
+# for NIXL which requires CUDA).  Total runtime ~1.6s for gpu_0 subset — no
+# need for parallel marker.
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
 
 EMBEDDING_SIZE = 8 * 1024
 

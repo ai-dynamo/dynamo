@@ -35,6 +35,7 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -90,7 +91,10 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -325,6 +329,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile EPP resources: %w", err)
 	}
 
+	// Reconcile the wait-for-leader ConfigMap for multinode mp deployments
+	err = r.reconcileWaitLeaderConfigMap(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile wait-leader ConfigMap")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile wait-leader ConfigMap: %w", err)
+	}
+
 	// Determine if any service is multinode
 	hasMultinode := dynamoDeployment.HasAnyMultinodeService()
 
@@ -547,7 +558,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 	}
 
 	// generate the dynamoComponentsDeployments from the config
-	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.RuntimeConfig, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
+	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.RuntimeConfig, r.Client, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
@@ -649,6 +660,27 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
+
+	// Sync ResourceClaimTemplates for GMS-enabled components before creating pods.
+	if r.RuntimeConfig.DRAEnabled {
+		for serviceName, component := range dynamoDeployment.Spec.Services {
+			svcComponent := component
+			claimTemplateName := dynamo.GMSResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
+			_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+				return dynamo.GenerateGMSResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, svcComponent)
+			})
+			if err != nil {
+				logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
+				return ReconcileResult{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", serviceName, err)
+			}
+		}
+	} else {
+		for _, component := range dynamoDeployment.Spec.Services {
+			if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+				return ReconcileResult{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
+			}
+		}
+	}
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
 	if err != nil {
@@ -1348,18 +1380,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		return nil, fmt.Errorf("checkpoint identity is required for Auto mode")
 	}
 
-	identity := component.Checkpoint.Identity
-
-	checkpointIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
-		Model:                identity.Model,
-		BackendFramework:     identity.BackendFramework,
-		DynamoVersion:        identity.DynamoVersion,
-		TensorParallelSize:   identity.TensorParallelSize,
-		PipelineParallelSize: identity.PipelineParallelSize,
-		Dtype:                identity.Dtype,
-		MaxModelLen:          identity.MaxModelLen,
-		ExtraParameters:      identity.ExtraParameters,
-	}
+	checkpointIdentity := *component.Checkpoint.Identity.DeepCopy()
 
 	// Capture config is not part of the checkpoint identity. Once a checkpoint object exists for a
 	// hash, later reconcilers must reuse it instead of racing to overwrite the capture pod template.
@@ -1367,7 +1388,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		dynamoDeployment,
 		component,
 		serviceName,
-		identity.BackendFramework,
+		checkpointIdentity.BackendFramework,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
@@ -1379,6 +1400,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		dynamoDeployment.Namespace,
 		checkpointIdentity,
 		podTemplate,
+		component.GPUMemoryService,
 	)
 }
 
@@ -1579,6 +1601,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
 	return nil
+}
+
+// reconcileWaitLeaderConfigMap ensures the wait-for-leader Python script
+// ConfigMap exists for multinode DGDs. The ConfigMap is only mounted by
+// vLLM mp worker pods (via UpdatePodSpec); for other backends it is inert.
+func (r *DynamoGraphDeploymentReconciler) reconcileWaitLeaderConfigMap(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	if !dgd.HasAnyMultinodeService() {
+		return nil
+	}
+
+	cm := dynamo.GenerateWaitLeaderConfigMap(dgd.Name, dgd.Namespace)
+	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+		return cm, false, nil
+	})
+	return err
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {

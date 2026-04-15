@@ -16,8 +16,9 @@ use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_kv_router::{
+    PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
-    protocols::{OverlapScores, WorkerId},
+    protocols::{OverlapScores, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -45,6 +46,7 @@ where
         workers_with_configs: RuntimeConfigWatch,
         selector: Sel,
         kv_router_config: &KvRouterConfig,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
@@ -81,6 +83,8 @@ where
             block_size,
             selector,
             policy,
+            prefill_load_estimator,
+            kv_router_config.router_queue_recheck_interval(),
             kv_router_config.router_track_prefill_tokens,
             component.drt().child_token(),
             worker_type,
@@ -89,16 +93,29 @@ where
 
         let metrics_scheduler = Arc::clone(&inner);
         let metrics_cancel_token = component.drt().child_token();
+        let mut queue_updates = inner.subscribe_queue_updates();
         tokio::spawn(async move {
             let mut recheck_interval = tokio::time::interval(Duration::from_secs(60));
             ROUTER_QUEUE_METRICS.set_pending(worker_type, metrics_scheduler.pending_count());
+            ROUTER_QUEUE_METRICS
+                .set_pending_isl_tokens(worker_type, metrics_scheduler.pending_isl_tokens());
 
             loop {
                 tokio::select! {
                     _ = metrics_cancel_token.cancelled() => break,
-                    _ = recheck_interval.tick() => {
+                    result = queue_updates.changed() => {
+                        if result.is_err() {
+                            break;
+                        }
                         ROUTER_QUEUE_METRICS
                             .set_pending(worker_type, metrics_scheduler.pending_count());
+                    }
+                    _ = recheck_interval.tick() => {
+                        ROUTER_QUEUE_METRICS.set_pending(worker_type, metrics_scheduler.pending_count());
+                        ROUTER_QUEUE_METRICS.set_pending_isl_tokens(
+                            worker_type,
+                            metrics_scheduler.pending_isl_tokens(),
+                        );
                     }
                 }
             }
@@ -119,6 +136,7 @@ where
         lora_name: Option<String>,
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let response = self
@@ -133,10 +151,12 @@ where
                 lora_name,
                 priority_jump,
                 expected_output_tokens,
+                pinned_worker,
                 allowed_worker_ids,
             )
             .await;
         ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.pending_count());
+        ROUTER_QUEUE_METRICS.set_pending_isl_tokens(self.worker_type(), self.pending_isl_tokens());
         response
     }
 
@@ -151,17 +171,23 @@ where
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.inner.mark_prefill_completed(request_id).await?;
         ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.pending_count());
+        ROUTER_QUEUE_METRICS.set_pending_isl_tokens(self.worker_type(), self.pending_isl_tokens());
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.inner.free(request_id).await?;
         ROUTER_QUEUE_METRICS.set_pending(self.worker_type(), self.pending_count());
+        ROUTER_QUEUE_METRICS.set_pending_isl_tokens(self.worker_type(), self.pending_isl_tokens());
         Ok(())
     }
 
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
+    }
+
+    pub fn pending_isl_tokens(&self) -> usize {
+        self.inner.pending_isl_tokens()
     }
 
     pub fn worker_type(&self) -> &'static str {

@@ -29,8 +29,8 @@ pub trait DecodeInterpolator: Send + Sync {
 /// Implementors call the Python AIC SDK via PyO3 GIL.
 pub trait AicCallback: Send + Sync {
     /// Predict prefill latency in ms.
-    /// Parameters: (batch_size, isl, prefix, osl)
-    fn predict_prefill(&self, batch_size: usize, isl: usize, prefix: usize, osl: usize) -> f64;
+    /// Parameters: (batch_size, effective_isl, prefix)
+    fn predict_prefill(&self, batch_size: usize, effective_isl: usize, prefix: usize) -> f64;
 
     /// Predict decode (generation) latency in ms.
     /// Parameters: (batch_size, isl, osl)
@@ -83,7 +83,7 @@ pub enum PerfModel {
         decode_interp: Arc<dyn DecodeInterpolator>,
     },
     /// AI Configurator SDK calls via Python callback.
-    /// Passes full parameters (batch_size, isl, prefix, osl) for maximum accuracy.
+    /// Passes the reduced prefill inputs (batch_size, effective_isl, prefix).
     Aiconfigurator { callback: Arc<dyn AicCallback> },
 }
 
@@ -217,7 +217,7 @@ impl PerfModel {
     /// Callers always pass all parameters; each variant uses what it needs:
     /// - Polynomial/Interpolated: uses total new tokens across the batch
     ///   (`batch_size * (isl - prefix)`), modeling GPU processing total tokens in parallel
-    /// - Aiconfigurator: passes (batch_size, isl, prefix) directly to the AIC SDK
+    /// - Aiconfigurator: passes (batch_size, isl - prefix, prefix) to the AIC SDK
     pub fn predict_prefill_time(&self, batch_size: usize, isl: usize, prefix: usize) -> f64 {
         let new_tokens_per_req = isl.saturating_sub(prefix);
         let time = match self {
@@ -231,7 +231,7 @@ impl PerfModel {
                 prefill_interp.interp(tokens).unwrap_or(0.0)
             }
             PerfModel::Aiconfigurator { callback } => {
-                callback.predict_prefill(batch_size, isl, prefix, 1)
+                callback.predict_prefill(batch_size, new_tokens_per_req, prefix)
             }
         };
         time.max(0.0)
@@ -240,7 +240,7 @@ impl PerfModel {
     /// Predict decode time in milliseconds.
     ///
     /// Callers always pass all parameters; each variant uses what it needs:
-    /// - Polynomial: uses active_kv_tokens
+    /// - Polynomial: uses (active_kv_tokens, total_kv_tokens) as utilization
     /// - Interpolated: uses (active_kv_tokens, context_length)
     /// - Aiconfigurator: uses (batch_size, context_length)
     pub fn predict_decode_time(
@@ -248,13 +248,19 @@ impl PerfModel {
         batch_size: usize,
         active_kv_tokens: usize,
         context_length: usize,
+        total_kv_tokens: usize,
     ) -> f64 {
         if batch_size == 0 {
             return 0.0;
         }
         let time = match self {
             PerfModel::Polynomial => {
-                let active_perc = active_kv_tokens as f64 / 16384.0;
+                let active_perc = if total_kv_tokens > 0 {
+                    active_kv_tokens as f64 / total_kv_tokens as f64
+                } else {
+                    tracing::warn!("Total KV tokens is 0, using 1.0 as capacity");
+                    1.0
+                };
                 -25.74 * active_perc.powi(2) + 54.01 * active_perc + 5.74
             }
             PerfModel::Interpolated { decode_interp, .. } => decode_interp

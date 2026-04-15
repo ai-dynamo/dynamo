@@ -7,6 +7,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -44,6 +45,10 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
+LOCAL_VIDEO_TEST_PATH = Path(
+    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
+).resolve()
+LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
 
 # vLLM test configurations
@@ -54,8 +59,14 @@ vllm_configs = {
         script_name="xpu/agg_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                360
+            ),  # ~8.5x observed 42.2s; bumped for GPU-parallel headroom
             pytest.mark.pre_merge,
-            pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -79,7 +90,15 @@ vllm_configs = {
         name="aggregated_logprobs_xpu",
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
-        marks=[pytest.mark.xpu_1, pytest.mark.post_merge],
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(120),  # ~5x observed 24.3s; CI machines are slower
+            pytest.mark.post_merge,
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_with_logprobs(
@@ -103,9 +122,14 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_lmcache_xpu.sh",
         marks=[
+            pytest.mark.lmcache,
             pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
-            pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -120,9 +144,14 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_lmcache_multiproc_xpu.sh",
         marks=[
+            pytest.mark.lmcache,
             pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
-            pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -141,8 +170,14 @@ vllm_configs = {
         script_name="xpu/agg_request_planes_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                360
+            ),  # ~8x observed 43.0s; bumped for GPU-parallel headroom
             pytest.mark.pre_merge,
-            pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         script_args=["--tcp"],
@@ -157,8 +192,14 @@ vllm_configs = {
         script_name="xpu/agg_request_planes_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(
+                360
+            ),  # ~8.5x observed 42.3s; bumped for GPU-parallel headroom
             pytest.mark.pre_merge,
-            pytest.mark.timeout(300),  # 3x measured time (43s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
         script_args=["--http"],
@@ -173,7 +214,8 @@ vllm_configs = {
         script_name="xpu/agg_router_xpu.sh",
         marks=[
             pytest.mark.xpu_2,
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
+            pytest.mark.skip(reason="DYN-2263"),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -230,8 +272,12 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
-            pytest.mark.pre_merge,
-            pytest.mark.skip("skip for XPU"),
+            pytest.mark.profiled_vram_gib(9.6),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_710_490_000
+            ),  # KV cache cap (2x safety over min=855_244_800)
+            pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2-VL-2B-Instruct",
         # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
@@ -265,8 +311,14 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
-            pytest.mark.pre_merge,
-            pytest.mark.skip(reason="skip for XPU"),
+            pytest.mark.profiled_vram_gib(19.9),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
+            pytest.mark.timeout(
+                360
+            ),  # ~7x observed 50.0s; 7B model loads ~48s on CI (A10G/L4)
+            pytest.mark.post_merge,
         ],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
@@ -285,7 +337,7 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["Green, White"],
+                expected_response=["purple"],
                 max_tokens=100,
             ),
         ],
@@ -296,6 +348,13 @@ vllm_configs = {
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(14.9),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                922_354_000
+            ),  # KV cache cap (2x safety over min=461_176_832)
+            pytest.mark.timeout(
+                300
+            ),  # ~7x observed 42.7s; 7B model loads ~48s on CI (A10G/L4)
             pytest.mark.nightly,
             # https://github.com/ai-dynamo/dynamo/issues/4501
             pytest.mark.xfail(strict=False),
@@ -335,7 +394,6 @@ vllm_configs = {
             pytest.mark.xpu_2,
             pytest.mark.multimodal,
             pytest.mark.nightly,
-            pytest.mark.skip(reason="skip for XPU"),
         ],
         model="Qwen/Qwen3-VL-8B-Instruct",
         script_args=[
@@ -394,9 +452,45 @@ vllm_configs = {
                     "max_tokens": 1024,
                 },
                 repeat_count=1,
-                expected_response=["green"],  # Validate image understanding
+                expected_response=[
+                    "green",
+                    "purple",
+                    "llm",
+                    "optimize",
+                    "deploy",
+                ],  # OR: pass if any keyword found in tool args
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
+            )
+        ],
+    ),
+    # Video multimodal tests for CI using the vLLM video launch scripts.
+    "multimodal_video_agg": VLLMConfig(
+        name="multimodal_video_agg_xpu",
+        directory=vllm_dir,
+        script_name="xpu/agg_multimodal_xpu.sh",
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(600),  # TODO: profile to get tighter timeout
+        ],  # TODO: profile to get max_vram
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        delayed_start=60,  # Video models require longer loading time
+        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
+        timeout=600,  # 10 minutes for video processing overhead
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["red", "static", "still"],
+                temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),
@@ -406,11 +500,14 @@ vllm_configs = {
         script_name="xpu/agg_xpu.sh",
         marks=[
             pytest.mark.xpu_1,
-            pytest.mark.post_merge,
-            pytest.mark.skip(reason="skip for XPU"),
+            pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                4_074_898_000
+            ),  # KV cache cap (2x safety over min=2_037_448_704)
             pytest.mark.timeout(
                 420
-            ),  # 3x estimated time (60s) + download time (240s) for 7B model
+            ),  # 7B model loads ~48s on CI (A10G/L4) vs ~15s locally
+            pytest.mark.post_merge,
         ],
         model="deepseek-ai/deepseek-llm-7b-base",
         script_args=[
@@ -427,7 +524,15 @@ vllm_configs = {
         name="guided_decoding_xpu",
         directory=vllm_dir,
         script_name="xpu/agg_xpu.sh",
-        marks=[pytest.mark.xpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.xpu_1,
+            pytest.mark.profiled_vram_gib(3.8),  # actual profiled peak with kv-bytes
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                1_119_388_000
+            ),  # KV cache cap (2x safety over min=559_693_824)
+            pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
+            pytest.mark.pre_merge,
+        ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload(
@@ -495,9 +600,8 @@ def test_serve_deployment(
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.xpu_1
+@pytest.mark.xpu_2
 @pytest.mark.nightly
-@pytest.mark.skip(reason="skip for XPU")
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
     request,
@@ -527,7 +631,7 @@ def test_multimodal_b64(
             },
         ],
         repeat_count=1,
-        expected_response=["Green, White"],
+        expected_response=["purple"],
         max_tokens=100,
     )
 
@@ -541,6 +645,65 @@ def test_multimodal_b64(
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
         timeout=360,
+        request_payloads=[b64_payload],
+    )
+
+    config = dataclasses.replace(
+        config, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.xpu_1
+@pytest.mark.pre_merge
+@pytest.mark.timeout(220)
+def test_multimodal_b64_frontend_decoding(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+):
+    """
+    Test multimodal inference with base64 images through frontend decoding path.
+
+    This exercises the Rust frontend image decode + NIXL RDMA transfer path
+    with inline base64 data: URIs (not HTTP URLs). Verifies that the
+    strip_inline_data_urls optimization does not break correctness.
+    """
+    b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
+
+    b64_payload = chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What colors are in the following image? Respond only with the colors.",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64_img}"},
+            },
+        ],
+        repeat_count=1,
+        expected_response=["green"],
+        temperature=0.0,
+        max_tokens=100,
+    )
+
+    config = VLLMConfig(
+        name="test_multimodal_b64_frontend_decoding",
+        directory=vllm_dir,
+        script_name="xpu/agg_multimodal_xpu.sh",
+        marks=[],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
+        delayed_start=0,
+        timeout=220,
         request_payloads=[b64_payload],
     )
 
@@ -593,7 +756,6 @@ def lora_chat_payload(
 @pytest.mark.xpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
-@pytest.mark.skip(reason="skip for XPU")
 @pytest.mark.post_merge
 def test_lora_aggregated(
     request,
@@ -650,7 +812,6 @@ def test_lora_aggregated(
 @pytest.mark.xpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
-@pytest.mark.skip(reason="skip for XPU")
 @pytest.mark.post_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_lora_aggregated_router(

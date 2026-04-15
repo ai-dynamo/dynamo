@@ -21,7 +21,7 @@ This document provides a comprehensive compatibility matrix for key Dynamo featu
 | **SLA-Based Planner** | ✅ | ✅ | ✅ | [Planner Doc][planner] |
 | **KV Block Manager** | 🚧 | ✅ | ✅ | [KVBM Doc][kvbm] |
 | **Multimodal (Image)** | ✅ | ✅ | ✅ | [Multimodal Doc][mm] |
-| **Multimodal (Video)** | | | ✅ | [Multimodal Doc][mm] |
+| **Multimodal (Video)** | 🚧 | | ✅ | [Multimodal Doc][mm] |
 | **Multimodal (Audio)** | | | 🚧 | [Multimodal Doc][mm] |
 | **Request Migration** | ✅ | 🚧 | ✅ | [Migration Doc][migration] |
 | **Request Cancellation** | 🚧 | ✅ | ✅ | Backend READMEs |

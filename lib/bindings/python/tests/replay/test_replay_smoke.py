@@ -125,6 +125,32 @@ def test_run_trace_replay_supports_multiturn_sessions(tmp_path, replay_mode):
     )
 
 
+@pytest.mark.parametrize("replay_mode", ["offline", "online"])
+def test_run_trace_replay_supports_distinct_trace_and_engine_block_sizes(
+    tmp_path, replay_mode
+):
+    trace_path = tmp_path / "trace_block_size_split.jsonl"
+    trace_path.write_text(
+        '{"timestamp":1000.0,"input_length":128,"output_length":2,"hash_ids":[101]}\n',
+        encoding="utf-8",
+    )
+
+    report = run_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        num_workers=1,
+        replay_mode=replay_mode,
+        trace_block_size=512,
+    )
+
+    _assert_basic_report_counts(
+        report,
+        num_requests=1,
+        input_tokens=128,
+        output_tokens=2,
+    )
+
+
 @pytest.mark.parametrize("engine_type", ["vllm", "sglang"])
 @pytest.mark.parametrize("replay_mode", ["offline", "online"])
 @pytest.mark.parametrize("router_mode", ["round_robin", "kv_router"])

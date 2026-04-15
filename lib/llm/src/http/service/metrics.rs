@@ -27,12 +27,29 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
+use dynamo_runtime::error::ErrorType as DynamoErrorType;
+
+/// Check whether an error chain indicates the request was rejected.
+pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
+    const REJECTION: &[DynamoErrorType] = &[DynamoErrorType::ResourceExhausted];
+    const NON_REJECTION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
+}
+
+/// Check whether an error chain indicates the request was cancelled.
+pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
+    const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
+    const NON_CANCELLATION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;
 
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -256,7 +273,9 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
+    model_rejection_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -284,6 +303,7 @@ pub struct InflightGuard {
     error_type: ErrorType,
     timer: Instant,
     request_id: String,
+    span: tracing::Span,
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -354,6 +374,8 @@ pub enum ErrorType {
     Overload,
     /// Request cancelled by client or timeout
     Cancelled,
+    /// Backend accepted the request but stopped responding (response inactivity timeout)
+    ResponseTimeout,
     /// Internal server error (500 and other unexpected errors)
     Internal,
     /// Feature not implemented (501)
@@ -670,12 +692,30 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_max_seq_len_exceeded_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL),
+                "Total number of times migration was disabled by max_seq_len limit",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         let model_cancellation_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_CANCELLATION_TOTAL),
                 "Total number of request cancellations",
             ),
             &["model", "endpoint", "request_type"],
+        )
+        .unwrap();
+
+        let model_rejection_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_REJECTION_TOTAL),
+                "Total number of requests rejected due to resource exhaustion",
+            ),
+            &["model", "endpoint"],
         )
         .unwrap();
 
@@ -699,7 +739,9 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
+            model_rejection_total,
         }
     }
 
@@ -804,7 +846,11 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(
+            self.model_migration_max_seq_len_exceeded_total.clone(),
+        ))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
+        registry.register(Box::new(self.model_rejection_total.clone()))?;
 
         Ok(())
     }
@@ -888,6 +934,20 @@ impl Metrics {
             .get()
     }
 
+    /// Increment the counter for migrations disabled by max_seq_len being exceeded
+    pub fn inc_migration_max_seq_len_exceeded(&self, model: &str) {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
+            .inc();
+    }
+
+    /// Get the current count of migrations disabled by max_seq_len being exceeded
+    pub fn get_migration_max_seq_len_exceeded_count(&self, model: &str) -> u64 {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
+            .get()
+    }
+
     /// Increment the cancellation counter
     pub fn inc_cancellation(&self, labels: &CancellationLabels) {
         self.model_cancellation_total
@@ -899,6 +959,20 @@ impl Metrics {
     pub fn get_cancellation_count(&self, labels: &CancellationLabels) -> u64 {
         self.model_cancellation_total
             .with_label_values(&[&labels.model, &labels.endpoint, &labels.request_type])
+            .get()
+    }
+
+    /// Increment the rejection counter for a request rejected due to resource exhaustion
+    pub fn inc_rejection(&self, model: &str, endpoint: Endpoint) {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
+            .inc();
+    }
+
+    /// Get the current rejection count for a model and endpoint
+    pub fn get_rejection_count(&self, model: &str, endpoint: Endpoint) -> u64 {
+        self.model_rejection_total
+            .with_label_values(&[model, &endpoint.to_string()])
             .get()
     }
 
@@ -996,6 +1070,7 @@ impl InflightGuard {
             error_type: ErrorType::Internal,
             timer,
             request_id,
+            span: tracing::Span::current(),
         }
     }
 
@@ -1031,6 +1106,7 @@ impl InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
+        let _enter = self.span.enter();
         let duration = self.timer.elapsed().as_secs_f64();
         self.metrics.dec_inflight_gauge(&self.model);
         self.metrics.inc_request_counter(
@@ -1045,12 +1121,13 @@ impl Drop for InflightGuard {
             .with_label_values(&[&self.model])
             .observe(duration);
 
-        let elapsed_ms = self.timer.elapsed().as_millis();
+        let elapsed_ms = (duration * 1000.0) as u64;
         let status_str = self.status.as_str();
         match self.status {
             Status::Error => {
                 let detail = match self.error_type {
                     ErrorType::Cancelled => "cancelled before completion",
+                    ErrorType::ResponseTimeout => "backend stream inactivity timeout",
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
                     ErrorType::NotFound => "model or resource not found",
@@ -1149,6 +1226,7 @@ impl ErrorType {
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
             ErrorType::Overload => frontend_service::error_type::OVERLOAD,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
+            ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
             ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
         }
@@ -1304,7 +1382,7 @@ impl ResponseMetricCollector {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .prefill_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .prefill_worker_type
                     .as_deref()
@@ -1347,7 +1425,7 @@ impl ResponseMetricCollector {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .decode_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .decode_worker_type
                     .as_deref()
@@ -2176,6 +2254,7 @@ mod tests {
         assert_eq!(ErrorType::NotFound.as_str(), "not_found");
         assert_eq!(ErrorType::Overload.as_str(), "overload");
         assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
+        assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
         assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
     }
@@ -2285,6 +2364,7 @@ mod tests {
             ErrorType::NotFound,
             ErrorType::Overload,
             ErrorType::Cancelled,
+            ErrorType::ResponseTimeout,
             ErrorType::Internal,
             ErrorType::NotImplemented,
         ];

@@ -804,6 +804,12 @@ where
                     trace_id = Some(parent_tracing_context.trace_id.clone());
                     parent_id = Some(parent_tracing_context.span_id.clone());
                     tracestate = parent_tracing_context.tracestate.clone();
+                    if x_request_id.is_none() {
+                        x_request_id = parent_tracing_context.x_request_id.clone();
+                    }
+                    if request_id.is_none() {
+                        request_id = parent_tracing_context.request_id.clone();
+                    }
                 }
             }
 
@@ -949,7 +955,7 @@ pub fn init() {
 }
 
 #[cfg(feature = "tokio-console")]
-fn setup_logging() {
+fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
         .with_default_env()
         .server_addr(([0, 0, 0, 0], console_subscriber::Server::DEFAULT_PORT))
@@ -967,6 +973,7 @@ fn setup_logging() {
         .with(l)
         .with(tokio_console_layer.with_filter(tokio_console_target))
         .init();
+    Ok(())
 }
 
 #[cfg(not(feature = "tokio-console"))]

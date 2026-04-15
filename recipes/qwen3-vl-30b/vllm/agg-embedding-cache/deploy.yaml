@@ -42,17 +42,6 @@ spec:
           args:
             - |
               set -euo pipefail
-              SITE_PACKAGES="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"
-              cd "${SITE_PACKAGES}"
-              curl -sL https://github.com/vllm-project/vllm/pull/34182.diff | patch -p1
-              curl -sL https://github.com/vllm-project/vllm/pull/34783.diff | python3 -c "
-              import sys
-              chunks = sys.stdin.read().split('diff --git ')
-              filtered = [c for c in chunks if c.startswith('a/vllm/')]
-              print(''.join('diff --git ' + c for c in filtered))
-              " | patch -p1
-              cd /workspace
-
               python3 -m dynamo.vllm \
                 --model Qwen/Qwen3-VL-30B-A3B-Instruct-FP8 \
                 --enable-multimodal \

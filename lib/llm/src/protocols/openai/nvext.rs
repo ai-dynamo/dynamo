@@ -13,6 +13,7 @@ pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
 pub const HEADER_DP_RANK: &str = "x-dp-rank";
 pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 /// Apply routing overrides from HTTP headers to nvext.
 ///
@@ -44,6 +45,7 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .get(HEADER_PREFILL_DP_RANK)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
+    let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
     if worker_id.is_none() && prefill_id.is_none() && dp_rank.is_none() && prefill_dp_rank.is_none()
     {
@@ -200,6 +202,14 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timestamp_ms: Option<f64>,
+
+    /// Session control for subagent KV isolation and sticky routing.
+    /// When present, the router uses `session_id` for worker affinity.
+    /// When `action` is set to `open` or `close`, the router also fires
+    /// session lifecycle RPCs to the worker.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_control: Option<SessionControl>,
 }
 
 /// Hints from the agent/caller about request characteristics.
@@ -233,6 +243,36 @@ pub struct AgentHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(ignore)]
     pub latency_sensitivity: Option<f64>,
+}
+
+fn default_session_timeout() -> u64 {
+    300
+}
+
+/// Session control for subagent KV isolation and sticky routing.
+///
+/// Always requires `session_id`. The `action` field is optional:
+/// - `action: "open"` on the first turn creates a streaming session on the worker
+/// - `action: "close"` on the last turn frees session KV after generation
+/// - No `action` on intermediate turns -- just provides `session_id` for sticky routing
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SessionControl {
+    /// Unique session identifier. Present on every turn for sticky routing.
+    pub session_id: String,
+    /// Lifecycle action: `"open"` or `"close"`. Omit on intermediate turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<SessionAction>,
+    /// Inactivity timeout in seconds (default 300, only used with `action: "open"`).
+    #[serde(default = "default_session_timeout")]
+    pub timeout: u64,
+}
+
+/// Session lifecycle actions.
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAction {
+    Open,
+    Close,
 }
 
 impl Default for NvExt {
@@ -283,6 +323,7 @@ mod tests {
         assert_eq!(nv_ext.decode_worker_id, None);
         assert_eq!(nv_ext.agent_hints, None);
         assert_eq!(nv_ext.request_timestamp_ms, None);
+        assert_eq!(nv_ext.session_control, None);
     }
 
     // Test valid builder configurations
@@ -320,6 +361,47 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, Some(100));
         assert_eq!(nv_ext.decode_worker_id, Some(200));
         assert!(nv_ext.validate().is_ok());
+    }
+
+    #[test]
+    fn test_session_control_serde() {
+        // Open action with timeout
+        let sc_json = r#"{"session_id": "sub-1", "action": "open", "timeout": 60}"#;
+        let sc: SessionControl = serde_json::from_str(sc_json).unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Open));
+        assert_eq!(sc.session_id, "sub-1");
+        assert_eq!(sc.timeout, 60);
+
+        // Close action (timeout defaults to 300)
+        let sc_close = r#"{"session_id": "sub-1", "action": "close"}"#;
+        let sc: SessionControl = serde_json::from_str(sc_close).unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Close));
+        assert_eq!(sc.timeout, 300);
+
+        // Continue (no action, just session_id for sticky routing)
+        let sc_continue = r#"{"session_id": "sub-1"}"#;
+        let sc: SessionControl = serde_json::from_str(sc_continue).unwrap();
+        assert_eq!(sc.action, None);
+        assert_eq!(sc.session_id, "sub-1");
+
+        // NvExt with session_control
+        let nvext_json =
+            r#"{"session_control": {"session_id": "sub-2", "action": "open", "timeout": 300}}"#;
+        let nvext: NvExt = serde_json::from_str(nvext_json).unwrap();
+        assert!(nvext.session_control.is_some());
+        let sc = nvext.session_control.unwrap();
+        assert_eq!(sc.action, Some(SessionAction::Open));
+        assert_eq!(sc.session_id, "sub-2");
+
+        // Roundtrip
+        let original = SessionControl {
+            session_id: "test-session".to_string(),
+            action: Some(SessionAction::Close),
+            timeout: 90,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let deser: SessionControl = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, original);
     }
 
     #[test]

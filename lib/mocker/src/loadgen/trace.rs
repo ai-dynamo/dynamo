@@ -9,7 +9,8 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_kv_router::LocalBlockHash;
 use dynamo_kv_router::protocols::{
-    ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_seq_hash_for_block,
+    BlockHashOptions, ExternalSequenceBlockHash, WorkerId, XXH3_SEED, compute_block_hash_for_seq,
+    compute_seq_hash_for_block,
 };
 use dynamo_tokens::compute_hash_v2;
 use rand::rngs::StdRng;
@@ -45,27 +46,27 @@ struct RawMooncakeRecord {
 }
 
 impl TurnTrace {
-    fn validate_block_size_and_capacity(&self, block_size: usize) -> Result<()> {
-        if block_size == 0 {
-            bail!("block_size must be greater than 0");
+    fn validate_block_size_and_capacity(&self, trace_block_size: usize) -> Result<()> {
+        if trace_block_size == 0 {
+            bail!("trace_block_size must be greater than 0");
         }
-        if self.hash_ids.len() * block_size < self.input_length {
+        if self.hash_ids.len() * trace_block_size < self.input_length {
             bail!(
                 "input_length {} exceeds synthesized capacity {}",
                 self.input_length,
-                self.hash_ids.len() * block_size
+                self.hash_ids.len() * trace_block_size
             );
         }
         Ok(())
     }
 
-    pub(crate) fn synthesize_tokens(&self, block_size: usize) -> Result<Vec<u32>> {
-        self.validate_block_size_and_capacity(block_size)?;
+    pub(crate) fn synthesize_tokens(&self, trace_block_size: usize) -> Result<Vec<u32>> {
+        self.validate_block_size_and_capacity(trace_block_size)?;
 
         let mut tokens = Vec::with_capacity(self.input_length);
         for &hash_id in &self.hash_ids {
             let token_id = hash_id as u32;
-            tokens.extend((0..block_size).map(|_| token_id));
+            tokens.extend((0..trace_block_size).map(|_| token_id));
             if tokens.len() >= self.input_length {
                 tokens.truncate(self.input_length);
                 break;
@@ -85,11 +86,11 @@ impl TurnTrace {
 
     pub fn to_direct_request(
         &self,
-        block_size: usize,
+        trace_block_size: usize,
         request_uuid: Uuid,
         arrival_timestamp_ms: Option<f64>,
     ) -> Result<DirectRequest> {
-        let tokens = self.synthesize_tokens(block_size)?;
+        let tokens = self.synthesize_tokens(trace_block_size)?;
         Ok(DirectRequest {
             tokens,
             max_output_tokens: self.max_output_tokens,
@@ -99,16 +100,20 @@ impl TurnTrace {
         })
     }
 
-    pub fn to_replay_hashes(&self, block_size: usize) -> Result<ReplayRequestHashes> {
-        self.validate_block_size_and_capacity(block_size)?;
+    pub fn to_replay_hashes(
+        &self,
+        trace_block_size: usize,
+        engine_block_size: usize,
+    ) -> Result<ReplayRequestHashes> {
+        if engine_block_size == 0 {
+            bail!("engine_block_size must be greater than 0");
+        }
 
-        let num_full_blocks = self.input_length / block_size;
-        let local_block_hashes = self
-            .hash_ids
-            .iter()
-            .take(num_full_blocks)
-            .map(|&hash_id| local_block_hash_from_id(hash_id, block_size))
-            .collect::<Vec<_>>();
+        let tokens = self.synthesize_tokens(trace_block_size)?;
+        let engine_block_size =
+            u32::try_from(engine_block_size).context("engine_block_size does not fit in u32")?;
+        let local_block_hashes =
+            compute_block_hash_for_seq(&tokens, engine_block_size, BlockHashOptions::default());
         let sequence_hashes = compute_seq_hash_for_block(&local_block_hashes);
 
         Ok(ReplayRequestHashes {
@@ -119,9 +124,9 @@ impl TurnTrace {
 }
 
 impl Trace {
-    pub fn from_mooncake(path: &Path, block_size: usize) -> Result<Self> {
-        if block_size == 0 {
-            bail!("block_size must be greater than 0");
+    pub fn from_mooncake(path: &Path, trace_block_size: usize) -> Result<Self> {
+        if trace_block_size == 0 {
+            bail!("trace_block_size must be greater than 0");
         }
 
         let file = File::open(path)
@@ -157,7 +162,9 @@ impl Trace {
             let hash_ids = raw
                 .hash_ids
                 .ok_or_else(|| anyhow!("trace line {} is missing hash_ids", line_idx + 1))?;
-            let input_length = raw.input_length.unwrap_or(hash_ids.len() * block_size);
+            let input_length = raw
+                .input_length
+                .unwrap_or(hash_ids.len() * trace_block_size);
             let output_length = raw
                 .output_length
                 .ok_or_else(|| anyhow!("trace line {} is missing output_length", line_idx + 1))?;
@@ -214,12 +221,12 @@ impl Trace {
                 );
             }
 
-            if hash_ids.len() * block_size < input_length {
+            if hash_ids.len() * trace_block_size < input_length {
                 bail!(
                     "trace line {} input_length {} exceeds synthesized capacity {}",
                     line_idx + 1,
                     input_length,
-                    hash_ids.len() * block_size
+                    hash_ids.len() * trace_block_size
                 );
             }
 
@@ -239,7 +246,7 @@ impl Trace {
         }
 
         Ok(Self {
-            block_size,
+            block_size: trace_block_size,
             sessions,
         })
     }
@@ -598,12 +605,30 @@ impl Trace {
 
     pub fn into_trace_driver(self) -> Result<WorkloadDriver> {
         self.validate_for_trace_mode()?;
-        WorkloadDriver::new_trace(self)
+        let engine_block_size = self.block_size;
+        WorkloadDriver::new_trace(self, engine_block_size)
     }
 
     pub fn into_concurrency_driver(self) -> Result<WorkloadDriver> {
         self.validate_for_concurrency_mode()?;
-        WorkloadDriver::new_concurrency(self)
+        let engine_block_size = self.block_size;
+        WorkloadDriver::new_concurrency(self, engine_block_size)
+    }
+
+    pub fn into_trace_driver_with_block_size(
+        self,
+        engine_block_size: usize,
+    ) -> Result<WorkloadDriver> {
+        self.validate_for_trace_mode()?;
+        WorkloadDriver::new_trace(self, engine_block_size)
+    }
+
+    pub fn into_concurrency_driver_with_block_size(
+        self,
+        engine_block_size: usize,
+    ) -> Result<WorkloadDriver> {
+        self.validate_for_concurrency_mode()?;
+        WorkloadDriver::new_concurrency(self, engine_block_size)
     }
 
     fn validate(&self, allow_missing_first_timestamp: bool) -> Result<()> {

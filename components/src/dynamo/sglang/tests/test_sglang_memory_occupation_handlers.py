@@ -45,7 +45,8 @@ class _TestWorkerHandler(BaseWorkerHandler):
         yield {}
 
 
-def _make_handler() -> _TestWorkerHandler:
+@pytest.fixture
+def handler():
     handler = _TestWorkerHandler.__new__(_TestWorkerHandler)
     handler.engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
@@ -65,22 +66,7 @@ def _make_handler() -> _TestWorkerHandler:
 
 
 @pytest.mark.asyncio
-async def test_resume_before_release_is_noop():
-    handler = _make_handler()
-
-    result = await handler.resume_memory_occupation({})
-
-    assert result["status"] == "ok"
-    assert result["message"] == "Memory already resumed"
-    handler.engine.tokenizer_manager.resume_memory_occupation.assert_not_awaited()
-    handler.engine.tokenizer_manager.continue_generation.assert_not_awaited()
-    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_release_and_resume_are_idempotent():
-    handler = _make_handler()
-
+async def test_release_and_resume_are_idempotent(handler):
     first_release = await handler.release_memory_occupation({})
     second_release = await handler.release_memory_occupation({})
 
@@ -113,11 +99,29 @@ async def test_release_and_resume_are_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_release_and_resume_use_explicit_request_tags():
-    handler = _make_handler()
+async def test_memory_occupation_handlers_forward_tags_exactly(handler):
+    await handler.release_memory_occupation({"tags": []})
+    resume_result = await handler.resume_memory_occupation({"tags": []})
+
+    assert resume_result["status"] == "ok"
+    release_req = (
+        handler.engine.tokenizer_manager.release_memory_occupation.await_args.args[0]
+    )
+    resume_req = (
+        handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
+    )
+    assert release_req.tags == []
+    assert resume_req.tags == []
+
+    handler.engine.tokenizer_manager.pause_generation.reset_mock()
+    handler.engine.tokenizer_manager.release_memory_occupation.reset_mock()
+    handler.engine.tokenizer_manager.resume_memory_occupation.reset_mock()
+    handler.engine.tokenizer_manager.continue_generation.reset_mock()
+    handler.generate_endpoint.unregister_endpoint_instance.reset_mock()
+    handler.generate_endpoint.register_endpoint_instance.reset_mock()
 
     await handler.release_memory_occupation({"tags": ["weights"]})
-    resume_result = await handler.resume_memory_occupation({"tags": ["weights"]})
+    resume_result = await handler.resume_memory_occupation({})
 
     assert resume_result["status"] == "ok"
     release_req = (
@@ -127,73 +131,38 @@ async def test_release_and_resume_use_explicit_request_tags():
         handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
     )
     assert release_req.tags == ["weights"]
-    assert resume_req.tags == ["weights"]
+    assert resume_req.tags is None
     handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_resume_reuses_release_tags_when_request_omits_them():
-    handler = _make_handler()
-
-    await handler.release_memory_occupation({"tags": ["weights"]})
-    resume_result = await handler.resume_memory_occupation({})
-
-    assert resume_result["status"] == "ok"
-    resume_req = (
-        handler.engine.tokenizer_manager.resume_memory_occupation.await_args.args[0]
-    )
-    assert resume_req.tags == ["weights"]
-    handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
-    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_resume_with_no_sleeping_state_is_noop():
-    handler = _make_handler()
-
-    result = await handler.resume_memory_occupation({})
-
-    assert result["status"] == "ok"
-    assert result["message"] == "Memory already resumed"
-    handler.engine.tokenizer_manager.resume_memory_occupation.assert_not_awaited()
-    handler.engine.tokenizer_manager.continue_generation.assert_not_awaited()
-    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_release_returns_error_when_worker_has_no_tokenizer_manager():
-    handler = _make_handler()
+@pytest.mark.parametrize(
+    ("method_name", "endpoint_method"),
+    [
+        ("release_memory_occupation", "unregister_endpoint_instance"),
+        ("resume_memory_occupation", "register_endpoint_instance"),
+    ],
+)
+async def test_memory_control_returns_error_without_quiesce_controller(
+    handler,
+    method_name,
+    endpoint_method,
+):
     handler.engine = None
     handler._quiesce_controller = None
 
-    result = await handler.release_memory_occupation({})
+    result = await getattr(handler, method_name)({})
 
     assert result == {
         "status": "error",
         "message": "memory control not supported on this worker",
     }
-    handler.generate_endpoint.unregister_endpoint_instance.assert_not_awaited()
+    getattr(handler.generate_endpoint, endpoint_method).assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_resume_returns_error_when_worker_has_no_tokenizer_manager():
-    handler = _make_handler()
-    handler.engine = None
-    handler._quiesce_controller = None
-
-    result = await handler.resume_memory_occupation({})
-
-    assert result == {
-        "status": "error",
-        "message": "memory control not supported on this worker",
-    }
-    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_resume_keeps_quiesced_state_when_register_fails():
-    handler = _make_handler()
+async def test_resume_keeps_quiesced_state_when_register_fails(handler):
     await handler.release_memory_occupation({})
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery write timeout")

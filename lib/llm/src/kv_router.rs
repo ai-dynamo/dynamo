@@ -1,16 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 use dynamo_kv_router::{
+    PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, DpRank, RouterEvent, RouterRequest, RouterResponse,
-        TokensWithHashes, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
+        RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        compute_block_hash_for_seq,
     },
 };
 use dynamo_runtime::{
@@ -28,20 +31,27 @@ use futures::stream;
 use tracing::Instrument;
 use validator::Validate;
 
+// Re-export from dynamo-kv-router crate
+pub use dynamo_kv_router::approx;
+pub use dynamo_kv_router::protocols;
+pub use dynamo_kv_router::scheduling;
+pub use dynamo_kv_router::selector;
+
+pub mod agent_controller;
 pub mod indexer;
-mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
 pub mod scheduler;
 pub mod sequence;
-pub mod subscriber;
-pub mod worker_query;
+pub mod sticky_sessions;
 
-pub use indexer::Indexer;
+pub use agent_controller::AgentController;
+pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
+pub use sticky_sessions::StickySessionRouter;
 
 use crate::{
     discovery::RuntimeConfigWatch,
@@ -80,6 +90,28 @@ pub fn worker_kv_indexer_query_endpoint(dp_rank: DpRank) -> String {
     format!("worker_kv_indexer_query_dp{dp_rank}")
 }
 
+fn log_routing_input_hashes(
+    request_id: Option<&str>,
+    block_size: u32,
+    tokens: &[u32],
+    local_hashes: &[LocalBlockHash],
+) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+
+    let local_hash_ids: Vec<u64> = local_hashes.iter().map(|hash| hash.0).collect();
+
+    tracing::debug!(
+        request_id = request_id.unwrap_or(""),
+        isl_tokens = tokens.len(),
+        block_size,
+        num_blocks = local_hashes.len(),
+        local_hashes = ?local_hash_ids,
+        "[ROUTING_INPUT] request local hashes"
+    );
+}
+
 // for router discovery registration
 pub const KV_ROUTER_ENDPOINT: &str = "router-discovery";
 
@@ -109,11 +141,14 @@ where
 {
     indexer: Indexer,
     scheduler: KvScheduler<Sel>,
+    workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
     is_eagle: bool,
+    _served_indexer_handle: Option<ServedIndexerHandle>,
 }
 
 impl<Sel> KvRouter<Sel>
@@ -128,6 +163,7 @@ where
         block_size: u32,
         selector: Sel,
         kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
@@ -138,7 +174,13 @@ where
         let cancellation_token = component.drt().primary_token();
         let min_initial_workers = min_initial_workers_from_env()?;
 
-        let indexer = Indexer::new(component, &kv_router_config, block_size, model_name).await?;
+        let indexer = Indexer::new(
+            component,
+            &kv_router_config,
+            block_size,
+            model_name.as_deref(),
+        )
+        .await?;
 
         if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
             let mut startup_watch = workers_with_configs.clone();
@@ -159,16 +201,16 @@ where
             workers_with_configs.clone(),
             selector,
             &kv_router_config,
+            prefill_load_estimator.clone(),
             worker_type,
         )
         .await?;
 
-        // Start KV event subscription if needed — skip when using a remote indexer
-        // (the standalone indexer handles its own event subscription).
-        if kv_router_config.remote_indexer_component.is_some() {
+        // Start KV event subscription if needed — skip when using a remote indexer.
+        if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            subscriber::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
+            indexer::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
                 .await?;
         } else {
             tracing::info!(
@@ -178,15 +220,35 @@ where
             );
         }
 
+        let served_indexer_handle = if kv_router_config.serve_indexer {
+            let model_name = model_name.clone().ok_or_else(|| {
+                anyhow::anyhow!("model_name is required when serve_indexer is configured")
+            })?;
+            Some(
+                ensure_served_indexer_service(
+                    component.clone(),
+                    ServedIndexerMode::from_use_kv_events(kv_router_config.use_kv_events),
+                    model_name,
+                    indexer.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
         tracing::info!("KV Routing initialized");
         Ok(Self {
             indexer,
             scheduler,
+            workers_with_configs,
             block_size,
             kv_router_config,
+            prefill_load_estimator,
             cancellation_token,
             client,
             is_eagle,
+            _served_indexer_handle: served_indexer_handle,
         })
     }
 
@@ -221,6 +283,9 @@ where
     /// Returns the best worker (with dp_rank) and overlap amount in number of blocks.
     /// Now also takes optional context_id for request tracking.
     ///
+    /// When `pinned_worker` is Some, scheduling and queueing are constrained to
+    /// that exact worker/rank.
+    ///
     /// When `allowed_worker_ids` is Some, only workers in that set are considered for selection.
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match(
@@ -233,6 +298,7 @@ where
         lora_name: Option<String>,
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> anyhow::Result<(WorkerWithDpRank, u32)> {
         let start = Instant::now();
@@ -250,6 +316,7 @@ where
 
         let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
             .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, hash_options));
+        log_routing_input_hashes(context_id, self.block_size, tokens, &block_hashes);
         let hash_elapsed = start.elapsed();
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
@@ -282,6 +349,7 @@ where
                 lora_name,
                 priority_jump,
                 expected_output_tokens,
+                pinned_worker,
                 allowed_worker_ids,
             )
             .instrument(tracing::info_span!("kv_router.schedule"))
@@ -345,6 +413,8 @@ where
         let track_prefill_tokens = self
             .kv_router_config
             .track_prefill_tokens(router_config_override);
+        let prefill_load_hint =
+            self.prefill_load_hint_for(isl_tokens, overlap_blocks, track_prefill_tokens);
 
         if let Err(e) = self
             .scheduler
@@ -355,6 +425,7 @@ where
                 overlap: overlap_blocks,
                 track_prefill_tokens,
                 expected_output_tokens,
+                prefill_load_hint,
                 worker,
                 lora_name,
             })
@@ -377,10 +448,53 @@ where
         self.scheduler.pending_count()
     }
 
+    fn prefill_load_hint_for(
+        &self,
+        isl_tokens: usize,
+        overlap_blocks: u32,
+        track_prefill_tokens: bool,
+    ) -> Option<PrefillLoadHint> {
+        if !track_prefill_tokens {
+            return None;
+        }
+
+        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let effective_isl = isl_tokens.saturating_sub(prefix);
+        if effective_isl == 0 {
+            return None;
+        }
+
+        let Some(estimator) = &self.prefill_load_estimator else {
+            return None;
+        };
+
+        match estimator.predict_prefill_duration(1, effective_isl, prefix) {
+            Ok(expected_prefill_duration) => Some(PrefillLoadHint {
+                initial_effective_prefill_tokens: effective_isl,
+                expected_prefill_duration: Some(expected_prefill_duration),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    effective_isl,
+                    prefix,
+                    "failed to predict prefill duration for direct add_request path: {error}"
+                );
+                None
+            }
+        }
+    }
+
     /// Get the worker type for this router ("prefill" or "decode").
     /// Used for Prometheus metric labeling.
     pub fn worker_type(&self) -> &'static str {
         self.scheduler.worker_type()
+    }
+
+    /// Return the worker's unique global DP rank when it owns exactly one rank.
+    pub fn unique_dp_rank_for_worker(&self, worker_id: WorkerId) -> Option<u32> {
+        let configs = self.workers_with_configs.borrow();
+        let config = configs.get(&worker_id)?;
+        (config.data_parallel_size == 1).then_some(config.data_parallel_start_rank)
     }
 
     pub fn add_output_block(
@@ -413,6 +527,7 @@ where
                 is_eagle: Some(self.is_eagle),
             },
         );
+        log_routing_input_hashes(None, self.block_size, tokens, &block_hashes);
         let overlap_scores = self.indexer.find_matches(block_hashes).await?;
         Ok(overlap_scores.scores.get(&worker).copied().unwrap_or(0))
     }
@@ -488,6 +603,7 @@ where
                         true,
                         None,
                         0.0,
+                        None,
                         None,
                         None,
                     )

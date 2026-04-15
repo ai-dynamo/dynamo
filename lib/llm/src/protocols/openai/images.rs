@@ -11,10 +11,15 @@ mod nvext;
 pub use aggregator::DeltaAggregator;
 pub use nvext::{NvExt, NvExtProvider};
 
+/// Image generation request with NVIDIA extensions.
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateImageRequest {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateImageRequest,
+
+    /// Optional image reference that guides generation (for I2I/TI2I).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_reference: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -37,6 +42,11 @@ impl NvImagesResponse {
             inner: dynamo_protocols::types::ImagesResponse {
                 created: 0,
                 data: vec![],
+                background: None,
+                output_format: None,
+                quality: None,
+                size: None,
+                usage: None,
             },
         }
     }

@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated multimodal serving with standard Dynamo preprocessing
+# Aggregated multimodal image/video serving with standard Dynamo preprocessing
 #
 # Architecture: Single-worker PD (Prefill-Decode)
-# - Frontend: Rust OpenAIPreprocessor handles image URLs (HTTP and data:// base64)
-# - Worker: Standard vLLM worker with vision model support
+# - Frontend: Rust OpenAIPreprocessor forwards multimodal requests
+# - Worker: Standard vLLM worker with multimodal model support
 #
 # For EPD (Encode-Prefill-Decode) architecture with dedicated encoding worker,
 # see agg_multimodal_epd.sh
@@ -19,7 +19,7 @@ source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 # Default values
-MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+MODEL_NAME="${DYN_MODEL_NAME:-Qwen/Qwen3-VL-30B-A3B-Instruct-FP8}"
 
 # Parse command line arguments
 # Extra arguments are passed through to the vLLM worker
@@ -48,12 +48,40 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner --multimodal "Launching Aggregated Multimodal Serving" "$MODEL_NAME" "$HTTP_PORT"
 
 # Use TCP transport (instead of default NATS)
 # TCP is preferred for multimodal workloads because it overcomes:
 # - NATS default 1MB max payload limit (multimodal base64 images can exceed this)
 export DYN_REQUEST_PLANE=tcp
+
+print_launch_banner --no-curl "Launching Aggregated Multimodal Serving" "$MODEL_NAME" "$HTTP_PORT" \
+    "Backend:     dynamo.vllm --enable-multimodal" \
+    "Media:       image_url and video_url (model support dependent)"
+
+print_curl_footer <<CURL
+  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\
+    -H 'Content-Type: application/json' \\
+    -d '{
+      "model": "${MODEL_NAME}",
+      "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "Describe the image"},
+        {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/300px-PNG_transparency_demonstration_1.png"}}
+      ]}],
+      "max_tokens": 50
+    }'
+
+  # For video-capable models such as Qwen/Qwen3-VL-2B-Instruct:
+  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\
+    -H 'Content-Type: application/json' \\
+    -d '{
+      "model": "Qwen/Qwen3-VL-2B-Instruct",
+      "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "Describe the video in detail"},
+        {"type": "video_url", "video_url": {"url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"}}
+      ]}],
+      "max_tokens": 128
+    }'
+CURL
 
 # Start frontend with Rust OpenAIPreprocessor
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
@@ -65,11 +93,14 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 MODEL_EXTRA_ARGS=""
 case "$MODEL_NAME" in
     meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
-        MAX_MODEL_LEN="${MAX_MODEL_LEN:-108960}"
+        MAX_MODEL_LEN="108960"
         MODEL_EXTRA_ARGS="--tensor-parallel-size=8" ;;
 esac
 
-GPU_MEM_ARGS=$(build_gpu_mem_args vllm)
+# Default KV cache cap from profiling (2x safety over min=461 MiB); ~9.6 GiB peak VRAM
+# Uses smallest profiled value across multimodal tests; profiler/test framework overrides via env
+: "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=922354000}"
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 # Start vLLM worker with vision model
 # --enforce-eager: Quick deployment (remove for production)

@@ -72,6 +72,14 @@ impl Block {
             block_hash: Some(block_hash),
         }
     }
+
+    #[inline]
+    fn drop_worker(&mut self, worker: WorkerWithDpRank) {
+        self.workers.remove(&worker);
+        if self.workers.is_empty() {
+            self.children.clear();
+        }
+    }
 }
 
 /// Thread-safe radix tree for concurrent KV cache lookups.
@@ -458,11 +466,7 @@ impl ConcurrentRadixTree {
                 continue;
             };
 
-            let mut guard = block.write();
-            guard.workers.remove(&worker);
-            if guard.workers.is_empty() {
-                guard.children.clear();
-            }
+            block.write().drop_worker(worker);
 
             num_removed += 1;
         }
@@ -498,11 +502,7 @@ impl ConcurrentRadixTree {
         for worker in workers {
             if let Some(worker_lookup) = lookup.remove(&worker) {
                 for (_, block) in worker_lookup.into_iter() {
-                    let mut guard = block.write();
-                    guard.workers.remove(&worker);
-                    if guard.workers.is_empty() {
-                        guard.children.clear();
-                    }
+                    block.write().drop_worker(worker);
                 }
 
                 if keep_worker {
@@ -530,11 +530,7 @@ impl ConcurrentRadixTree {
         let key = WorkerWithDpRank { worker_id, dp_rank };
         if let Some(worker_lookup) = lookup.remove(&key) {
             for (_, block) in worker_lookup.into_iter() {
-                let mut guard = block.write();
-                guard.workers.remove(&key);
-                if guard.workers.is_empty() {
-                    guard.children.clear();
-                }
+                block.write().drop_worker(key);
             }
             self.tree_sizes.remove(&key);
         }
