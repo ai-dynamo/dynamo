@@ -603,10 +603,13 @@ class DiagnosticsRecorder:
         output_dir = self.config.report_output_dir
         os.makedirs(output_dir, exist_ok=True)
         self._report_count += 1
-        ts_label = datetime.fromtimestamp(ts[-1], tz=timezone.utc).strftime(
-            "%Y%m%d_%H%M%S"
-        )
-        filename = f"planner_report_{ts_label}_{self._report_count:03d}.html"
+        if self.config.report_filename:
+            filename = self.config.report_filename
+        else:
+            ts_label = datetime.fromtimestamp(ts[-1], tz=timezone.utc).strftime(
+                "%Y%m%d_%H%M%S"
+            )
+            filename = f"planner_report_{ts_label}_{self._report_count:03d}.html"
         filepath = os.path.join(output_dir, filename)
 
         with open(filepath, "w") as f:

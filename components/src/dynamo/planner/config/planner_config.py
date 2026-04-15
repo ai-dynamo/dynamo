@@ -149,6 +149,14 @@ class PlannerConfig(BaseModel):
         default="./planner_reports",
         description="Directory for HTML diagnostics reports.",
     )
+    report_filename: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fixed filename for HTML diagnostics reports. "
+            "When set, reports are written to report_output_dir/report_filename "
+            "instead of the default timestamped name."
+        ),
+    )
     live_dashboard_port: int = Field(
         default=8080,
         description=(
