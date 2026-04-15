@@ -395,9 +395,7 @@ class WorkerFactory:
             # Disagg decode workers may need params from prefill (e.g., embedding_params
             # for multimodal). Skip canary health check to prevent incompatible requests.
             health_check_payload = None
-            logger.info(
-                "Disagg decode worker: skipping canary health check payload"
-            )
+            logger.info("Disagg decode worker: skipping canary health check payload")
         else:
             health_check_payload = VllmHealthCheckPayload(
                 engine_client, use_text_input=config.use_vllm_tokenizer
