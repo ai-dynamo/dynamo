@@ -112,7 +112,7 @@ jobs:
         env:
           ECR_REPOSITORY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
         run: |
-          
+
           if [[ "${{ matrix.version_selector }}" == "cpu" ]] || [[ "${{ inputs.target_tag_plain }}" == *"planner"* ]]; then
             CPU_IMAGE_TAG=${{ github.sha }}-${{ inputs.target_tag_plain }}
             echo "cpu_runtime_image=${ECR_REPOSITORY}:${CPU_IMAGE_TAG}" >> $GITHUB_OUTPUT
@@ -231,5 +231,4 @@ jobs:
           docker image rm -f "${{ steps.calculate-target-tag.outputs.test_image }}" 2>/dev/null || true
           docker image rm -f "${{ steps.calculate-target-tag.outputs.runtime_image }}" 2>/dev/null || true
           echo "✓ XPU image cleanup finished"
-      
-      
+
