@@ -99,6 +99,17 @@ impl ShardReadPool {
 const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
 const FNV_PRIME: u64 = 1099511628211;
 
+/// Fold one `u64` value into an FNV-1a accumulator.
+#[inline(always)]
+fn fnv_fold(state: u64, value: u64) -> u64 {
+    let mut h = state;
+    for b in value.to_le_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 // ---------------------------------------------------------------------------
 // BranchShardedIndexer
 // ---------------------------------------------------------------------------
@@ -256,28 +267,18 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     /// Used by `find_matches` to compute the branch key for an incoming query.
     fn branch_key_for_local_hashes(&self, hashes: &[LocalBlockHash]) -> u64 {
         let k = self.prefix_depth.min(hashes.len());
-        let mut h = FNV_OFFSET_BASIS;
-        for block in &hashes[..k] {
-            for b in block.0.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(FNV_PRIME);
-            }
-        }
-        h
+        hashes[..k]
+            .iter()
+            .fold(FNV_OFFSET_BASIS, |h, block| fnv_fold(h, block.0))
     }
 
     /// FNV-1a hash of the first `min(prefix_depth, len)` `tokens_hash` values
     /// from a `Stored` event's block list.
     fn branch_key_for_stored_blocks(&self, blocks: &[KvCacheStoredBlockData]) -> u64 {
         let k = self.prefix_depth.min(blocks.len());
-        let mut h = FNV_OFFSET_BASIS;
-        for block in &blocks[..k] {
-            for b in block.tokens_hash.0.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(FNV_PRIME);
-            }
-        }
-        h
+        blocks[..k]
+            .iter()
+            .fold(FNV_OFFSET_BASIS, |h, block| fnv_fold(h, block.tokens_hash.0))
     }
 
     // --- routing table operations ---
@@ -320,6 +321,188 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         drop(counts);
         self.branch_to_shard.insert(branch_key, selected);
         selected
+    }
+
+    // -----------------------------------------------------------------------
+    // Private event handlers (called from apply_event)
+    // -----------------------------------------------------------------------
+
+    /// Compute the target shard and (if still shallow) the updated FNV
+    /// accumulator state for a `Stored` event.
+    ///
+    /// Shard assignment uses accumulated FNV until the chain reaches
+    /// `prefix_depth` blocks, then switches to parent-hash inheritance.
+    ///
+    /// Three cases:
+    ///
+    /// A. Parent tail found in `block_to_fnv_state` (depth < prefix_depth):
+    ///    Extend the FNV accumulator with leading blocks from this batch.
+    ///    Once the accumulated depth reaches `prefix_depth`, call
+    ///    `assign_shard` with the finalized key so that distinct
+    ///    continuations receive distinct shard assignments.
+    ///    Record the updated state on the last block of this batch if the
+    ///    chain is still shallow after processing.
+    ///
+    /// B. Parent tail found in `block_to_shard` (depth >= prefix_depth):
+    ///    Inherit the shard — the branch was already decided.
+    ///
+    /// C. No parent (root) or OOO (parent not in either map):
+    ///    Compute FNV from this batch's own blocks.  For root events
+    ///    shorter than `prefix_depth` this is a partial key; a future
+    ///    continuation in case A will extend it to the full depth.
+    ///
+    /// Returns `(shard_idx, Option<(fnv, depth)>)`.  A `Some` state means
+    /// the chain has not yet reached `prefix_depth` blocks; the caller should
+    /// record it on the last block of the batch so the next continuation can
+    /// extend it.
+    fn compute_stored_routing(
+        &self,
+        store_data: &KvCacheStoreData,
+    ) -> (usize, Option<(u64, usize)>) {
+        if let Some(parent_hash) = &store_data.parent_hash {
+            if let Some(entry) = self.block_to_fnv_state.get(&parent_hash.0) {
+                // Case A: parent is shallow — extend FNV accumulator.
+                let (parent_fnv, parent_depth) = *entry;
+                drop(entry);
+                let remaining = self.prefix_depth - parent_depth;
+                let to_process = remaining.min(store_data.blocks.len());
+                let fnv = store_data.blocks[..to_process]
+                    .iter()
+                    .fold(parent_fnv, |h, block| fnv_fold(h, block.tokens_hash.0));
+                let new_depth = parent_depth + to_process;
+                let shard = self.assign_shard(fnv);
+                let state = (new_depth < self.prefix_depth).then_some((fnv, new_depth));
+                (shard, state)
+            } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0) {
+                // Case B: deep chain — inherit shard.
+                (shard, None)
+            } else {
+                // Case C (OOO): parent not in either map; best-effort key from this batch.
+                let key = self.branch_key_for_stored_blocks(&store_data.blocks);
+                (self.assign_shard(key), None)
+            }
+        } else {
+            // Case C (root): start FNV accumulation from scratch.
+            let to_process = self.prefix_depth.min(store_data.blocks.len());
+            let fnv = store_data.blocks[..to_process]
+                .iter()
+                .fold(FNV_OFFSET_BASIS, |h, block| fnv_fold(h, block.tokens_hash.0));
+            let depth = to_process;
+            let shard = self.assign_shard(fnv);
+            let state = (depth < self.prefix_depth).then_some((fnv, depth));
+            (shard, state)
+        }
+    }
+
+    async fn apply_stored(&self, event: RouterEvent) {
+        let KvCacheEventData::Stored(store_data) = &event.event.data else {
+            return;
+        };
+
+        let (shard_idx, new_fnv_state) = self.compute_stored_routing(store_data);
+
+        // Update eager block count before dispatching.
+        self.shard_block_counts[shard_idx]
+            .fetch_add(store_data.blocks.len(), Ordering::Relaxed);
+
+        // Record block → shard before dispatching so a fast continuation
+        // can find entries immediately.
+        for block in &store_data.blocks {
+            self.block_to_shard
+                .entry(block.block_hash.0)
+                .and_modify(|e| e.1 += 1)
+                .or_insert((shard_idx, 1));
+        }
+
+        // Propagate partial FNV state on the last block of this batch.
+        if let Some(fnv_state) = new_fnv_state {
+            if let Some(last_block) = store_data.blocks.last() {
+                self.block_to_fnv_state
+                    .insert(last_block.block_hash.0, fnv_state);
+            }
+        }
+
+        self.shards[shard_idx].apply_event(event).await;
+    }
+
+    async fn apply_removed(&self, event: RouterEvent) {
+        // Copy metadata before borrowing event.event.data.
+        let worker_id = event.worker_id;
+        let storage_tier = event.storage_tier;
+        let event_id = event.event.event_id;
+        let dp_rank = event.event.dp_rank;
+
+        let KvCacheEventData::Removed(remove_data) = &event.event.data else {
+            return;
+        };
+
+        // --- Plan: classify each block as mapped-to-shard or broadcast ---
+        let mut shard_blocks: Vec<Vec<ExternalSequenceBlockHash>> =
+            vec![Vec::new(); self.num_shards];
+        let mut broadcast_blocks: Vec<ExternalSequenceBlockHash> = Vec::new();
+
+        for &block_hash in &remove_data.block_hashes {
+            self.block_to_fnv_state.remove(&block_hash.0);
+            let found_shard = self.block_to_shard.get_mut(&block_hash.0).map(|mut e| {
+                let shard_idx = e.0;
+                e.1 = e.1.saturating_sub(1);
+                shard_idx
+            });
+            match found_shard {
+                Some(shard_idx) => {
+                    self.block_to_shard
+                        .remove_if(&block_hash.0, |_, v| v.1 == 0);
+                    shard_blocks[shard_idx].push(block_hash);
+                }
+                None => {
+                    self.remove_broadcast_count.fetch_add(1, Ordering::Relaxed);
+                    broadcast_blocks.push(block_hash);
+                }
+            }
+        }
+
+        // --- Dispatch: route mapped removes to their owning shards ---
+        for (shard_idx, blocks) in shard_blocks.into_iter().enumerate() {
+            if blocks.is_empty() {
+                continue;
+            }
+            self.shard_block_counts[shard_idx]
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_sub(blocks.len()))
+                })
+                .ok();
+            let shard_event = RouterEvent {
+                worker_id,
+                storage_tier,
+                event: KvCacheEvent {
+                    event_id,
+                    dp_rank,
+                    data: KvCacheEventData::Removed(KvCacheRemoveData {
+                        block_hashes: blocks,
+                    }),
+                },
+            };
+            self.shards[shard_idx].apply_event(shard_event).await;
+        }
+
+        // Broadcast unknown blocks to all shards; each CRTC treats a missing
+        // block as a no-op so correctness is maintained.
+        if !broadcast_blocks.is_empty() {
+            for shard in &self.shards {
+                let broadcast_event = RouterEvent {
+                    worker_id,
+                    storage_tier,
+                    event: KvCacheEvent {
+                        event_id,
+                        dp_rank,
+                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: broadcast_blocks.clone(),
+                        }),
+                    },
+                };
+                shard.apply_event(broadcast_event).await;
+            }
+        }
     }
 }
 
@@ -382,175 +565,8 @@ impl<T: SyncIndexer> KvIndexerInterface for BranchShardedIndexer<T> {
 
     async fn apply_event(&self, event: RouterEvent) {
         match &event.event.data {
-            KvCacheEventData::Stored(store_data) => {
-                // Shard assignment uses accumulated FNV until the chain reaches
-                // `prefix_depth` blocks, then switches to parent-hash inheritance.
-                //
-                // Three cases:
-                //
-                // A. Parent tail found in `block_to_fnv_state` (depth < prefix_depth):
-                //    Extend the FNV accumulator with leading blocks from this batch.
-                //    Once the accumulated depth reaches `prefix_depth`, call
-                //    `assign_shard` with the finalized key so that distinct
-                //    continuations receive distinct shard assignments.
-                //    Record the updated state on the last block of this batch if the
-                //    chain is still shallow after processing.
-                //
-                // B. Parent tail found in `block_to_shard` (depth >= prefix_depth):
-                //    Inherit the shard — the branch was already decided.
-                //
-                // C. No parent (root) or OOO (parent not in either map):
-                //    Compute FNV from this batch's own blocks.  For root events
-                //    shorter than `prefix_depth` this is a partial key; a future
-                //    continuation in case A will extend it to the full depth.
-                let (shard_idx, new_fnv_state) = if let Some(parent_hash) = &store_data.parent_hash
-                {
-                    if let Some(entry) = self.block_to_fnv_state.get(&parent_hash.0) {
-                        // Case A: parent is shallow — extend FNV accumulator.
-                        let (parent_fnv, parent_depth) = *entry;
-                        drop(entry);
-
-                        let remaining = self.prefix_depth - parent_depth;
-                        let to_process = remaining.min(store_data.blocks.len());
-                        let mut fnv = parent_fnv;
-                        for block in &store_data.blocks[..to_process] {
-                            for b in block.tokens_hash.0.to_le_bytes() {
-                                fnv ^= b as u64;
-                                fnv = fnv.wrapping_mul(FNV_PRIME);
-                            }
-                        }
-                        let new_depth = parent_depth + to_process;
-                        let shard = self.assign_shard(fnv);
-                        let state = if new_depth < self.prefix_depth {
-                            Some((fnv, new_depth))
-                        } else {
-                            None
-                        };
-                        (shard, state)
-                    } else if let Some(shard) = self.block_to_shard.get(&parent_hash.0).map(|v| v.0)
-                    {
-                        // Case B: deep chain — inherit.
-                        (shard, None)
-                    } else {
-                        // Case C (OOO): parent not in either map; best-effort key
-                        // from this batch.
-                        let key = self.branch_key_for_stored_blocks(&store_data.blocks);
-                        (self.assign_shard(key), None)
-                    }
-                } else {
-                    // Case C (root): start FNV accumulation.
-                    let to_process = self.prefix_depth.min(store_data.blocks.len());
-                    let mut fnv = FNV_OFFSET_BASIS;
-                    for block in &store_data.blocks[..to_process] {
-                        for b in block.tokens_hash.0.to_le_bytes() {
-                            fnv ^= b as u64;
-                            fnv = fnv.wrapping_mul(FNV_PRIME);
-                        }
-                    }
-                    let depth = to_process;
-                    let shard = self.assign_shard(fnv);
-                    let state = if depth < self.prefix_depth {
-                        Some((fnv, depth))
-                    } else {
-                        None
-                    };
-                    (shard, state)
-                };
-
-                // Update eager block count before dispatching.
-                self.shard_block_counts[shard_idx]
-                    .fetch_add(store_data.blocks.len(), Ordering::Relaxed);
-
-                // Record block → shard before dispatching so a fast continuation
-                // can find entries immediately.
-                for block in &store_data.blocks {
-                    self.block_to_shard
-                        .entry(block.block_hash.0)
-                        .and_modify(|e| e.1 += 1)
-                        .or_insert((shard_idx, 1));
-                }
-
-                // Propagate partial FNV state on the last block of this batch so
-                // the next continuation in the chain can extend it.
-                if let Some(fnv_state) = new_fnv_state
-                    && let Some(last_block) = store_data.blocks.last()
-                {
-                    self.block_to_fnv_state
-                        .insert(last_block.block_hash.0, fnv_state);
-                }
-
-                self.shards[shard_idx].apply_event(event).await;
-            }
-
-            KvCacheEventData::Removed(remove_data) => {
-                // Split blocks into per-shard groups (mapped) and unknown
-                // blocks (broadcast fallback).
-                let mut shard_blocks: Vec<Vec<ExternalSequenceBlockHash>> =
-                    vec![Vec::new(); self.num_shards];
-                let mut broadcast_blocks: Vec<ExternalSequenceBlockHash> = Vec::new();
-
-                for &block_hash in &remove_data.block_hashes {
-                    self.block_to_fnv_state.remove(&block_hash.0);
-                    let found_shard = self.block_to_shard.get_mut(&block_hash.0).map(|mut e| {
-                        let shard_idx = e.0;
-                        e.1 = e.1.saturating_sub(1);
-                        shard_idx
-                    });
-                    match found_shard {
-                        Some(shard_idx) => {
-                            // Delete the entry only once the last holder has evicted.
-                            self.block_to_shard
-                                .remove_if(&block_hash.0, |_, v| v.1 == 0);
-                            shard_blocks[shard_idx].push(block_hash);
-                        }
-                        None => {
-                            // Block not in index — broadcast to all shards.
-                            // Each shard's CRTC treats a missing block as a no-op.
-                            self.remove_broadcast_count.fetch_add(1, Ordering::Relaxed);
-                            broadcast_blocks.push(block_hash);
-                        }
-                    }
-                }
-
-                // Route mapped removes to their specific shards.
-                for (shard_idx, blocks) in shard_blocks.into_iter().enumerate() {
-                    if blocks.is_empty() {
-                        continue;
-                    }
-                    self.shard_block_counts[shard_idx].fetch_sub(blocks.len(), Ordering::Relaxed);
-                    let shard_event = RouterEvent {
-                        worker_id: event.worker_id,
-                        storage_tier: event.storage_tier,
-                        event: KvCacheEvent {
-                            event_id: event.event.event_id,
-                            dp_rank: event.event.dp_rank,
-                            data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                block_hashes: blocks,
-                            }),
-                        },
-                    };
-                    self.shards[shard_idx].apply_event(shard_event).await;
-                }
-
-                // Broadcast unknown blocks to all shards.
-                if !broadcast_blocks.is_empty() {
-                    for shard in &self.shards {
-                        let broadcast_event = RouterEvent {
-                            worker_id: event.worker_id,
-                            storage_tier: event.storage_tier,
-                            event: KvCacheEvent {
-                                event_id: event.event.event_id,
-                                dp_rank: event.event.dp_rank,
-                                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                    block_hashes: broadcast_blocks.clone(),
-                                }),
-                            },
-                        };
-                        shard.apply_event(broadcast_event).await;
-                    }
-                }
-            }
-
+            KvCacheEventData::Stored(_) => self.apply_stored(event).await,
+            KvCacheEventData::Removed(_) => self.apply_removed(event).await,
             KvCacheEventData::Cleared => {
                 // A worker may have blocks across multiple shards (different
                 // branches stored over its lifetime) — broadcast to all.
