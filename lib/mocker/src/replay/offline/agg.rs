@@ -288,12 +288,11 @@ impl AggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
+        self.traffic
+            .record_arrival(request.tokens.len(), request.max_output_tokens);
 
         if self.router.is_none() {
-            self.requests.insert(
-                uuid,
-                AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
-            );
+            self.requests.insert(uuid, AggRequestState::new_running());
             let worker_idx = self.next_worker();
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
@@ -358,11 +357,9 @@ impl AggRuntime {
                 }
                 self.record_router_pending();
             }
-            let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
+            self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
-            self.traffic
-                .on_request(removed_state.input_tokens, removed_state.output_tokens);
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
             self.progress.inc_completed();
@@ -570,14 +567,25 @@ impl AggRuntime {
     /// work in the engine.
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
         let (added, newly_marked) = self.engine.apply_target_count(target_workers);
-        if let Some(router) = self.router.as_mut() {
+        #[cfg(test)]
+        if let Some(new_len) = added.iter().max().map(|id| id + 1) {
+            self.worker_active_requests.resize(new_len, Vec::new());
+        }
+        let admissions = if let Some(router) = self.router.as_mut() {
             for id in added {
                 router.add_worker(id)?;
             }
             for id in newly_marked {
                 router.remove_worker(id)?;
             }
-        }
+            let admissions = router.on_topology_changed(self.now_ms)?.admissions;
+            self.record_router_pending();
+            admissions
+        } else {
+            Vec::new()
+        };
+        self.dispatch_router_admissions(admissions)?;
+        self.record_in_flight_peak();
         Ok(())
     }
 
@@ -683,7 +691,7 @@ mod tests {
     use crate::common::protocols::{EngineType, SglangArgs};
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
     use crate::replay::normalize_trace_requests;
-    use dynamo_kv_router::config::RouterQueuePolicy;
+    use dynamo_kv_router::config::{KvRouterConfig, RouterQueuePolicy};
 
     fn replay_args(enable_prefix_caching: bool, enable_chunked_prefill: bool) -> MockEngineArgs {
         MockEngineArgs::builder()
@@ -711,6 +719,19 @@ mod tests {
             .unwrap()
     }
 
+    fn planner_runtime_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(64)
+            .num_gpu_blocks(512)
+            .max_num_batched_tokens(Some(8192))
+            .max_num_seqs(Some(8))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1.0)
+            .build()
+            .unwrap()
+    }
+
     fn queueing_router_args(policy: RouterQueuePolicy) -> MockEngineArgs {
         MockEngineArgs::builder()
             .block_size(64)
@@ -723,6 +744,13 @@ mod tests {
             .router_queue_policy(Some(policy))
             .build()
             .unwrap()
+    }
+
+    fn planner_router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            router_queue_threshold: Some(0.5),
+            ..KvRouterConfig::default()
+        }
     }
 
     fn sglang_replay_args() -> MockEngineArgs {
@@ -1017,6 +1045,100 @@ mod tests {
             runtime.stats.assigned_worker_by_uuid[&Uuid::from_u128(33)],
             cached_worker
         );
+    }
+
+    #[test]
+    fn test_apply_scaling_drains_router_pending_immediately() {
+        let args = queueing_router_args(RouterQueuePolicy::Fcfs);
+        let mut runtime = AggRuntime::new(
+            &args,
+            Some(planner_router_config()),
+            None,
+            normalize_trace_requests(
+                vec![
+                    DirectRequest {
+                        tokens: vec![11; 64],
+                        max_output_tokens: 8,
+                        uuid: Some(Uuid::from_u128(1)),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: Some(0.0),
+                    },
+                    DirectRequest {
+                        tokens: vec![22; 64],
+                        max_output_tokens: 8,
+                        uuid: Some(Uuid::from_u128(2)),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: Some(0.0),
+                    },
+                ],
+                1.0,
+            )
+            .unwrap(),
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap();
+
+        assert!(runtime.advance_one_timestamp().unwrap());
+        assert_eq!(
+            runtime.debug_snapshot().router_pending_request_ids,
+            vec![Uuid::from_u128(2)]
+        );
+
+        runtime.apply_scaling(2).unwrap();
+
+        assert!(
+            runtime
+                .debug_snapshot()
+                .router_pending_request_ids
+                .is_empty()
+        );
+        assert_eq!(
+            runtime.stats.assigned_worker_by_uuid[&Uuid::from_u128(2)],
+            1
+        );
+    }
+
+    #[test]
+    fn test_planner_traffic_counts_arrivals_before_completion() {
+        let args = planner_runtime_args();
+        let mut runtime = AggRuntime::new(
+            &args,
+            None,
+            None,
+            normalize_trace_requests(
+                vec![
+                    DirectRequest {
+                        tokens: vec![1; 512],
+                        max_output_tokens: 128,
+                        uuid: Some(Uuid::from_u128(1)),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: Some(0.0),
+                    },
+                    DirectRequest {
+                        tokens: vec![2; 512],
+                        max_output_tokens: 128,
+                        uuid: Some(Uuid::from_u128(2)),
+                        dp_rank: 0,
+                        arrival_timestamp_ms: Some(0.1),
+                    },
+                ],
+                1.0,
+            )
+            .unwrap(),
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        runtime.advance_to(0.1).unwrap();
+        let (_, num_req, avg_isl, avg_osl) = runtime.drain_traffic();
+
+        assert_eq!(num_req, 2);
+        assert_eq!(avg_isl, 512.0);
+        assert_eq!(avg_osl, 128.0);
     }
 
     #[test]
