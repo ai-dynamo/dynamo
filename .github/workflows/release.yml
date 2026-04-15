@@ -79,7 +79,8 @@ jobs:
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - name: Checkout at source commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        # fetch-depth: 0 + fetch-tags required here — git tag -l enumerates existing RC tags
         with:
           ref: ${{ needs.prepare-release.outputs.commit_sha }}
           fetch-depth: 0
@@ -291,6 +292,19 @@ jobs:
           OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
           copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
 
+          # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
+          echo ""
+          echo "=== Planner Image ==="
+          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
+          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
+          copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
+          # ---- Snapshot image ----
+          echo ""
+          echo "=== Snapshot Image ==="
+          SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
+          SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
+          copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
+
           # ---- Summary ----
           echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
           echo "failed_count=${#FAILED_COPIES[@]}" >> $GITHUB_OUTPUT
@@ -393,6 +407,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Operator image:" >> $GITHUB_STEP_SUMMARY
           echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Planner image:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-planner:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
           echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY

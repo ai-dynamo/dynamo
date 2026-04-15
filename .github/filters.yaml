@@ -72,10 +72,6 @@ ci: &ci
   - 'container/Dockerfile.test'
 
 core:
-  # Exclude documentation files first, then include patterns override for specific paths
-  - '!**/*.md'
-  - '!**/*.rst'
-  - '!**/*.txt'
   - *ci
   - 'container/render.py'
   - 'container/Dockerfile.template'
@@ -99,6 +95,12 @@ core:
   - '*.py'
   - '*.rs'
   - 'scripts/report_pytest_markers.py'
+  # Negation patterns MUST come after positive patterns — micromatch processes
+  # patterns left-to-right, so negations only filter matches accumulated by
+  # preceding patterns. Placing them first has no effect.
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.txt'
 
 operator:
   - *ci
@@ -109,13 +111,13 @@ operator:
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 deploy:
-  - '!**/*.md'
-  - '!**/*.rst'
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 planner:
   - 'container/templates/planner.Dockerfile'
@@ -125,29 +127,29 @@ planner:
   - 'components/src/dynamo/global_router/**'
 
 vllm:
-  - '!**/*.md'
-  - '!**/*.rst'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
   - 'container/templates/vllm_*'
-
-sglang:
   - '!**/*.md'
   - '!**/*.rst'
+
+sglang:
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/templates/sglang_*'
-
-trtllm:
   - '!**/*.md'
   - '!**/*.rst'
+
+trtllm:
   - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
   - 'container/templates/trtllm_*'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 fastvideo:
   - '!**/*.md'
@@ -158,8 +160,6 @@ fastvideo:
   - 'examples/backends/fastvideo/**'
 
 frontend:
-  - '!**/*.md'
-  - '!**/*.rst'
   - *ci
   - '.cargo/config.toml'
   - 'lib/**'
@@ -173,6 +173,8 @@ frontend:
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 rust:
   - '.github/workflows/pre-merge.yml'
