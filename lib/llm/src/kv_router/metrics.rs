@@ -57,20 +57,11 @@ use prometheus::{HistogramOpts, IntGaugeVec, Opts};
 use crate::http::service::metrics::generate_log_buckets;
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
-/// p50 sits in the 0.005–0.027 ms range with tails rarely exceeding a few ms.
-/// `exponential_buckets(0.001, 2.0, 15)` → 0.001 ms to ~16.4 ms, 15 buckets.
 fn compute_overhead_buckets() -> Vec<f64> {
     prometheus::exponential_buckets(0.001, 2.0, 15).unwrap()
 }
 
 /// Buckets for async phases (indexer find_matches, scheduling, total).
-/// p50 ranges from 0.01 ms (find_matches) to 13+ ms (scheduling), with
-/// scheduling tails reaching minutes under contention.
-/// `exponential_buckets(0.01, 3.0, 17)` → 0.01 ms to ~7.2 min, 17 buckets.
-///
-/// Previous config used `exponential_buckets(0.0001, 2.0, 18)` which topped
-/// out at ~13.1 ms, clipping `histogram_quantile()` output for any overhead
-/// beyond that boundary and hiding long-tail behavior.
 fn async_overhead_buckets() -> Vec<f64> {
     prometheus::exponential_buckets(0.01, 3.0, 17).unwrap()
 }
