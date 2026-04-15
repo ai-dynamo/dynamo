@@ -363,6 +363,7 @@ jobs:
       platform: '["amd64"]'
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
       cpu_only_test_timeout_minutes: 30
+      ecr_hostname: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     secrets: inherit
 
   # ============================================================================

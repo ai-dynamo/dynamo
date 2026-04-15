@@ -55,11 +55,11 @@ on:
         required: false
         type: string
         default: 'auto'
+      ecr_hostname:
+        description: 'ECR hostname (e.g. 123456.dkr.ecr.us-west-2.amazonaws.com)'
+        required: true
+        type: string
     secrets:
-      AWS_DEFAULT_REGION:
-        required: true
-      AWS_ACCOUNT_ID:
-        required: true
       HF_TOKEN:
         required: false
 
@@ -76,7 +76,7 @@ jobs:
     # container lifecycle, but GitHub Actions manages cgroup limits properly —
     # unlike a raw `docker run` inside a step which escapes cgroups under privileged DinD.
     container:
-      image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}-test
+      image: ${{ inputs.ecr_hostname }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}-test
       options: >-
         --shm-size=200m
         --ulimit memlock=-1
