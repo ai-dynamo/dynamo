@@ -7,12 +7,13 @@
 //! Connections are Arc-wrapped and shared across concurrent requests.
 //! The hot path (per-request) is fully lock-free: ArcSwap + atomic round-robin + SegQueue push.
 //! The cold path (connect/prune) uses a Mutex on the LRU cache.
-//! Writer tasks batch requests via BufWriter for ~50x fewer syscalls under load.
+//! Writer tasks batch requests into a reusable BytesMut buffer for a single write_all()
+//! syscall per drain, avoiding the fixed-size cap and double-copy of BufWriter.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
 use futures::StreamExt;
@@ -32,19 +33,19 @@ use tokio_util::codec::FramedRead;
 const DEFAULT_TCP_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 /// Default connection pool size per host.
-/// Paired with REQUEST_CHANNEL_BUFFER: 50 × 1024 = 51,200 concurrent slots per host.
-/// At sub-10ms transport latency a single connection handles ~1,024 in-flight requests,
-/// so 50 connections is generous while keeping per-host FD/task overhead reasonable.
-const DEFAULT_POOL_SIZE: usize = 50;
+/// Ceiling: DEFAULT_POOL_SIZE(100) x REQUEST_CHANNEL_BUFFER(1024) = 102,400 concurrent
+/// slots per host. At sub-10ms transport latency only a handful of connections are
+/// ever active simultaneously; the remainder are opened on-demand by should_grow().
+const DEFAULT_POOL_SIZE: usize = 100;
 
 /// Admission semaphore permits (and pipelining depth) per connection.
 /// Raised from 256 to 1024 for high-throughput frontends (1M+ RPS across ~100 backends).
 /// At 1ms round-trip a single connection already supports ~1,000 concurrent requests,
 /// so deeper pipelining avoids unnecessary connection proliferation and lets the
-/// BufWriter writer task drain larger batches per flush (fewer syscalls at high rate).
+/// the writer task drain larger batches per write_all (fewer syscalls at high rate).
 /// Head-of-line blocking stays acceptable because the TCP transport layer targets
 /// sub-ms latency; later requests rarely wait long behind earlier ones.
-/// Per-host ceiling: DEFAULT_POOL_SIZE(50) x REQUEST_CHANNEL_BUFFER(1024) = 51,200.
+/// Per-host ceiling: DEFAULT_POOL_SIZE(100) x REQUEST_CHANNEL_BUFFER(1024) = 102,400.
 const REQUEST_CHANNEL_BUFFER: usize = 1024;
 
 /// Maximum retries when another task is connecting (prevents unbounded recursion)
@@ -62,8 +63,10 @@ const DEFAULT_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 /// Spin loop limit before falling back to async Notify in writer task
 const WRITER_SPIN_LIMIT: u32 = 64;
 
-/// BufWriter capacity for batched writes (256 KB)
-const WRITER_BUF_CAPACITY: usize = 256 * 1024;
+/// Initial capacity of the per-writer BytesMut send buffer (256 KB).
+/// The buffer grows automatically beyond this if a batch exceeds it, then
+/// stays at the high-water mark for subsequent batches (amortised zero allocation).
+const WRITER_INITIAL_BUF_CAPACITY: usize = 256 * 1024;
 
 /// Get maximum message size from environment or use default
 fn get_max_message_size() -> usize {
@@ -149,9 +152,9 @@ struct PendingRequest {
 ///
 /// Design: SegQueue submit → batched writer task → reader task → oneshot response
 /// - Callers push to SegQueue (lock-free, ~20-40ns)
-/// - Writer task drains queue, batches via BufWriter, single flush per batch
+/// - Writer task drains queue into a reusable BytesMut, single write_all per batch
 /// - Reader task uses framed codec, pops response_tx from SegQueue
-/// - FIFO ordering: writer pushes ALL response_txs BEFORE flushing data
+/// - FIFO ordering: writer pushes ALL response_txs AFTER write_all succeeds
 struct TcpConnection {
     addr: SocketAddr,
     /// Lock-free queue for callers to submit requests
@@ -198,7 +201,7 @@ impl TcpConnection {
         let inflight = Arc::new(AtomicU64::new(0));
         let admission = Arc::new(tokio::sync::Semaphore::new(channel_buffer));
 
-        // Spawn writer task (batched via BufWriter)
+        // Spawn writer task (batches into BytesMut, single write_all per drain)
         let writer_handle = {
             let submit_q = submit_queue.clone();
             let response_q = response_queue.clone();
@@ -316,25 +319,35 @@ impl TcpConnection {
         }
     }
 
-    /// Writer task: drains SegQueue, batches via BufWriter, single flush per batch.
+    /// Writer task: drains SegQueue into a reusable BytesMut, then issues a single
+    /// write_all() per drain cycle — one syscall regardless of batch size.
+    ///
+    /// Why BytesMut instead of BufWriter:
+    /// - BufWriter has a fixed internal cap (256 KB); batches larger than that trigger
+    ///   implicit mid-batch partial flushes, breaking the one-syscall-per-batch guarantee.
+    ///   With channel_buffer=1024 this happens routinely under moderate load.
+    /// - BufWriter copies each Bytes into its internal Vec<u8> and then the kernel
+    ///   copies again on flush — two copies per request. BytesMut collapses this to
+    ///   one extend_from_slice + one write_all (single kernel copy).
+    /// - BytesMut grows to the batch HWM and stays there; after warm-up there are
+    ///   zero allocations per batch.
     ///
     /// Flush-boundary tracking: response_txs are held locally during the write
-    /// phase and only pushed to response_queue AFTER flush succeeds. This way:
-    /// - On write/flush error, callers in the current batch get immediate errors
+    /// phase and only pushed to response_queue AFTER write_all succeeds. This way:
+    /// - On write error, callers in the current batch get immediate errors
     ///   (not "Connection closed" via drain_pending)
-    /// - Previously flushed batches stay in response_queue for the reader to
+    /// - Previously written batches stay in response_queue for the reader to
     ///   deliver -- they are NOT erroneously killed by drain_pending
-    /// - The reader spins briefly if a response arrives before the writer pushes
-    ///   the response_tx, but this is safe (BufWriter doesn't send data until
-    ///   flush, so the server can't respond before the push)
+    /// - The server cannot respond before write_all returns, so the reader will
+    ///   never see a response before its response_tx is in the queue
     async fn writer_task(
-        write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: tokio::io::WriteHalf<TcpStream>,
         submit_queue: Arc<SegQueue<PendingRequest>>,
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         notify: Arc<tokio::sync::Notify>,
         healthy: Arc<AtomicBool>,
     ) -> Result<()> {
-        let mut writer = tokio::io::BufWriter::with_capacity(WRITER_BUF_CAPACITY, write_half);
+        let mut send_buf = BytesMut::with_capacity(WRITER_INITIAL_BUF_CAPACITY);
         let trace = latency_trace_enabled();
 
         // Latency instrumentation accumulators
@@ -375,7 +388,9 @@ impl TcpConnection {
                     continue; // spurious wakeup
                 }
 
-                // Phase 1: Write batch to BufWriter (buffered, no syscalls yet).
+                // Phase 1: Gather all encoded payloads into the send buffer.
+                // A single extend_from_slice per item — no intermediate BufWriter
+                // copy, no implicit partial flushes if the batch exceeds a cap.
                 // response_txs stay local — they are NOT in response_queue yet.
                 let write_start = if trace {
                     Some(std::time::Instant::now())
@@ -384,29 +399,24 @@ impl TcpConnection {
                 };
 
                 for data in &encoded_batch {
-                    if let Err(e) = writer.write_all(data).await {
-                        // Write failed before flush: data is in BufWriter memory,
-                        // not on the wire. Fail the entire batch directly.
-                        let err_msg = format!("Write failed: {}", e);
-                        for tx in response_batch.drain(..) {
-                            let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
-                        }
-                        return Err(e.into());
-                    }
+                    send_buf.extend_from_slice(data);
                 }
 
-                // Phase 2: Single flush = single write(2) syscall for entire batch.
-                if let Err(e) = writer.flush().await {
-                    // Flush failed: data may be partially on the wire.
-                    // Ambiguous — fail the batch directly (safest).
-                    let err_msg = format!("Flush failed: {}", e);
+                // Phase 2: Single write_all = one syscall for the entire batch.
+                // The socket send buffer is 2 MB; batches that fit go out in one
+                // writev(). Larger batches loop inside write_all but still hit
+                // the kernel only as fast as it drains the socket buffer.
+                if let Err(e) = write_half.write_all(&send_buf).await {
+                    // Data may be partially on the wire — fail batch directly.
+                    let err_msg = format!("Write failed: {}", e);
                     for tx in response_batch.drain(..) {
                         let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
                     }
                     return Err(e.into());
                 }
+                send_buf.clear(); // reset length, keep allocation for next batch
 
-                // Phase 3: Flush succeeded — data is committed to the wire.
+                // Phase 3: write_all succeeded — data is committed to the wire.
                 // NOW push response_txs to response_queue so the reader can
                 // match them with incoming responses.
                 for tx in response_batch.drain(..) {
