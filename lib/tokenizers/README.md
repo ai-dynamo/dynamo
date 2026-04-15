@@ -1,7 +1,7 @@
 # Tokenizers
 
 ## Introduction
-`tokenizers` is designed for efficient and versatile tokenization in natural language processing. It supports both HuggingFace models, offering a streamlined API for text encoding and decoding.
+`dynamo-tokenizers` is designed for efficient and versatile tokenization in natural language processing. It supports both HuggingFace models, offering a streamlined API for text encoding and decoding.
 
 ## Features
 - **Hash Verification**: Ensures tokenization consistency and accuracy across different models.
@@ -12,7 +12,7 @@
 
 #### HuggingFace Tokenizer
 ```rust
-use dynamo_llm::tokenizers::hf::HuggingFaceTokenizer;
+use dynamo_tokenizers::hf::HuggingFaceTokenizer;
 
 let hf_tokenizer = HuggingFaceTokenizer::from_file("tests/data/sample-models/TinyLlama_v1.1/tokenizer.json")
     .expect("Failed to load HuggingFace tokenizer");
@@ -21,7 +21,7 @@ let hf_tokenizer = HuggingFaceTokenizer::from_file("tests/data/sample-models/Tin
 ### Encoding and Decoding Text
 
 ```rust
-use dynamo_llm::tokenizers::{HuggingFaceTokenizer, traits::{Encoder, Decoder}};
+use dynamo_tokenizers::{HuggingFaceTokenizer, traits::{Encoder, Decoder}};
 
 let tokenizer = HuggingFaceTokenizer::from_file("tests/data/sample-models/TinyLlama_v1.1/tokenizer.json")
     .expect("Failed to load HuggingFace tokenizer");
@@ -39,7 +39,7 @@ assert_eq!(text, decoded_text);
 
 // Using the Sequence object for encoding and decoding
 
-use dynamo_llm::tokenizers::{Sequence, Tokenizer};
+use dynamo_tokenizers::{Sequence, Tokenizer};
 use std::sync::{Arc, RwLock};
 
 let tokenizer = Tokenizer::from(Arc::new(tokenizer));

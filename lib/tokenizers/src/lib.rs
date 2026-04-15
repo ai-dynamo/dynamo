@@ -11,15 +11,17 @@ pub mod tiktoken;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
-use std::{ops::Deref, path::Path};
+use std::{fs::File, io::BufReader, ops::Deref, path::Path};
 
-use crate::protocols::TokenIdType;
+use anyhow::Context as _;
 pub use anyhow::{Error, Result};
 
 pub use fastokens::FastTokenizer;
 pub use hf::HuggingFaceTokenizer;
 pub use tiktoken::TikTokenTokenizer;
 pub use traits::DecodeResult;
+
+pub type TokenIdType = u32;
 
 /// Represents the type of tokenizer being used
 #[derive(Debug)]
@@ -129,6 +131,80 @@ pub mod traits {
         // fn get_vocab_size(&self) -> usize;
         // fn make_unique_clone(&self) -> Box<dyn Tokenizer>;
     }
+}
+
+pub fn file_json_field<T: serde::de::DeserializeOwned>(
+    json_file_path: &Path,
+    field_name: &str,
+) -> anyhow::Result<T> {
+    let file = File::open(json_file_path)
+        .with_context(|| format!("Failed to open file: {:?}", json_file_path))?;
+    let reader = BufReader::new(file);
+
+    let json_data: serde_json::Value = serde_json::from_reader(reader)
+        .with_context(|| format!("Failed to parse JSON from file: {:?}", json_file_path))?;
+
+    let map = json_data.as_object().ok_or_else(|| {
+        anyhow::anyhow!("JSON root is not an object in file: {:?}", json_file_path)
+    })?;
+
+    let field_value = map.get(field_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Field '{}' not found in JSON file: {:?}",
+            field_name,
+            json_file_path
+        )
+    })?;
+
+    serde_json::from_value(field_value.clone()).with_context(|| {
+        format!(
+            "Failed to deserialize field '{}' (value: {:?}) to the expected type from file: {:?}",
+            field_name, field_value, json_file_path
+        )
+    })
+}
+
+pub fn log_json_err(filename: &str, json: &str, err: &serde_json::Error) {
+    const ERROR_PREFIX: &str = ">>     ";
+
+    if !(err.is_syntax() || err.is_data()) {
+        return;
+    }
+
+    let line = err.line().saturating_sub(1);
+    let column = err.column().saturating_sub(1);
+
+    let json_lines: Vec<&str> = json.lines().collect();
+    if json_lines.is_empty() {
+        tracing::error!("JSON parsing error in {filename}: File is empty.");
+        return;
+    }
+
+    let start_index = (line - 2).max(0);
+    let end_index = (line + 3).min(json_lines.len());
+
+    let mut context_lines: Vec<String> = (start_index..end_index)
+        .map(|i| {
+            if i == line {
+                format!("{ERROR_PREFIX}{}", json_lines[i])
+            } else {
+                format!("{:06} {}", i + 1, json_lines[i])
+            }
+        })
+        .collect();
+
+    let col_indicator = "_".to_string().repeat(column + ERROR_PREFIX.len()) + "^";
+    let error_in_context_idx = line - start_index;
+    if error_in_context_idx < context_lines.len() {
+        context_lines.insert(error_in_context_idx + 1, col_indicator);
+    }
+
+    tracing::error!(
+        "JSON parsing error in {filename}: Line {}, column {}:\n{}",
+        err.line(),
+        err.column(),
+        context_lines.join("\n")
+    );
 }
 
 impl Encoding {

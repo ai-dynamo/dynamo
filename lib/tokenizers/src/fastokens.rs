@@ -62,13 +62,13 @@ impl Tokenizer for FastTokenizer {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokenizers::HuggingFaceTokenizer;
+    use crate::HuggingFaceTokenizer;
 
     // Minimal synthetic BPE tokenizer with no normalizer or post-processor --
     // compatible with fastokens. Vocab covers: H,T,a,d,e,h,i,l,o,r,s,t,w + punctuation.
     const TOKENIZER_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/data/sample-models/minimal-bpe/tokenizer.json"
+        "/../llm/tests/data/sample-models/minimal-bpe/tokenizer.json"
     );
 
     #[test]
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_fast_with_decode_stream() {
-        use crate::tokenizers::Tokenizer as TokenizerWrapper;
+        use crate::Tokenizer as TokenizerWrapper;
         use std::sync::Arc;
 
         let tokenizer = Arc::new(FastTokenizer::from_file(TOKENIZER_PATH).unwrap());

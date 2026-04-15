@@ -6,6 +6,7 @@ members = [
     "lib/llm",
     "lib/runtime",
     "lib/config",
+    "lib/tokenizers",
     "lib/tokens",
     "lib/mocker",
     "lib/kv-router",
@@ -39,6 +40,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 dynamo-runtime = { path = "lib/runtime", version = "1.0.0" }
 dynamo-llm = { path = "lib/llm", version = "1.0.0" }
 dynamo-config = { path = "lib/config", version = "1.0.0" }
+dynamo-tokenizers = { path = "lib/tokenizers", version = "1.0.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.0.0" }
 dynamo-memory = { path = "lib/memory", version = "1.0.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
