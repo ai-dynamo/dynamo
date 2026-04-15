@@ -1192,6 +1192,10 @@ class KvRouterConfig:
         router_queue_threshold: Optional[float] = 4.0,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
+        use_remote_indexer: bool = False,
+        serve_indexer: bool = False,
+        conditional_prefill_enabled: bool = False,
+        conditional_prefill_max_new_tokens: int = 5000,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1230,6 +1234,10 @@ class KvRouterConfig:
                 "fcfs": first-come first-served with priority bumps — optimizes tail TTFT.
                 "lcfs": last-come first-served with priority bumps — intentionally worsens tail behavior for policy comparisons.
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
+            use_remote_indexer: Query a remote KV indexer instead of maintaining a local one (default: False).
+            serve_indexer: Serve this router's local indexer over the request plane (default: False).
+            conditional_prefill_enabled: Enable conditional local prefill on decode workers (default: False).
+            conditional_prefill_max_new_tokens: Net-new prompt token cap for conditional prefill (default: 5000).
         """
         ...
 

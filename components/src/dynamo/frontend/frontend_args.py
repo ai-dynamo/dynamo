@@ -146,6 +146,10 @@ class FrontendConfig(KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
+        if self.conditional_prefill_max_new_tokens < 0:
+            raise ValueError("--router-conditional-prefill-max-new-tokens must be >= 0")
+        if self.conditional_prefill_enabled and self.router_mode != "kv":
+            raise ValueError("--router-conditional-prefill requires --router-mode=kv")
 
 
 @register_encoder(FrontendConfig)

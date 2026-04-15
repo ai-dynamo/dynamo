@@ -31,7 +31,10 @@ mod types;
 
 use inner::InnerPrefillRouter;
 pub use types::PrefillError;
-use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override};
+use types::{
+    ConditionalPrefillPolicy, PrefillOutcome, PrefillResolveDecision,
+    TokenCapConditionalPrefillPolicy, build_decode_router_override,
+};
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
@@ -43,11 +46,13 @@ use types::{PrefillOutcome, PrefillResolveDecision, build_decode_router_override
 /// - Normal: Worker IDs determined by router based on KV cache state
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
+    decode_router: Option<Arc<super::KvRouter>>,
     model_manager: Arc<ModelManager>,
     endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
+    conditional_prefill_policy: TokenCapConditionalPrefillPolicy,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name used to look up the worker monitor for prefill client registration
     model_name: String,
@@ -100,6 +105,45 @@ impl
                 return Err(anyhow::anyhow!(PrefillError::NotActivated));
             }
             return next.generate(context.map(|_| req)).await;
+        }
+
+        if self.conditional_prefill_policy.is_enabled() {
+            match self
+                .select_decode_worker_for_conditional_prefill(&req, &request_id)
+                .await
+            {
+                Ok(Some(decision)) => {
+                    tracing::info!(
+                        request_id = %request_id,
+                        worker_id = decision.worker.worker_id,
+                        dp_rank = decision.worker.dp_rank,
+                        net_new_tokens = decision.net_new_tokens,
+                        overlap_tokens = decision.overlap_tokens,
+                        "Conditional prefill routing to decode worker"
+                    );
+
+                    if req.tracker.is_none() {
+                        req.tracker = Some(Arc::new(RequestTracker::new()));
+                    }
+                    if let Some(ref tracker) = req.tracker {
+                        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+                    }
+
+                    let routing = req.routing_mut();
+                    routing.decode_worker_id = Some(decision.worker.worker_id);
+                    routing.dp_rank = Some(decision.worker.dp_rank);
+
+                    return next.generate(context.map(|_| req)).await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        error = %error,
+                        "Conditional prefill decision failed; falling back to remote prefill"
+                    );
+                }
+            }
         }
 
         // Ensure tracker exists for routing decisions in disaggregated mode.

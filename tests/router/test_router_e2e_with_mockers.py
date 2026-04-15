@@ -9,6 +9,7 @@
 # @pytest.mark.parallel until DRT endpoint registration is confirmed thread-safe.
 #
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -37,8 +38,10 @@ from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
     get_runtime,
+    wait_for_frontend_ready,
     wait_for_indexer_workers_active,
 )
+from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -1291,6 +1294,136 @@ def test_router_decisions_disagg(
             request_plane="nats",
             enable_bootstrap=enable_disagg_bootstrap,
         )
+
+
+async def _send_conditional_prefill_e2e_requests(
+    frontend_port: int, max_new_tokens: int
+) -> list[dict]:
+    frontend_url = f"http://localhost:{frontend_port}"
+    completions_url = f"{frontend_url}/v1/completions"
+    long_prompt = " ".join(["conditional-prefill-cache-reuse"] * 180)
+
+    async def post_json(
+        session: aiohttp.ClientSession, url: str, payload: dict
+    ) -> dict:
+        async with session.post(url, json=payload) as response:
+            body = await response.text()
+            assert response.status == 200, (
+                f"Conditional prefill request failed with status {response.status}: "
+                f"{body}"
+            )
+            return json.loads(body)
+
+    async with aiohttp.ClientSession() as session:
+        short_response = await post_json(
+            session,
+            completions_url,
+            {
+                "model": MODEL_NAME,
+                "prompt": "short",
+                "max_tokens": 2,
+                "stream": False,
+                "nvext": {"extra_fields": ["worker_id", "timing"]},
+            },
+        )
+        long_response = await post_json(
+            session,
+            completions_url,
+            {
+                "model": MODEL_NAME,
+                "prompt": long_prompt,
+                "max_tokens": 2,
+                "stream": False,
+                "nvext": {"extra_fields": ["worker_id", "timing"]},
+            },
+        )
+
+    short_worker_id = short_response.get("nvext", {}).get("worker_id", {})
+    assert short_response["usage"]["prompt_tokens"] <= max_new_tokens
+    assert short_worker_id.get("decode_worker_id") is not None, (
+        "Short conditional prefill request should route to a decode worker, "
+        f"got worker_id={short_worker_id}"
+    )
+    assert short_worker_id.get("prefill_worker_id") is None, (
+        "Short conditional prefill request should bypass remote prefill, "
+        f"got worker_id={short_worker_id}"
+    )
+
+    long_worker_id = long_response.get("nvext", {}).get("worker_id", {})
+    assert long_response["usage"]["prompt_tokens"] > max_new_tokens
+    assert long_worker_id.get("prefill_worker_id") is not None, (
+        "Long conditional prefill request should route through remote prefill, "
+        f"got worker_id={long_worker_id}"
+    )
+    assert long_worker_id.get("decode_worker_id") is not None, (
+        "Long conditional prefill request should still route to a decode worker, "
+        f"got worker_id={long_worker_id}"
+    )
+
+    return [short_response, long_response]
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+def test_conditional_prefill_e2e_with_mockers(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+):
+    """E2E: conditional prefill routes short requests locally and long ones remotely."""
+    logger.info("Starting conditional prefill E2E test with mocker workers")
+
+    namespace_suffix = generate_random_suffix()
+    shared_namespace = f"test-namespace-{namespace_suffix}"
+    conditional_prefill_max_new_tokens = 10
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": 64,
+    }
+
+    with _launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        prefill_mocker_args=mocker_args,
+        decode_mocker_args=mocker_args,
+        num_prefill_mockers=1,
+        num_decode_mockers=1,
+        enable_disagg_bootstrap=False,
+        request_plane=request_plane,
+    ) as (_prefill_workers, decode_workers):
+        frontend_port = get_unique_ports(
+            request, num_ports=1, request_plane=request_plane
+        )[0]
+
+        with FrontendRouterProcess(
+            request,
+            block_size=64,
+            frontend_port=frontend_port,
+            namespace=decode_workers.namespace,
+            enforce_disagg=True,
+            request_plane=request_plane,
+            min_initial_workers=decode_workers.num_workers,
+            use_kv_events=False,
+            conditional_prefill_enabled=True,
+            conditional_prefill_max_new_tokens=conditional_prefill_max_new_tokens,
+        ):
+            frontend_url = f"http://localhost:{frontend_port}"
+            asyncio.run(
+                wait_for_frontend_ready(
+                    frontend_url=frontend_url,
+                    expected_num_workers=decode_workers.num_workers,
+                    timeout=120,
+                )
+            )
+
+            responses = asyncio.run(
+                _send_conditional_prefill_e2e_requests(
+                    frontend_port, conditional_prefill_max_new_tokens
+                )
+            )
+            logger.info("Conditional prefill E2E responses: %s", responses)
 
 
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])

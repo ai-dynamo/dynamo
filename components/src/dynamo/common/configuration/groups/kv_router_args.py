@@ -38,6 +38,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_queue_policy",
     "use_remote_indexer",
     "serve_indexer",
+    "conditional_prefill_enabled",
+    "conditional_prefill_max_new_tokens",
 )
 
 
@@ -64,6 +66,8 @@ class KvRouterConfigBase(ConfigBase):
     router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
+    conditional_prefill_enabled: bool = False
+    conditional_prefill_max_new_tokens: int = 5000
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -287,6 +291,30 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=str,
             choices=["fcfs", "wspt"],
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-conditional-prefill",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: Enable conditional prefill. When enabled, "
+                "the frontend may skip remote prefill and route directly to decode "
+                "when decode KV reuse leaves a small net-new prompt."
+            ),
+            dest="conditional_prefill_enabled",
+        )
+        add_argument(
+            g,
+            flag_name="--router-conditional-prefill-max-new-tokens",
+            env_var="DYN_ROUTER_CONDITIONAL_PREFILL_MAX_NEW_TOKENS",
+            default=5000,
+            help=(
+                "KV Router: Maximum net-new prompt tokens allowed for conditional "
+                "local prefill on a decode worker."
+            ),
+            arg_type=int,
+            dest="conditional_prefill_max_new_tokens",
         )
         add_negatable_bool_argument(
             g,

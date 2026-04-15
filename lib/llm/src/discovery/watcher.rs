@@ -525,6 +525,7 @@ impl ModelWatcher {
                         card.kv_cache_block_size,
                         Some(prefill_config),
                         self.prefill_load_estimator.clone(),
+                        kv_chooser.clone(),
                         self.router_config.enforce_disagg,
                         model_name.clone(),
                         namespace.clone(),

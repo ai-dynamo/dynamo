@@ -14,10 +14,11 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 
+use super::types::TokenCapConditionalPrefillPolicy;
 use super::{InnerPrefillRouter, PrefillRouter};
 use crate::{
     discovery::ModelManager,
-    kv_router::KvPushRouter,
+    kv_router::{KvPushRouter, KvRouter},
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::WORKER_TYPE_PREFILL,
@@ -33,11 +34,13 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
+            decode_router: None,
             model_manager,
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             enforce_disagg,
+            conditional_prefill_policy: TokenCapConditionalPrefillPolicy::default(),
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -55,6 +58,7 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        decode_router: Option<Arc<KvRouter>>,
         enforce_disagg: bool,
         model_name: String,
         namespace: String,
@@ -62,14 +66,18 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let conditional_prefill_policy =
+            TokenCapConditionalPrefillPolicy::from_config(kv_router_config.as_ref());
 
         let router = Arc::new(Self {
             prefill_router,
+            decode_router,
             model_manager: model_manager.clone(),
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
+            conditional_prefill_policy,
             prefill_load_estimator,
             model_name,
             namespace,
