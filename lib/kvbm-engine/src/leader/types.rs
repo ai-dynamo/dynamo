@@ -198,6 +198,49 @@ impl AsyncSessionResult {
             .map(|v| *v)
             .unwrap_or_default()
     }
+
+    /// Test-only constructor for a terminal (Complete) `AsyncSessionResult`.
+    ///
+    /// Creates an `AsyncSessionResult` pre-wired with `OnboardingStatus::Complete`
+    /// and a ready-to-take blocks slot. Use this from unit tests that need an
+    /// AsyncSession variant without spinning up a real session.
+    ///
+    /// `matched_blocks` is the count reported by the status watcher; the
+    /// `blocks` vec is used as-is for RAII purposes (typically empty in tests).
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new_complete_for_test(
+        matched_blocks: usize,
+        blocks: Vec<ImmutableBlock<G2>>,
+        breakdown: MatchBreakdown,
+    ) -> Self {
+        let (status_tx, status_rx) = watch::channel(OnboardingStatus::Complete { matched_blocks });
+        // Drop the sender so the channel stays at its latest value.
+        drop(status_tx);
+        Self {
+            session_id: SessionId::from(uuid::Uuid::nil()),
+            status_rx,
+            blocks: Arc::new(Mutex::new(Some(blocks))),
+            match_breakdown: Arc::new(Mutex::new(breakdown)),
+            session_handle: None,
+        }
+    }
+
+    /// Test-only constructor for an in-progress (`Searching`) `AsyncSessionResult`.
+    ///
+    /// Returns both the session result and the `watch::Sender` so tests can
+    /// transition the status to `Complete` later.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new_pending_for_test() -> (Self, watch::Sender<OnboardingStatus>) {
+        let (status_tx, status_rx) = watch::channel(OnboardingStatus::Searching);
+        let session = Self {
+            session_id: SessionId::from(uuid::Uuid::nil()),
+            status_rx,
+            blocks: Arc::new(Mutex::new(None)),
+            match_breakdown: Arc::new(Mutex::new(MatchBreakdown::default())),
+            session_handle: None,
+        };
+        (session, status_tx)
+    }
 }
 
 impl FindMatchesResult {

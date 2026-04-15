@@ -162,11 +162,8 @@ impl ConnectorLeader {
 
         let mut slot = shared_slot.lock();
         let onboarding_state = slot.txn_take_onboarding()?;
-        if let Some(session_id) = onboarding_state.find_session.session_id() {
-            self.instance_leader
-                .get()
-                .unwrap()
-                .release_session(session_id);
+        if let Some(instance_leader) = self.instance_leader.get() {
+            onboarding_state.release_all(instance_leader);
         }
         Ok(())
     }
