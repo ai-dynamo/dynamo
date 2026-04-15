@@ -45,6 +45,7 @@ from dynamo.planner.config.defaults import SLAPlannerDefaults  # noqa: E402
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
+    pytest.mark.unit,
 ]
 
 
