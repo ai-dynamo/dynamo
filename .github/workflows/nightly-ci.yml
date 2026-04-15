@@ -20,26 +20,26 @@ jobs:
   # ============================================================================
   # PRE-WARM K8S BUILDER
   # ============================================================================
-  create-fresh-builder:
-    name: Create fresh K8s builder
-    runs-on: prod-default-small-v2
-    permissions:
-      contents: read
-    outputs:
-      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Export builder name
-        id: export-builder-name
-        run: |
-          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
-      - name: Create and bootstrap fresh K8s builder
-        uses: ./.github/actions/bootstrap-buildkit
-        with:
-          builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-          buildkit_worker_addresses: ''
-          fresh_builder: 'true'
+  # create-fresh-builder:
+  #   name: Create fresh K8s builder
+  #   runs-on: prod-default-small-v2
+  #   permissions:
+  #     contents: read
+  #   outputs:
+  #     builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Export builder name
+  #       id: export-builder-name
+  #       run: |
+  #         echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
+  #     - name: Create and bootstrap fresh K8s builder
+  #       uses: ./.github/actions/bootstrap-buildkit
+  #       with:
+  #         builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+  #         buildkit_worker_addresses: ''
+  #         fresh_builder: 'true'
 
   # ============================================================================
   # BUILD JOBS
@@ -47,7 +47,7 @@ jobs:
 
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [create-fresh-builder]
+    # needs: [create-fresh-builder]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -60,7 +60,7 @@ jobs:
 
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [create-fresh-builder]
+    # needs: [create-fresh-builder]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
@@ -73,7 +73,7 @@ jobs:
 
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [create-fresh-builder]
+    # needs: [create-fresh-builder]
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
