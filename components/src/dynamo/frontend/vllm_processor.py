@@ -37,11 +37,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Client, DistributedRuntime
 
-from .prepost import (
-    StreamingPostProcessor,
-    preprocess_chat_request,
-    preprocess_chat_request_sync,
-)
+from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .utils import extract_mm_urls, random_uuid
 
 logger = logging.getLogger(__name__)
@@ -73,31 +69,6 @@ def map_finish_reason(raw_reason: str | None) -> FinishReason | None:
     return mapped
 
 
-class _PreprocessError(Exception):
-    """Raised by thread worker for user-facing errors (e.g., n!=1)."""
-
-    def __init__(self, error_dict: dict[str, Any]):
-        self.error_dict = error_dict
-        super().__init__(str(error_dict))
-
-
-def _normalize_image_detail(request: dict[str, Any]) -> None:
-    """Normalize image_url.detail to 'auto' if None (vLLM Pydantic requirement)."""
-    for msg in request.get("messages") or []:
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            if part.get("type") == "image_url":
-                img_url = part.get("image_url")
-                if isinstance(img_url, dict) and img_url.get("detail") is None:
-                    img_url["detail"] = "auto"
-
-
 class VllmProcessor:
     def __init__(
         self,
@@ -109,8 +80,6 @@ class VllmProcessor:
         reasoning_parser_class: type[ReasoningParser] | None,
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
-        preprocess_pool: Any = None,  # ThreadPoolExecutor
-        preprocess_workers: int = 0,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -124,19 +93,19 @@ class VllmProcessor:
         self.enable_auto_tool_choice = enable_auto_tool_choice
         # Persistent NIXL sender — caches pickled mm_kwargs across requests.
         self._mm_kwargs_sender: Any = None
-        # SHM sender for same-node transfers (~1.5ms vs NIXL's ~50ms).
+        # SHM sender for same-node transfers.
         self._shm_sender: Any = None
         # Set DYNAMO_DISABLE_NIXL_MM=1 to disable mm_kwargs transfer entirely.
-        # Set DYNAMO_MM_TRANSFER=shm to use shared memory instead of NIXL.
+        # Set DYNAMO_MM_TRANSFER to choose transfer mode:
+        #   auto (default): use SHM. Same-node backends read directly from
+        #     shared memory (~2ms); cross-node backends fail gracefully and
+        #     fall back to normal processing (backend runs HF processor).
+        #   shm: same as auto (explicit).
+        #   nixl: use NIXL RDMA. Works cross-node via IB.
         self.nixl_mm_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
-        self.use_shm_transfer = os.environ.get("DYNAMO_MM_TRANSFER", "") == "shm"
-        self.preprocess_pool = preprocess_pool
-        if preprocess_pool is not None:
-            self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
-                preprocess_workers + 2
-            )
-        else:
-            self._worker_semaphore = None
+        transfer_mode = os.environ.get("DYNAMO_MM_TRANSFER", "auto").lower()
+        self.use_shm_transfer = transfer_mode in ("auto", "shm")
+        logger.info("[mm-routing] Transfer mode: %s", transfer_mode)
 
     def _get_eos_token_ids(self) -> list[int]:
         """Return EOS token ids using tokenizer metadata.
@@ -218,14 +187,19 @@ class VllmProcessor:
                         f.mm_position.offset,
                         f.mm_position.length,
                     )
-            # Register mm_kwargs tensors with NIXL so the backend can pull
-            # them and skip its own HF processor call.
+                # Transfer pre-processed mm_kwargs to the backend so it can skip
+            # the HF processor.  Strategy:
+            #   - auto (default): use SHM. Same-node backends read directly;
+            #     cross-node backends fail gracefully and fall back to normal
+            #     processing.  Use DYNAMO_MM_TRANSFER=nixl for cross-node.
+            #   - shm: force shared memory (same-node only).
+            #   - nixl: force NIXL RDMA (works cross-node via IB).
             if not self.nixl_mm_enabled:
                 logger.debug(
-                    "[mm-routing] NIXL mm_kwargs transfer disabled via DYNAMO_DISABLE_NIXL_MM"
+                    "[mm-routing] mm_kwargs transfer disabled via DYNAMO_DISABLE_NIXL_MM"
                 )
             elif self.use_shm_transfer:
-                # Shared memory path: ~1.5ms same-node transfer.
+                # Shared memory path: ~2ms same-node transfer.
                 try:
                     from dynamo.common.multimodal.mm_kwargs_transfer import (
                         MmKwargsShmSender,
@@ -240,17 +214,18 @@ class VllmProcessor:
                     if shm_meta is not None:
                         dynamo_preproc["extra_args"]["mm_kwargs_shm"] = shm_meta
                         shm_handles = shm_handles_local
+                        nixl_transferred = True
                         logger.debug(
                             "[mm-routing] SHM: wrote %d item(s) to shared memory",
                             len(shm_meta["items"]),
                         )
-                        nixl_transferred = True
                 except Exception:
                     logger.warning(
                         "[mm-routing] SHM sender failed, backend will run HF processor",
                         exc_info=True,
                     )
             else:
+                # NIXL RDMA path: ~47ms same-node (UCX TCP), faster cross-node (IB).
                 try:
                     from dynamo.common.multimodal.mm_kwargs_transfer import (
                         MmKwargsSender,
@@ -271,11 +246,11 @@ class VllmProcessor:
                         dynamo_preproc["extra_args"][
                             "mm_kwargs_nixl"
                         ] = nixl_meta.model_dump()
+                        nixl_transferred = True
                         logger.debug(
                             "[mm-routing] NIXL: registered %d tensor(s) for transfer",
                             len(nixl_meta.tensor_specs),
                         )
-                        nixl_transferred = True
                     else:
                         logger.debug(
                             "[mm-routing] NIXL: no tensors to transfer (sender returned None)"
@@ -304,17 +279,12 @@ class VllmProcessor:
         model inference to a backend using the router.
         """
         with _nvtx.annotate("mm_frontend:generator", color="blue"):
-            if self.preprocess_pool is None:
-                async for item in self._generator_inner(request):
-                    yield item
-            else:
-                async for item in self._generator_inner_pool(request):
-                    yield item
+            async for item in self._generator_inner(request):
+                yield item
 
     async def _generator_inner(
         self, request: dict[str, Any]
     ) -> AsyncGenerator[dict[str, Any], None]:
-        _t_start = time.monotonic()
         request_id = random_uuid()
 
         # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
@@ -337,7 +307,6 @@ class VllmProcessor:
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
         # which wraps our ImageLoader (LRU cache + in-flight dedup).
         # No data URI encoding needed.
-        _t_preprocess_start = time.monotonic()
         with _nvtx.annotate("mm_frontend:preprocess_chat", color="yellow"):
             pre = await preprocess_chat_request(
                 request,
@@ -410,8 +379,6 @@ class VllmProcessor:
                 "mm_processor_kwargs"
             ] = request_for_sampling.mm_processor_kwargs
 
-        _t_preprocess_done = time.monotonic()
-
         with _nvtx.annotate("mm_frontend:process_inputs", color="orange"):
             vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
                 request_id,
@@ -420,7 +387,6 @@ class VllmProcessor:
                 GENERATION_TASKS,  # vLLM 0.17.0: required supported_tasks arg
             )
 
-        _t_process_inputs_done = time.monotonic()
         InputProcessor.assign_request_id(vllm_preproc)
 
         # vLLM 0.17.0 removed EngineCoreRequest.eos_token_id. Dynamo now uses
@@ -474,20 +440,24 @@ class VllmProcessor:
             "routing": request.get("routing"),
         }
 
-        # Extract MM routing metadata and prepare NIXL transfer.
-        _t_nixl_start = time.monotonic()
+        # Extract MM routing metadata and prepare transfer.
         (
             mm_routing_info,
             nixl_completion_futures,
             nixl_transferred,
             shm_handles,
         ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
-        _t_nixl_done = time.monotonic()
 
         # Forward multimodal URLs so the backend handler can load the media.
-        # Skip when NIXL/SHM transferred successfully — the backend already has
-        # the pre-processed mm_kwargs and does not need to re-download.
-        if not nixl_transferred:
+        # Only skip when ALL features were transferred — a partial transfer
+        # (some features had data=None due to processor cache) still needs
+        # URLs for the backend to process the missing features.
+        n_features = len(vllm_preproc.mm_features) if vllm_preproc.mm_features else 0
+        n_with_data = sum(
+            1 for f in (vllm_preproc.mm_features or []) if f.data is not None
+        )
+        all_transferred = nixl_transferred and n_with_data == n_features
+        if not all_transferred:
             mm_data = extract_mm_urls(request.get("messages") or [])
             if mm_data:
                 dynamo_preproc["multi_modal_data"] = mm_data
@@ -496,254 +466,6 @@ class VllmProcessor:
             tokenizer=self.tokenizer,
             request_for_sampling=request_for_sampling,
             sampling_params=sampling_params,
-            prompt_token_ids=tokens,
-            tool_parser=tool_parser,
-            reasoning_parser_class=self.reasoning_parser_class,
-            chat_template_kwargs=chat_template_kwargs,
-        )
-
-        _t_backend_start = time.monotonic()
-        logger.info(
-            "[TIMING] %s preprocess=%.1fms process_inputs=%.1fms "
-            "nixl_routing=%.1fms frontend_total=%.1fms",
-            request_id,
-            (_t_preprocess_done - _t_preprocess_start) * 1000,
-            (_t_process_inputs_done - _t_preprocess_done) * 1000,
-            (_t_nixl_done - _t_nixl_start) * 1000,
-            (_t_backend_start - _t_start) * 1000,
-        )
-        _first_token = True
-        async for item in self._generate_and_stream(
-            request_id,
-            request,
-            dynamo_preproc,
-            tokens,
-            vllm_preproc,
-            post,
-            mm_routing_info=mm_routing_info,
-            nixl_completion_futures=nixl_completion_futures,
-            shm_handles=shm_handles,
-        ):
-            if _first_token:
-                _t_first_token = time.monotonic()
-                logger.info(
-                    "[TIMING] %s backend_ttft=%.1fms total=%.1fms",
-                    request_id,
-                    (_t_first_token - _t_backend_start) * 1000,
-                    (_t_first_token - _t_start) * 1000,
-                )
-                _first_token = False
-            yield item
-
-    def _preprocess_sync(
-        self, request: dict[str, Any], request_id: str
-    ) -> tuple[
-        Any, list[int], dict[str, Any], dict[str, Any] | None, EngineCoreRequest
-    ]:
-        """Sync preprocessing for thread pool offloading.
-
-        Runs render_messages + process_inputs + MM routing extraction in a
-        thread.  Returns (pre, tokens, dynamo_preproc, mm_routing_info,
-        vllm_preproc).  NIXL registration happens in the async caller.
-        """
-        _normalize_image_detail(request)
-
-        pre = preprocess_chat_request_sync(
-            request,
-            tokenizer=self.tokenizer,
-            renderer=self.input_processor.renderer,
-            tool_parser_class=self.tool_parser_class,
-            exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
-            enable_auto_tool_choice=self.enable_auto_tool_choice,
-        )
-
-        request_for_sampling = pre.request_for_sampling
-        engine_prompt = pre.engine_prompt
-        tokens = pre.prompt_token_ids
-
-        if request_for_sampling.max_completion_tokens is not None:
-            max_tokens = request_for_sampling.max_completion_tokens
-        elif request_for_sampling.max_tokens is not None:
-            max_tokens = request_for_sampling.max_tokens
-        else:
-            max_tokens = None
-
-        sampling_params = SamplingParams(
-            output_kind=RequestOutputKind.DELTA,
-            max_tokens=max_tokens,
-        )
-        for k, v in self.input_processor.generation_config_fields.items():
-            if k == "eos_token_id":
-                continue
-            if hasattr(sampling_params, k):
-                setattr(sampling_params, k, v)
-
-        sampling_fields = (
-            set(getattr(SamplingParams, "__annotations__", ()))
-            & set(type(request_for_sampling).model_fields)
-        ) - {"max_tokens", "logprobs", "output_kind"}
-        for k in sorted(sampling_fields):
-            v = getattr(request_for_sampling, k, None)
-            if v is not None:
-                setattr(sampling_params, k, v)
-        logprobs = request_for_sampling.logprobs
-        top_logprobs = request_for_sampling.top_logprobs
-        if logprobs is True:
-            sampling_params.logprobs = top_logprobs or 1
-        elif isinstance(logprobs, int) and not isinstance(logprobs, bool):
-            sampling_params.logprobs = logprobs
-        elif top_logprobs not in (None, 0):
-            sampling_params.logprobs = top_logprobs
-
-        prompt_inputs = engine_prompt
-        if request_for_sampling.cache_salt is not None:
-            prompt_inputs["cache_salt"] = request_for_sampling.cache_salt
-        if request_for_sampling.mm_processor_kwargs is not None:
-            prompt_inputs[
-                "mm_processor_kwargs"
-            ] = request_for_sampling.mm_processor_kwargs
-
-        vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
-            request_id,
-            prompt_inputs,
-            sampling_params,
-            GENERATION_TASKS,
-        )
-        InputProcessor.assign_request_id(vllm_preproc)
-
-        sp = vllm_preproc.sampling_params
-        if sp.n != 1:
-            raise _PreprocessError(
-                {
-                    "error": {
-                        "message": (
-                            f"Unsupported value: 'n={sp.n}'. "
-                            "This endpoint currently supports only n=1."
-                        ),
-                        "type": "invalid_request_error",
-                        "param": "n",
-                        "code": "unsupported_value",
-                    }
-                }
-            )
-
-        dynamo_preproc: dict[str, Any] = {
-            "model": request["model"],
-            "token_ids": tokens,
-            "stop_conditions": {
-                "max_tokens": sp.max_tokens,
-                "stop": sp.stop,
-                "stop_token_ids": sp.stop_token_ids,
-                "min_tokens": sp.min_tokens,
-                "ignore_eos": sp.ignore_eos,
-            },
-            "sampling_options": {
-                "n": sp.n,
-                "presence_penalty": sp.presence_penalty,
-                "frequency_penalty": sp.frequency_penalty,
-                "repetition_penalty": sp.repetition_penalty,
-                "temperature": sp.temperature,
-                "top_p": sp.top_p,
-                "top_k": sp.top_k,
-                "min_p": sp.min_p,
-                "seed": sp.seed,
-            },
-            "output_options": {
-                "logprobs": sp.logprobs,
-                "prompt_logprobs": sp.prompt_logprobs,
-                "skip_special_tokens": sp.skip_special_tokens,
-            },
-            "eos_token_ids": self._get_eos_token_ids(),
-            "annotations": [],
-            "routing": request.get("routing"),
-        }
-
-        mm_routing_info = None
-        if vllm_preproc.mm_features:
-            mm_routing_info = build_mm_routing_info_from_features(
-                vllm_preproc.mm_features,
-                prompt_token_ids=list(vllm_preproc.prompt_token_ids),
-                block_size=self.block_size,
-            )
-            mm_hashes_list = [f.mm_hash for f in vllm_preproc.mm_features]
-            mm_placeholders_list = [
-                (f.mm_position.offset, f.mm_position.length)
-                for f in vllm_preproc.mm_features
-            ]
-            dynamo_preproc.setdefault("extra_args", {})
-            dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
-            dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
-            dynamo_preproc["extra_args"]["expanded_token_ids"] = list(
-                vllm_preproc.prompt_token_ids
-            )
-
-        return pre, tokens, dynamo_preproc, mm_routing_info, vllm_preproc
-
-    async def _generator_inner_pool(
-        self, request: dict[str, Any]
-    ) -> AsyncGenerator[dict[str, Any], None]:
-        """Process a request using the thread pool.
-
-        Phase 1: Preprocess in a thread (GIL released during numpy/PIL).
-        Phase 2: NIXL registration + routing + streaming in async event loop.
-        """
-        request_id = random_uuid()
-
-        # --- Phase 1: Offload CPU-bound work to thread pool ---
-        assert self._worker_semaphore is not None
-        assert self.preprocess_pool is not None
-        loop = asyncio.get_event_loop()
-        try:
-            async with self._worker_semaphore:
-                (
-                    pre,
-                    tokens,
-                    dynamo_preproc,
-                    mm_routing_info,
-                    vllm_preproc,
-                ) = await loop.run_in_executor(
-                    self.preprocess_pool,
-                    self._preprocess_sync,
-                    request,
-                    request_id,
-                )
-        except _PreprocessError as exc:
-            yield exc.error_dict
-            return
-        except Exception as exc:
-            logger.exception(
-                "Thread preprocessing failed for request %s",
-                request.get("model", "unknown"),
-            )
-            yield {
-                "error": {
-                    "message": f"Worker error: {exc}",
-                    "type": "internal_error",
-                }
-            }
-            return
-
-        # --- Phase 2: NIXL/SHM + routing + streaming (async event loop) ---
-        (
-            _,
-            nixl_completion_futures,
-            nixl_transferred,
-            shm_handles,
-        ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
-
-        if not nixl_transferred:
-            mm_data = extract_mm_urls(request.get("messages") or [])
-            if mm_data:
-                dynamo_preproc["multi_modal_data"] = mm_data
-
-        request_for_sampling = pre.request_for_sampling
-        tool_parser = pre.tool_parser
-        chat_template_kwargs = pre.chat_template_kwargs
-
-        post = StreamingPostProcessor(
-            tokenizer=self.tokenizer,
-            request_for_sampling=request_for_sampling,
-            sampling_params=vllm_preproc.sampling_params,
             prompt_token_ids=tokens,
             tool_parser=tool_parser,
             reasoning_parser_class=self.reasoning_parser_class,
@@ -1033,22 +755,6 @@ class EngineFactory:
 
         block_size = self.config.kv_cache_block_size or 16
 
-        # Create preprocess thread pool if requested.
-        preprocess_pool = None
-        preprocess_workers = self.config.preprocess_workers
-        if preprocess_workers > 0:
-            from concurrent.futures import ThreadPoolExecutor
-
-            logger.info(
-                "Creating vLLM preprocess thread pool with %d threads for %s",
-                preprocess_workers,
-                source_path,
-            )
-            preprocess_pool = ThreadPoolExecutor(max_workers=preprocess_workers)
-            logger.info(
-                "vLLM preprocess thread pool ready (%d threads)", preprocess_workers
-            )
-
         gen = VllmProcessor(
             tokenizer,
             input_processor,
@@ -1058,8 +764,6 @@ class EngineFactory:
             reasoning_parser_class,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
-            preprocess_pool=preprocess_pool,
-            preprocess_workers=preprocess_workers,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

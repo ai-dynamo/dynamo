@@ -1207,9 +1207,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
 
         # Try SHM path first (same-node, ~1.5ms).
+        # SHM only works when frontend and backend are on the same machine.
+        # If SHM read fails (cross-node), fall through to normal processing.
         shm_meta = extra_args.get("mm_kwargs_shm")
         if shm_meta:
-            return await self._receive_mm_kwargs_shm(request, shm_meta)
+            result = await self._receive_mm_kwargs_shm(request, shm_meta)
+            if result is not None:
+                return result
+            logger.debug(
+                "[mm-routing] SHM read failed (cross-node?), falling back to "
+                "normal processing"
+            )
+            return None
 
         nixl_meta_raw = extra_args.get("mm_kwargs_nixl")
         if not nixl_meta_raw:
@@ -1230,18 +1239,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return None
 
         try:
-            import time as _time
-
-            _t0 = _time.monotonic()
             with _nvtx.annotate("mm_backend:nixl_setup", color="magenta"):
                 metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
                 if self._mm_kwargs_receiver is None:
                     self._mm_kwargs_receiver = MmKwargsReceiver()
                 receiver = self._mm_kwargs_receiver
-            _t1 = _time.monotonic()
             with _nvtx.annotate("mm_backend:nixl_rdma_read", color="magenta"):
                 mm_kwargs_tensors = await receiver.receive(metadata)
-            _t2 = _time.monotonic()
 
             pickled_items = mm_kwargs_tensors.get("__pickled_kwargs_item__")
             if not pickled_items:
@@ -1252,7 +1256,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 return None
             # pickled_items is a list (one per image/feature).
             kwargs_items = []
-            _t3 = _time.monotonic()
             with _nvtx.annotate("mm_backend:nixl_pickle_loads", color="magenta"):
                 for pi in pickled_items:
                     item = pickle.loads(pi)
@@ -1264,36 +1267,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         return None
                     kwargs_items.append(item)
-            _t4 = _time.monotonic()
-            logger.info(
-                "[TIMING-BACKEND] nixl_setup=%.1fms rdma_read=%.1fms "
-                "pickle_loads=%.1fms total_nixl=%.1fms",
-                (_t1 - _t0) * 1000,
-                (_t2 - _t1) * 1000,
-                (_t4 - _t3) * 1000,
-                (_t4 - _t0) * 1000,
-            )
 
             # Use the expanded token IDs (with image placeholders) from the
             # frontend, not the unexpanded request["token_ids"].
+            # The mm_placeholders and transferred kwargs are aligned to the
+            # expanded sequence — using unexpanded tokens would misplace
+            # every placeholder.
             expanded_token_ids = extra_args.get("expanded_token_ids")
             if not expanded_token_ids:
                 logger.warning(
                     "[mm-routing] No expanded_token_ids in extra_args, "
-                    "falling back to request token_ids"
+                    "cannot use pre-rendered mm_kwargs; falling back to "
+                    "normal processing"
                 )
-                expanded_token_ids = request["token_ids"]
+                _nvtx.end_range(rng)
+                return None
 
+            mm_hashes_dict = {metadata.modality: mm_hashes}
+            mm_kwargs_dict = {metadata.modality: kwargs_items}
             engine_input = {
                 "type": "multimodal",
-                "externally_processed": True,
                 "prompt_token_ids": expanded_token_ids,
-                "mm_kwargs": {
-                    metadata.modality: kwargs_items,
-                },
-                "mm_hashes": {
-                    metadata.modality: mm_hashes,
-                },
+                "mm_kwargs": mm_kwargs_dict,
+                "mm_hashes": mm_hashes_dict,
                 "mm_placeholders": {
                     metadata.modality: [
                         PlaceholderRange(offset=off, length=length)
@@ -1301,6 +1297,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     ],
                 },
             }
+            # Inject into the engine's MM processor cache so that
+            # subsequent requests with the same images get cache hits.
+            try:
+                self.engine_client.input_processor.inject_into_mm_cache(
+                    mm_hashes_dict, mm_kwargs_dict
+                )
+            except Exception:
+                logger.debug(
+                    "[mm-routing] Failed to inject into mm_cache",
+                    exc_info=True,
+                )
             logger.debug(
                 "[mm-routing] Constructed pre-rendered MultiModalInput from "
                 "%d pickled kwargs_items, %d hashes, %d placeholders",
@@ -1318,11 +1325,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _receive_mm_kwargs_shm(
         self, request: Dict[str, Any], shm_meta: Dict[str, Any]
     ) -> Dict[str, Any] | None:
-        """Receive pre-processed mm_kwargs via shared memory (~1.5ms)."""
-        import time as _time
-
+        """Receive pre-processed mm_kwargs via shared memory (~2ms)."""
         rng = _nvtx.start_range("mm_backend:shm_receive", color="cyan")
-        _t0 = _time.monotonic()
         extra_args = request.get("extra_args") or {}
         mm_hashes = extra_args.get("mm_hashes")
         mm_placeholders = extra_args.get("mm_placeholders")
@@ -1354,19 +1358,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             expanded_token_ids = extra_args.get("expanded_token_ids")
             if not expanded_token_ids:
-                expanded_token_ids = request["token_ids"]
+                logger.warning("[mm-routing] SHM: no expanded_token_ids, falling back")
+                _nvtx.end_range(rng)
+                return None
 
             with _nvtx.annotate("mm_backend:shm_build_engine_input", color="cyan"):
+                mm_hashes_dict = {shm_meta["modality"]: mm_hashes}
+                mm_kwargs_dict = {shm_meta["modality"]: kwargs_items}
                 engine_input = {
                     "type": "multimodal",
-                    "externally_processed": True,
                     "prompt_token_ids": expanded_token_ids,
-                    "mm_kwargs": {
-                        shm_meta["modality"]: kwargs_items,
-                    },
-                    "mm_hashes": {
-                        shm_meta["modality"]: mm_hashes,
-                    },
+                    "mm_kwargs": mm_kwargs_dict,
+                    "mm_hashes": mm_hashes_dict,
                     "mm_placeholders": {
                         shm_meta["modality"]: [
                             PlaceholderRange(offset=off, length=length)
@@ -1374,12 +1377,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         ],
                     },
                 }
-            _t1 = _time.monotonic()
-            logger.info(
-                "[TIMING-BACKEND] shm_receive=%.1fms items=%d",
-                (_t1 - _t0) * 1000,
-                len(kwargs_items),
-            )
+            # Inject into the engine's MM processor cache.
+            try:
+                self.engine_client.input_processor.inject_into_mm_cache(
+                    mm_hashes_dict, mm_kwargs_dict
+                )
+            except Exception:
+                logger.debug(
+                    "[mm-routing] Failed to inject into mm_cache",
+                    exc_info=True,
+                )
             _nvtx.end_range(rng)
             return engine_input
         except Exception:

@@ -23,6 +23,7 @@ import logging
 import multiprocessing.shared_memory as shm
 import os
 import pickle
+import uuid
 from queue import Queue
 from typing import Any, Awaitable
 
@@ -104,10 +105,10 @@ class MmKwargsSender:
             tensors to transfer.
         """
         if not self._available:
-            logger.info("[NIXL-Sender] NIXL not available, skipping")
+            logger.debug("[NIXL-Sender] NIXL not available, skipping")
             return None, []
         if not mm_features:
-            logger.info("[NIXL-Sender] No mm_features to send")
+            logger.debug("[NIXL-Sender] No mm_features to send")
             return None, []
         logger.debug(
             "[NIXL-Sender] Preparing %d mm_features for NIXL transfer",
@@ -269,12 +270,15 @@ class MmKwargsReceiver:
             raise RuntimeError("NIXL not available for mm_kwargs reception")
 
         rng = _nvtx.start_range("mm_nixl:receiver_read", color="magenta")
-        results: dict[str, Any] = {}
+        # Pre-allocate result slots to preserve spec order regardless of
+        # completion order from asyncio.gather.
         read_tasks = []
         # Track acquired descriptors for release after reads complete.
         acquired: list[tuple[Any, bool, int | None]] = []
+        # Store (spec_index, field_name, tensor_view, size_bytes) per task.
+        task_meta: list[tuple[int, str, Any, int]] = []
 
-        for spec in metadata.tensor_specs:
+        for idx, spec in enumerate(metadata.tensor_specs):
             size_bytes = 1
             for s in spec.shape:
                 size_bytes *= s
@@ -283,28 +287,29 @@ class MmKwargsReceiver:
                 size_bytes
             )
             acquired.append((desc, is_dynamic, orig_size))
+            task_meta.append((idx, spec.field_name, tensor_view, size_bytes))
 
             rdma_metadata = self._nixl_connect.RdmaMetadata.model_validate(
                 spec.serialized_request
             )
 
-            async def _do_read(
-                rm=rdma_metadata,
-                d=desc,
-                name=spec.field_name,
-                t=tensor_view,
-                sz=size_bytes,
-            ):
+            async def _do_read(rm=rdma_metadata, d=desc):
                 read_op = await self._connector.begin_read(rm, d)
                 await read_op.wait_for_completion()
-                if name == "__pickled_kwargs_item__":
-                    results.setdefault(name, []).append(bytes(t[:sz].numpy().tobytes()))
-                else:
-                    results[name] = t[:sz]
 
             read_tasks.append(_do_read())
 
         await asyncio.gather(*read_tasks)
+
+        # Collect results in spec order (not completion order).
+        results: dict[str, Any] = {}
+        for idx, name, tensor_view, sz in task_meta:
+            if name == "__pickled_kwargs_item__":
+                results.setdefault(name, []).append(
+                    bytes(tensor_view[:sz].numpy().tobytes())
+                )
+            else:
+                results[name] = tensor_view[:sz]
 
         # Release all descriptors back to pool.
         for desc, is_dynamic, orig_size in acquired:
@@ -361,8 +366,6 @@ class MmKwargsShmSender:
 
             with _nvtx.annotate("mm_shm:pickle_dumps", color="cyan"):
                 pickled = pickle.dumps(feat.data)
-            import uuid
-
             name = f"mm_kwargs_{os.getpid()}_{uuid.uuid4().hex[:12]}_{i}"
             with _nvtx.annotate("mm_shm:create_and_write", color="cyan"):
                 sm = shm.SharedMemory(name=name, create=True, size=len(pickled))

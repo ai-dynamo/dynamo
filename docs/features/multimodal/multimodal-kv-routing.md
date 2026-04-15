@@ -103,4 +103,4 @@ See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main
 
 ## Known Limitations
 
-- The `externally_processed` flag for accurate MM cache hit rate metrics requires a small upstream vLLM change (pending).
+- Accurate MM cache hit rate metrics require vLLM's `InputProcessor.inject_into_mm_cache()` API (upstream PR pending).
