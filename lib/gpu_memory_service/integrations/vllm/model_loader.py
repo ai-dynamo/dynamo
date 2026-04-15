@@ -175,11 +175,8 @@ def _load_read_mode(
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
         if mx_ctx is not None:
-            try:
-                register_tensors(model, mx_ctx)
-                publish_metadata(mx_ctx)
-            except Exception as e:
-                logger.warning("[GMS-MX] Registration failed: %s", e)
+            register_tensors(model, mx_ctx)
+            publish_metadata(mx_ctx)
 
         _last_imported_weights_bytes = gms_client.total_bytes
         logger.info(

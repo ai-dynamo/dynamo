@@ -253,10 +253,7 @@ class GMSWorker(Worker):
         # Stops heartbeat + worker gRPC server, marks STALE on MX server.
         mx_ctx = get_mx_load_context()
         if mx_ctx is not None:
-            try:
-                unpublish_metadata(mx_ctx)
-            except Exception as e:
-                logger.warning("[GMS-MX] Unpublish failed during sleep: %s", e)
+            unpublish_metadata(mx_ctx)
 
         # Unmap GMS weights: synchronize + unmap all VAs + disconnect
         weights_manager = get_gms_client_memory_manager("weights")
@@ -336,10 +333,7 @@ class GMSWorker(Worker):
             # Re-register MX after GMS remap (new handles, same VAs)
             mx_ctx = get_mx_load_context()
             if mx_ctx is not None:
-                try:
-                    publish_metadata(mx_ctx)
-                except Exception as e:
-                    logger.warning("[GMS-MX] Re-registration failed during wake: %s", e)
+                publish_metadata(mx_ctx)
 
         if "kv_cache" in tags:
             # Check if KV cache was skipped at startup (shadow engine mode)
