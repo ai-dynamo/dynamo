@@ -521,7 +521,7 @@ impl Metrics {
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
         let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 256.0, 10);
+            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -1451,11 +1451,17 @@ impl Drop for ResponseMetricCollector {
                 .observe(avg_detokenize_latency_ms);
         }
 
-        // Publish final OSL when the collector is dropped
-        self.metrics
-            .output_sequence_length
-            .with_label_values(&[&self.model])
-            .observe(self.osl as f64);
+        // Publish final OSL when the collector is dropped, but only for
+        // requests that actually produced output tokens. Recording zero for
+        // failed/cancelled requests would corrupt histogram averages (sum/count)
+        // and percentiles. Failures are already tracked by requests_total with
+        // status and error_type labels.
+        if self.osl > 0 {
+            self.metrics
+                .output_sequence_length
+                .with_label_values(&[&self.model])
+                .observe(self.osl as f64);
+        }
 
         // Record request summary on the enclosing span.
         // InflightGuard::Drop and on_response logs will inherit these.
