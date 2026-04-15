@@ -369,7 +369,7 @@ class ReplayPlannerAdapter:
 
         traffic = None
         if tick.need_traffic_metrics:
-            t = result.get("traffic", {})
+            t = self._bridge.drain_traffic()
             duration_s = t.get("duration_s", 0.0)
             if duration_s > 0:
                 traffic = TrafficObservation(
