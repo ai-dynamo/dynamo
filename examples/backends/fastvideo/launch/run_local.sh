@@ -30,7 +30,7 @@ export PYTHONPATH="${REPO_DIR}/components/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 cd "${EXAMPLE_DIR}"
 
-worker_cmd=("${PYTHON_BIN}" -m dynamo.fastvideo --model-path "${MODEL}" --num-gpus "${NUM_GPUS}")
+worker_cmd=("${PYTHON_BIN}" -m dynamo.fastvideo --model "${MODEL}" --num-gpus "${NUM_GPUS}")
 if [[ -n "${WORKER_EXTRA_ARGS}" ]]; then
   # shellcheck disable=SC2206
   worker_extra=( ${WORKER_EXTRA_ARGS} )

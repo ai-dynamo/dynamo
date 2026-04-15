@@ -43,7 +43,7 @@ class _GeneratorShouldNotRun:
 
 
 def test_parse_fastvideo_args_uses_builtin_defaults():
-    config = parse_fastvideo_args(["--model-path", "org/model"])
+    config = parse_fastvideo_args(["--model", "org/model"])
 
     assert config.model_path == "org/model"
     assert config.served_model_name == "org/model"
@@ -72,7 +72,7 @@ def test_parse_fastvideo_args_uses_builtin_defaults():
 def test_parse_fastvideo_args_applies_explicit_overrides():
     config = parse_fastvideo_args(
         [
-            "--model-path",
+            "--model",
             "org/model",
             "--num-gpus",
             "2",
@@ -133,7 +133,7 @@ def test_parse_fastvideo_args_keeps_generator_args_for_backend_validation(tmp_pa
     tmp_file = tmp_path / "nonexistent-generator-args.json"
     config = parse_fastvideo_args(
         [
-            "--model-path",
+            "--model",
             "org/model",
             "--extra-generator-args-file",
             str(tmp_file),
@@ -148,7 +148,7 @@ def test_parse_fastvideo_args_keeps_generator_args_for_backend_validation(tmp_pa
 
 @pytest.mark.asyncio
 async def test_register_fastvideo_model_uses_video_discovery_type():
-    config = parse_fastvideo_args(["--model-path", "org/model"])
+    config = parse_fastvideo_args(["--model", "org/model"])
     endpoint = object()
 
     with patch(
@@ -182,9 +182,16 @@ def test_fastvideo_health_check_payload_uses_minimal_video_request():
     }
 
 
+def test_parse_fastvideo_args_accepts_legacy_model_path_flag():
+    config = parse_fastvideo_args(["--model-path", "org/model"])
+
+    assert config.model_path == "org/model"
+    assert config.served_model_name == "org/model"
+
+
 @pytest.mark.asyncio
 async def test_fastvideo_handler_generates_minimal_video_response():
-    config = parse_fastvideo_args(["--model-path", "org/model"])
+    config = parse_fastvideo_args(["--model", "org/model"])
     handler = FastVideoHandler(config, generator=_FakeGenerator())
 
     results = []
@@ -211,7 +218,7 @@ async def test_fastvideo_handler_generates_minimal_video_response():
 
 @pytest.mark.asyncio
 async def test_fastvideo_handler_rejects_input_reference_requests():
-    config = parse_fastvideo_args(["--model-path", "org/model"])
+    config = parse_fastvideo_args(["--model", "org/model"])
     handler = FastVideoHandler(config, generator=_GeneratorShouldNotRun())
 
     results = []
@@ -257,7 +264,7 @@ def test_fastvideo_handler_builds_generator_kwargs_from_generator_args_file_and_
 
     config = parse_fastvideo_args(
         [
-            "--model-path",
+            "--model",
             "org/model",
             "--no-dit-cpu-offload",
             "--no-dit-layerwise-offload",
@@ -300,7 +307,7 @@ def test_fastvideo_handler_builds_generator_kwargs_from_generator_args_file_and_
 def test_fastvideo_handler_rejects_non_object_override_generator_args_json():
     config = parse_fastvideo_args(
         [
-            "--model-path",
+            "--model",
             "org/model",
             "--override-generator-args-json",
             '["not", "an", "object"]',
@@ -318,7 +325,7 @@ def test_fastvideo_handler_rejects_non_object_override_generator_args_json():
 def test_fastvideo_handler_rejects_missing_generator_args_file(tmp_path):
     config = parse_fastvideo_args(
         [
-            "--model-path",
+            "--model",
             "org/model",
             "--extra-generator-args-file",
             str(tmp_path / "definitely-missing-generator-args.yaml"),

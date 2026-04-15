@@ -192,7 +192,7 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
 **FastVideo**
 
 ```bash
-python3 -m dynamo.fastvideo --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers --discovery-backend file
+python3 -m dynamo.fastvideo --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers --discovery-backend file
 ```
 
 ### KV Events Configuration

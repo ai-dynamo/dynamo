@@ -62,8 +62,9 @@ class FastVideoArgGroup(ArgGroup):
 
         add_argument(
             group,
-            flag_name="--model-path",
-            obsolete_flag="--model",
+            flag_name="--model",
+            obsolete_flag="--model-path",
+            dest="model_path",
             env_var="DYN_FASTVIDEO_MODEL_PATH",
             default=DEFAULT_MODEL_PATH,
             help="Hugging Face model path to load.",
@@ -73,7 +74,7 @@ class FastVideoArgGroup(ArgGroup):
             flag_name="--served-model-name",
             env_var="DYN_FASTVIDEO_SERVED_MODEL_NAME",
             default=None,
-            help="Model name registered in discovery. Defaults to --model-path.",
+            help="Model name registered in discovery. Defaults to --model.",
         )
         add_argument(
             group,

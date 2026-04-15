@@ -14,7 +14,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 ## Overview
 
 - **Default model:** `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` — a single-GPU-friendly Wan 2.1 text-to-video model that keeps the built-in backend examples and smoke tests approachable.
-- **Alternate models:** You serve other FastVideo-compatible checkpoints, including `FastVideo/LTX2-Distilled-Diffusers`, by overriding `--model-path`.
+- **Alternate models:** You serve other FastVideo-compatible checkpoints, including `FastVideo/LTX2-Distilled-Diffusers`, by overriding `--model`.
 - **Optimized inference:** The built-in backend exposes explicit runtime flags such as `--torch-compile`, `--fp4-quantization`, `--attention-backend`, and CPU offload controls instead of bundling them into a single profile.
 - **Response format:** Uses Dynamo's shared video protocol types and returns one complete MP4 payload per request. By default, responses use `data[0].url` and store output via Dynamo media storage. Set `"response_format": "b64_json"` when you want inline base64 video data instead.
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
@@ -28,7 +28,7 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 Launch the built-in backend directly:
 
 ```bash
-python -m dynamo.fastvideo --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+python -m dynamo.fastvideo --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers
 ```
 
 The local example flow in `examples/backends/fastvideo/launch/` now shells into this built-in entrypoint rather than maintaining separate worker logic.
@@ -149,7 +149,7 @@ Use the built-in entrypoint directly if you prefer not to use the wrapper script
 ```bash
 PYTHONPATH=<dynamo-root>/components/src \
 python -m dynamo.fastvideo \
-  --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
+  --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
   --discovery-backend file
 ```
 
@@ -198,7 +198,7 @@ kubectl apply -f agg.yaml -n ${NAMESPACE}
 The example deployment manifests use the backend default
 (`Wan-AI/Wan2.1-T2V-1.3B-Diffusers`) for faster startup and single-GPU
 compatibility. To use another FastVideo-compatible model such as
-`FastVideo/LTX2-Distilled-Diffusers`, update the worker `--model-path`
+`FastVideo/LTX2-Distilled-Diffusers`, update the worker `--model`
 argument in the manifest.
 
 The shipped Kubernetes manifests also set
@@ -283,8 +283,8 @@ If you omit `"response_format": "b64_json"`, the backend uses its default
 
 | Flag | Default | Description |
 |---|---|---|
-| `--model-path` | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | HuggingFace model path |
-| `--served-model-name` | `--model-path` | Model name registered with Dynamo discovery |
+| `--model` | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | HuggingFace model path |
+| `--served-model-name` | `--model` | Model name registered with Dynamo discovery |
 | `--num-gpus` | `1` | Number of GPUs for distributed inference |
 | `--attention-backend` | `TORCH_SDPA` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |
 | `--dit-cpu-offload` / `--no-dit-cpu-offload` | `enabled` | Enable or disable DiT CPU offload |

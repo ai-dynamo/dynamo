@@ -40,7 +40,7 @@ tools.
 Try the following to begin interacting with a model:
 > python -m dynamo.frontend [--http-port 8000]
 > python -m dynamo.{vllm,sglang,trtllm} --model Qwen/Qwen2.5-3B-Instruct
-> python -m dynamo.fastvideo --model-path Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+> python -m dynamo.fastvideo --model Wan-AI/Wan2.1-T2V-1.3B-Diffusers
 
 To run more complete deployment examples, instances of etcd and nats need to be
 accessible within the container. This is generally done by connecting to
