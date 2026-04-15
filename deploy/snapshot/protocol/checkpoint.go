@@ -5,6 +5,7 @@ package protocol
 
 import (
 	"fmt"
+	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -56,10 +57,10 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}
 	if opts.WrapLaunchJob {
-		container, err := ResolveCheckpointWorkerContainer(&podTemplate.Spec)
-		if err != nil {
-			return nil, err
+		if len(podTemplate.Spec.Containers) == 0 {
+			return nil, fmt.Errorf("checkpoint job requires at least one container")
 		}
+		container := &podTemplate.Spec.Containers[0]
 		if len(container.Command) == 0 {
 			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
 		}
@@ -157,6 +158,17 @@ func EnsureLocalhostSeccompProfile(podSpec *corev1.PodSpec, profile string) {
 }
 
 func wrapWithCudaCheckpointLaunchJob(command []string, args []string) ([]string, []string) {
+	// Unwrap "/bin/sh -c <single-string>" so cuda-checkpoint launches the
+	// actual process directly. Otherwise sh sits between cuda-checkpoint and
+	// the real process and swallows SIGUSR1.
+	if len(command) >= 2 && command[len(command)-1] == "-c" && len(args) == 1 {
+		shell := command[:len(command)-1] // e.g. ["/bin/sh"] — discarded
+		_ = shell
+		parts := strings.Fields(args[0])
+		command = parts[:1] // e.g. ["python3"]
+		args = parts[1:]    // e.g. ["-m", "dynamo.vllm", "--model", ...]
+	}
+
 	wrappedArgs := make([]string, 0, len(command)+len(args)+1)
 	wrappedArgs = append(wrappedArgs, "--launch-job")
 	wrappedArgs = append(wrappedArgs, command...)
