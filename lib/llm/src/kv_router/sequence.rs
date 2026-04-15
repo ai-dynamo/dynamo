@@ -143,6 +143,7 @@ pub async fn create_multi_worker_sequences(
 mod tests {
     use super::*;
     use dynamo_runtime::{DistributedRuntime, Runtime};
+    use tokio::time::Instant;
 
     #[tokio::test]
     #[ignore]
