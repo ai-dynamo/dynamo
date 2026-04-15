@@ -184,7 +184,11 @@ pub fn find_tool_call_end_position(chunk: &str, parser_str: Option<&str>) -> Opt
                 } else {
                     parser_key
                 };
-                Some(find_tool_call_end_position_json(chunk, effective_parser, json_config))
+                Some(find_tool_call_end_position_json(
+                    chunk,
+                    effective_parser,
+                    json_config,
+                ))
             }
             ParserConfig::Harmony(json_config) => {
                 Some(find_tool_call_end_position_harmony(chunk, json_config))

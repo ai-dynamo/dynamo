@@ -1159,28 +1159,17 @@ mod tests {
     async fn test_kimi_k2_streaming_complete_section() {
         let chunks = vec![
             make_chunk("<|tool_calls_section_begin|>", None),
-            make_chunk(
-                "<|tool_call_begin|>functions.get_weather:0",
-                None,
-            ),
+            make_chunk("<|tool_call_begin|>functions.get_weather:0", None),
             make_chunk("<|tool_call_argument_begin|>", None),
             make_chunk(r#"{"location":"NYC"}"#, None),
             make_chunk("<|tool_call_end|>", None),
-            make_chunk(
-                "<|tool_calls_section_end|>",
-                Some(FinishReason::Stop),
-            ),
+            make_chunk("<|tool_calls_section_end|>", Some(FinishReason::Stop)),
         ];
 
         let input_stream = stream::iter(chunks);
-        let output_chunks = parse_response_stream(
-            input_stream,
-            true,
-            false,
-            Some("kimi_k2".to_string()),
-            None,
-        )
-        .await;
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
 
         let aggregated = aggregate_content_from_chunks(&output_chunks);
 
@@ -1203,10 +1192,7 @@ mod tests {
     async fn test_kimi_k2_streaming_missing_section_end_max_tokens() {
         let chunks = vec![
             make_chunk("<|tool_calls_section_begin|>", None),
-            make_chunk(
-                "<|tool_call_begin|>functions.get_weather:0",
-                None,
-            ),
+            make_chunk("<|tool_call_begin|>functions.get_weather:0", None),
             make_chunk("<|tool_call_argument_begin|>", None),
             make_chunk(r#"{"location":"NYC"}"#, None),
             make_chunk("<|tool_call_end|>", None),
@@ -1215,14 +1201,9 @@ mod tests {
         ];
 
         let input_stream = stream::iter(chunks);
-        let output_chunks = parse_response_stream(
-            input_stream,
-            true,
-            false,
-            Some("kimi_k2".to_string()),
-            None,
-        )
-        .await;
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
 
         let aggregated = aggregate_content_from_chunks(&output_chunks);
 
@@ -1263,14 +1244,9 @@ mod tests {
         ];
 
         let input_stream = stream::iter(chunks);
-        let output_chunks = parse_response_stream(
-            input_stream,
-            true,
-            false,
-            Some("kimi_k2".to_string()),
-            None,
-        )
-        .await;
+        let output_chunks =
+            parse_response_stream(input_stream, true, false, Some("kimi_k2".to_string()), None)
+                .await;
 
         let aggregated = aggregate_content_from_chunks(&output_chunks);
 
