@@ -1,0 +1,116 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Multi-Node Elastic EP Scaling Deployment — 3 GPUs per node (6 total)
+#
+# Warm-standby topology: leader node has 2 active DP ranks; worker node's 3 GPUs
+# sit idle in the shared Ray cluster, ready to be claimed on scale-up.
+#
+# vLLM constraint: --enable-elastic-ep requires --enable-eplb, and --enable-eplb
+# requires dp>=2 (or tp>=2). dp=1 is not a valid starting point; scale DOWN to
+# dp=1 crashes vLLM's _eplb_reshuffle_before_scale_down — avoid dp=1 at runtime.
+#
+# Topology:
+#   - 2 nodes × 3 GPUs each = 6 GPUs total in one Ray cluster
+#   - Leader pod: ray start --head && dynamo.vllm ... --data-parallel-size 2
+#   - Worker pod: polls leader port 9090 until dynamo.vllm is ready, then
+#                 ray start --address=<leader>:6379 --block  (no vLLM, GPUs idle)
+#   - scale_elastic_ep endpoint: leader pod port 9090 only
+#
+# Scale sequence (run_elastic_ep_scale_test_multinode_3gpu.sh):
+#   dp=2 → dp=3 → dp=4 → dp=5 → dp=6 → dp=5 → dp=4 → dp=3 → dp=2 → dp=4 → dp=6 → dp=2
+#
+# Node placement per step:
+#   dp=2: leader GPU 0+1 active                  ← baseline (2 leader GPUs)
+#   dp=3: leader GPU 0+1+2                       ← all leader GPUs
+#   dp=4: leader GPU 0+1+2, worker GPU 0         ← first cross-node actor
+#   dp=5: leader GPU 0+1+2, worker GPU 0+1
+#   dp=6: leader GPU 0+1+2, worker GPU 0+1+2     ← full capacity
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: ep-mn
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        nodeSelector:
+          karpenter.sh/nodepool: general-medium-storage
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/tzulingk-dynamo-vllm:elastic_ep_scale_lock
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        requests:
+          memory: "90Gi"
+          gpu: "3"
+        limits:
+          memory: "180Gi"
+          gpu: "3"
+      envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        - name: VLLM_ALL2ALL_BACKEND
+          value: "allgather_reducescatter"
+        - name: VLLM_USE_ELASTIC_EP
+          value: "1"
+        - name: VLLM_USE_V1
+          value: "1"
+        - name: VLLM_WORKER_MULTIPROC_METHOD
+          value: "spawn"
+        - name: VLLM_LOGGING_LEVEL
+          value: "INFO"
+        - name: HF_HUB_ENABLE_HF_TRANSFER
+          value: "1"
+        - name: HF_HOME
+          value: "/model-cache"
+        - name: NCCL_IB_DISABLE
+          value: "1"
+        - name: NCCL_SOCKET_IFNAME
+          value: "eth0"
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-imagepullsecret
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        mainContainer:
+          image: nvcr.io/nvidian/dynamo-dev/tzulingk-dynamo-vllm:elastic_ep_scale_lock
+          imagePullPolicy: Always
+          workingDir: /workspace/examples/backends/vllm
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+            - --model
+            - deepseek-ai/DeepSeek-V2-Lite
+            - --trust-remote-code
+            - --tensor-parallel-size
+            - "1"
+            - --data-parallel-size
+            - "2"
+            - --data-parallel-backend
+            - ray
+            - --gpu-memory-utilization
+            - "0.8"
+            - --max-model-len
+            - "4096"
+            - --enable-expert-parallel
+            - --enable-elastic-ep
+            - --enable-eplb
+            - --eplb-config.num_redundant_experts
+            - "0"
+            - --no-enable-prefix-caching
+            - --enforce-eager
