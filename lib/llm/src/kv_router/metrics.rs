@@ -59,16 +59,23 @@ use crate::http::service::metrics::generate_log_buckets;
 /// Custom buckets for routing overhead histograms (milliseconds).
 ///
 /// Covers 0.1 ms to 1000 ms with log-spaced boundaries, providing good
-/// resolution in the typical 0.1-10 ms range while extending high enough
-/// to capture tail latency from async indexer queries and scheduling under load.
+/// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
+/// p50 sits in the 0.005–0.027 ms range with tails rarely exceeding a few ms.
+/// `exponential_buckets(0.001, 2.0, 15)` → 0.001 ms to ~16.4 ms, 15 buckets.
+fn compute_overhead_buckets() -> Vec<f64> {
+    prometheus::exponential_buckets(0.001, 2.0, 15).unwrap()
+}
+
+/// Buckets for async phases (indexer find_matches, scheduling, total).
+/// p50 ranges from 0.01 ms (find_matches) to 13+ ms (scheduling), with
+/// scheduling tails reaching minutes under contention.
+/// `exponential_buckets(0.01, 3.0, 17)` → 0.01 ms to ~7.2 min, 17 buckets.
 ///
 /// Previous config used `exponential_buckets(0.0001, 2.0, 18)` which topped
 /// out at ~13.1 ms, clipping `histogram_quantile()` output for any overhead
 /// beyond that boundary and hiding long-tail behavior.
-fn overhead_buckets() -> Vec<f64> {
-    vec![
-        0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0,
-    ]
+fn async_overhead_buckets() -> Vec<f64> {
+    prometheus::exponential_buckets(0.01, 3.0, 17).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -212,39 +219,45 @@ impl RoutingOverheadMetrics {
         instance_id: u64,
     ) -> Result<(), prometheus::Error> {
         let m = ROUTING_OVERHEAD_METRICS.get_or_init(|| {
-            let buckets = overhead_buckets();
+            let compute_buckets = compute_overhead_buckets();
+            let async_buckets = async_overhead_buckets();
             let router_id = instance_id.to_string();
-            let make = |suffix: &str, help: &str| {
+            let make = |suffix: &str, help: &str, buckets: Vec<f64>| {
                 let name = format!("{}_{}", name_prefix::ROUTER, suffix);
                 prometheus::Histogram::with_opts(
                     HistogramOpts::new(name, help)
                         .const_label(labels::ROUTER_ID, &router_id)
-                        .buckets(buckets.clone()),
+                        .buckets(buckets),
                 )
             };
             let block_hashing = make(
                 routing_overhead::BLOCK_HASHING_MS,
                 "Time spent computing block hashes in milliseconds",
+                compute_buckets.clone(),
             )
             .expect("overhead_block_hashing_ms");
             let indexer_find_matches = make(
                 routing_overhead::INDEXER_FIND_MATCHES_MS,
                 "Time spent in indexer find_matches in milliseconds",
+                async_buckets.clone(),
             )
             .expect("overhead_indexer_find_matches_ms");
             let seq_hashing = make(
                 routing_overhead::SEQ_HASHING_MS,
                 "Time spent computing sequence hashes in milliseconds",
+                compute_buckets,
             )
             .expect("overhead_seq_hashing_ms");
             let scheduling = make(
                 routing_overhead::SCHEDULING_MS,
                 "Time spent in scheduler worker selection in milliseconds",
+                async_buckets.clone(),
             )
             .expect("overhead_scheduling_ms");
             let total = make(
                 routing_overhead::TOTAL_MS,
                 "Total routing overhead per request in milliseconds",
+                async_buckets,
             )
             .expect("overhead_total_ms");
             Arc::new(Self {
@@ -568,7 +581,7 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
         // Verify the overhead constants produce valid histogram names when
         // combined with dynamo_router_ prefix.
         let registry = prometheus::Registry::new();
-        let buckets = overhead_buckets();
+        let buckets = async_overhead_buckets();
         let prefix = name_prefix::ROUTER;
         let name = format!("{}_{}", prefix, routing_overhead::TOTAL_MS);
         let total = prometheus::Histogram::with_opts(
@@ -599,7 +612,7 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
 
     #[test]
     fn test_routing_overhead_saturating_sub() {
-        let buckets = overhead_buckets();
+        let buckets = async_overhead_buckets();
         let make = |name: &str| {
             prometheus::Histogram::with_opts(
                 prometheus::HistogramOpts::new(name, "test").buckets(buckets.clone()),
