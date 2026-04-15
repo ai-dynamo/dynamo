@@ -17,7 +17,7 @@ use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
     next_timestamp as choose_next_timestamp, pop_ready_decode_handoff, pop_ready_worker_completion,
-    push_decode_handoff, push_worker_completion,
+    pop_ready_worker_ready, push_decode_handoff, push_worker_completion, push_worker_ready,
 };
 #[cfg(test)]
 use super::state::DisaggRequestSnapshot;
@@ -402,6 +402,24 @@ impl DisaggRuntime {
             && self.decode_engine.is_drained()
     }
 
+    /// Return true once the request workload is complete, even if `WorkerReady`
+    /// events remain in the queue.
+    fn is_workload_done(&self) -> bool {
+        self.cluster_in_flight() == 0
+            && self.admission.is_drained()
+            && self.prefill_engine.is_drained()
+            && self.decode_engine.is_drained()
+            && self.only_worker_ready_events_remain()
+    }
+
+    /// True if the event heap is empty or contains only `WorkerReady` events.
+    fn only_worker_ready_events_remain(&self) -> bool {
+        use super::events::SimulationEventKind;
+        self.events
+            .iter()
+            .all(|e| matches!(e.kind, SimulationEventKind::WorkerReady { .. }))
+    }
+
     /// Pick the next logical timestamp from arrivals, worker completions, or decode handoffs.
     fn next_timestamp(&mut self) -> Option<f64> {
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
@@ -690,10 +708,40 @@ impl DisaggRuntime {
         Ok(())
     }
 
+    /// Activate workers whose startup period has elapsed at the current timestamp.
+    fn apply_worker_ready_events(&mut self) -> Result<bool> {
+        let mut changed = false;
+        while let Some((stage, worker_id)) = pop_ready_worker_ready(&mut self.events, self.now_ms) {
+            match stage {
+                SimulationWorkerStage::Prefill => {
+                    if self.prefill_engine.mark_worker_ready(worker_id) {
+                        if let Some(router) = self.prefill_router.as_mut() {
+                            router.add_worker(worker_id)?;
+                        }
+                        changed = true;
+                    }
+                }
+                SimulationWorkerStage::Decode => {
+                    if self.decode_engine.mark_worker_ready(worker_id) {
+                        if let Some(router) = self.decode_router.as_mut() {
+                            router.add_worker(worker_id)?;
+                        }
+                        changed = true;
+                    }
+                }
+                SimulationWorkerStage::Aggregated => {
+                    unreachable!("disagg replay should not receive aggregated worker ready events")
+                }
+            }
+        }
+        Ok(changed)
+    }
+
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> Result<()> {
         loop {
             let mut changed = self.apply_worker_completions()?;
+            changed |= self.apply_worker_ready_events()?;
             changed |= self.apply_decode_handoffs()?;
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_prefill_workers()?;
@@ -723,7 +771,8 @@ impl DisaggRuntime {
     // ------------------------------------------------------------------
 
     /// Advance the simulation up to `until_ms` simulated time, then pause.
-    /// Returns `true` if the replay is done (no more work).
+    /// Returns `true` if the request workload is done — pending `WorkerReady`
+    /// events do not block completion since there is no work for those workers.
     pub(in crate::replay) fn advance_to(&mut self, until_ms: f64) -> Result<bool> {
         self.drain_current_timestamp()?;
 
@@ -743,7 +792,7 @@ impl DisaggRuntime {
             self.drain_current_timestamp()?;
         }
 
-        Ok(self.is_done())
+        Ok(self.is_workload_done())
     }
 
     /// Current simulated time in milliseconds.
@@ -783,18 +832,41 @@ impl DisaggRuntime {
     }
 
     /// Apply a scaling decision with separate prefill and decode targets.
-    /// Newly marked workers are removed from the router immediately so no
-    /// new requests land on them while they drain in-flight work.
+    ///
+    /// Scale-up: if `startup_time` is configured on the respective engine args,
+    /// new workers enter a startup phase and a `WorkerReady` event is scheduled.
+    /// They become active (and are registered with the router) only when that
+    /// event fires.  Without `startup_time`, workers are available immediately.
+    ///
+    /// Scale-down: the worker is removed from the router immediately so no
+    /// new requests land on it while it drains in-flight work.
     pub(in crate::replay) fn apply_scaling(
         &mut self,
         target_prefill: usize,
         target_decode: usize,
     ) -> Result<()> {
+        // -- prefill --
         let (added, newly_marked) = self.prefill_engine.apply_target_count(target_prefill);
-        let prefill_admissions = if let Some(router) = self.prefill_router.as_mut() {
-            for id in added {
-                router.add_worker(id)?;
+        let prefill_delay = self.prefill_engine.startup_time_ms();
+        for &id in &added {
+            match prefill_delay {
+                Some(delay) => {
+                    push_worker_ready(
+                        &mut self.events,
+                        &mut self.next_event_seq,
+                        self.now_ms + delay,
+                        SimulationWorkerStage::Prefill,
+                        id,
+                    );
+                }
+                None => {
+                    if let Some(router) = self.prefill_router.as_mut() {
+                        router.add_worker(id)?;
+                    }
+                }
             }
+        }
+        let prefill_admissions = if let Some(router) = self.prefill_router.as_mut() {
             for id in newly_marked {
                 router.remove_worker(id)?;
             }
@@ -802,11 +874,29 @@ impl DisaggRuntime {
         } else {
             Vec::new()
         };
+
+        // -- decode --
         let (added, newly_marked) = self.decode_engine.apply_target_count(target_decode);
-        let decode_admissions = if let Some(router) = self.decode_router.as_mut() {
-            for id in added {
-                router.add_worker(id)?;
+        let decode_delay = self.decode_engine.startup_time_ms();
+        for &id in &added {
+            match decode_delay {
+                Some(delay) => {
+                    push_worker_ready(
+                        &mut self.events,
+                        &mut self.next_event_seq,
+                        self.now_ms + delay,
+                        SimulationWorkerStage::Decode,
+                        id,
+                    );
+                }
+                None => {
+                    if let Some(router) = self.decode_router.as_mut() {
+                        router.add_worker(id)?;
+                    }
+                }
             }
+        }
+        let decode_admissions = if let Some(router) = self.decode_router.as_mut() {
             for id in newly_marked {
                 router.remove_worker(id)?;
             }
