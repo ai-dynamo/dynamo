@@ -114,6 +114,7 @@ def test_agg_mode_supports_throughput_scaling():
     config = PlannerConfig(
         namespace="test-ns",
         mode="agg",
+        optimization_target="sla",
         enable_throughput_scaling=True,
         enable_load_scaling=False,
     )

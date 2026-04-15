@@ -173,7 +173,7 @@ jobs:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           lfs: true
       - name: Compute compliance arches
@@ -250,7 +250,7 @@ jobs:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
@@ -327,7 +327,7 @@ jobs:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
@@ -384,7 +384,7 @@ jobs:
     runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -431,7 +431,7 @@ jobs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Copy image to target registry
         timeout-minutes: ${{ inputs.copy_timeout_minutes }}

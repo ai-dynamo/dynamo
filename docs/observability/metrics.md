@@ -223,7 +223,7 @@ Suppose the backend allows 3 concurrent requests and there are 10 clients contin
 
 The router exposes metrics for monitoring routing decisions and overhead. Defined in `lib/llm/src/kv_router/metrics.rs`.
 
-For router configuration, deployment modes, and tuning, see the [Router Guide](../components/router/router-guide.md).
+For router deployment modes, see the [Router Guide](../components/router/router-guide.md). For router flags and tuning, see [Configuration and Tuning](../components/router/router-configuration.md).
 
 #### Metrics Availability by Configuration
 
