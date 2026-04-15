@@ -18,7 +18,6 @@
 //! Each block is identified by a hash of its contents, allowing for deduplication when multiple
 //! requests share common prefixes (e.g., system prompts, few-shot examples).
 
-use derive_getters::Getters;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -30,9 +29,7 @@ use uuid::Uuid;
 use rustc_hash::FxHashSet;
 
 use super::block_tracker::BlockTracker;
-use super::prefill_tracker::{
-    PrefillLoadSnapshot, PrefillLoadState, PrefillLoadTracker, added_prefill_tokens,
-};
+use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker, added_prefill_tokens};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::PrefillLoadHint;
 
@@ -105,21 +102,18 @@ pub(super) struct SequenceMutationOutcome {
 }
 
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
-#[derive(Debug, Getters)]
+#[derive(Debug)]
 pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
-
-    #[getter(copy)]
     block_size: usize,
-
     last_expiry_check_time: Instant,
 }
 
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
-    pub fn new(block_size: usize) -> Self {
+    pub(super) fn new(block_size: usize) -> Self {
         assert!(block_size > 1, "block_size must be greater than 1");
 
         Self {
@@ -155,50 +149,13 @@ impl ActiveSequences {
         self.assert_consistent();
     }
 
-    pub fn active_blocks(&self) -> usize {
+    pub(super) fn active_blocks(&self) -> usize {
         self.blocks.active_blocks()
     }
 
-    fn insert_prefill_load(
-        &mut self,
-        request_id: &RequestId,
-        prefill: PrefillLoadState,
-        decay_now: Instant,
-    ) {
-        self.prefill.insert(request_id, prefill, decay_now);
-    }
-
-    fn remove_prefill_load(
-        &mut self,
-        request_id: &RequestId,
-        decay_now: Instant,
-    ) -> Option<PrefillLoadState> {
-        self.prefill.remove(request_id, decay_now)
-    }
-
-    fn active_prefill_tokens_at(&self, now: Instant) -> usize {
-        self.prefill_load_snapshot().active_tokens_at(now)
-    }
-
-    pub fn active_tokens(&self, decay_now: Instant) -> usize {
-        self.active_prefill_tokens_at(decay_now)
-    }
-
-    /// Find all blocks in a request that have only a single strong reference (only used by this request)
-    /// and insert them into fractional_blocks with the given fraction value.
-    pub fn set_single_ref_blocks_as_fractional(&mut self, request_id: &RequestId, fraction: f64) {
-        let Some(request_state) = self.requests.get(request_id) else {
-            tracing::warn!(
-                "Request {request_id} not found for set_single_ref_blocks_as_fractional"
-            );
-            return;
-        };
-
-        for (hash, rc) in request_state.all_blocks() {
-            if Arc::strong_count(rc) == 1 {
-                self.blocks.fractional_blocks.insert(*hash, fraction);
-            }
-        }
+    #[cfg(test)]
+    pub(super) fn active_tokens(&self, decay_now: Instant) -> usize {
+        self.prefill.snapshot().active_tokens_at(decay_now)
     }
 
     /// Add a new request with its initial tokens.
@@ -309,7 +266,7 @@ impl ActiveSequences {
         );
 
         if let Some(prefill) = prefill {
-            self.insert_prefill_load(&request_id, prefill, decay_now);
+            self.prefill.insert(&request_id, prefill, decay_now);
         }
 
         self.validate_state();
@@ -317,89 +274,9 @@ impl ActiveSequences {
     }
 
     /// Mark prefill as completed for a request, removing it from prompt-load tracking.
-    pub fn mark_prefill_completed(&mut self, request_id: &RequestId, decay_now: Instant) {
-        let _ = self.remove_prefill_load(request_id, decay_now);
+    pub(super) fn mark_prefill_completed(&mut self, request_id: &RequestId, decay_now: Instant) {
+        let _ = self.prefill.remove(request_id, decay_now);
         self.validate_state();
-    }
-
-    pub fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
-        added_prefill_tokens(self.block_size, isl, overlap)
-    }
-
-    pub fn potential_blocks_and_tokens(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        overlap: u32,
-        decay_now: Instant,
-    ) -> (usize, usize) {
-        self.potential_blocks_and_tokens_with_prefill_tracking(
-            token_sequence,
-            isl,
-            overlap,
-            true,
-            decay_now,
-        )
-    }
-
-    pub fn potential_blocks_and_tokens_with_prefill_tracking(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        isl: usize,
-        overlap: u32,
-        track_prefill_tokens: bool,
-        decay_now: Instant,
-    ) -> (usize, usize) {
-        let potential_blocks = if let Some(token_seq) = token_sequence {
-            self.new_blocks(token_seq) + self.active_blocks()
-        } else {
-            self.active_blocks()
-        };
-        let active_tokens = self.active_tokens(decay_now);
-        let potential_tokens = if track_prefill_tokens {
-            self.new_tokens(isl, overlap) + active_tokens
-        } else {
-            active_tokens
-        };
-
-        (potential_blocks, potential_tokens)
-    }
-
-    /// Match a request against existing blocks and return the number of new blocks that would be added
-    pub fn new_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
-        token_sequence
-            .iter()
-            .filter(|block| !self.blocks.unique_blocks.contains_key(block))
-            .count()
-    }
-
-    /// Return the total number of blocks that would be used if the token sequence was added.
-    pub fn potential_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
-        self.new_blocks(token_sequence) + self.active_blocks()
-    }
-
-    fn prefill_load_snapshot(&self) -> PrefillLoadSnapshot {
-        self.prefill.snapshot()
-    }
-
-    pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
-        WorkerLoadSnapshot {
-            active_blocks: self.active_blocks(),
-            prefill: self.prefill_load_snapshot(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn active_block_hashes(&self) -> FxHashSet<SequenceHash> {
-        self.blocks.unique_blocks.keys().copied().collect()
-    }
-
-    #[cfg(test)]
-    pub(super) fn active_prompt_hashes(&self) -> FxHashSet<SequenceHash> {
-        self.requests
-            .values()
-            .flat_map(|state| state.prompt_blocks.iter().map(|(hash, _)| *hash))
-            .collect()
     }
 
     /// Free all blocks associated with a request.
@@ -411,7 +288,7 @@ impl ActiveSequences {
         request_id: &RequestId,
         decay_now: Instant,
     ) -> PromptMembershipDelta {
-        let _ = self.remove_prefill_load(request_id, decay_now);
+        let _ = self.prefill.remove(request_id, decay_now);
 
         let Some(request_state) = self.requests.remove(request_id) else {
             tracing::warn!("Trying to free non-existent request {request_id}");
@@ -451,7 +328,7 @@ impl ActiveSequences {
     /// Add an output block with a random hash and optional fractional decay weight.
     ///
     /// This is used during generation to track output blocks as they are created.
-    pub fn add_output_block(
+    pub(super) fn add_output_block(
         &mut self,
         request_id: &RequestId,
         decay_fraction: Option<f64>,
@@ -477,6 +354,47 @@ impl ActiveSequences {
 
         self.validate_state();
         acquire.became_present_on_worker.then_some(random_hash)
+    }
+
+    pub(super) fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
+        added_prefill_tokens(self.block_size, isl, overlap)
+    }
+
+    #[cfg(test)]
+    fn potential_blocks_and_tokens_with_prefill_tracking(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        isl: usize,
+        overlap: u32,
+        track_prefill_tokens: bool,
+        decay_now: Instant,
+    ) -> (usize, usize) {
+        let potential_blocks = if let Some(token_seq) = token_sequence {
+            self.new_blocks(token_seq) + self.active_blocks()
+        } else {
+            self.active_blocks()
+        };
+        let active_tokens = self.active_tokens(decay_now);
+        let potential_tokens = if track_prefill_tokens {
+            self.new_tokens(isl, overlap) + active_tokens
+        } else {
+            active_tokens
+        };
+
+        (potential_blocks, potential_tokens)
+    }
+
+    /// Match a request against existing blocks and return the number of new blocks that would be added
+    pub(super) fn new_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
+        token_sequence
+            .iter()
+            .filter(|block| !self.blocks.unique_blocks.contains_key(block))
+            .count()
+    }
+
+    /// Return the total number of blocks that would be used if the token sequence was added.
+    pub(super) fn potential_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
+        self.new_blocks(token_sequence) + self.active_blocks()
     }
 
     /// Force expiry of stale requests if the timer has elapsed.
@@ -509,6 +427,43 @@ impl ActiveSequences {
 
         self.validate_state();
         outcome
+    }
+
+    /// Find all blocks in a request that have only a single strong reference (only used by this request)
+    /// and insert them into fractional_blocks with the given fraction value.
+    fn set_single_ref_blocks_as_fractional(&mut self, request_id: &RequestId, fraction: f64) {
+        let Some(request_state) = self.requests.get(request_id) else {
+            tracing::warn!(
+                "Request {request_id} not found for set_single_ref_blocks_as_fractional"
+            );
+            return;
+        };
+
+        for (hash, rc) in request_state.all_blocks() {
+            if Arc::strong_count(rc) == 1 {
+                self.blocks.fractional_blocks.insert(*hash, fraction);
+            }
+        }
+    }
+
+    pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
+        WorkerLoadSnapshot {
+            active_blocks: self.active_blocks(),
+            prefill: self.prefill.snapshot(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn active_block_hashes(&self) -> FxHashSet<SequenceHash> {
+        self.blocks.unique_blocks.keys().copied().collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn active_prompt_hashes(&self) -> FxHashSet<SequenceHash> {
+        self.requests
+            .values()
+            .flat_map(|state| state.prompt_blocks.iter().map(|(hash, _)| *hash))
+            .collect()
     }
 }
 

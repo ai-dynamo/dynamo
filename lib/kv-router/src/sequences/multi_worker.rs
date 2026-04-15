@@ -207,21 +207,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.publisher.publish_load(active_load);
     }
 
-    fn apply_worker_membership_delta_and_load(
-        &self,
-        worker: WorkerWithDpRank,
-        lookup: &Arc<RwLock<super::prompt_membership_trie::WorkerLookup>>,
-        delta: PromptMembershipDelta,
-        load: WorkerLoadSnapshot,
-    ) {
-        self.prompt_registry
-            .apply_membership_delta_and_load(worker, lookup, delta, load);
-    }
-
-    fn replace_worker_load_state(&self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) {
-        self.prompt_registry.replace_worker_load_state(worker, load);
-    }
-
     fn spawn_publish_event(&self, event: ActiveSequenceEvent) {
         if !self.replica_sync {
             return;
@@ -323,7 +308,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                         decay_now,
                                     );
                                     let load = seq.worker_load_snapshot();
-                                    self.apply_worker_membership_delta_and_load(
+                                    self.prompt_registry.apply_membership_delta_and_load(
                                         event.worker,
                                         &slot.trie_lookup,
                                         outcome.membership_delta,
@@ -351,7 +336,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                         let mut seq = slot.sequences.write();
                                         let delta = seq.free(&event.request_id, decay_now);
                                         let load = seq.worker_load_snapshot();
-                                        self.apply_worker_membership_delta_and_load(
+                                        self.prompt_registry.apply_membership_delta_and_load(
                                             worker,
                                             &slot.trie_lookup,
                                             delta,
@@ -374,7 +359,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                         let mut seq = table.slots[idx].sequences.write();
                                         seq.mark_prefill_completed(&event.request_id, decay_now);
                                         let load = seq.worker_load_snapshot();
-                                        self.replace_worker_load_state(worker, load);
+                                        self.prompt_registry.replace_worker_load_state(worker, load);
                                     }
                                     drop(table);
                                     remote_capacity_changed = true;
@@ -439,87 +424,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.prompt_registry.apply_topology_change(change);
     }
 
-    fn ensure_worker_registered(&self, worker: WorkerWithDpRank) {
-        if self.workers.read().index.contains_key(&worker) {
-            return;
-        }
-
-        let mut table = self.workers.write();
-        if table.index.contains_key(&worker) {
-            return;
-        }
-
-        tracing::debug!(?worker, "Lazily registering worker in slot tracker");
-        let change = table.ensure_worker(self.block_size, worker);
-        drop(table);
-
-        self.prompt_registry.apply_topology_change(change);
-    }
-
-    fn add_request_local(
-        &self,
-        req: SequenceRequest,
-        decay_now: Instant,
-    ) -> Result<(), SequenceError> {
-        let SequenceRequest {
-            request_id,
-            token_sequence,
-            isl,
-            overlap,
-            track_prefill_tokens,
-            expected_output_tokens,
-            prefill_load_hint,
-            worker,
-            lora_name,
-        } = req;
-
-        self.ensure_worker_registered(worker);
-
-        let (expired_request_ids, load) = {
-            let table = self.workers.read();
-            let &idx = table
-                .index
-                .get(&worker)
-                .ok_or(SequenceError::WorkerNotFound { worker })?;
-            if let Err(existing_worker) =
-                self.request_index
-                    .try_insert_request(request_id.clone(), worker, lora_name)
-            {
-                return Err(SequenceError::DuplicateRequest {
-                    request_id,
-                    worker: existing_worker,
-                });
-            }
-            let slot = &table.slots[idx];
-            let mut seq = slot.sequences.write();
-            let outcome = seq.add_request_with_prefill_tracking(
-                request_id,
-                token_sequence,
-                isl,
-                overlap,
-                expected_output_tokens,
-                track_prefill_tokens,
-                prefill_load_hint,
-                decay_now,
-            );
-            let load = seq.worker_load_snapshot();
-            self.apply_worker_membership_delta_and_load(
-                worker,
-                &slot.trie_lookup,
-                outcome.membership_delta,
-                load,
-            );
-            (outcome.expired_request_ids, load)
-        };
-
-        self.request_index
-            .remove_requests(expired_request_ids.iter());
-
-        self.publish_worker_load_snapshot(worker, load, decay_now);
-
-        Ok(())
-    }
-
     pub fn add_request(
         &self,
         req: SequenceRequest,
@@ -541,147 +445,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         };
         self.add_request_local(req, decay_now)?;
         self.spawn_publish_event(event);
-        Ok(())
-    }
-
-    fn stale_request_not_found(
-        &self,
-        request_id: &RequestId,
-        worker: WorkerWithDpRank,
-        operation: &'static str,
-    ) -> SequenceError {
-        if self.request_index.worker_for(request_id) == Some(worker) {
-            self.request_index.remove_request(request_id);
-            tracing::warn!(
-                %request_id,
-                ?worker,
-                operation,
-                "request index referenced a missing worker slot; removed stale mapping"
-            );
-        } else {
-            tracing::warn!(
-                %request_id,
-                ?worker,
-                operation,
-                "request worker slot disappeared before the mutation ran"
-            );
-        }
-
-        SequenceError::RequestNotFound {
-            request_id: request_id.clone(),
-        }
-    }
-
-    fn mutate_request_worker_prompt_state_local(
-        &self,
-        worker: WorkerWithDpRank,
-        request_id: &RequestId,
-        decay_now: Instant,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
-        remove_mapping: bool,
-    ) -> Result<(), SequenceError> {
-        let load = {
-            let table = self.workers.read();
-            let Some(&idx) = table.index.get(&worker) else {
-                drop(table);
-                return Err(self.stale_request_not_found(request_id, worker, "free_or_mutate"));
-            };
-            let slot = &table.slots[idx];
-            let mut seq = slot.sequences.write();
-            let delta = mutate_fn(&mut seq, request_id, decay_now);
-            let load = seq.worker_load_snapshot();
-            self.apply_worker_membership_delta_and_load(worker, &slot.trie_lookup, delta, load);
-            load
-        };
-
-        if remove_mapping {
-            self.request_index.remove_request(request_id);
-        }
-
-        self.publish_worker_load_snapshot(worker, load, decay_now);
-
-        Ok(())
-    }
-
-    fn mutate_request_worker_load_state_local(
-        &self,
-        worker: WorkerWithDpRank,
-        request_id: &RequestId,
-        decay_now: Instant,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
-    ) -> Result<(), SequenceError> {
-        let load = {
-            let table = self.workers.read();
-            let Some(&idx) = table.index.get(&worker) else {
-                drop(table);
-                return Err(self.stale_request_not_found(request_id, worker, "load_only_mutate"));
-            };
-            let mut seq = table.slots[idx].sequences.write();
-            mutate_fn(&mut seq, request_id, decay_now);
-            let load = seq.worker_load_snapshot();
-            self.replace_worker_load_state(worker, load);
-            load
-        };
-
-        self.publish_worker_load_snapshot(worker, load, decay_now);
-
-        Ok(())
-    }
-
-    fn mutate_request_worker_prompt_state(
-        &self,
-        request_id: &RequestId,
-        decay_now: Instant,
-        event_data: ActiveSequenceEventData,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
-        remove_mapping: bool,
-    ) -> Result<(), SequenceError> {
-        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
-            SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            }
-        })?;
-
-        let lora_name = self.request_index.lora_for(request_id);
-        self.mutate_request_worker_prompt_state_local(
-            worker,
-            request_id,
-            decay_now,
-            mutate_fn,
-            remove_mapping,
-        )?;
-        self.spawn_publish_event(ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker,
-            data: event_data,
-            router_id: self.router_id,
-            lora_name,
-        });
-        Ok(())
-    }
-
-    fn mutate_request_worker_load_state(
-        &self,
-        request_id: &RequestId,
-        decay_now: Instant,
-        event_data: ActiveSequenceEventData,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
-    ) -> Result<(), SequenceError> {
-        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
-            SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            }
-        })?;
-
-        let lora_name = self.request_index.lora_for(request_id);
-        self.mutate_request_worker_load_state_local(worker, request_id, decay_now, mutate_fn)?;
-        self.spawn_publish_event(ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker,
-            data: event_data,
-            router_id: self.router_id,
-            lora_name,
-        });
         Ok(())
     }
 
@@ -759,7 +522,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 });
             };
             let load = seq.worker_load_snapshot();
-            self.replace_worker_load_state(worker, load);
+            self.prompt_registry.replace_worker_load_state(worker, load);
             load
         };
 
@@ -769,7 +532,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Get the number of workers.
-    pub fn num_workers(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn num_workers(&self) -> usize {
         self.workers.read().slots.len()
     }
 
@@ -889,7 +653,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let outcome = seq.force_expiry();
             if !outcome.expired_request_ids.is_empty() {
                 let load = seq.worker_load_snapshot();
-                self.apply_worker_membership_delta_and_load(
+                self.prompt_registry.apply_membership_delta_and_load(
                     slot.worker,
                     &slot.trie_lookup,
                     outcome.membership_delta,
@@ -936,6 +700,233 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 }
             }
         });
+    }
+
+    fn ensure_worker_registered(&self, worker: WorkerWithDpRank) {
+        if self.workers.read().index.contains_key(&worker) {
+            return;
+        }
+
+        let mut table = self.workers.write();
+        if table.index.contains_key(&worker) {
+            return;
+        }
+
+        tracing::debug!(?worker, "Lazily registering worker in slot tracker");
+        let change = table.ensure_worker(self.block_size, worker);
+        drop(table);
+
+        self.prompt_registry.apply_topology_change(change);
+    }
+
+    fn add_request_local(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<(), SequenceError> {
+        let SequenceRequest {
+            request_id,
+            token_sequence,
+            isl,
+            overlap,
+            track_prefill_tokens,
+            expected_output_tokens,
+            prefill_load_hint,
+            worker,
+            lora_name,
+        } = req;
+
+        self.ensure_worker_registered(worker);
+
+        let (expired_request_ids, load) = {
+            let table = self.workers.read();
+            let &idx = table
+                .index
+                .get(&worker)
+                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            if let Err(existing_worker) =
+                self.request_index
+                    .try_insert_request(request_id.clone(), worker, lora_name)
+            {
+                return Err(SequenceError::DuplicateRequest {
+                    request_id,
+                    worker: existing_worker,
+                });
+            }
+            let slot = &table.slots[idx];
+            let mut seq = slot.sequences.write();
+            let outcome = seq.add_request_with_prefill_tracking(
+                request_id,
+                token_sequence,
+                isl,
+                overlap,
+                expected_output_tokens,
+                track_prefill_tokens,
+                prefill_load_hint,
+                decay_now,
+            );
+            let load = seq.worker_load_snapshot();
+            self.prompt_registry.apply_membership_delta_and_load(
+                worker,
+                &slot.trie_lookup,
+                outcome.membership_delta,
+                load,
+            );
+            (outcome.expired_request_ids, load)
+        };
+
+        self.request_index
+            .remove_requests(expired_request_ids.iter());
+
+        self.publish_worker_load_snapshot(worker, load, decay_now);
+
+        Ok(())
+    }
+
+    fn stale_request_not_found(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        operation: &'static str,
+    ) -> SequenceError {
+        if self.request_index.worker_for(request_id) == Some(worker) {
+            self.request_index.remove_request(request_id);
+            tracing::warn!(
+                %request_id,
+                ?worker,
+                operation,
+                "request index referenced a missing worker slot; removed stale mapping"
+            );
+        } else {
+            tracing::warn!(
+                %request_id,
+                ?worker,
+                operation,
+                "request worker slot disappeared before the mutation ran"
+            );
+        }
+
+        SequenceError::RequestNotFound {
+            request_id: request_id.clone(),
+        }
+    }
+
+    fn mutate_request_worker_prompt_state_local(
+        &self,
+        worker: WorkerWithDpRank,
+        request_id: &RequestId,
+        decay_now: Instant,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
+        remove_mapping: bool,
+    ) -> Result<(), SequenceError> {
+        let load = {
+            let table = self.workers.read();
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                return Err(self.stale_request_not_found(request_id, worker, "free_or_mutate"));
+            };
+            let slot = &table.slots[idx];
+            let mut seq = slot.sequences.write();
+            let delta = mutate_fn(&mut seq, request_id, decay_now);
+            let load = seq.worker_load_snapshot();
+            self.prompt_registry.apply_membership_delta_and_load(
+                worker,
+                &slot.trie_lookup,
+                delta,
+                load,
+            );
+            load
+        };
+
+        if remove_mapping {
+            self.request_index.remove_request(request_id);
+        }
+
+        self.publish_worker_load_snapshot(worker, load, decay_now);
+
+        Ok(())
+    }
+
+    fn mutate_request_worker_load_state_local(
+        &self,
+        worker: WorkerWithDpRank,
+        request_id: &RequestId,
+        decay_now: Instant,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
+    ) -> Result<(), SequenceError> {
+        let load = {
+            let table = self.workers.read();
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                return Err(self.stale_request_not_found(request_id, worker, "load_only_mutate"));
+            };
+            let mut seq = table.slots[idx].sequences.write();
+            mutate_fn(&mut seq, request_id, decay_now);
+            let load = seq.worker_load_snapshot();
+            self.prompt_registry.replace_worker_load_state(worker, load);
+            load
+        };
+
+        self.publish_worker_load_snapshot(worker, load, decay_now);
+
+        Ok(())
+    }
+
+    fn mutate_request_worker_prompt_state(
+        &self,
+        request_id: &RequestId,
+        decay_now: Instant,
+        event_data: ActiveSequenceEventData,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
+        remove_mapping: bool,
+    ) -> Result<(), SequenceError> {
+        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
+            SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            }
+        })?;
+
+        let lora_name = self.request_index.lora_for(request_id);
+        self.mutate_request_worker_prompt_state_local(
+            worker,
+            request_id,
+            decay_now,
+            mutate_fn,
+            remove_mapping,
+        )?;
+        self.spawn_publish_event(ActiveSequenceEvent {
+            request_id: request_id.clone(),
+            worker,
+            data: event_data,
+            router_id: self.router_id,
+            lora_name,
+        });
+        Ok(())
+    }
+
+    fn mutate_request_worker_load_state(
+        &self,
+        request_id: &RequestId,
+        decay_now: Instant,
+        event_data: ActiveSequenceEventData,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
+    ) -> Result<(), SequenceError> {
+        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
+            SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            }
+        })?;
+
+        let lora_name = self.request_index.lora_for(request_id);
+        self.mutate_request_worker_load_state_local(worker, request_id, decay_now, mutate_fn)?;
+        self.spawn_publish_event(ActiveSequenceEvent {
+            request_id: request_id.clone(),
+            worker,
+            data: event_data,
+            router_id: self.router_id,
+            lora_name,
+        });
+        Ok(())
     }
 }
 

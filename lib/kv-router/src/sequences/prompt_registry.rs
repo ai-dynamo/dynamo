@@ -49,14 +49,10 @@ impl Default for PromptRegistry {
 }
 
 impl PromptRegistry {
-    fn ensure_worker_entries(&self, worker: WorkerWithDpRank) {
-        self.loads.entry(worker).or_default();
-    }
-
     pub(super) fn new(workers: impl IntoIterator<Item = WorkerWithDpRank>) -> Self {
         let registry = Self::default();
         for worker in workers {
-            registry.ensure_worker_entries(worker);
+            registry.loads.entry(worker).or_default();
         }
         registry
     }
@@ -94,7 +90,7 @@ impl PromptRegistry {
         }
 
         for worker in change.added {
-            self.ensure_worker_entries(worker);
+            self.loads.entry(worker).or_default();
         }
     }
 
