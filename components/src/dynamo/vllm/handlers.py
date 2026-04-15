@@ -1254,6 +1254,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"Extracted {len(audios)} audio item(s) for multimodal processing"
                 )
 
+        # Some models (e.g. Kimi-K2.5) set `use_unified_vision_chunk = True` in
+        # their HF config.  vLLM's chat_utils.py remaps "image"/"video" →
+        # "vision_chunk" when it processes OpenAI chat requests, but Dynamo
+        # bypasses that path and feeds multi-modal data directly to the engine.
+        # Without the remap, vLLM's validate_num_items() looks up "image" in
+        # get_supported_mm_limits() which only contains "vision_chunk" → 0,
+        # raising "At most 0 image(s) may be provided in one prompt".
+        hf_config = self.engine_client.vllm_config.model_config.hf_config
+        if getattr(hf_config, "use_unified_vision_chunk", False):
+            vision_chunks = []
+            if "image" in vllm_mm_data:
+                imgs = vllm_mm_data.pop("image")
+                vision_chunks += imgs if isinstance(imgs, list) else [imgs]
+            if "video" in vllm_mm_data:
+                vids = vllm_mm_data.pop("video")
+                vision_chunks += vids if isinstance(vids, list) else [vids]
+            if vision_chunks:
+                vllm_mm_data["vision_chunk"] = (
+                    vision_chunks[0] if len(vision_chunks) == 1 else vision_chunks
+                )
+
         return vllm_mm_data if vllm_mm_data else None
 
     def _build_prompt_from_request(
