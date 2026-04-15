@@ -7,6 +7,7 @@ import logging
 from typing import Any, AsyncGenerator
 
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.llm import KvRouter
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -36,13 +37,15 @@ class MMRouterHandler:
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         """Main entry point: process request, compute routing, forward to best worker."""
+        rng = _nvtx.start_range("mm_worker:generate", color="blue")
         messages = request.get("extra_args", {}).get("messages", [])
         image_urls = extract_image_urls(messages)
 
         if image_urls:
-            routing_tokens, block_mm_infos = await self._process_mm_request(
-                request, messages, image_urls
-            )
+            with _nvtx.annotate("mm_worker:process_mm_request", color="orange"):
+                routing_tokens, block_mm_infos = await self._process_mm_request(
+                    request, messages, image_urls
+                )
         else:
             routing_tokens = request.get("token_ids")
             if not routing_tokens:
@@ -50,6 +53,7 @@ class MMRouterHandler:
             n_blocks = (len(routing_tokens) + self.block_size - 1) // self.block_size
             block_mm_infos = [None] * n_blocks
 
+        _nvtx.end_range(rng)
         stream = await self.kv_router.generate(
             token_ids=request.get("token_ids"),
             model=request["model"],

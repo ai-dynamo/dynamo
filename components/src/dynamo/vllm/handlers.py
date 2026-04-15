@@ -1219,11 +1219,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return None
 
         try:
-            metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
-            if self._mm_kwargs_receiver is None:
-                self._mm_kwargs_receiver = MmKwargsReceiver()
-            receiver = self._mm_kwargs_receiver
-            mm_kwargs_tensors = await receiver.receive(metadata)
+            with _nvtx.annotate("mm_backend:nixl_setup", color="magenta"):
+                metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
+                if self._mm_kwargs_receiver is None:
+                    self._mm_kwargs_receiver = MmKwargsReceiver()
+                receiver = self._mm_kwargs_receiver
+            with _nvtx.annotate("mm_backend:nixl_rdma_read", color="magenta"):
+                mm_kwargs_tensors = await receiver.receive(metadata)
 
             # Reconstruct a pre-rendered MultiModalInput dict.
             # The vLLM engine detects "type": "multimodal" and skips the HF
@@ -1244,7 +1246,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "falling back to normal path"
                 )
                 return None
-            kwargs_item = pickle.loads(pickled_item)
+            with _nvtx.annotate("mm_backend:nixl_pickle_loads", color="magenta"):
+                kwargs_item = pickle.loads(pickled_item)
             if not isinstance(kwargs_item, MultiModalKwargsItem):
                 logger.warning(
                     "[mm-routing] Deserialized object is %s, expected "
@@ -1775,12 +1778,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request, request_id, context
                     )
         else:
-            # Fast path: check for pre-processed mm_kwargs via NIXL from frontend.
+            # Fast path: check for pre-processed mm_kwargs via NIXL/SHM from frontend.
             # If available, we skip image downloading AND the HF processor.
-            pre_rendered = await self._try_receive_mm_kwargs_nixl(request)
+            with _nvtx.annotate("mm_backend:receive_mm_kwargs", color="magenta"):
+                pre_rendered = await self._try_receive_mm_kwargs_nixl(request)
             if pre_rendered is not None:
                 logger.debug(
-                    "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL",
+                    "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL/SHM",
                     request_id,
                 )
             else:

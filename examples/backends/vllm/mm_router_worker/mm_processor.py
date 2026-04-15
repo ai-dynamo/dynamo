@@ -17,6 +17,7 @@ from typing import Any, Sequence
 from PIL import Image
 
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 logger = logging.getLogger(__name__)
@@ -68,19 +69,26 @@ async def process_multimodal(
     Uses the shared ImageLoader for async loading with HTTP cache.
     Hashes PIL images to natively match the vLLM backend's multi_modal_uuids.
     """
-    prompt = _apply_chat_template(messages, tokenizer, processor)
+    rng = _nvtx.start_range("mm_worker:process_multimodal", color="orange")
 
-    image_mm_items = [{"Url": url} for url in image_urls]
-    pil_images = await image_loader.load_image_batch(image_mm_items)
+    with _nvtx.annotate("mm_worker:apply_chat_template", color="yellow"):
+        prompt = _apply_chat_template(messages, tokenizer, processor)
+
+    with _nvtx.annotate("mm_worker:image_download", color="green"):
+        image_mm_items = [{"Url": url} for url in image_urls]
+        pil_images = await image_loader.load_image_batch(image_mm_items)
     image_dims = [(img.width, img.height) for img in pil_images]
 
-    tokens, image_ranges = _get_expanded_tokens(
-        prompt, image_dims, pil_images, tokenizer, processor
-    )
+    with _nvtx.annotate("mm_worker:token_expansion", color="red"):
+        tokens, image_ranges = _get_expanded_tokens(
+            prompt, image_dims, pil_images, tokenizer, processor
+        )
 
-    mm_uuids = compute_mm_uuids_from_images(pil_images)
-    mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
+    with _nvtx.annotate("mm_worker:compute_mm_hashes", color="magenta"):
+        mm_uuids = compute_mm_uuids_from_images(pil_images)
+        mm_hashes = [int(uuid[:16], 16) for uuid in mm_uuids]
 
+    _nvtx.end_range(rng)
     return ProcessedInput(tokens=tokens, mm_hashes=mm_hashes, image_ranges=image_ranges)
 
 
