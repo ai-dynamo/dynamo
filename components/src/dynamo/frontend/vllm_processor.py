@@ -233,9 +233,10 @@ class VllmProcessor:
 
                     if self._shm_sender is None:
                         self._shm_sender = MmKwargsShmSender()
-                    shm_meta, shm_handles_local = self._shm_sender.prepare(
-                        vllm_preproc.mm_features, modality="image"
-                    )
+                    with _nvtx.annotate("mm_frontend:shm_sender_prepare", color="cyan"):
+                        shm_meta, shm_handles_local = self._shm_sender.prepare(
+                            vllm_preproc.mm_features, modality="image"
+                        )
                     if shm_meta is not None:
                         dynamo_preproc["extra_args"]["mm_kwargs_shm"] = shm_meta
                         shm_handles = shm_handles_local
@@ -257,12 +258,15 @@ class VllmProcessor:
 
                     if self._mm_kwargs_sender is None:
                         self._mm_kwargs_sender = MmKwargsSender()
-                    (
-                        nixl_meta,
-                        nixl_completion_futures,
-                    ) = await self._mm_kwargs_sender.prepare(
-                        vllm_preproc.mm_features, modality="image"
-                    )
+                    with _nvtx.annotate(
+                        "mm_frontend:nixl_sender_prepare", color="magenta"
+                    ):
+                        (
+                            nixl_meta,
+                            nixl_completion_futures,
+                        ) = await self._mm_kwargs_sender.prepare(
+                            vllm_preproc.mm_features, modality="image"
+                        )
                     if nixl_meta is not None:
                         dynamo_preproc["extra_args"][
                             "mm_kwargs_nixl"

@@ -128,7 +128,8 @@ class MmKwargsSender:
                 continue
 
             # Pickle the kwargs item — preserves MultiModalFieldElem + field objects
-            pickled_item = pickle.dumps(feat.data)
+            with _nvtx.annotate("mm_nixl:pickle_dumps", color="magenta"):
+                pickled_item = pickle.dumps(feat.data)
             logger.debug(
                 "[NIXL-Sender] feature[%d]: pickled kwargs_item (%d bytes)",
                 i,
@@ -136,11 +137,12 @@ class MmKwargsSender:
             )
 
             # Register pickled bytes as a NIXL transfer
-            pickled_tensor = torch.frombuffer(
-                bytearray(pickled_item), dtype=torch.uint8
-            )
-            descriptor = self._nixl_connect.Descriptor(pickled_tensor)
-            readable_op = await self._connector.create_readable(descriptor)
+            with _nvtx.annotate("mm_nixl:register_descriptor", color="magenta"):
+                pickled_tensor = torch.frombuffer(
+                    bytearray(pickled_item), dtype=torch.uint8
+                )
+                descriptor = self._nixl_connect.Descriptor(pickled_tensor)
+                readable_op = await self._connector.create_readable(descriptor)
 
             spec = TensorTransferSpec(
                 field_name="__pickled_kwargs_item__",
@@ -357,12 +359,14 @@ class MmKwargsShmSender:
             if feat.data is None:
                 continue
 
-            pickled = pickle.dumps(feat.data)
+            with _nvtx.annotate("mm_shm:pickle_dumps", color="cyan"):
+                pickled = pickle.dumps(feat.data)
             import uuid
 
             name = f"mm_kwargs_{os.getpid()}_{uuid.uuid4().hex[:12]}_{i}"
-            sm = shm.SharedMemory(name=name, create=True, size=len(pickled))
-            sm.buf[: len(pickled)] = pickled
+            with _nvtx.annotate("mm_shm:create_and_write", color="cyan"):
+                sm = shm.SharedMemory(name=name, create=True, size=len(pickled))
+                sm.buf[: len(pickled)] = pickled
             handles.append(sm)
             items.append({"name": name, "size": len(pickled)})
             logger.debug(
@@ -417,9 +421,10 @@ class MmKwargsShmReceiver:
             name = item["name"]
             size = item["size"]
             try:
-                sm = shm.SharedMemory(name=name, create=False)
-                data = bytes(sm.buf[:size])
-                sm.close()
+                with _nvtx.annotate("mm_shm:open_and_read", color="cyan"):
+                    sm = shm.SharedMemory(name=name, create=False)
+                    data = bytes(sm.buf[:size])
+                    sm.close()
                 results.setdefault("__pickled_kwargs_item__", []).append(data)
                 logger.debug("[SHM-Receiver] read %d bytes from shm %s", size, name)
             except Exception:

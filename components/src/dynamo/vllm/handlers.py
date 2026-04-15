@@ -1233,12 +1233,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             import time as _time
 
             _t0 = _time.monotonic()
-            metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
-            if self._mm_kwargs_receiver is None:
-                self._mm_kwargs_receiver = MmKwargsReceiver()
-            receiver = self._mm_kwargs_receiver
+            with _nvtx.annotate("mm_backend:nixl_setup", color="magenta"):
+                metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
+                if self._mm_kwargs_receiver is None:
+                    self._mm_kwargs_receiver = MmKwargsReceiver()
+                receiver = self._mm_kwargs_receiver
             _t1 = _time.monotonic()
-            mm_kwargs_tensors = await receiver.receive(metadata)
+            with _nvtx.annotate("mm_backend:nixl_rdma_read", color="magenta"):
+                mm_kwargs_tensors = await receiver.receive(metadata)
             _t2 = _time.monotonic()
 
             pickled_items = mm_kwargs_tensors.get("__pickled_kwargs_item__")
@@ -1251,16 +1253,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # pickled_items is a list (one per image/feature).
             kwargs_items = []
             _t3 = _time.monotonic()
-            for pi in pickled_items:
-                item = pickle.loads(pi)
-                if not isinstance(item, MultiModalKwargsItem):
-                    logger.warning(
-                        "[mm-routing] Deserialized object is %s, expected "
-                        "MultiModalKwargsItem; falling back to normal path",
-                        type(item).__name__,
-                    )
-                    return None
-                kwargs_items.append(item)
+            with _nvtx.annotate("mm_backend:nixl_pickle_loads", color="magenta"):
+                for pi in pickled_items:
+                    item = pickle.loads(pi)
+                    if not isinstance(item, MultiModalKwargsItem):
+                        logger.warning(
+                            "[mm-routing] Deserialized object is %s, expected "
+                            "MultiModalKwargsItem; falling back to normal path",
+                            type(item).__name__,
+                        )
+                        return None
+                    kwargs_items.append(item)
             _t4 = _time.monotonic()
             logger.info(
                 "[TIMING-BACKEND] nixl_setup=%.1fms rdma_read=%.1fms "
@@ -1318,6 +1321,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Receive pre-processed mm_kwargs via shared memory (~1.5ms)."""
         import time as _time
 
+        rng = _nvtx.start_range("mm_backend:shm_receive", color="cyan")
         _t0 = _time.monotonic()
         extra_args = request.get("extra_args") or {}
         mm_hashes = extra_args.get("mm_hashes")
@@ -1326,54 +1330,61 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.warning(
                 "[mm-routing] SHM present but mm_hashes/mm_placeholders missing"
             )
+            _nvtx.end_range(rng)
             return None
 
         try:
             from dynamo.common.multimodal.mm_kwargs_transfer import MmKwargsShmReceiver
 
             receiver = MmKwargsShmReceiver()
-            results = receiver.receive(shm_meta)
+            with _nvtx.annotate("mm_backend:shm_open_and_read", color="cyan"):
+                results = receiver.receive(shm_meta)
 
             pickled_items = results.get("__pickled_kwargs_item__")
             if not pickled_items:
                 logger.warning("[mm-routing] SHM: no pickled items received")
+                _nvtx.end_range(rng)
                 return None
 
-            kwargs_items = []
-            for pi in pickled_items:
-                item = pickle.loads(pi)
-                kwargs_items.append(item)
+            with _nvtx.annotate("mm_backend:shm_pickle_loads", color="cyan"):
+                kwargs_items = []
+                for pi in pickled_items:
+                    item = pickle.loads(pi)
+                    kwargs_items.append(item)
 
             expanded_token_ids = extra_args.get("expanded_token_ids")
             if not expanded_token_ids:
                 expanded_token_ids = request["token_ids"]
 
-            engine_input = {
-                "type": "multimodal",
-                "externally_processed": True,
-                "prompt_token_ids": expanded_token_ids,
-                "mm_kwargs": {
-                    shm_meta["modality"]: kwargs_items,
-                },
-                "mm_hashes": {
-                    shm_meta["modality"]: mm_hashes,
-                },
-                "mm_placeholders": {
-                    shm_meta["modality"]: [
-                        PlaceholderRange(offset=off, length=length)
-                        for off, length in mm_placeholders
-                    ],
-                },
-            }
+            with _nvtx.annotate("mm_backend:shm_build_engine_input", color="cyan"):
+                engine_input = {
+                    "type": "multimodal",
+                    "externally_processed": True,
+                    "prompt_token_ids": expanded_token_ids,
+                    "mm_kwargs": {
+                        shm_meta["modality"]: kwargs_items,
+                    },
+                    "mm_hashes": {
+                        shm_meta["modality"]: mm_hashes,
+                    },
+                    "mm_placeholders": {
+                        shm_meta["modality"]: [
+                            PlaceholderRange(offset=off, length=length)
+                            for off, length in mm_placeholders
+                        ],
+                    },
+                }
             _t1 = _time.monotonic()
             logger.info(
                 "[TIMING-BACKEND] shm_receive=%.1fms items=%d",
                 (_t1 - _t0) * 1000,
                 len(kwargs_items),
             )
+            _nvtx.end_range(rng)
             return engine_input
         except Exception:
             logger.exception("[mm-routing] SHM receive failed, falling back")
+            _nvtx.end_range(rng)
             return None
 
     async def _extract_multimodal_data(
@@ -1868,12 +1879,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request, request_id, context
                     )
         else:
-            # Fast path: check for pre-processed mm_kwargs via NIXL from frontend.
+            # Fast path: check for pre-processed mm_kwargs via NIXL/SHM from frontend.
             # If available, we skip image downloading AND the HF processor.
-            pre_rendered = await self._try_receive_mm_kwargs_nixl(request)
+            with _nvtx.annotate("mm_backend:receive_mm_kwargs", color="magenta"):
+                pre_rendered = await self._try_receive_mm_kwargs_nixl(request)
             if pre_rendered is not None:
                 logger.debug(
-                    "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL",
+                    "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL/SHM",
                     request_id,
                 )
             else:
