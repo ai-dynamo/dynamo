@@ -478,6 +478,79 @@ impl PyRustKvCacheManager {
         self.block_manager.reset_inactive_pool().is_ok()
     }
 
+    /// ``get_num_common_prefix_blocks`` — number of blocks at the head
+    /// of ``running_request_id``'s block list that are shared by every
+    /// other tracked request.
+    ///
+    /// This mirrors vLLM's ``FullAttentionManager`` implementation
+    /// (``vllm/v1/core/single_type_kv_cache_manager.py``):
+    ///
+    /// ```python
+    /// blocks = self.req_to_blocks[running_request_id]
+    /// num_common_blocks = 0
+    /// for block in blocks:
+    ///     if block.ref_cnt == len(self.req_to_blocks):
+    ///         num_common_blocks += 1
+    ///     else:
+    ///         break
+    /// return num_common_blocks
+    /// ```
+    ///
+    /// The kvbm equivalent is more direct because block ids in
+    /// kvbm-logical are pool indices and the registry only hands out
+    /// the *same* [`ImmutableBlock`] / block id to two different
+    /// slots when they prefix-matched the same sequence hash. So
+    /// "block shared by every request" is exactly "the same block id
+    /// appears in every active slot's owned list".
+    ///
+    /// We walk the running slot's **assigned** block ids in order
+    /// (staged/unassigned blocks aren't in the registry yet and
+    /// cannot be shared), and for each id count how many slots
+    /// currently own it. If that count equals the total number of
+    /// tracked slots, the block is a common-prefix block; otherwise
+    /// we stop. ``num_running_requests`` is accepted for API
+    /// symmetry with older vLLM signatures but is ignored — we use
+    /// ``slots.len()`` as the ground-truth denominator, which is
+    /// what vLLM's ``FullAttentionManager`` uses too
+    /// (``len(self.req_to_blocks)``).
+    pub fn get_num_common_prefix_blocks(&self, running_request_id: &str) -> usize {
+        let slots = self.slots.lock().unwrap();
+        let total = slots.len();
+        if total == 0 {
+            return 0;
+        }
+        let Some(running) = slots.get(running_request_id) else {
+            return 0;
+        };
+
+        // Running request's assigned block ids in lifecycle order.
+        // We deliberately skip staged / unassigned here: staged
+        // blocks aren't in the registry yet, so no other slot could
+        // have matched them, and unassigned blocks haven't been
+        // filled with tokens yet. Both would always fail the
+        // all-slots-contain check.
+        let running_ids: Vec<BlockId> = running
+            .sequence
+            .assignments()
+            .assigned_iter()
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut num_common = 0usize;
+        for block_id in &running_ids {
+            let hits = slots
+                .values()
+                .filter(|s| s.owned_block_ids.contains(block_id))
+                .count();
+            if hits == total {
+                num_common += 1;
+            } else {
+                break;
+            }
+        }
+        num_common
+    }
+
     /// Number of blocks this manager manages (including the pinned
     /// sentinel at id 0).
     pub fn total_blocks(&self) -> usize {

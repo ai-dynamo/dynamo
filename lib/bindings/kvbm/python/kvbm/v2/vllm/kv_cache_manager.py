@@ -231,11 +231,21 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
     def get_num_common_prefix_blocks(
         self, running_request_id: str
     ) -> list[int]:
-        # TODO: implement common-prefix counting on the Rust side.
-        # Returning zeros mirrors what v1's shim does and never over-
-        # claims sharing. vLLM's scheduler treats this as "no common
-        # prefix to skip in attention".
-        return [0] * self._num_kv_cache_groups
+        # Mirrors vLLM's ``FullAttentionManager.get_num_common_prefix_blocks``
+        # (vllm/v1/core/single_type_kv_cache_manager.py): walk the
+        # running request's assigned blocks in order, count blocks
+        # whose ref_cnt equals the number of tracked requests, stop
+        # on the first non-match.
+        #
+        # kvbm-logical only ever hands the *same* block id back to
+        # two different slots when they prefix-matched the same
+        # registry entry, so "shared by every request" collapses to
+        # "present in every slot's owned-id list" — see the Rust
+        # implementation for details. Returned as a list with one
+        # entry per kv cache group (kvbm currently supports exactly
+        # one group).
+        count = int(self._core.get_num_common_prefix_blocks(running_request_id))
+        return [count] * self._num_kv_cache_groups
 
     def take_events(self) -> "list[KVCacheEvent]":
         return list(self._core.take_events())
