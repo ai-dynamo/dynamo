@@ -811,16 +811,12 @@ impl Metrics {
 
     fn inc_inflight_gauge(&self, model: &str) {
         self.inflight_gauge.with_label_values(&[model]).inc();
-        self.active_requests_gauge
-            .with_label_values(&[model])
-            .inc();
+        self.active_requests_gauge.with_label_values(&[model]).inc();
     }
 
     fn dec_inflight_gauge(&self, model: &str) {
         self.inflight_gauge.with_label_values(&[model]).dec();
-        self.active_requests_gauge
-            .with_label_values(&[model])
-            .dec();
+        self.active_requests_gauge.with_label_values(&[model]).dec();
     }
 
     /// Increment the gauge for client disconnections
@@ -2386,10 +2382,12 @@ mod tests {
         );
 
         {
-            let _guard =
-                metrics
-                    .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, true, "req-1");
+            let _guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                true,
+                "req-1",
+            );
 
             // Both gauges increment together
             assert_eq!(metrics.inflight_gauge.with_label_values(&[model]).get(), 1);

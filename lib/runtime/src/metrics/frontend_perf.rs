@@ -127,9 +127,7 @@ static PROMETHEUS_REGISTERED: OnceCell<()> = OnceCell::new();
 /// Register frontend perf metrics with the given registry. Idempotent.
 pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
     let _ = REGISTERED.get_or_init(|| {
-        registry
-            .add_metric(Box::new(STAGE_REQUESTS.clone()))
-            .ok();
+        registry.add_metric(Box::new(STAGE_REQUESTS.clone())).ok();
         registry
             .add_metric(Box::new(STAGE_DURATION_SECONDS.clone()))
             .ok();
