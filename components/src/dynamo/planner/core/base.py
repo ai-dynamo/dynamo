@@ -20,6 +20,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Optional, Union
 
+import aiohttp.web
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
@@ -42,6 +43,7 @@ from dynamo.planner.core.types import (
     WorkerCounts,
 )
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
+from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
 from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClient
 from dynamo.planner.monitoring.worker_info import WorkerInfo, resolve_worker_info
@@ -77,6 +79,7 @@ def _engine_caps(
         else None,
         max_num_seqs=worker_info.max_num_seqs if worker_info else None,
         context_length=worker_info.context_length if worker_info else None,
+        max_kv_tokens=worker_info.max_kv_tokens if worker_info else None,
     )
 
 
@@ -176,6 +179,9 @@ class NativePlannerBase:
         # Diagnostics recorder
         self._recorder = DiagnosticsRecorder(config=config)
 
+        # Live dashboard runner (started in _async_init)
+        self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
+
         # State machine (created after WorkerInfo is resolved)
         self._state_machine: Optional[PlannerStateMachine] = None
 
@@ -264,6 +270,15 @@ class NativePlannerBase:
                 await self._init_fpm_subscriber("decode")
 
         await self._bootstrap_regression()
+
+        # Start live dashboard if configured
+        if self.config.live_dashboard_port:
+            try:
+                self._dashboard_runner = await start_live_dashboard(
+                    self._recorder, self.config.live_dashboard_port
+                )
+            except Exception as e:
+                logger.error(f"Failed to start live dashboard: {e}")
 
     async def _init_worker_info(self) -> None:
         connector = getattr(self, "connector", None)
@@ -604,32 +619,37 @@ class NativePlannerBase:
         next_tick = self.state_machine.initial_tick(time.time())
         poll_interval = self.config.load_adjustment_interval / 10
 
-        while True:
-            now = time.time()
-            if now < next_tick.at_s:
-                await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
-                continue
+        try:
+            while True:
+                now = time.time()
+                if now < next_tick.at_s:
+                    await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
+                    continue
 
-            tick_input = await self._gather_tick_input(next_tick)
-            effects = self.state_machine.on_tick(next_tick, tick_input)
-            await self._apply_effects(effects)
-            self._report_diagnostics(effects.diagnostics)
+                tick_input = await self._gather_tick_input(next_tick)
+                effects = self.state_machine.on_tick(next_tick, tick_input)
+                await self._apply_effects(effects)
+                self._report_diagnostics(effects.diagnostics)
 
-            if self._recorder.enabled:
-                try:
-                    self._recorder.record(
-                        tick_input,
-                        effects,
-                        self._last_metrics,
-                        self._cumulative_gpu_hours,
-                    )
-                    if self._recorder.should_generate_report(tick_input.now_s):
-                        self._recorder.generate_report()
-                except Exception as e:
-                    logger.error(f"Diagnostics report failed: {e}")
+                if self._recorder.enabled:
+                    try:
+                        self._recorder.record(
+                            tick_input,
+                            effects,
+                            self._last_metrics,
+                            self._cumulative_gpu_hours,
+                        )
+                        if self._recorder.should_generate_report(tick_input.now_s):
+                            self._recorder.generate_report()
+                    except Exception as e:
+                        logger.error(f"Diagnostics report failed: {e}")
 
-            assert effects.next_tick is not None
-            next_tick = effects.next_tick
+                assert effects.next_tick is not None
+                next_tick = effects.next_tick
+        finally:
+            self._recorder.finalize()
+            if self._dashboard_runner is not None:
+                await self._dashboard_runner.cleanup()
 
 
 # ------------------------------------------------------------------
