@@ -159,8 +159,9 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
 
 # Build hwloc from source (>= 2.3 required by nixl >= v1.0.0 for hwloc_location API)
 ARG HWLOC_VERSION=2.12.0
-RUN cd /tmp && \
-    curl --retry 3 -LO https://download.open-mpi.org/release/hwloc/v2.12/hwloc-${HWLOC_VERSION}.tar.gz && \
+RUN HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1-2)" && \
+    cd /tmp && \
+    curl --retry 3 -LO "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
     tar xf hwloc-${HWLOC_VERSION}.tar.gz && \
     cd hwloc-${HWLOC_VERSION} && \
     ./configure --prefix=/usr/local && \
