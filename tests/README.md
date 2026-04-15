@@ -377,16 +377,16 @@ pytest tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -v --tb=
 # trtllm
 pytest tests/serve/test_trtllm.py::test_deployment[aggregated-2] -v --tb=short
 # fastvideo
-python3 -m pytest tests/serve/test_fastvideo.py::test_fastvideo_deployment[aggregated] -v --tb=short
+pytest tests/serve/test_fastvideo.py::test_fastvideo_deployment[aggregated] -v --tb=short
 ```
 
 **Pre-merge CI equivalent** -- this is what [`container-validation-dynamo.yml`](../.github/workflows/container-validation-dynamo.yml) runs on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
 ```bash
 # Parallel pre-merge tests (4 workers, CPU-only; typically <5min)
-python3 -m pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -n 4 --dist=loadscope -v --tb=short
+pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -n 4 --dist=loadscope -v --tb=short
 
 # Sequential pre-merge tests (CPU-only; typically <10min)
-python3 -m pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -v --tb=short
+pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm or fastvideo) and gpu_0" -v --tb=short
 ```
 
 > **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). GPU tests (`gpu_1`, `gpu_2`, etc.) run sequentially by default, but can run in parallel with `--max-vram-gib=N -n auto` (uses a custom VRAM-aware scheduler, not xdist). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
@@ -397,7 +397,7 @@ python3 -m pytest -m "pre_merge and not parallel and not (vllm or sglang or trtl
 pytest -m "vllm and e2e and gpu_1" -v --tb=short
 pytest -m "sglang and e2e and gpu_1" -v --tb=short
 pytest -m "trtllm and e2e and gpu_1" -v --tb=short
-python3 -m pytest -m "fastvideo and e2e and gpu_1" -v --tb=short
+pytest -m "fastvideo and e2e and gpu_1" -v --tb=short
 
 # GPU-parallel (VRAM-aware scheduling, ~2x faster on 48 GiB GPU)
 # Only tests with profiled_vram_gib markers are selected; -n auto calculates
