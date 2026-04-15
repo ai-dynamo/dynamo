@@ -157,45 +157,43 @@ class OmniStageWorker:
             return
 
         # --- Write output ---
-        if not self.final_output:
-            from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
-            connector = self.connectors.get((from_s, to_s))
-            if connector is not None:
-                try:
-                    ok, _, metadata = connector.put(  # type: ignore[arg-type]
-                        from_s, to_s, request_id, last_result
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Stage %d: connector.put() raised %s: %s",
-                        self.stage_id,
-                        type(e).__name__,
-                        e,
-                        exc_info=True,
-                    )
-                    yield {"error": f"connector.put() raised: {e}", "finished": True}
-                    return
-                if not ok:
-                    yield {"error": "connector.put() failed", "finished": True}
-                    return
-                out: dict = {
-                    "original_prompt": original_prompt,
-                    "stage_connector_refs": {
-                        **{str(k): v for k, v in stage_connector_refs.items()},
-                        str(self.stage_id): metadata,
-                    },
-                    "finished": True,
-                }
-                if sampling_params_list_override is not None:
-                    out["sampling_params_list"] = sampling_params_list_override
-                yield out
+        # Check for a downstream connector first, regardless of final_output.
+        # In vllm-omni's native mode, multiple stages can set final_output=True
+        # (meaning "produces user-visible output"). In Dynamo's disaggregated
+        # mode the actual pipeline topology — connector edges from the YAML —
+        # determines whether output should go to a connector or to SHM.
+        from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
+        connector = self.connectors.get((from_s, to_s))
+        if connector is not None:
+            try:
+                ok, _, metadata = connector.put(  # type: ignore[arg-type]
+                    from_s, to_s, request_id, last_result
+                )
+            except Exception as e:
+                logger.error(
+                    "Stage %d: connector.put() raised %s: %s",
+                    self.stage_id,
+                    type(e).__name__,
+                    e,
+                    exc_info=True,
+                )
+                yield {"error": f"connector.put() raised: {e}", "finished": True}
                 return
-            logger.warning(
-                "Stage %d: no connector found for edge (%s→%s), falling through to SHM",
-                self.stage_id,
-                from_s,
-                to_s,
-            )
+            if not ok:
+                yield {"error": "connector.put() failed", "finished": True}
+                return
+            out: dict = {
+                "original_prompt": original_prompt,
+                "stage_connector_refs": {
+                    **{str(k): v for k, v in stage_connector_refs.items()},
+                    str(self.stage_id): metadata,
+                },
+                "finished": True,
+            }
+            if sampling_params_list_override is not None:
+                out["sampling_params_list"] = sampling_params_list_override
+            yield out
+            return
 
         # Final stage → router: write output to shared memory and return the SHM handle.
         # The router reads it back via shm_deserialize() to format the response.
