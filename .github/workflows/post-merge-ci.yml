@@ -17,6 +17,31 @@ jobs:
   # FRAMEWORK PIPELINES (Build → Test → Copy)
   # ============================================================================
   # ============================================================================
+  # PLANNER PIPELINE
+  # ============================================================================
+  planner-pipeline:
+    name: planner
+    uses: ./.github/workflows/build-test-distribute-flavor.yml
+    with:
+      framework: dynamo
+      builder_flavor: general
+      target: planner
+      platform: 'linux/amd64,linux/arm64'
+      cpu_only: true
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-planner' || '' }}
+        ${{ github.ref_name == 'main' && format('main-planner-{0}', github.sha) || '' }}
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 45
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and planner and gpu_0'
+      cpu_only_test_timeout_minutes: 30
+      run_single_gpu_tests: false
+      run_multi_gpu_tests: false
+      copy_to_acr: false
+    secrets: inherit
+
+  # ============================================================================
   # VLLM PIPELINE
   # ============================================================================
   vllm-pipeline:
@@ -408,7 +433,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
+    needs: [planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -429,7 +454,7 @@ jobs:
     name: Notify Slack
     runs-on: prod-builder-amd-v1
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
+    needs: [ planner-pipeline, vllm-pipeline, sglang-pipeline, trtllm-pipeline, vllm-dev-pipeline, sglang-dev-pipeline, trtllm-dev-pipeline, vllm-efa-pipeline, trtllm-efa-pipeline, operator, frontend-image, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie ]
     permissions:
       contents: read
     steps:
