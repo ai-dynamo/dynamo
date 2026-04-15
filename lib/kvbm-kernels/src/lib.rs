@@ -3,6 +3,10 @@
 
 pub mod tensor_kernels;
 
+#[cfg(feature = "xpu_permute_kernels")]
+pub mod tensor_kernels_xpu;
+
+
 // Always available - core transfer functionality
 pub use tensor_kernels::{
     MemcpyBatchMode, is_memcpy_batch_available, is_using_stubs, memcpy_batch, vectorized_copy,
@@ -12,3 +16,11 @@ pub use tensor_kernels::{
 #[cfg(feature = "permute_kernels")]
 pub use tensor_kernels::{BlockLayout, TensorDataType, block_from_universal, universal_from_block};
 
+// XPU permute kernels - SYCL queue-based (requires xpu_permute_kernels feature)
+#[cfg(feature = "xpu_permute_kernels")]
+pub use tensor_kernels_xpu::{
+    XpuBlockLayout,
+    xpu_block_from_universal,
+    xpu_universal_from_block,
+    xpu_vectorized_copy,
+};

@@ -162,10 +162,17 @@ pub fn create_test_agent_with_backends(name: &str, backends: &[&str]) -> Result<
 
 /// Select device backend for transfer tests.
 ///
-/// Prefer ZE when compiled with xpu feature and available; otherwise fall back
-/// to CUDA when available. Panic if no device backend is available.
+/// Priority: SYCL (xpu-sycl) > ZE (xpu-ze) > CUDA.
+/// Panic if no device backend is available.
 fn test_device_backend() -> DeviceBackend {
-    #[cfg(feature = "xpu")]
+    #[cfg(feature = "xpu-sycl")]
+    {
+        if DeviceBackend::Sycl.is_available() {
+            return DeviceBackend::Sycl;
+        }
+    }
+
+    #[cfg(feature = "xpu-ze")]
     {
         if DeviceBackend::Ze.is_available() {
             return DeviceBackend::Ze;
@@ -176,7 +183,7 @@ fn test_device_backend() -> DeviceBackend {
         return DeviceBackend::Cuda;
     }
 
-    panic!("No supported device backend available for transfer tests (need ZE or CUDA)");
+    panic!("No supported device backend available for transfer tests (need SYCL, ZE, or CUDA)");
 }
 
 

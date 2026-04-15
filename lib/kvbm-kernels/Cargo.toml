@@ -32,19 +32,33 @@ testing-cuda = []
 # most FC↔LW transfers efficiently without permutation.
 permute_kernels = []
 
+# Enable XPU permute kernels (SYCL-based, requires icpx + KVBM_ENABLE_XPU_KERNELS env).
+# Tests are gated with #[cfg(all(test, feature = "testing-xpu"))]
+xpu_permute_kernels = []
+
+# Enable XPU tests - only works when SYCL kernels are built
+testing-xpu = []
+
 # Enable kvbench example (pulls in clap for CLI)
 kvbench = ["dep:clap"]
 
-# Enable XPU kvbench example (pulls in clap + level-zero)
-kvbench-xpu = ["dep:clap", "dep:level-zero"]
+# Enable XPU Level-Zero kvbench example (pulls in clap + level-zero)
+kvbench-xpu-ze = ["dep:clap", "dep:level-zero"]
+
+# Enable XPU SYCL kvbench example (pulls in clap + oneapi-rs)
+kvbench-xpu-sycl = ["dep:clap", "dep:oneapi-rs", "xpu_permute_kernels"]
 
 [[example]]
 name = "kvbench"
 required-features = ["kvbench"]
 
 [[example]]
-name = "kvbench_xpu"
-required-features = ["kvbench-xpu"]
+name = "kvbench_xpu_ze"
+required-features = ["kvbench-xpu-ze"]
+
+[[example]]
+name = "kvbench_xpu_sycl"
+required-features = ["kvbench-xpu-sycl"]
 
 [dependencies]
 cudarc = { workspace = true }
@@ -54,13 +68,18 @@ clap = { version = "4", features = ["derive"], optional = true }
 
 # XPU SYCL support
 
-# XPU Level Zero support (for kvbench_xpu)
+# XPU Level Zero support (for kvbench_xpu_ze)
 level-zero = { workspace = true, optional = true }
+
+# XPU SYCL support (for kvbench_xpu_sycl)
+oneapi-rs = { workspace = true, optional = true }
 
 [dev-dependencies]
 ndarray = "0.17.2"
 half = "2"
 rand = { workspace = true }
 cudarc = { workspace = true, features = ["f16"] }
+level-zero = { workspace = true }
+oneapi-rs = { workspace = true, features = ["f16"] }
 
 [build-dependencies]

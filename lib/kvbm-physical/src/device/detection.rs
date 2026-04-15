@@ -19,7 +19,15 @@ impl DeviceBackend {
             }
         }
 
-        #[cfg(feature = "xpu")]
+        #[cfg(feature = "xpu-sycl")]
+        {
+            if Self::Sycl.is_available() {
+                tracing::info!("Auto-detected SYCL (XPU) backend");
+                return Ok(Self::Sycl);
+            }
+        }
+
+        #[cfg(feature = "xpu-ze")]
         {
             if Self::Ze.is_available() {
                 tracing::info!("Auto-detected Level-Zero (XPU) backend");
@@ -39,7 +47,12 @@ impl DeviceBackend {
             backends.push(Self::Cuda);
         }
 
-        #[cfg(feature = "xpu")]
+        #[cfg(feature = "xpu-sycl")]
+        if Self::Sycl.is_available() {
+            backends.push(Self::Sycl);
+        }
+
+        #[cfg(feature = "xpu-ze")]
         if Self::Ze.is_available() {
             backends.push(Self::Ze);
         }

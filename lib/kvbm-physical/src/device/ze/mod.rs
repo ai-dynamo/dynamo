@@ -23,6 +23,7 @@ const COPY_KERNEL_NAME: &str = "vectorized_copy";
 const COPY_WG_SIZE: u32 = 128;
 const COPY_MAX_WGS: u32 = 65535;
 
+
 /// Global initialization state for Level-Zero runtime.
 fn ensure_ze_initialized() -> Result<()> {
     static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
@@ -177,6 +178,7 @@ fn get_or_create_ze_context(device_id: u32) -> Result<Arc<DeviceContextCache>> {
             None
         }
     };
+
 
     let cache_entry = Arc::new(DeviceContextCache {
         _driver: driver.clone(),
@@ -546,7 +548,8 @@ impl DeviceStreamOps for ZeStreamWrapper {
             return Ok(());
         }
 
-        // Fast path: launch GPU kernel from pre-compiled SPIR-V.
+
+        // SPIR-V path: launch GPU kernel from pre-compiled SPIR-V.
         if let Some(ref kernel) = self.copy_kernel {
             let num_pairs = count as i32;
             let grid_dim = std::cmp::min(count as u32, COPY_MAX_WGS);

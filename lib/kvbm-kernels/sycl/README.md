@@ -1,53 +1,61 @@
-# SYCL Kernels for XPU (Level-Zero)
+# SYCL Kernels for XPU
+
+SYCL C++ sources compiled into `libkvbm_kernels_xpu.so` and called from Rust
+via `extern "C"` FFI through `tensor_kernels_xpu.rs`.
 
 ## Files
 
-- `vectorized_copy_kernel.cpp` — SYCL free-function kernel source for vectorized memory copy between arbitrary device pointer pairs.
-- `vectorized_copy_kernel.spv` — Pre-compiled SPIR-V binary, embedded at build time via `include_bytes!` in `kvbm-physical/src/device/ze/mod.rs`.
+- `tensor_permute_kernel.cpp` — Block/universal permute kernels (`universal_from_block`, `block_from_universal`).
+- `vectorized_copy_kernel.cpp` — Vectorized memory copy between device pointer pairs.
 
-## Building the SPIR-V Binary
+## Build
 
-Requires Intel oneAPI DPC++ compiler (`icpx`) and `llvm-spirv` translator.
+Compiled automatically by `build.rs` when `KVBM_ENABLE_XPU_KERNELS` is set.
+Requires Intel oneAPI DPC++ compiler (`icpx`).
 
 ```bash
-# 1. Source oneAPI environment (if not already active)
+# Automatic (via cargo):
+KVBM_ENABLE_XPU_KERNELS=1 cargo build --features xpu_permute_kernels
+
+# Manual (equivalent):
 source /opt/intel/oneapi/setvars.sh
-
-# 2. Compile SYCL source to LLVM bitcode
-icpx -fsycl -fsycl-device-only -fsycl-targets=spir64 -O2 \
-     -o vectorized_copy_kernel.bc vectorized_copy_kernel.cpp
-
-# 3. Convert LLVM bitcode to SPIR-V
-llvm-spirv vectorized_copy_kernel.bc -o vectorized_copy_kernel.spv
-
-# 4. Verify SPIR-V magic (should print: 03 02 23 07)
-od -A x -t x1z -N 4 vectorized_copy_kernel.spv
-
-# 5. Clean up intermediate file
-rm -f vectorized_copy_kernel.bc
+icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_xpu.so \
+     tensor_permute_kernel.cpp vectorized_copy_kernel.cpp
 ```
 
-If `llvm-spirv` is not on `$PATH`, it is typically at:
-```
-/opt/intel/oneapi/compiler/<version>/bin/compiler/llvm-spirv
-```
+The resulting `libkvbm_kernels_xpu.so` is linked dynamically (`-lkvbm_kernels_xpu -lsycl`).
 
-## Runtime Behavior
+## Extern "C" API
 
-- **Valid `.spv`**: Loaded via `zeModuleCreate` at device init. The kernel `kvbm_vectorized_copy` is launched on the compute engine via `zeCommandListAppendLaunchKernel`.
-- **Placeholder/invalid `.spv`**: Module creation fails gracefully. A warning is logged and the fallback path (host-readback + `batch_copy`) is used instead.
+### vectorized_copy_kernel.cpp
 
-## Kernel Interface
-
-```
-void kvbm_vectorized_copy(
+```c
+int kvbm_kernels_xpu_launch_vectorized_copy(
     void** src_ptrs,          // device pointer array of sources
     void** dst_ptrs,          // device pointer array of destinations
     size_t copy_size_bytes,   // bytes per pair (uniform)
-    int    num_pairs          // number of pointer pairs
-)
+    int    num_pairs,         // number of pointer pairs
+    void*  queue_ptr          // opaque sycl::queue*
+);
 ```
 
 - Work group size: 128
-- Max work groups: min(num_pairs, 65535)
 - Per-pair alignment detection: 16B / 8B / 4B / 1B vectorized copy
+
+### tensor_permute_kernel.cpp
+
+```c
+int kvbm_kernels_xpu_launch_universal_from_block(
+    void* const* universal_ptrs, const void* const* block_ptrs,
+    size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd,
+    size_t elem_size, int layout_value, void* queue_ptr);
+
+int kvbm_kernels_xpu_launch_block_from_universal(
+    const void* const* universal_ptrs, void* const* block_ptrs,
+    size_t num_blocks, size_t nh, size_t nl, size_t no, size_t nt, size_t hd,
+    size_t elem_size, int layout_value, void* queue_ptr);
+```
+
+- `layout_value`: 0 = NHD, 1 = HND
+- `elem_size`: bytes per element (2 = f16/bf16, 4 = f32, 8 = f64)
+- All pointer arrays and queue must be valid for the duration of the kernel

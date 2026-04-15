@@ -10,22 +10,20 @@
 //!
 //! # Usage for Multiple Backends
 //!
-//! Requires `testing-kvbm` feature plus a device backend (`cuda` or `xpu`):
+//! Requires `testing-kvbm` feature plus a device backend (`cuda`, `xpu-ze`, or `xpu-sycl`):
 //!
 //! ```sh
-//! # All tests in this file
+//! # CUDA
 //! cargo test -p kvbm-physical --features testing-kvbm,cuda -- transfer::tests::local_transfers
-//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu -- transfer::tests::local_transfers
 //!
-//! # A single test (e.g. test_roundtrip)
-//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu -- transfer::tests::local_transfers::test_roundtrip
+//! # XPU (Level-Zero)
+//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-ze -- transfer::tests::local_transfers
 //!
-//! # With stdout visible
-//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu -- transfer::tests::local_transfers --nocapture
+//! # XPU (SYCL) — requires KVBM_ENABLE_XPU_KERNELS=1 and icpx
+//! KVBM_ENABLE_XPU_KERNELS=1 cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-sycl -- transfer::tests::local_transfers
 //!
 //! # Release mode (recommended for GPU-bound tests)
-//! cargo test -p kvbm-physical --features testing-kvbm,cuda --release -- transfer::tests::local_transfers
-//! cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu --release -- transfer::tests::local_transfers
+//! KVBM_ENABLE_XPU_KERNELS=1 cargo test -p kvbm-physical --no-default-features --features testing-kvbm,xpu-sycl --release -- transfer::tests::local_transfers
 //! ```
 
 use super::*;

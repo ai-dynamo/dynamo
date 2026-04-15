@@ -23,6 +23,7 @@ bincode = { version = "2.0.0", features = ["serde", "derive"] }
 blake3 = { version = "1" }
 cudarc = { workspace = true, features = ["nccl"] }
 level-zero = { workspace = true, optional = true }
+oneapi-rs = { workspace = true, optional = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
 derive-getters = { version = "0.5" }
@@ -41,8 +42,10 @@ collectives = []
 testing = []
 testing-kvbm = []
 testing-nixl-gds = []
-testing-xpu = ["xpu"]
-xpu = ["dep:level-zero", "dynamo-memory/level-zero"]
+testing-xpu-ze = ["xpu-ze"]
+testing-xpu-sycl = ["xpu-sycl"]
+xpu-ze = ["dep:level-zero", "dynamo-memory/level-zero"]
+xpu-sycl = ["dep:kvbm-kernels", "kvbm-kernels/xpu_permute_kernels", "dep:oneapi-rs", "dynamo-memory/sycl"]
 
 [[bin]]
 name = "validate_numa_placement"

@@ -12,3 +12,9 @@ pub use cuda::{CudaMemPool, CudaMemPoolBuilder};
 
 #[cfg(feature = "level-zero")]
 pub use ze::{ZeMemPool, ZeMemPoolBuilder};
+
+#[cfg(feature = "sycl")]
+pub mod sycl;
+
+#[cfg(feature = "sycl")]
+pub use sycl::{SyclMemPool, SyclMemPoolBuilder};

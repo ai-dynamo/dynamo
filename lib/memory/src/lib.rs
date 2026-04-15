@@ -51,6 +51,8 @@ pub use pinned::PinnedStorage;
 pub use pool::{CudaMemPool, CudaMemPoolBuilder};
 #[cfg(feature = "level-zero")]
 pub use pool::{ZeMemPool, ZeMemPoolBuilder};
+#[cfg(feature = "sycl")]
+pub use pool::{SyclMemPool, SyclMemPoolBuilder};
 pub use system::SystemStorage;
 pub use tensor::{TensorDescriptor, TensorDescriptorExt};
 

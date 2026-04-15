@@ -21,14 +21,17 @@ unsafe-slices = []
 testing-cuda = []
 testing-nixl = []
 testing-ze = []
-testing-all = ["testing-cuda", "testing-nixl", "testing-ze"]
+testing-sycl = []
+testing-all = ["testing-cuda", "testing-nixl", "testing-ze", "testing-sycl"]
 
 level-zero = ["dep:level-zero"]
+sycl = ["dep:oneapi-rs"]
 
 [dependencies]
 anyhow = { workspace = true }
 cudarc = { workspace = true }
 level-zero = { path = "../../../level-zero-rc/level-zero", optional = true }
+oneapi-rs = { workspace = true, optional = true }
 nixl-sys = { version = "=0.10.1" }
 serde = { workspace = true}
 thiserror = { workspace = true }
