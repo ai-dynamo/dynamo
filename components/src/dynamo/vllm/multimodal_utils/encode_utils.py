@@ -16,6 +16,7 @@
 import hashlib
 import logging
 import os
+import time
 from typing import Any, Dict, Optional
 
 import torch
@@ -105,6 +106,7 @@ def encode_image_embeddings(
         ValueError: If projector is missing for LLaVA models
         NotImplementedError: If model is not supported
     """
+    t0 = time.perf_counter()
     with torch.no_grad():
         # Route through the correct encoder based on model
         if is_model_supported(model_name, SupportedModels.LLAVA_1_5_7B):
@@ -127,6 +129,8 @@ def encode_image_embeddings(
             embeddings = embeddings[0]
         embeddings = embeddings.unsqueeze(0) if embeddings.ndim == 2 else embeddings
 
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    logger.info(f"[PERF] vision_encoder time_ms={elapsed_ms:.2f}")
     return embeddings
 
 

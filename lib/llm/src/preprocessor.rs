@@ -414,6 +414,8 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<String>,
     ) -> Result<()> {
+        let _nvtx = dynamo_nvtx_range!("preprocess.gather_mm_data");
+        let gather_start = std::time::Instant::now();
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
@@ -480,6 +482,8 @@ impl OpenAIPreprocessor {
             }
         }
 
+        let n_media: usize = media_map.values().map(|v| v.len()).sum();
+
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
 
@@ -495,6 +499,7 @@ impl OpenAIPreprocessor {
             // (media_loader decoded the images into RDMA descriptors). TRT-LLM and
             // other backends that pass URLs through still need the original data: URIs.
             if self.media_loader.is_some() {
+                let _nvtx = dynamo_nvtx_range!("preprocess.strip_b64_urls");
                 Self::strip_inline_data_urls(&mut extra_args["messages"]);
             }
 
@@ -503,6 +508,12 @@ impl OpenAIPreprocessor {
             }
             builder.extra_args(Some(extra_args));
         }
+
+        tracing::info!(
+            "[PERF] gather_mm_data n_media={} time_ms={:.2}",
+            n_media,
+            gather_start.elapsed().as_secs_f64() * 1000.0,
+        );
 
         Ok(())
     }

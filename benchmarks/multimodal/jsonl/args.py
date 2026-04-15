@@ -47,8 +47,8 @@ def parse_args(description: str = "") -> argparse.Namespace:
     parser.add_argument(
         "--image-dir",
         type=Path,
-        default=Path("/tmp/bench_images"),
-        help="Directory to save generated PNG images (default: /tmp/bench_images)",
+        default=Path(__file__).parent / "bench_images",
+        help="Directory to save generated PNG images (default: bench_images/ next to this script)",
     )
     parser.add_argument(
         "--user-text-tokens",
@@ -71,6 +71,12 @@ def parse_args(description: str = "") -> argparse.Namespace:
         help=f"Path to COCO image_info JSON for --image-mode http (default: {COCO_ANNOTATIONS})",
     )
     parser.add_argument(
+        "--image-overwrite",
+        action="store_true",
+        default=False,
+        help="Regenerate images even if they already exist (default: skip existing)",
+    )
+    parser.add_argument(
         "--image-size",
         type=int,
         nargs=2,
@@ -82,6 +88,6 @@ def parse_args(description: str = "") -> argparse.Namespace:
         "--seed",
         type=int,
         default=None,
-        help="Random seed for reproducible dataset generation (default: time-based)",
+        help="Random seed for reproducible dataset generation (default: wall clock)",
     )
     return parser.parse_args()

@@ -119,12 +119,16 @@ def _run_config(
         print(f"  All runs skipped for {bench_cfg.label}", flush=True)
         return
 
+    # For non-restart mode, use the first run's parent dir for server logs
+    config_log_dir = pending_runs[0][3].parent if pending_runs else output_base
+
     if not config.restart_server_every_benchmark:
         server.start(
             workflow_script=workflow_abs,
             model=config.model,
             extra_args=bench_cfg.extra_args,
             env_overrides=env_overrides,
+            artifact_dir=config_log_dir,
         )
 
     try:
@@ -140,6 +144,7 @@ def _run_config(
                     model=config.model,
                     extra_args=bench_cfg.extra_args,
                     env_overrides=env_overrides,
+                    artifact_dir=artifact_dir,
                 )
 
             try:
@@ -153,6 +158,7 @@ def _run_config(
                     input_file=input_file,
                     osl=config.osl,
                     artifact_dir=artifact_dir,
+                    cleanup_inputs_json=config.cleanup_inputs_json,
                 )
             finally:
                 if config.restart_server_every_benchmark:

@@ -68,6 +68,7 @@ def run_aiperf_single(
     input_file: str,
     osl: int,
     artifact_dir: Path,
+    cleanup_inputs_json: bool = True,
 ) -> None:
     """Run a single aiperf profile invocation."""
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -95,6 +96,11 @@ def run_aiperf_single(
         raise subprocess.CalledProcessError(
             proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr
         )
+
+    if cleanup_inputs_json:
+        inputs_file = artifact_dir / "inputs.json"
+        if inputs_file.exists():
+            inputs_file.unlink()
 
     print(f"  aiperf {sweep_mode}={sweep_value} done.", flush=True)
 

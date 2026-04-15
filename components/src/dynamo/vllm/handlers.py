@@ -37,6 +37,7 @@ from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
@@ -1188,6 +1189,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if "multi_modal_data" not in request or request["multi_modal_data"] is None:
             return None
 
+        t0 = time.perf_counter()
+        _nvtx_rng = _nvtx.start_range("mm:extract_mm_data", color="cyan")
+
         # Security check: reject multimodal data if not explicitly enabled
         if not self.enable_multimodal:
             raise ValueError(
@@ -1253,6 +1257,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.debug(
                     f"Extracted {len(audios)} audio item(s) for multimodal processing"
                 )
+
+        _nvtx.end_range(_nvtx_rng)
+        extract_ms = (time.perf_counter() - t0) * 1000
+        n_img = len(mm_map.get(IMAGE_URL_KEY, []))
+        n_vid = len(mm_map.get(VIDEO_URL_KEY, []))
+        logger.info(
+            f"[PERF] extract_mm_data request_id={request_id} "
+            f"images={n_img} videos={n_vid} time_ms={extract_ms:.2f}"
+        )
 
         return vllm_mm_data if vllm_mm_data else None
 
@@ -1477,6 +1490,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 request_id,
                 lora_request,
             )
+            t0_generate = time.perf_counter()
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -1488,6 +1502,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             num_output_tokens_so_far = 0
+            first_token_logged = False
             async for res in gen:
                 # res is vllm's RequestOutput
 
@@ -1507,6 +1522,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                 output = res.outputs[0]
                 next_total_toks = len(output.token_ids)
+
+                if not first_token_logged:
+                    llm_fwd_ms = (time.perf_counter() - t0_generate) * 1000
+                    logger.info(
+                        f"[PERF] llm_forward request_id={request_id} "
+                        f"time_ms={llm_fwd_ms:.2f}"
+                    )
+                    first_token_logged = True
+
                 out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                 # Extract logprobs for new tokens if available

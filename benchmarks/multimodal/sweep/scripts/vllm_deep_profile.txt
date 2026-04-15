@@ -1,0 +1,61 @@
+AI generated -- take it with a grain of salt pls.
+
+❯   Component                  count      avg      p50      p90      p99
+    ----------------------------------------------------------------------
+    openai_preprocess             60   1935      1394     3762     4975
+    ├── render_messages           60    583       247     1471     2690
+    │   ├── parse_chat            60    249       241      261      404
+    │   │   └── image_fetch(×4)  240     40        12      116      132
+    │   │       ├── base64_decode 240     29         8       61       77
+    │   │       └── pil_open_conv 240      0.1       0.1      0.1      0.2
+    │   └── chat_template         60    334         0.4   1213     2437
+    ├── tokenize                  60      6         4        9       12
+    └── hf_processor_wait         60   1346       937     2496     4402
+        └── hf_processor          60   1006       931     1235     1558
+            └── mm_processor_apply 60  1006       931     1235     1558
+                └── hf_processor_call 60 772       721      955     1106
+                    (cache+hash+placeholder overhead: ~234ms)
+
+⏺ vllm-serve Deep Image Processing Attribution (rate=0.4, Qwen3-VL-30B, 4× 2400×1080 JPEG)
+
+  openai_preprocess                        avg=1935ms
+  ├── render_messages                      avg=583ms
+  │   ├── parse_chat                       avg=249ms
+  │   │   └── 4× image_fetch (parallel)   avg=40ms each
+  │   │       ├── base64_decode            avg=29ms  (base64 string → JPEG bytes)
+  │   │       └── pil_open                 avg=0.1ms (lazy header parse, no pixel data)
+  │   └── chat_template                    avg=334ms (p50=0.4ms; inflated by executor queue)
+  ├── tokenize                             avg=6ms
+  └── hf_processor_wait                    avg=1346ms
+      ├── executor_queue_delay             avg=340ms (wait - body)
+      └── hf_processor (body)              avg=1006ms
+          └── mm_processor_apply           avg=1006ms
+              ├── hf_processor_call        avg=772ms (JPEG decompress + resize + normalize + patches)
+              └── cache/hash/placeholder   avg=234ms
+
+  What happens where
+
+  ┌──────────────────────────────────────────────────────────┬─────────────────────────────┬──────────────────────┐
+  │                           Step                           │            Where            │       Avg time       │
+  ├──────────────────────────────────────────────────────────┼─────────────────────────────┼──────────────────────┤
+  │ base64 string → JPEG bytes                               │ parse_chat                  │ 29ms/image           │
+  ├──────────────────────────────────────────────────────────┼─────────────────────────────┼──────────────────────┤
+  │ JPEG bytes → lazy PIL object                             │ parse_chat                  │ 0.1ms/image          │
+  ├──────────────────────────────────────────────────────────┼─────────────────────────────┼──────────────────────┤
+  │ PIL → decompress + resize + normalize + patches          │ hf_processor_call           │ 772ms (all 4 images) │
+  ├──────────────────────────────────────────────────────────┼─────────────────────────────┼──────────────────────┤
+  │ MM cache lookup, hash computation, placeholder expansion │ mm_processor_apply overhead │ 234ms                │
+  ├──────────────────────────────────────────────────────────┼─────────────────────────────┼──────────────────────┤
+  │ Shared executor queue wait                               │ hf_processor_wait overhead  │ 340ms                │
+  ├──────────────────────────────────────────────────────────┼─────────────────────────────┼──────────────────────┤
+  │ Jinja2 template (actual work)                            │ chat_template               │ 0.4ms (p50)          │
+  ├──────────────────────────────────────────────────────────┼─────────────────────────────┼──────────────────────┤
+  │ Tokenizer encode                                         │ tokenize                    │ 6ms                  │
+  └──────────────────────────────────────────────────────────┴─────────────────────────────┴──────────────────────┘
+
+  Key takeaways
+
+  1. 772ms hf_processor_call is the dominant cost — JPEG decompression, resize, normalize, and patch creation all happen here in one shot when the HF processor first accesses pixel data
+  2. 340ms executor queue delay — the shared thread pool (renderer_num_workers) causes contention; chat_template and tokenize show inflated averages but tiny p50s for the same reason
+  3. base64 decode (29ms/image) happens in parse_chat, separate from JPEG decompression
+  4. Sum closes exactly: render_messages(583) + tokenize(6) + hf_processor_wait(1346) = 1935 = openai_preprocess(1935)

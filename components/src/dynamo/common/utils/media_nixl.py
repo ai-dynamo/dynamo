@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from dynamo import nixl_connect
+from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.nixl_connect import OperationKind, RdmaMetadata, SerializedDescriptor
 
 logger = logging.getLogger(__name__)
@@ -78,11 +79,18 @@ async def read_decoded_media_via_nixl(
     alloc_end = time.perf_counter()
     local_descriptor = nixl_connect.Descriptor(tensor)
 
-    read_start = time.perf_counter()
-    read_op = await connector.begin_read(rdma_metadata, local_descriptor)
-    await read_op.wait_for_completion()
-    read_end = time.perf_counter()
+    with _nvtx.annotate("mm:nixl_read", color="orange"):
+        read_start = time.perf_counter()
+        read_op = await connector.begin_read(rdma_metadata, local_descriptor)
+        await read_op.wait_for_completion()
+        read_end = time.perf_counter()
 
+    read_ms = (read_end - read_start) * 1000
+    logger.info(
+        f"[PERF] nixl_read shape={shape} "
+        f"time_ms={read_ms:.2f} "
+        f"alloc_ms={(alloc_end - alloc_start) * 1000:.2f}"
+    )
     logger.debug(
         f"Loaded media via NIXL RDMA: shape={shape}, "
         f"read_time={read_end - read_start:.4f}s, "

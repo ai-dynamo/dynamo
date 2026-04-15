@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Pass 4: vllm-serve vs dynamo-fd at low rate (near-sequential).
+# Rate=0.4, 60 requests, 4 images/request, 240 unique 2400x1080 images.
+# OSL=1 for pure TTFT measurement.
+#
+# Usage:
+#   python -m benchmarks.multimodal.sweep \
+#     --config benchmarks/multimodal/sweep/experiments/h100_vllm_vs_fd/sweep_pass4_rate04.yaml
+
+model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+request_rates: [0.4]
+osl: 1
+request_count: 60
+warmup_count: 3
+port: 8000
+timeout: 600
+output_dir: logs/04-09/h100-fd-pass5-breakdown
+
+env:
+  CUDA_VISIBLE_DEVICES: "0"
+  HF_HOME: /huggingface
+  DYN_TCP_MAX_MESSAGE_SIZE: "104857600"
+  DYN_PERF_PATCHES: "1"
+
+input_files:
+  - benchmarks/multimodal/jsonl/60req_4img_240pool_400word_base64.jsonl
+
+configs:
+  - label: vllm-serve
+    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve_clean.sh
+    extra_args:
+      - --max-num-seqs
+      - "8"
+      - --gpu-memory-utilization
+      - ".9"
+
+  - label: dynamo-fd
+    workflow: examples/backends/vllm/launch/agg_multimodal.sh
+    extra_args:
+      - --no-enable-prefix-caching
+      - --frontend-decoding
+      - --max-model-len
+      - "16384"
+      - --max-num-seqs
+      - "8"
+      - --gpu-memory-utilization
+      - ".9"

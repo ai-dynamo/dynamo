@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import logging
 import time
 from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_checkable
 
@@ -45,6 +46,9 @@ except ImportError:
         BaseModelPath,
         OpenAIServingModels,
     )
+
+
+logger = logging.getLogger(__name__)
 
 
 class StubEngineClient:
@@ -170,6 +174,7 @@ class ChatProcessor:
         else:
             chat_template = request.chat_template or self.tokenizer.chat_template
 
+        t0 = time.perf_counter()
         (
             conversation,
             engine_prompts,
@@ -187,6 +192,8 @@ class ChatProcessor:
             tool_parser=self.openai_serving.tool_parser,
             add_special_tokens=request.add_special_tokens,
         )
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        logger.info(f"[PERF] hf_processor time_ms={elapsed_ms:.2f}")
 
         # In newer vLLM, _preprocess_chat returns (conversation, engine_prompts) - 2 values
         if not conversation or not engine_prompts:

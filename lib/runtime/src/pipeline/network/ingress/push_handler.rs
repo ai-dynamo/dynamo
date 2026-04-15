@@ -3,6 +3,7 @@
 
 use super::*;
 
+use crate::dynamo_nvtx_range;
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
@@ -183,9 +184,11 @@ where
         });
 
         // decode the control message and the request
+        let _nvtx_decode = dynamo_nvtx_range!("transport.tcp.decode");
         let msg = TwoPartCodec::default()
             .decode_message(payload)?
             .into_message_type();
+        drop(_nvtx_decode);
 
         // we must have a header and a body
         // it will be held by this closure as a Some(permit)
@@ -196,6 +199,7 @@ where
                     header.len(),
                     data.len()
                 );
+                let _nvtx_deser = dynamo_nvtx_range!("transport.tcp.deserialize");
                 let control_msg: RequestControlMessage = match serde_json::from_slice(&header) {
                     Ok(cm) => cm,
                     Err(err) => {

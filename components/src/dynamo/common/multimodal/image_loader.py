@@ -179,6 +179,14 @@ class ImageLoader:
         # It's not file:, http:, https:, or data:
         raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
 
+    @_nvtx.annotate("mm:img:nixl_read", color="orange")
+    async def _read_decoded_via_nixl(
+        self, metadata: Dict[str, Any]
+    ) -> Any:
+        """Read decoded media via NIXL with NVTX annotation."""
+        return await read_decoded_media_via_nixl(self._nixl_connector, metadata)
+
+    @_nvtx.annotate("mm:img:load_batch", color="lime")
     async def load_image_batch(
         self,
         image_mm_items: List[Dict[str, Any]],
@@ -214,7 +222,7 @@ class ImageLoader:
                     if self._nixl_connector is None:
                         raise RuntimeError("NIXL connector is not initialized")
                     image_futures.append(
-                        read_decoded_media_via_nixl(self._nixl_connector, metadata)
+                        self._read_decoded_via_nixl(metadata)
                     )
                 else:
                     logger.error(
