@@ -157,19 +157,6 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         libuuid-devel \
         zlib-devel
 
-# Build hwloc from source (>= 2.3 required by nixl >= v1.0.0 for hwloc_location API)
-ARG HWLOC_VERSION=2.12.0
-RUN HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1-2)" && \
-    cd /tmp && \
-    curl --retry 3 -LO "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
-    tar xf hwloc-${HWLOC_VERSION}.tar.gz && \
-    cd hwloc-${HWLOC_VERSION} && \
-    ./configure --prefix=/usr/local && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig && \
-    rm -rf /tmp/hwloc-*
-
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
     LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
