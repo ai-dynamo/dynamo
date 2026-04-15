@@ -391,9 +391,21 @@ class WorkerFactory:
             vllm_config,
         )
 
-        health_check_payload = VllmHealthCheckPayload(
-            engine_client, use_text_input=config.use_vllm_tokenizer
-        ).to_dict()
+        is_multimodal_decode = (
+            config.disaggregation_mode == DisaggregationMode.DECODE
+            and model_type == ModelType.MULTIMODAL
+        )
+        if is_multimodal_decode:
+            # Multimodal decode workers need embedding_params from prefill.
+            # Skip canary to avoid crash.
+            health_check_payload = None
+            logger.info(
+                "Multimodal decode worker: skipping canary health check payload"
+            )
+        else:
+            health_check_payload = VllmHealthCheckPayload(
+                engine_client, use_text_input=config.use_vllm_tokenizer
+            ).to_dict()
 
         perf_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.get_perf_metrics"
