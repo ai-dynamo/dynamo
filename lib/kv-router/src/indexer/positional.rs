@@ -25,6 +25,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{SyncIndexer, WorkerTask};
+use crate::active_set::reconcile_active_workers;
 use crate::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
     KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,
@@ -460,18 +461,6 @@ impl PositionalIndexer {
 // -----------------------------------------------------------------------------
 
 impl PositionalIndexer {
-    /// Score all active workers at the given position and clear the active set.
-    #[inline]
-    fn drain_active(
-        active: &mut FxHashSet<WorkerWithDpRank>,
-        scores: &mut OverlapScores,
-        pos: usize,
-    ) {
-        for worker in active.drain() {
-            scores.scores.insert(worker, pos as u32);
-        }
-    }
-
     /// Compute sequence hash incrementally from previous hash and current local hash.
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
@@ -570,24 +559,23 @@ impl PositionalIndexer {
             }
 
             let Some(entry) = self.index.get(&(pos, sequence[pos])) else {
-                Self::drain_active(active, scores, pos);
+                for worker in active.drain() {
+                    scores.scores.insert(worker, pos as u32);
+                }
                 break;
             };
 
             Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
             let Some(workers) = entry.get(seq_hashes[pos]) else {
-                Self::drain_active(active, scores, pos);
+                for worker in active.drain() {
+                    scores.scores.insert(worker, pos as u32);
+                }
                 break;
             };
 
-            if workers.len() < active.len() {
-                active.retain(|w| {
-                    if workers.contains(w) {
-                        true
-                    } else {
-                        scores.scores.insert(*w, pos as u32);
-                        false
-                    }
+            if workers.len() != active.len() {
+                reconcile_active_workers(active, workers, |worker| {
+                    scores.scores.insert(worker, pos as u32);
                 });
             }
 

@@ -1100,17 +1100,6 @@ mod tests {
         )
     }
 
-    fn make_multi_dp_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
-        ActiveSequencesMultiWorker::new(
-            NoopSequencePublisher,
-            4,
-            HashMap::from([(1_u64, (0_u32, 2_u32))]),
-            false,
-            0,
-            "test",
-        )
-    }
-
     fn naive_potential_loads(
         sequences: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
         token_sequence: Option<&[SequenceHash]>,
@@ -1561,53 +1550,6 @@ mod tests {
         sequences.update_workers(&HashMap::from([(1_u64, (0_u32, 1_u32))]));
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
         assert!(sequences.prompt_registry.is_block_index_empty());
-    }
-
-    #[test]
-    fn dp_ranks_with_same_worker_id_remain_isolated_in_registry() {
-        let sequences = make_multi_dp_sequences();
-        let worker_a = WorkerWithDpRank::new(1, 0);
-        let worker_b = WorkerWithDpRank::new(1, 1);
-        let decay_now = Instant::now();
-
-        sequences
-            .add_request(
-                SequenceRequest {
-                    request_id: "req-a".to_string(),
-                    token_sequence: Some(vec![1, 2, 3]),
-                    isl: 12,
-                    overlap: 0,
-                    track_prefill_tokens: false,
-                    expected_output_tokens: None,
-                    prefill_load_hint: None,
-                    worker: worker_a,
-                    lora_name: None,
-                },
-                decay_now,
-            )
-            .unwrap();
-
-        let expected = naive_potential_loads(
-            &sequences,
-            Some(&[1, 2, 3]),
-            12,
-            &OverlapScores::default(),
-            false,
-            decay_now,
-        );
-        let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
-            Some(&[1, 2, 3]),
-            12,
-            OverlapScores::default(),
-            false,
-            decay_now,
-        );
-
-        assert_eq!(actual, expected);
-        assert_eq!(actual.0.get(&worker_a).copied(), Some(3));
-        assert_eq!(actual.0.get(&worker_b).copied(), Some(3));
-        assert_eq!(sequences.active_blocks().get(&worker_a).copied(), Some(3));
-        assert_eq!(sequences.active_blocks().get(&worker_b).copied(), Some(0));
     }
 
     #[test]

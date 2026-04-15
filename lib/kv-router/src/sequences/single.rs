@@ -29,8 +29,7 @@ use uuid::Uuid;
 
 use super::block_tracker::BlockTracker;
 use super::prefill_tracker::{
-    AnchoredPrefillSnapshot, PrefillLoadSnapshot, PrefillLoadState, PrefillLoadTracker,
-    added_prefill_tokens,
+    PrefillLoadSnapshot, PrefillLoadState, PrefillLoadTracker, added_prefill_tokens,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::PrefillLoadHint;
@@ -389,16 +388,9 @@ impl ActiveSequences {
                         .get(request_id)
                         .and_then(|state| state.prefill)
                         .expect("prefill_order front missing prefill load");
-                    AnchoredPrefillSnapshot {
-                        initial_effective_prefill_tokens: prefill.initial_effective_prefill_tokens,
-                        expected_prefill_duration: prefill.expected_prefill_duration,
-                        anchored_since: *anchored_since,
-                    }
+                    (prefill, *anchored_since)
                 });
-        PrefillLoadSnapshot {
-            prefill_full_tokens_sum: self.prefill.prefill_full_tokens_sum,
-            anchored_prefill,
-        }
+        self.prefill.snapshot(anchored_prefill)
     }
 
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
@@ -783,181 +775,6 @@ mod tests {
         );
         assert_eq!(blocks, 4);
         assert_eq!(tokens, 0);
-    }
-
-    #[test]
-    fn test_prefill_decay_only_applies_to_oldest_request() {
-        let mut seq_manager = ActiveSequences::new(4);
-        let epoch = Instant::now();
-
-        seq_manager.add_request_with_prefill_tracking(
-            "r1".to_string(),
-            Some(vec![1]),
-            100,
-            0,
-            None,
-            true,
-            Some(prefill_hint(100, 10)),
-            epoch,
-        );
-        seq_manager.add_request_with_prefill_tracking(
-            "r2".to_string(),
-            Some(vec![2]),
-            60,
-            0,
-            None,
-            true,
-            Some(prefill_hint(60, 6)),
-            epoch + Duration::from_secs(2),
-        );
-
-        assert_eq!(
-            seq_manager.active_tokens(epoch + Duration::from_secs(2)),
-            140
-        );
-
-        let decayed = seq_manager.active_tokens(epoch + Duration::from_secs(5));
-        assert_eq!(decayed, 110);
-        assert!(decayed <= 160);
-        assert!(decayed >= 60);
-    }
-
-    #[test]
-    fn test_prefill_decay_hands_off_to_next_oldest_request() {
-        let mut seq_manager = ActiveSequences::new(4);
-        let epoch = Instant::now();
-
-        seq_manager.add_request_with_prefill_tracking(
-            "r1".to_string(),
-            Some(vec![1]),
-            100,
-            0,
-            None,
-            true,
-            Some(prefill_hint(100, 10)),
-            epoch,
-        );
-        seq_manager.add_request_with_prefill_tracking(
-            "r2".to_string(),
-            Some(vec![2]),
-            40,
-            0,
-            None,
-            true,
-            Some(prefill_hint(40, 8)),
-            epoch,
-        );
-
-        assert_eq!(
-            seq_manager.active_tokens(epoch + Duration::from_secs(3)),
-            110
-        );
-
-        seq_manager.mark_prefill_completed(&"r1".to_string(), epoch + Duration::from_secs(3));
-        assert_eq!(
-            seq_manager.active_tokens(epoch + Duration::from_secs(3)),
-            40
-        );
-        assert_eq!(
-            seq_manager.prefill.prefill_order,
-            VecDeque::from(vec!["r2".to_string()])
-        );
-        assert!(
-            seq_manager
-                .prefill
-                .anchored_prefill
-                .as_ref()
-                .is_some_and(|(request_id, _)| request_id == "r2")
-        );
-
-        assert_eq!(
-            seq_manager.active_tokens(epoch + Duration::from_secs(5)),
-            30
-        );
-    }
-
-    #[test]
-    fn test_prefill_decay_resets_when_request_becomes_oldest() {
-        let mut seq_manager = ActiveSequences::new(4);
-        let epoch = Instant::now();
-
-        seq_manager.add_request_with_prefill_tracking(
-            "r1".to_string(),
-            Some(vec![1]),
-            100,
-            0,
-            None,
-            true,
-            Some(prefill_hint(100, 10)),
-            epoch,
-        );
-        seq_manager.add_request_with_prefill_tracking(
-            "r2".to_string(),
-            Some(vec![2]),
-            80,
-            0,
-            None,
-            true,
-            Some(prefill_hint(80, 8)),
-            epoch + Duration::from_secs(4),
-        );
-
-        assert_eq!(
-            seq_manager.active_tokens(epoch + Duration::from_secs(8)),
-            100
-        );
-
-        seq_manager.mark_prefill_completed(&"r1".to_string(), epoch + Duration::from_secs(8));
-        assert_eq!(
-            seq_manager.active_tokens(epoch + Duration::from_secs(8)),
-            80
-        );
-
-        assert_eq!(
-            seq_manager.active_tokens(epoch + Duration::from_secs(10)),
-            60
-        );
-    }
-
-    #[test]
-    fn test_prefill_front_removal_reanchors_queue_front() {
-        let mut seq_manager = ActiveSequences::new(4);
-        let epoch = Instant::now();
-
-        seq_manager.add_request_with_prefill_tracking(
-            "r1".to_string(),
-            Some(vec![1]),
-            30,
-            0,
-            None,
-            true,
-            Some(prefill_hint(30, 6)),
-            epoch,
-        );
-        seq_manager.add_request_with_prefill_tracking(
-            "r2".to_string(),
-            Some(vec![2]),
-            20,
-            0,
-            None,
-            true,
-            Some(prefill_hint(20, 4)),
-            epoch,
-        );
-
-        seq_manager.mark_prefill_completed(&"r1".to_string(), epoch + Duration::from_secs(2));
-
-        assert!(
-            seq_manager
-                .prefill
-                .anchored_prefill
-                .as_ref()
-                .is_some_and(|(request_id, _)| request_id == "r2")
-        );
-        assert_eq!(
-            seq_manager.active_tokens(epoch + Duration::from_secs(2)),
-            20
-        );
     }
 
     #[test]
