@@ -204,10 +204,10 @@ impl ResponseStorage for InMemoryResponseStorage {
         });
 
         // Apply cursor: skip all responses up to and including the cursor
-        if let Some(cursor_id) = after {
-            if let Some(cursor_pos) = responses.iter().position(|r| r.response_id == cursor_id) {
-                responses.drain(..=cursor_pos);
-            }
+        if let Some(cursor_id) = after
+            && let Some(cursor_pos) = responses.iter().position(|r| r.response_id == cursor_id)
+        {
+            responses.drain(..=cursor_pos);
         }
 
         if let Some(limit) = limit {
