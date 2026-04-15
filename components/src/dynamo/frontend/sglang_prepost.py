@@ -58,12 +58,28 @@ def _materialize_messages(messages: list[Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def detect_force_reasoning(tokenizer, prompt_token_ids: list[int]) -> bool:
+    """Check if the chat template's generation prompt ends with ``<think>``.
+
+    When the template appends ``<think>`` to the prompt, the model output
+    starts inside a reasoning block without an explicit opening tag.
+    The reasoning parser must be told to begin in reasoning mode
+    (``force_reasoning=True``) so that it correctly separates reasoning
+    content from normal content.
+    """
+    if not prompt_token_ids:
+        return False
+    tail = tokenizer.decode(prompt_token_ids[-10:], skip_special_tokens=False)
+    return tail.rstrip().endswith("<think>")
+
+
 def create_parsers(
     request: dict[str, Any],
     *,
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
     sglang_tools: list[SglangTool] | None = None,
+    force_reasoning: bool = False,
 ) -> tuple[FunctionCallParser | None, ReasoningParser | None]:
     """Create tool call and reasoning parsers for a request.
 
@@ -86,10 +102,13 @@ def create_parsers(
 
     reasoning_parser = None
     if reasoning_parser_name:
-        reasoning_parser = ReasoningParser(
-            model_type=reasoning_parser_name,
-            stream_reasoning=True,
-        )
+        kwargs: dict[str, Any] = {
+            "model_type": reasoning_parser_name,
+            "stream_reasoning": True,
+        }
+        if force_reasoning:
+            kwargs["force_reasoning"] = True
+        reasoning_parser = ReasoningParser(**kwargs)
 
     return tool_call_parser, reasoning_parser
 
@@ -131,6 +150,7 @@ def preprocess_chat_request(
     template_kwargs: dict[str, Any] = {
         "add_generation_prompt": True,
         "tokenize": True,
+        "return_dict": False,
     }
     # Strip tools from template when tool_choice=none so the model doesn't
     # see them and generate raw XML tool calls in its response.
@@ -144,11 +164,18 @@ def preprocess_chat_request(
         tokenizer.apply_chat_template(messages, **template_kwargs)
     )
 
+    force_reasoning = (
+        detect_force_reasoning(tokenizer, prompt_token_ids)
+        if reasoning_parser_name
+        else False
+    )
+
     tool_call_parser, reasoning_parser = create_parsers(
         request,
         tool_call_parser_name=tool_call_parser_name,
         reasoning_parser_name=reasoning_parser_name,
         sglang_tools=sglang_tools,
+        force_reasoning=force_reasoning,
     )
 
     return SglangPreprocessResult(
