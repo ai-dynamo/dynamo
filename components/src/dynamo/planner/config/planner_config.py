@@ -65,7 +65,6 @@ class PlannerConfig(BaseModel):
         ),
     )
 
-    no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
     throughput_adjustment_interval: int = (
         SLAPlannerDefaults.throughput_adjustment_interval

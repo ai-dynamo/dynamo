@@ -38,7 +38,6 @@ class BasePlannerDefaults:
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
     environment: Literal["kubernetes", "virtual", "global-planner"] = "kubernetes"
     backend: Literal["vllm", "sglang", "trtllm", "mocker"] = "vllm"
-    no_operation = False
     log_dir = None
     throughput_adjustment_interval = 180  # in seconds
     max_gpu_budget = 8

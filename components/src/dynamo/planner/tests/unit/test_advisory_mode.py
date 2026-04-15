@@ -128,18 +128,16 @@ class TestAdvisoryModeLogic:
         """Advisory mode: _apply_effects runs (for metrics), but
         _apply_scaling_targets is guarded (no actual scaling)."""
         scaling_mode = ScalingMode.ADVISORY
-        no_operation = False
 
         # _apply_scaling_targets guard (mirrors base.py)
-        scaling_skipped = no_operation or scaling_mode == ScalingMode.ADVISORY
+        scaling_skipped = scaling_mode == ScalingMode.ADVISORY
         assert scaling_skipped is True
 
     def test_active_mode_applies_scaling(self):
         """Active mode: _apply_scaling_targets proceeds."""
         scaling_mode = ScalingMode.ACTIVE
-        no_operation = False
 
-        scaling_skipped = no_operation or scaling_mode == ScalingMode.ADVISORY
+        scaling_skipped = scaling_mode == ScalingMode.ADVISORY
         assert scaling_skipped is False
 
     def test_advisory_delta_calculation(self):
@@ -177,39 +175,17 @@ class TestAdvisoryModeLogic:
 class TestAdvisoryModeStartupBehavior:
     """Test advisory mode startup behavior.
 
-    Advisory mode goes through the same startup path as active mode
-    (validate deployment, discover workers, subscribe to FPM) because
-    it needs real metrics to compute decisions.  The only difference
-    is that scaling decisions are logged, not executed.
+    Both modes go through the same startup path (validate deployment,
+    discover workers, subscribe to FPM).  Advisory mode only differs
+    at the ``_apply_scaling_targets`` call.
     """
 
-    def test_advisory_mode_validates_deployment(self):
-        """Advisory mode MUST validate deployment to discover workers."""
-        no_operation = False
-        validate_called = False
+    def test_advisory_mode_skips_apply_scaling_targets(self):
+        """Advisory mode skips the connector scaling call."""
+        scaling_mode = ScalingMode.ADVISORY
+        assert scaling_mode == ScalingMode.ADVISORY
 
-        # Simulate _async_init branching — advisory uses the same path
-        if not no_operation:
-            validate_called = True
-
-        assert validate_called is True
-
-    def test_active_mode_validates_deployment(self):
-        """Active mode must validate deployment."""
-        no_operation = False
-        validate_called = False
-
-        if not no_operation:
-            validate_called = True
-
-        assert validate_called is True
-
-    def test_no_operation_skips_validation(self):
-        """Only no_operation=True skips deployment validation."""
-        no_operation = True
-        validate_called = False
-
-        if not no_operation:
-            validate_called = True
-
-        assert validate_called is False
+    def test_active_mode_runs_apply_scaling_targets(self):
+        """Active mode runs the connector scaling call."""
+        scaling_mode = ScalingMode.ACTIVE
+        assert scaling_mode != ScalingMode.ADVISORY

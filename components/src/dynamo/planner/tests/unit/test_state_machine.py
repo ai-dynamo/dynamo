@@ -99,7 +99,6 @@ def _make_config(**overrides) -> PlannerConfig:
         enable_load_scaling=True,
         enable_throughput_scaling=True,
         load_predictor="constant",
-        no_operation=True,
         backend="vllm",
         metric_pulling_prometheus_endpoint="http://localhost:9090",
         metric_reporting_prometheus_port=0,

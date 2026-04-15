@@ -87,7 +87,6 @@ def _easy_config(**overrides) -> PlannerConfig:
         fpm_sample_bucket_size=16,
         load_min_observations=5,
         load_predictor="constant",
-        no_operation=True,
         backend="vllm",
         metric_pulling_prometheus_endpoint="http://localhost:9090",
         metric_reporting_prometheus_port=0,

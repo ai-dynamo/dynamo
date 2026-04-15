@@ -119,26 +119,25 @@ class NativePlannerBase:
 
         # Connector
         self.connector: ConnectorType
-        if not config.no_operation:
-            if config.environment == "global-planner":
-                assert config.global_planner_namespace is not None
-                assert runtime is not None
-                self.connector = GlobalPlannerConnector(
-                    runtime,
-                    self.namespace,
-                    config.global_planner_namespace,
-                    "GlobalPlanner",
-                    config.model_name,
-                )
-            elif config.environment == "kubernetes":
-                self.connector = KubernetesConnector(self.namespace, config.model_name)
-            elif config.environment == "virtual":
-                assert runtime is not None
-                self.connector = VirtualConnector(
-                    runtime, self.namespace, config.model_name
-                )
-            else:
-                raise ValueError(f"Invalid environment: {config.environment}")
+        if config.environment == "global-planner":
+            assert config.global_planner_namespace is not None
+            assert runtime is not None
+            self.connector = GlobalPlannerConnector(
+                runtime,
+                self.namespace,
+                config.global_planner_namespace,
+                "GlobalPlanner",
+                config.model_name,
+            )
+        elif config.environment == "kubernetes":
+            self.connector = KubernetesConnector(self.namespace, config.model_name)
+        elif config.environment == "virtual":
+            assert runtime is not None
+            self.connector = VirtualConnector(
+                runtime, self.namespace, config.model_name
+            )
+        else:
+            raise ValueError(f"Invalid environment: {config.environment}")
 
         # Prometheus
         self.prometheus_traffic_client = PrometheusAPIClient(
@@ -238,31 +237,30 @@ class NativePlannerBase:
         if hasattr(self, "connector") and hasattr(self.connector, "_async_init"):
             await self.connector._async_init()
 
-        if not self.config.no_operation:
-            defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
-            logger.info("Validating deployment...")
-            await self.connector.validate_deployment(
-                prefill_component_name=(
-                    defaults.prefill_worker_k8s_name
-                    if self.require_prefill and defaults
-                    else None
-                ),
-                decode_component_name=(
-                    defaults.decode_worker_k8s_name
-                    if self.require_decode and defaults
-                    else None
-                ),
-                require_prefill=self.require_prefill,
-                require_decode=self.require_decode,
-            )
-            logger.info("Successfully validated the deployment")
-            _initialize_gpu_counts(
-                self.config,
-                self.connector,
-                require_prefill=self.require_prefill,
-                require_decode=self.require_decode,
-            )
-            await self.connector.wait_for_deployment_ready(include_planner=False)
+        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
+        logger.info("Validating deployment...")
+        await self.connector.validate_deployment(
+            prefill_component_name=(
+                defaults.prefill_worker_k8s_name
+                if self.require_prefill and defaults
+                else None
+            ),
+            decode_component_name=(
+                defaults.decode_worker_k8s_name
+                if self.require_decode and defaults
+                else None
+            ),
+            require_prefill=self.require_prefill,
+            require_decode=self.require_decode,
+        )
+        logger.info("Successfully validated the deployment")
+        _initialize_gpu_counts(
+            self.config,
+            self.connector,
+            require_prefill=self.require_prefill,
+            require_decode=self.require_decode,
+        )
+        await self.connector.wait_for_deployment_ready(include_planner=False)
 
         await self._init_worker_info()
 
@@ -305,7 +303,7 @@ class NativePlannerBase:
             require_decode=self.require_decode,
             connector=connector,
             config_model_name=getattr(self.config, "model_name", ""),
-            no_operation=self.config.no_operation,
+            no_operation=False,
         )
         self.model_name = (
             self.decode_worker_info.model_name or self.prefill_worker_info.model_name
@@ -598,14 +596,9 @@ class NativePlannerBase:
     ) -> None:
         """Shared helper: send scaling targets to connector.
 
-        Skipped in advisory mode (decisions are logged but not executed)
-        and in no_operation mode (no connector available).
+        Skipped in advisory mode (decisions are logged but not executed).
         """
-        if (
-            self.config.no_operation
-            or self.config.scaling_mode == ScalingMode.ADVISORY
-            or not targets
-        ):
+        if self.config.scaling_mode == ScalingMode.ADVISORY or not targets:
             return
         await self.connector.set_component_replicas(targets, blocking=blocking)
 
