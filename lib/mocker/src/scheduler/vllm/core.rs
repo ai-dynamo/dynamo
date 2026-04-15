@@ -657,19 +657,28 @@ impl VllmCore {
             return (Duration::ZERO, Vec::new());
         }
 
-        let active_kv_tokens = self.kv_manager.num_active_blocks() * self.args.block_size;
-        let total_length = ready
-            .iter()
-            .filter_map(|uuid| self.state.requests.get(uuid))
-            .map(|request| request.sequence.len())
-            .sum::<usize>();
-        let context_length = total_length / ready.len();
-        let decode_ms =
-            self.args
-                .perf_model
-                .predict_decode_time(ready.len(), active_kv_tokens, context_length);
-        let decode_time = scale_decode_time(decode_ms, &self.args);
-        let decode_end_ms = decode_start_ms + decode_time.as_secs_f64() * 1000.0;
+        // For prefill workers, the first decode token is produced as part of
+        // the prefill forward pass — no separate decode iteration needed.
+        let (decode_time, decode_end_ms) = if self.args.worker_type == WorkerType::Prefill {
+            (Duration::ZERO, decode_start_ms)
+        } else {
+            let active_kv_tokens = self.kv_manager.num_active_blocks() * self.args.block_size;
+            let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
+            let total_length = ready
+                .iter()
+                .filter_map(|uuid| self.state.requests.get(uuid))
+                .map(|request| request.sequence.len())
+                .sum::<usize>();
+            let context_length = total_length / ready.len();
+            let decode_ms = self.args.perf_model.predict_decode_time(
+                ready.len(),
+                active_kv_tokens,
+                context_length,
+                total_kv_tokens,
+            );
+            let dt = scale_decode_time(decode_ms, &self.args);
+            (dt, decode_start_ms + dt.as_secs_f64() * 1000.0)
+        };
 
         let mut output_signals = Vec::with_capacity(ready.len());
         for uuid in ready {
