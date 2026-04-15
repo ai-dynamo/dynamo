@@ -152,24 +152,12 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         librdmacm-devel \
         numactl-devel \
         # Libfabric support
+        hwloc \
+        hwloc-devel \
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
         zlib-devel
-
-# Build hwloc from source — nixl v1.0.x requires it via src/utils/libfabric/meson.build,
-# and the RHEL8 system package is too old (needs >= 2.3).
-ARG HWLOC_VERSION=2.12.0
-RUN HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1-2)" && \
-    cd /tmp && \
-    curl --retry 3 -LO "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
-    tar xf hwloc-${HWLOC_VERSION}.tar.gz && \
-    cd hwloc-${HWLOC_VERSION} && \
-    ./configure --prefix=/usr/local && \
-    make -j$(nproc) && \
-    make install && \
-    ldconfig && \
-    rm -rf /tmp/hwloc-*
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
