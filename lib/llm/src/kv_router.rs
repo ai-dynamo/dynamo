@@ -72,6 +72,7 @@ pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 // for metric publishing (push-based)
 pub const KV_METRICS_SUBJECT: &str = "kv_metrics";
+pub const MULTIMODAL_EMBEDDING_CACHE_SUBJECT: &str = "multimodal_embedding_cache";
 
 // for inter-router comms
 pub const PREFILL_SUBJECT: &str = "prefill_events";

@@ -9,7 +9,7 @@ import sglang as sgl
 
 from dynamo import prometheus_names
 from dynamo.common.constants import DisaggregationMode
-from dynamo.llm import ModelInput
+from dynamo.llm import ModelInput, MultimodalEmbeddingCachePublisher
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
@@ -45,7 +45,18 @@ async def init_multimodal_encode_worker(
         f"{dynamo_args.namespace}.backend.generate"
     ).client()
 
-    handler = MultimodalEncodeWorkerHandler(config, pd_worker_client, shutdown_event)
+    cache_publisher = None
+    if config.dynamo_args.multimodal_embedding_cache_capacity_gb > 0:
+        cache_publisher = MultimodalEmbeddingCachePublisher()
+        await cache_publisher.create_endpoint(generate_endpoint)
+        cache_publisher.publish([])
+
+    handler = MultimodalEncodeWorkerHandler(
+        config,
+        pd_worker_client,
+        cache_publisher,
+        shutdown_event,
+    )
 
     await pd_worker_client.wait_for_instances()
 

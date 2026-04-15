@@ -18,6 +18,8 @@ use crate::{
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
+use blake2::digest::{Update, VariableOutput};
+use blake2::Blake2bVar;
 use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -107,6 +109,14 @@ pub trait WorkerLoadMonitor: Send + Sync {
     /// Start background monitoring of worker load.
     /// This should spawn background tasks that update the client's free instances.
     async fn start_monitoring(&self) -> anyhow::Result<()>;
+
+    /// Return worker IDs that contain all provided multimodal cache keys.
+    ///
+    /// The default implementation returns no candidates when a monitor does not
+    /// support multimodal cache indexing.
+    fn workers_with_cached_multimodal_keys(&self, _cache_keys: &[String]) -> Vec<u64> {
+        Vec::new()
+    }
 }
 
 #[derive(Clone)]
@@ -151,6 +161,9 @@ where
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
 
+    /// Optional worker monitor for load and cache-aware routing hints.
+    worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
     /// compiler to specialize us at compile time.
@@ -178,6 +191,45 @@ impl RouterMode {
     pub fn is_direct_routing(&self) -> bool {
         *self == RouterMode::Direct
     }
+}
+
+fn multimodal_cache_key_from_url(url: &str) -> Option<String> {
+    let mut hasher = Blake2bVar::new(32).ok()?;
+    hasher.update(url.as_bytes());
+    let mut out = [0u8; 32];
+    hasher.finalize_variable(&mut out).ok()?;
+    Some(out.iter().map(|b| format!("{:02x}", b)).collect())
+}
+
+fn extract_multimodal_cache_keys_from_request<T: Data + Serialize>(
+    request: &SingleIn<T>,
+) -> Vec<String> {
+    let value = match serde_json::to_value(request.content()) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let Some(items) = value.pointer("/multi_modal_data/image_url") else {
+        return Vec::new();
+    };
+    let Some(arr) = items.as_array() else {
+        return Vec::new();
+    };
+
+    let mut keys = arr
+        .iter()
+        .filter_map(|item| {
+            if let Some(url) = item.as_str() {
+                return multimodal_cache_key_from_url(url);
+            }
+            item.get("Url")
+                .and_then(|v| v.as_str())
+                .and_then(multimodal_cache_key_from_url)
+        })
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 /// Pick the instance with lower in-flight count from two random candidates.
@@ -311,6 +363,7 @@ where
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
+            worker_monitor: None,
             _phantom: PhantomData,
         })
     }
@@ -349,6 +402,7 @@ where
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
+            worker_monitor,
             _phantom: PhantomData,
         };
 
@@ -493,24 +547,50 @@ where
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|v| *v >= 1)
             .unwrap_or(8);
-        let candidates = device_aware_candidate_group(
-            state.as_ref(),
-            &instance_ids,
-            &device_type_map,
-            cuda_to_cpu_ratio,
-        );
 
-        // Select least-loaded within the chosen group
-        let instance_id = state
-            .select_exact_min_and_increment(&candidates)
-            .await
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no instances in selected device group for endpoint {}",
-                    endpoint_id
-                )
-            })?;
-        let permit = OccupancyPermit::new(state.clone(), instance_id);
+        let request_cache_keys = extract_multimodal_cache_keys_from_request(&request);
+        let cache_matched_candidates = self
+            .worker_monitor
+            .as_ref()
+            .filter(|_| !request_cache_keys.is_empty())
+            .map(|m| {
+                let mut matched = m.workers_with_cached_multimodal_keys(&request_cache_keys);
+                matched.retain(|id| instance_ids.contains(id));
+                matched
+            })
+            .unwrap_or_default();
+
+        let skip_weighted_accounting = !cache_matched_candidates.is_empty();
+
+        let candidates = if cache_matched_candidates.is_empty() {
+            device_aware_candidate_group(
+                state.as_ref(),
+                &instance_ids,
+                &device_type_map,
+                cuda_to_cpu_ratio,
+            )
+        } else {
+            cache_matched_candidates
+        };
+
+        // Select least-loaded within the chosen group.
+        // Cache-hit requests should not consume ratio budget occupancy.
+        let instance_id = if skip_weighted_accounting {
+            state.select_exact_min(&candidates).await
+        } else {
+            state.select_exact_min_and_increment(&candidates).await
+        }
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no instances in selected device group for endpoint {}",
+                endpoint_id
+            )
+        })?;
+        let permit = if skip_weighted_accounting {
+            None
+        } else {
+            Some(OccupancyPermit::new(state.clone(), instance_id))
+        };
         let is_cpu = matches!(
             device_type_map.get(&instance_id),
             Some(Some(DeviceType::Cpu))
@@ -519,6 +599,8 @@ where
             endpoint = %endpoint_id,
             selected_instance = instance_id,
             is_cpu,
+            embedding_cache_hit = skip_weighted_accounting,
+            request_cache_keys = request_cache_keys.len(),
             "DeviceAwareWeighted selected instance"
         );
 
@@ -526,7 +608,10 @@ where
             .generate_with_fault_detection(instance_id, request)
             .await
         {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+            Ok(stream) => Ok(match permit {
+                Some(permit) => permit.into_tracked_stream(stream),
+                None => stream,
+            }),
             Err(err) => Err(err),
         }
     }

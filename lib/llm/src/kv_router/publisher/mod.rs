@@ -30,6 +30,7 @@ use crate::kv_router::{
 mod event_processor;
 #[cfg(test)]
 mod tests;
+mod worker_cache;
 mod worker_metrics;
 mod zmq_listener;
 
@@ -38,6 +39,7 @@ use event_processor::{BatchingState, EventDedupFilter, run_event_processor_loop}
 use event_processor::{
     EventPlanePublisher, start_event_processor, start_event_processor_jetstream,
 };
+pub use worker_cache::{MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher};
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 

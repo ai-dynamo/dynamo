@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -16,7 +16,8 @@ use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
-use crate::kv_router::KV_METRICS_SUBJECT;
+use crate::kv_router::publisher::MultimodalEmbeddingCacheEvent;
+use crate::kv_router::{KV_METRICS_SUBJECT, MULTIMODAL_EMBEDDING_CACHE_SUBJECT};
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::model_card::ModelDeploymentCard;
 use dynamo_runtime::component::Client;
@@ -307,6 +308,7 @@ pub struct KvWorkerMonitor {
     /// Notifies the monitoring task when a prefill client is registered
     prefill_client_notify: Arc<Notify>,
     worker_load_states: Arc<DashMap<u64, WorkerLoadState>>,
+    embedding_cache_keys: Arc<DashMap<u64, HashSet<String>>>,
     /// Active decode blocks threshold stored as parts-per-10000 (e.g., 8500 = 0.85)
     active_decode_blocks_threshold: Arc<AtomicU32>,
     /// Active prefill tokens threshold stored as literal token count (u64)
@@ -346,6 +348,7 @@ impl KvWorkerMonitor {
             prefill_client: Arc::new(RwLock::new(None)),
             prefill_client_notify: Arc::new(Notify::new()),
             worker_load_states: Arc::new(DashMap::new()),
+            embedding_cache_keys: Arc::new(DashMap::new()),
             active_decode_blocks_threshold: Arc::new(AtomicU32::new(Self::f64_to_scaled(
                 active_decode_blocks,
             ))),
@@ -373,10 +376,59 @@ impl KvWorkerMonitor {
         tracing::debug!("KvWorkerMonitor: prefill client registered for TTFT cleanup");
     }
 
+    pub fn cache_keys_for_worker(&self, worker_id: u64) -> Vec<String> {
+        self.embedding_cache_keys
+            .get(&worker_id)
+            .map(|keys| {
+                let mut keys = keys.iter().cloned().collect::<Vec<_>>();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn match_workers_with_cached_multimodal_keys<'a, I>(&self, cache_keys: I) -> Vec<u64>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let requested = cache_keys.into_iter().collect::<HashSet<_>>();
+        if requested.is_empty() {
+            return Vec::new();
+        }
+
+        let mut worker_ids = self
+            .embedding_cache_keys
+            .iter()
+            .filter_map(|entry| {
+                requested
+                    .iter()
+                    .all(|key| entry.value().contains(*key))
+                    .then_some(*entry.key())
+            })
+            .collect::<Vec<_>>();
+        worker_ids.sort_unstable();
+        worker_ids
+    }
+
     /// Convert a f64 threshold to scaled u32 for atomic storage.
     #[inline]
     fn f64_to_scaled(threshold: f64) -> u32 {
         (threshold * THRESHOLD_SCALE as f64) as u32
+    }
+
+    fn update_embedding_cache_state(
+        embedding_cache_keys: &DashMap<u64, HashSet<String>>,
+        event: &MultimodalEmbeddingCacheEvent,
+    ) {
+        if event.cache_keys.is_empty() {
+            embedding_cache_keys.remove(&event.worker_id);
+            return;
+        }
+
+        embedding_cache_keys.insert(
+            event.worker_id,
+            event.cache_keys.iter().cloned().collect(),
+        );
     }
 
     /// Convert a scaled u32 back to f64 threshold.
@@ -500,10 +552,27 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             }
         };
 
+        let embedding_cache_rx = match EventSubscriber::for_namespace(
+            component.namespace(),
+            MULTIMODAL_EMBEDDING_CACHE_SUBJECT,
+        )
+        .await
+        {
+            Ok(sub) => Some(sub.typed::<MultimodalEmbeddingCacheEvent>()),
+            Err(e) => {
+                tracing::warn!(
+                    "KvWorkerMonitor: multimodal embedding cache subscriber not available ({}), skipping cache-state sync.",
+                    e
+                );
+                None
+            }
+        };
+
         // Watch decode endpoint instances for cleanup (ITL metrics)
         let mut decode_instances_rx = self.client.instance_avail_watcher();
 
         let worker_load_states = self.worker_load_states.clone();
+        let embedding_cache_keys = self.embedding_cache_keys.clone();
         let client = self.client.clone();
         let prefill_client_holder = self.prefill_client.clone();
         let prefill_client_notify = self.prefill_client_notify.clone();
@@ -515,6 +584,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         // Spawn background monitoring task
         tokio::spawn(async move {
             let mut kv_metrics_rx = kv_metrics_rx; // Move into async block
+            let mut embedding_cache_rx = embedding_cache_rx;
             let mut previous_busy_instances = Vec::new(); // Track previous state
 
             // Track decode worker IDs (for ITL cleanup)
@@ -536,6 +606,14 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         rx.next().await
                     } else {
                         // If no subscriber, pend forever (this branch is effectively disabled)
+                        std::future::pending().await
+                    }
+                };
+
+                let embedding_cache_future = async {
+                    if let Some(ref mut rx) = embedding_cache_rx {
+                        rx.next().await
+                    } else {
                         std::future::pending().await
                     }
                 };
@@ -564,6 +642,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 // Clean up metrics for both worker types since we don't know which type this worker was
                                 cleanup_worker_metrics(*worker_id, &dp_ranks_vec, WORKER_TYPE_DECODE);
                                 cleanup_worker_metrics(*worker_id, &dp_ranks_vec, WORKER_TYPE_PREFILL);
+                                embedding_cache_keys.remove(worker_id);
                                 tracing::debug!(
                                     "Removed Prometheus metrics for worker {}",
                                     worker_id
@@ -667,6 +746,20 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
                     }
 
+                    embedding_cache_event = embedding_cache_future => {
+                        let Some(event_result) = embedding_cache_event else {
+                            tracing::debug!("Multimodal embedding cache stream closed");
+                            break;
+                        };
+
+                        let Ok((_envelope, event)) = event_result else {
+                            tracing::error!("Error receiving multimodal embedding cache event: {event_result:?}");
+                            continue;
+                        };
+
+                        Self::update_embedding_cache_state(&embedding_cache_keys, &event);
+                    }
+
                     // Handle decode endpoint instance changes (for ITL and decode metrics cleanup)
                     _ = decode_instances_rx.changed() => {
                         let current_instances: std::collections::HashSet<u64> =
@@ -687,6 +780,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     .map(|ranks| ranks.iter().copied().collect())
                                     .unwrap_or_else(|| vec![0]);
                                 cleanup_worker_metrics(*worker_id, &dp_ranks, WORKER_TYPE_DECODE);
+                                embedding_cache_keys.remove(worker_id);
                                 tracing::debug!(
                                     "Cleaned up metrics for removed decode worker {}",
                                     worker_id
@@ -767,12 +861,19 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
         Ok(())
     }
+
+    fn workers_with_cached_multimodal_keys(&self, cache_keys: &[String]) -> Vec<u64> {
+        self.match_workers_with_cached_multimodal_keys(cache_keys.iter().map(|k| k.as_str()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::WorkerLoadState;
+    use super::{KvWorkerMonitor, WorkerLoadState};
+    use dashmap::DashMap;
     use dynamo_kv_router::protocols::ActiveLoad;
+
+    use crate::kv_router::publisher::MultimodalEmbeddingCacheEvent;
 
     #[test]
     fn is_busy_prefers_kv_used_blocks_over_active_decode_blocks() {
@@ -950,5 +1051,35 @@ mod tests {
             0.6,
         );
         assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+    }
+
+    #[test]
+    fn embedding_cache_state_replaces_worker_snapshot() {
+        let cache_state = DashMap::new();
+
+        KvWorkerMonitor::update_embedding_cache_state(
+            &cache_state,
+            &MultimodalEmbeddingCacheEvent {
+                worker_id: 7,
+                cache_keys: vec!["b".to_string(), "a".to_string()],
+            },
+        );
+        KvWorkerMonitor::update_embedding_cache_state(
+            &cache_state,
+            &MultimodalEmbeddingCacheEvent {
+                worker_id: 7,
+                cache_keys: vec!["c".to_string()],
+            },
+        );
+
+        let keys = cache_state
+            .get(&7)
+            .map(|entry| {
+                let mut keys = entry.iter().cloned().collect::<Vec<_>>();
+                keys.sort();
+                keys
+            })
+            .unwrap_or_default();
+        assert_eq!(keys, vec!["c".to_string()]);
     }
 }

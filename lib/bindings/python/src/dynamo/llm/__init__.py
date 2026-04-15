@@ -22,6 +22,7 @@ from dynamo._core import MediaFetcher as MediaFetcher
 from dynamo._core import MockEngineArgs as MockEngineArgs
 from dynamo._core import ModelCardInstanceId as ModelCardInstanceId
 from dynamo._core import ModelInput as ModelInput
+from dynamo._core import MultimodalEmbeddingCachePublisher as MultimodalEmbeddingCachePublisher
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
