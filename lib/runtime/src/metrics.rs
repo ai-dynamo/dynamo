@@ -244,6 +244,24 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
         }
     }
 
+    // Also validate that vector label names (const_labels) don't collide with auto-injected
+    // const labels. A variable label named "worker_id" would conflict with the auto-injected
+    // worker_id const label, causing a prometheus registration error or ambiguous output.
+    if let Some(label_names) = const_labels {
+        for name in label_names.iter() {
+            if *name == labels::NAMESPACE
+                || *name == labels::COMPONENT
+                || *name == labels::ENDPOINT
+                || *name == labels::WORKER_ID
+            {
+                return Err(anyhow::anyhow!(
+                    "Variable label name '{}' conflicts with auto-injected const label and cannot be used",
+                    name
+                ));
+            }
+        }
+    }
+
     // Add auto-generated labels with sanitized values
     // Hierarchy: [drt, namespace, component, endpoint]
     if hierarchy_names.len() > 1 {
