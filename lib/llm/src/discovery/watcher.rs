@@ -276,7 +276,6 @@ impl ModelWatcher {
                     // await the in-flight put before attempting cleanup.
                     let instance_key = mcid.to_path();
                     let watcher = Arc::clone(&self);
-                    let key_for_cleanup = instance_key.clone();
                     let handle = tokio::spawn(async move {
                         match watcher.handle_put(&mcid, &mut card).await {
                             Ok(()) => {
@@ -296,12 +295,13 @@ impl ModelWatcher {
                                 );
                             }
                         }
-                        // Remove ourselves from pending_puts once complete
-                        watcher.pending_puts.remove(&key_for_cleanup);
+                        // Note: we intentionally do NOT remove from pending_puts here.
+                        // Only the watch loop (on duplicate events) and handle_delete
+                        // manage pending_puts, avoiding a race where a completed task's
+                        // cleanup could remove a newer task's entry.
                     });
                     // If a duplicate Added event arrives while the first task is still
-                    // in-flight, abort the old task to prevent its cleanup from
-                    // removing the new task's handle from pending_puts.
+                    // in-flight, abort the old task to cancel redundant work.
                     if let Some((_, old_handle)) = self.pending_puts.remove(&instance_key) {
                         old_handle.abort();
                     }
@@ -355,7 +355,15 @@ impl ModelWatcher {
             tracing::debug!(key = %key, "awaiting in-flight handle_put before delete");
             // Ignore join errors (panic in the spawned task) — we still proceed
             // with cleanup since the put may have partially registered the model.
-            let _ = handle.await;
+            match tokio::time::timeout(Duration::from_secs(60), handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        key = %key,
+                        "Timed out waiting for in-flight handle_put, proceeding with delete"
+                    );
+                }
+            }
         }
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
@@ -508,6 +516,17 @@ impl ModelWatcher {
         while self.registering_worker_sets.contains(registration_key) && attempts < 300 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             attempts += 1;
+        }
+
+        // If we timed out and the other task is still running, bail out rather
+        // than proceeding with concurrent pipeline construction.
+        if self.registering_worker_sets.contains(registration_key) {
+            tracing::warn!(
+                model_name = card.name(),
+                namespace = namespace,
+                "Timed out waiting for concurrent registration to complete, skipping"
+            );
+            return Ok(false);
         }
 
         // Validate checksum against the registered model
