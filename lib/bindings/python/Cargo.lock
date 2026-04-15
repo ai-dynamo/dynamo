@@ -1599,6 +1599,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "strum",
  "tempfile",
  "thiserror 2.0.18",

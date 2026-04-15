@@ -38,6 +38,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_queue_policy",
     "use_remote_indexer",
     "serve_indexer",
+    "shared_cache_multiplier",
+    "shared_cache_type",
 )
 
 
@@ -64,6 +66,8 @@ class KvRouterConfigBase(ConfigBase):
     router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
+    shared_cache_multiplier: float = 0.0
+    shared_cache_type: str = "none"
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -298,4 +302,31 @@ class KvRouterArgGroup(ArgGroup):
                 "component via the request plane instead of maintaining a local radix tree."
             ),
             dest="use_remote_indexer",
+        )
+        add_argument(
+            g,
+            flag_name="--shared-cache-multiplier",
+            env_var="DYN_SHARED_CACHE_MULTIPLIER",
+            default=0.5,
+            help=(
+                "[EXPERIMENTAL] KV Router: Multiplier for shared cache hits (0.0-1.0). "
+                "Blocks in the shared cache are less valuable than device-local blocks. "
+                "E.g. 0.5 means each shared hit counts as half a device-local hit. "
+                "Default 0.5."
+            ),
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--shared-cache-type",
+            env_var="DYN_SHARED_CACHE_TYPE",
+            default="none",
+            help=(
+                "[EXPERIMENTAL] KV Router: Type of external shared KV cache to query. "
+                "'none' (default): disabled. "
+                "'hicache': query Mooncake master directly for SGLang L3 (HiCache) state "
+                "using SGLang-compatible Mooncake key derivation."
+            ),
+            arg_type=str,
+            choices=["none", "hicache"],
         )
