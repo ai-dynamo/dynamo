@@ -351,16 +351,20 @@ impl ModelWatcher {
         // to complete before we attempt cleanup. Without this, a Removed event
         // arriving while handle_put is still downloading HF config would fail
         // to find the model card, leaving a stale registration.
-        if let Some((_, handle)) = self.pending_puts.remove(&key) {
+        if let Some((_, mut handle)) = self.pending_puts.remove(&key) {
             tracing::debug!(key = %key, "awaiting in-flight handle_put before delete");
             // Ignore join errors (panic in the spawned task) — we still proceed
             // with cleanup since the put may have partially registered the model.
-            match tokio::time::timeout(Duration::from_secs(60), handle).await {
+            match tokio::time::timeout(Duration::from_secs(60), &mut handle).await {
                 Ok(_) => {}
                 Err(_) => {
+                    // Abort the timed-out task so it cannot register the model
+                    // after we proceed with deletion.
+                    handle.abort();
+                    let _ = handle.await;
                     tracing::warn!(
                         key = %key,
-                        "Timed out waiting for in-flight handle_put, proceeding with delete"
+                        "Timed out waiting for in-flight handle_put, aborted and proceeding with delete"
                     );
                 }
             }
@@ -455,6 +459,16 @@ impl ModelWatcher {
         if let Some(model) = self.manager.get_model(&model_name)
             && model.has_worker_set(&ws_key)
         {
+            if !model.is_checksum_compatible(&ws_key, card.mdcsum()) {
+                tracing::error!(
+                    model_name = card.name(),
+                    namespace = namespace,
+                    new_checksum = card.mdcsum(),
+                    "Checksum for new worker does not match existing WorkerSet's checksum. \
+                     Drain all old workers in this namespace before deploying a new version."
+                );
+                return Ok(());
+            }
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
             tracing::debug!(
@@ -551,13 +565,24 @@ impl ModelWatcher {
             .get_model(model_name)
             .is_none_or(|m| !m.has_worker_set(ws_key))
         {
+            // Only the first waiter to re-insert the key should proceed with
+            // registration. Other waiters return false to avoid concurrent builds.
+            if !self
+                .registering_worker_sets
+                .insert(registration_key.to_string())
+            {
+                tracing::debug!(
+                    model_name = card.name(),
+                    namespace = namespace,
+                    "Another waiter won the re-registration race, skipping"
+                );
+                return Ok(false);
+            }
             tracing::warn!(
                 model_name = card.name(),
                 namespace = namespace,
                 "Concurrent registration produced no WorkerSet, retrying"
             );
-            self.registering_worker_sets
-                .insert(registration_key.to_string());
             return Ok(true);
         }
 
