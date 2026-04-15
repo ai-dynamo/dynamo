@@ -1420,10 +1420,14 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		return corev1.PodTemplateSpec{}, err
 	}
 
-	// Create a copy of the component spec without checkpoint config
-	// The checkpoint job is CREATING the checkpoint, not restoring from one
+	// Create a copy of the component spec stripped of features that buildCheckpointJob
+	// or the checkpoint controller handle independently. GenerateBasePodSpec would
+	// otherwise apply DGD-specific transforms (DRA claims, GMS server sidecar,
+	// frontend sidecar) that conflict with the checkpoint path's own setup.
 	componentForJob := component.DeepCopy()
 	componentForJob.Checkpoint = nil
+	componentForJob.GPUMemoryService = nil
+	componentForJob.FrontendSidecar = nil
 
 	// Ensure DYN_NAMESPACE is set for checkpoint job using the same logic as regular pods
 	// This is required for service discovery and distributed coordination

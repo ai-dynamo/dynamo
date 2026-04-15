@@ -6,6 +6,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -17,7 +18,6 @@ import (
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -106,12 +106,12 @@ func buildCheckpointJob(
 	}
 	mainContainer.LivenessProbe = nil
 	mainContainer.StartupProbe = nil
+
+	// The snapshot agent sends SIGUSR1 to PID 1 of the main container after
 	checkpoint.EnsurePodInfoMount(mainContainer)
 	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
 
-	// Save GPU quantity before DRA setup removes nvidia.com/gpu from limits.
-	gpuResource := corev1.ResourceName(consts.KubeResourceGPUNvidia)
-	gpuQty, hasGPU := mainContainer.Resources.Limits[gpuResource]
+
 
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
 		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
@@ -131,6 +131,9 @@ func buildCheckpointJob(
 		if err := checkpoint.EnsureGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage); err != nil {
 			return nil, err
 		}
+		// Re-acquire pointer: append in EnsureGMSCheckpointJobSidecars may
+		// have reallocated the Containers slice.
+		mainContainer = &podTemplate.Spec.Containers[0]
 	}
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
@@ -139,10 +142,32 @@ func buildCheckpointJob(
 		activeDeadlineSeconds = &defaultDeadline
 	}
 
-	wrapLaunchJob := false
-	if hasGPU {
-		wrapLaunchJob = gpuQty.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
+	// Wrap with cuda-checkpoint --launch-job for multi-GPU jobs (TP*PP > 1).
+	// Use checkpoint identity (not container limits) because DRA may have
+	// already removed nvidia.com/gpu from the template.
+	tp := ckpt.Spec.Identity.TensorParallelSize
+	pp := ckpt.Spec.Identity.PipelineParallelSize
+	if tp == 0 {
+		tp = 1
 	}
+	if pp == 0 {
+		pp = 1
+	}
+	wrapLaunchJob := tp*pp > 1
+
+
+
+
+	// For single-GPU jobs (no cuda-checkpoint wrapper), unwrap /bin/sh -c so
+	// the actual process is PID 1 and receives SIGUSR1 from the snapshot agent.
+	if !wrapLaunchJob && len(mainContainer.Command) >= 2 &&
+		mainContainer.Command[len(mainContainer.Command)-1] == "-c" &&
+		len(mainContainer.Args) == 1 {
+		parts := strings.Fields(mainContainer.Args[0])
+		mainContainer.Command = parts[:1]
+		mainContainer.Args = parts[1:]
+	}
+
 	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
 
 	return snapshotprotocol.NewCheckpointJob(podTemplate, snapshotprotocol.CheckpointJobOptions{
@@ -156,3 +181,4 @@ func buildCheckpointJob(
 		WrapLaunchJob:         wrapLaunchJob,
 	})
 }
+

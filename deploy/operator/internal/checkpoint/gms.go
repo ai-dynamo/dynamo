@@ -12,6 +12,7 @@ import (
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -52,12 +53,17 @@ func EnsureGMSRestoreSidecars(
 	}
 	gms.EnsureSharedVolume(podSpec, mainContainer)
 
-	loader := gms.Container(GMSLoaderContainer, gmsCheckpointLoaderModule, mainContainer.Image)
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
+
+	server := gms.Container(gms.ServerContainerName, gms.ServerModule, mainContainer.Image)
+	server.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
+
+	loader := gms.Container(GMSLoaderContainer, gmsCheckpointLoaderModule, mainContainer.Image)
 	loader.VolumeMounts = append(loader.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
 	loader.Env = append(loader.Env, corev1.EnvVar{Name: envCheckpointDir, Value: resolveGMSArtifactDir(storage)})
+	loader.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 
-	podSpec.Containers = append(podSpec.Containers, gms.Container(gms.ServerContainerName, gms.ServerModule, mainContainer.Image), loader)
+	podSpec.InitContainers = append(podSpec.InitContainers, server, loader)
 }
 
 // EnsureGMSCheckpointJobSidecars adds GMS server (init) + saver containers
@@ -82,23 +88,14 @@ func EnsureGMSCheckpointJobSidecars(
 	gms.EnsureServerSidecar(podSpec, mainContainer)
 	snapshotprotocol.InjectCheckpointVolume(podSpec, storage.PVCName)
 
-	// Tell the GMS server where to look for the checkpoint-done stop file.
-	// The saver writes it to gmsArtifactDir after saving completes.
-	for i := range podSpec.InitContainers {
-		if podSpec.InitContainers[i].Name == gms.ServerContainerName {
-			podSpec.InitContainers[i].VolumeMounts = append(podSpec.InitContainers[i].VolumeMounts,
-				corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
-			podSpec.InitContainers[i].Env = append(podSpec.InitContainers[i].Env,
-				corev1.EnvVar{Name: envCheckpointDir, Value: gmsArtifactDir})
-			break
-		}
-	}
-
 	saver := gms.Container(GMSSaverContainer, gmsCheckpointSaverModule, mainContainer.Image)
 	saver.VolumeMounts = append(saver.VolumeMounts, corev1.VolumeMount{Name: snapshotprotocol.CheckpointVolumeName, MountPath: storage.BasePath})
 	saver.Env = append(saver.Env, corev1.EnvVar{Name: envCheckpointDir, Value: gmsArtifactDir})
-
-	podSpec.Containers = append(podSpec.Containers, saver)
+	// The saver is an init sidecar (restartPolicy=Always) so it doesn't
+	// affect pod Ready (only the worker's probe matters) and doesn't block
+	// Job completion. It saves, then sleeps until the pod terminates.
+	saver.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
+	podSpec.InitContainers = append(podSpec.InitContainers, saver)
 	return nil
 }
 
