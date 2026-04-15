@@ -63,10 +63,7 @@ func HandleFinalizer[T client.Object](ctx context.Context, obj T, writer client.
 		}
 		// Object is being deleted — signal the caller to skip reconciliation
 		// regardless of whether we just removed the finalizer or it was already
-		// gone (e.g., removed by a previous reconcile). Without this, controllers
-		// fall through to reconcileResources and recreate children that the
-		// garbage collector is trying to delete, causing an infinite thrash loop
-		// under foreground cascading deletion (the default for ArgoCD).
+		// gone (e.g., removed by a previous reconcile)
 		return true, nil
 	}
 	return false, nil
