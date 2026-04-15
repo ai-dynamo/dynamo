@@ -164,7 +164,10 @@ struct InflightGuard(Arc<AtomicU64>);
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        // Release: pairs with the Acquire loads in available_capacity() and
+        // cleanup_idle_hosts() so the decrement is visible to any reader that
+        // subsequently observes the updated counter value.
+        self.0.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -607,7 +610,9 @@ impl TcpConnection {
         // or any other future drop.  Without the guard, a tokio::time::timeout
         // drop would skip the fetch_sub, permanently inflating the counter and
         // blocking idle-host cleanup (inflight > 0 guard in cleanup_idle_hosts).
-        self.inflight.fetch_add(1, Ordering::Relaxed);
+        // Release: symmetric with the Release in InflightGuard::drop so that
+        // Acquire loads in available_capacity() see a consistent value.
+        self.inflight.fetch_add(1, Ordering::Release);
         let _inflight_guard = InflightGuard(self.inflight.clone());
 
         // Lock-free submit: ~20-40ns
@@ -641,7 +646,9 @@ impl TcpConnection {
 
     /// Available capacity (advisory, for cold path growth heuristic)
     fn available_capacity(&self) -> usize {
-        let inflight = self.inflight.load(Ordering::Relaxed) as usize;
+        // Acquire: pairs with the Release in fetch_add/fetch_sub so we observe
+        // the most recently committed inflight value from any other thread.
+        let inflight = self.inflight.load(Ordering::Acquire) as usize;
         self.channel_buffer.saturating_sub(inflight)
     }
 }
@@ -1086,7 +1093,7 @@ impl TcpConnectionPool {
                 // a long-running request with no new checkouts would look
                 // idle but killing it would fail legitimate work.
                 let snap = entry.value().snapshot.load();
-                !snap.iter().any(|c| c.inflight.load(Ordering::Relaxed) > 0)
+                !snap.iter().any(|c| c.inflight.load(Ordering::Acquire) > 0)
             })
             .map(|entry| *entry.key())
             .collect();
@@ -1121,7 +1128,7 @@ impl TcpConnectionPool {
             let snap = entry.value().snapshot.load();
             for conn in snap.iter() {
                 if conn.is_healthy() {
-                    if conn.inflight.load(Ordering::Relaxed) > 0 {
+                    if conn.inflight.load(Ordering::Acquire) > 0 {
                         active += 1;
                     } else {
                         idle += 1;
