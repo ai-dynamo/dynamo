@@ -4,17 +4,18 @@
 """GMS checkpoint saver entry point.
 
 Waits for committed GMS weights on each device, then saves GPU memory state
-to the checkpoint directory. Writes a stop file to signal the GMS server to
-shut down after save completes.
+to the checkpoint directory. Runs as an init sidecar — sleeps after saving
+until the pod terminates.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import signal
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 
 from gpu_memory_service.common.cuda_utils import list_devices
 from gpu_memory_service.common.utils import get_socket_path, wait_for_weights_socket
@@ -25,6 +26,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
 
 def _save_device(checkpoint_dir: str, device: int, max_workers: int) -> None:
     wait_for_weights_socket(device)
@@ -46,20 +48,21 @@ def main() -> None:
 
     devices = list_devices()
     logger.info("Starting GMS save for %d devices", len(devices))
-    try:
-        t0 = time.monotonic()
-        with ThreadPoolExecutor(max_workers=len(devices)) as pool:
-            futures = {
-                pool.submit(_save_device, checkpoint_dir, dev, max_workers): dev
-                for dev in devices
-            }
-            for future in as_completed(futures):
-                future.result()
-        elapsed = time.monotonic() - t0
-        logger.info("All %d devices saved in %.2fs", len(devices), elapsed)
-    finally:
-        # Signal the GMS server to shut down, even if saving failed.
-        (Path(checkpoint_dir) / "checkpoint-done").write_text("done", encoding="utf-8")
+    t0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=len(devices)) as pool:
+        futures = {
+            pool.submit(_save_device, checkpoint_dir, dev, max_workers): dev
+            for dev in devices
+        }
+        for future in as_completed(futures):
+            future.result()
+    elapsed = time.monotonic() - t0
+    logger.info("All %d devices saved in %.2fs", len(devices), elapsed)
+
+    logger.info("Save complete; sleeping until pod terminates")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    while True:
+        time.sleep(3600)
 
 
 if __name__ == "__main__":

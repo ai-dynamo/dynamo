@@ -219,10 +219,10 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	})
 
-	t.Run("ready checkpoint always targets first container", func(t *testing.T) {
+	t.Run("ready checkpoint targets the container named main", func(t *testing.T) {
 		podSpec := &corev1.PodSpec{
 			Containers: []corev1.Container{
-				{Name: "worker", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+				{Name: "main", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
 				{Name: "sidecar", Image: "sidecar:latest", Command: []string{"sidecar"}, Args: []string{"run"}},
 			},
 		}
@@ -248,10 +248,12 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		loader := findContainer(podSpec, GMSLoaderContainer)
 		require.NotNil(t, loader)
 
-		// Restore: gms-server should be a regular container, not an init container
-		assert.Empty(t, podSpec.InitContainers, "restore pods should not have gms-server as init container")
-		assert.Nil(t, gmsServer.RestartPolicy, "restore gms-server should not have RestartPolicy")
+		// Restore: server and loader are init sidecars (restartPolicy=Always)
+		assert.NotNil(t, gmsServer.RestartPolicy, "restore gms-server should have RestartPolicy")
+		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *gmsServer.RestartPolicy)
 		assert.Nil(t, gmsServer.StartupProbe, "restore gms-server should not have StartupProbe")
+		assert.NotNil(t, loader.RestartPolicy, "restore gms-loader should have RestartPolicy")
+		assert.Equal(t, corev1.ContainerRestartPolicyAlways, *loader.RestartPolicy)
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
@@ -278,7 +280,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			errMsg  string
 		}{
 			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
-			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no container found"},
+			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no container named"},
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {

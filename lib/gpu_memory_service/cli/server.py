@@ -4,8 +4,8 @@
 """GMS server entry point.
 
 Launches two GMS server processes per GPU (one for weights, one for kv_cache).
-Writes a ready file once all expected UDS sockets are present. Monitors an
-optional checkpoint stop file and shuts down cleanly when it appears.
+Writes a ready file once all expected UDS sockets are present. Runs until
+SIGTERM (pod termination kills it).
 """
 
 from __future__ import annotations
@@ -34,11 +34,6 @@ _READY_FILE = "gms-ready"
 def main() -> None:
     ready_file = Path(os.environ.get("GMS_SOCKET_DIR", "/tmp")) / _READY_FILE
     ready_file.unlink(missing_ok=True)
-
-    # When GMS_CHECKPOINT_DIR is set, the saver writes "checkpoint-done"
-    # there after saving GPU state. The server watches for it and shuts down.
-    checkpoint_dir = os.environ.get("GMS_CHECKPOINT_DIR")
-    stop_file = Path(checkpoint_dir) / "checkpoint-done" if checkpoint_dir else None
 
     devices = list_devices()
     processes = []
@@ -72,11 +67,6 @@ def main() -> None:
 
     ready_written = False
     while True:
-        stop_requested = stop_file is not None and stop_file.exists()
-        if stop_requested:
-            logger.info("checkpoint stop requested; shutting down GMS servers")
-            shutdown()
-
         if not ready_written:
             sockets_ready = all(
                 os.path.exists(get_socket_path(device, tag))
@@ -92,8 +82,6 @@ def main() -> None:
             exit_code = process.poll()
             if exit_code is None:
                 running = True
-                continue
-            if stop_requested:
                 continue
             shutdown()
             raise SystemExit(exit_code)

@@ -256,6 +256,8 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(300), *job.Spec.TTLSecondsAfterFinished)
 
+	// Multi-GPU: wrapping decision uses identity.TensorParallelSize, not container GPU limits.
+	ckpt.Spec.Identity.TensorParallelSize = 2
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
@@ -267,16 +269,11 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
 }
 
-func TestBuildCheckpointJobTargetsMainContainerWhenSidecarIsFirst(t *testing.T) {
+func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.Identity.TensorParallelSize = 2
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers = []corev1.Container{
-		{
-			Name:    "sidecar",
-			Image:   "sidecar:latest",
-			Command: []string{"sleep"},
-			Args:    []string{"infinity"},
-		},
 		{
 			Name:    consts.MainContainerName,
 			Image:   "test-image:latest",
@@ -288,13 +285,19 @@ func TestBuildCheckpointJobTargetsMainContainerWhenSidecarIsFirst(t *testing.T) 
 				},
 			},
 		},
+		{
+			Name:    "sidecar",
+			Image:   "sidecar:latest",
+			Command: []string{"sleep"},
+			Args:    []string{"infinity"},
+		},
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
 	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 
-	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
+	main := &job.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
 	require.NotNil(t, main.ReadinessProbe)
@@ -363,7 +366,7 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 
 	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
 	weightsServer := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, gms.ServerContainerName)
-	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, checkpoint.GMSSaverContainer)
+	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, checkpoint.GMSSaverContainer)
 
 	volNames := map[string]bool{}
 	for _, v := range job.Spec.Template.Spec.Volumes {

@@ -877,6 +877,7 @@ via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GP
 
 
 _Appears in:_
+- [DynamoCheckpointSpec](#dynamocheckpointspec)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 

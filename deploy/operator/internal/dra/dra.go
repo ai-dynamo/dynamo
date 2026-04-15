@@ -30,10 +30,18 @@ const (
 
 // ApplyClaim replaces the first container's nvidia.com/gpu resources with a
 // shared DRA ResourceClaim. Every container that references this claim name
-// will share the same physical GPUs.
+// will share the same physical GPUs. The function is idempotent — calling it
+// on a pod that already has the claim is a no-op.
 func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("pod spec must have at least one container for DRA claim")
+	}
+
+	// Skip if the pod-level claim already exists (idempotent).
+	for i := range podSpec.ResourceClaims {
+		if podSpec.ResourceClaims[i].Name == ClaimName {
+			return nil
+		}
 	}
 
 	// Replace nvidia.com/gpu with the shared DRA claim.

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -24,8 +26,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
 
 
 def _load_device(checkpoint_dir: str, device: int, max_workers: int) -> None:
@@ -63,6 +63,7 @@ def main() -> None:
             logger.info("Device %d load complete", dev)
     elapsed = time.monotonic() - t0
     logger.info("All %d devices loaded in %.2fs", len(devices), elapsed)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     while True:
         time.sleep(3600)
