@@ -256,9 +256,10 @@ impl Indexer {
     ) -> Result<MatchDetails, KvRouterError> {
         match self {
             Self::KvIndexer { primary, .. } => primary.find_match_details(sequence).await,
-            Self::Concurrent { primary, .. } => {
-                Ok(primary.backend().find_match_details_impl(&sequence, false))
-            }
+            Self::Concurrent { primary, .. } => Ok(MatchDetails {
+                overlap_scores: primary.backend().find_matches_impl(&sequence, false),
+                ..Default::default()
+            }),
             Self::Remote(remote) => remote
                 .find_matches(sequence)
                 .await

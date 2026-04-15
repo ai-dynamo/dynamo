@@ -563,6 +563,7 @@ where
                 lora_name,
                 priority_jump,
                 expected_output_tokens,
+                None,
                 allowed_worker_ids,
             )
             .await?;
@@ -603,6 +604,7 @@ where
         let track_prefill_tokens = self
             .kv_router_config
             .track_prefill_tokens(router_config_override);
+        let overlap_blocks = (cached_tokens / self.block_size as usize) as u32;
         let prefill_load_hint =
             self.prefill_load_hint_for(isl_tokens, overlap_blocks, track_prefill_tokens);
 
@@ -809,7 +811,6 @@ where
                         true,
                         None,
                         0.0,
-                        None,
                         None,
                         None,
                     )
