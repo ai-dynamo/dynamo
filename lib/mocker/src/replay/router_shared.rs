@@ -63,7 +63,7 @@ pub(super) type ReplayScheduler = LocalScheduler<
     DefaultWorkerSelector,
 >;
 
-pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
+fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
     ReplayWorkerConfig {
         max_num_batched_tokens: args
             .max_num_batched_tokens
