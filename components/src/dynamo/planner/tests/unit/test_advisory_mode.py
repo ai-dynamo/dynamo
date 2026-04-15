@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for Advisory Mode functionality.
-
-These tests validate ScalingMode configuration and advisory mode logic
-without requiring Rust bindings (dynamo._core).
-"""
+"""Unit tests for advisory mode and decision summary logging."""
 
 import sys
 import types
@@ -44,8 +40,7 @@ for _mod_name, _attrs in _stubs.items():
         setattr(_m, _k, _v)
     sys.modules.setdefault(_mod_name, _m)
 
-# Now safe to import planner modules
-from dynamo.planner.config.defaults import ScalingMode, SLAPlannerDefaults  # noqa: E402
+from dynamo.planner.config.defaults import SLAPlannerDefaults  # noqa: E402
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -53,65 +48,40 @@ pytestmark = [
 ]
 
 
-class TestScalingModeEnum:
-    """Test ScalingMode enum definition."""
-
-    def test_enum_values(self):
-        assert ScalingMode.ACTIVE.value == "active"
-        assert ScalingMode.ADVISORY.value == "advisory"
-
-    def test_enum_from_string(self):
-        assert ScalingMode("active") == ScalingMode.ACTIVE
-        assert ScalingMode("advisory") == ScalingMode.ADVISORY
-
-    def test_enum_is_string(self):
-        """ScalingMode should be usable as a string."""
-        assert ScalingMode.ADVISORY == "advisory"
-
-    def test_invalid_value_raises(self):
-        with pytest.raises(ValueError):
-            ScalingMode("invalid")
+class TestAdvisoryDefaults:
+    def test_default_is_false(self):
+        assert SLAPlannerDefaults.advisory is False
 
 
-class TestScalingModeDefaults:
-    """Test defaults and config integration."""
-
-    def test_default_is_active(self):
-        assert SLAPlannerDefaults.scaling_mode == ScalingMode.ACTIVE
-
-    def test_advisory_log_interval_default(self):
-        assert SLAPlannerDefaults.advisory_log_interval == 60
-
-
-class TestPlannerConfigScalingMode:
-    """Test PlannerConfig accepts scaling_mode."""
-
+class TestPlannerConfigAdvisory:
     def test_config_with_advisory(self):
         from dynamo.planner.config.planner_config import PlannerConfig
 
         config = PlannerConfig.model_construct(
             mode="agg",
-            component_name="test",
-            endpoint_name="test",
-            scaling_mode=ScalingMode.ADVISORY,
-            advisory_log_interval=120,
+            advisory=True,
         )
-        assert config.scaling_mode == ScalingMode.ADVISORY
-        assert config.advisory_log_interval == 120
+        assert config.advisory is True
 
-    def test_config_default_is_active(self):
+    def test_config_default_is_false(self):
         from dynamo.planner.config.planner_config import PlannerConfig
 
-        config = PlannerConfig.model_construct(
-            mode="agg",
-            component_name="test",
-            endpoint_name="test",
-        )
-        assert config.scaling_mode == ScalingMode.ACTIVE
+        config = PlannerConfig.model_construct(mode="agg")
+        assert config.advisory is False
+
+
+class TestAdvisoryGuard:
+    def test_advisory_skips_scaling(self):
+        advisory = True
+        assert advisory  # _apply_scaling_targets returns early
+
+    def test_non_advisory_applies_scaling(self):
+        advisory = False
+        assert not advisory  # _apply_scaling_targets proceeds
 
 
 def _classify_action(delta_p: int, delta_d: int, decision_is_none: bool) -> str:
-    """Mirror the action classification logic from _log_advisory_decision."""
+    """Mirror the action classification from _log_decision_summary."""
     if decision_is_none or (delta_p == 0 and delta_d == 0):
         return "hold"
     if (delta_p > 0 or delta_d > 0) and (delta_p < 0 or delta_d < 0):
@@ -121,71 +91,21 @@ def _classify_action(delta_p: int, delta_d: int, decision_is_none: bool) -> str:
     return "scale_down"
 
 
-class TestAdvisoryModeLogic:
-    """Test the advisory decision logic (without runtime dependencies)."""
+class TestDecisionSummaryClassification:
+    def test_scale_up(self):
+        assert _classify_action(1, 2, False) == "scale_up"
 
-    def test_advisory_mode_skips_scaling_but_runs_effects(self):
-        """Advisory mode: _apply_effects runs (for metrics), but
-        _apply_scaling_targets is guarded (no actual scaling)."""
-        scaling_mode = ScalingMode.ADVISORY
-
-        # _apply_scaling_targets guard (mirrors base.py)
-        scaling_skipped = scaling_mode == ScalingMode.ADVISORY
-        assert scaling_skipped is True
-
-    def test_active_mode_applies_scaling(self):
-        """Active mode: _apply_scaling_targets proceeds."""
-        scaling_mode = ScalingMode.ACTIVE
-
-        scaling_skipped = scaling_mode == ScalingMode.ADVISORY
-        assert scaling_skipped is False
-
-    def test_advisory_delta_calculation(self):
-        """Test delta calculation for advisory logging."""
-        current_p, current_d = 2, 4
-        rec_p, rec_d = 3, 6
-
-        delta_p = rec_p - current_p
-        delta_d = rec_d - current_d
-
-        assert delta_p == 1
-        assert delta_d == 2
-        assert _classify_action(delta_p, delta_d, False) == "scale_up"
-
-    def test_advisory_hold_when_no_change(self):
-        """No delta -> hold."""
-        assert _classify_action(0, 0, False) == "hold"
-
-    def test_advisory_hold_when_no_decision(self):
-        """None decision -> hold."""
-        assert _classify_action(0, 0, True) == "hold"
-
-    def test_advisory_scale_down(self):
+    def test_scale_down(self):
         assert _classify_action(-1, -2, False) == "scale_down"
 
-    def test_advisory_rebalance_when_mixed(self):
-        """Prefill up + decode down -> rebalance."""
+    def test_hold_no_change(self):
+        assert _classify_action(0, 0, False) == "hold"
+
+    def test_hold_no_decision(self):
+        assert _classify_action(0, 0, True) == "hold"
+
+    def test_rebalance_prefill_up_decode_down(self):
         assert _classify_action(1, -2, False) == "rebalance"
 
-    def test_advisory_rebalance_reversed(self):
-        """Prefill down + decode up -> rebalance."""
+    def test_rebalance_prefill_down_decode_up(self):
         assert _classify_action(-1, 2, False) == "rebalance"
-
-
-class TestAdvisoryModeStartupBehavior:
-    """Test advisory mode startup behavior.
-
-    Both modes go through the same startup path (validate deployment,
-    discover workers, subscribe to FPM).  Advisory mode only differs
-    at the ``_apply_scaling_targets`` call.
-    """
-
-    def test_advisory_mode_skips_apply_scaling_targets(self):
-        """Advisory mode skips the connector scaling call."""
-        scaling_mode = ScalingMode.ADVISORY
-        assert scaling_mode == ScalingMode.ADVISORY
-
-    def test_active_mode_runs_apply_scaling_targets(self):
-        """Active mode runs the connector scaling call."""
-        scaling_mode = ScalingMode.ACTIVE
-        assert scaling_mode != ScalingMode.ADVISORY

@@ -20,19 +20,6 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 
 
-class ScalingMode(str, Enum):
-    """Operating mode for planner scaling decisions.
-
-    ACTIVE: Normal mode - planner executes scaling decisions automatically.
-    ADVISORY: Observation mode - planner computes and logs scaling recommendations
-              but does NOT execute them. Useful for validating planner behavior
-              before enabling auto-scaling in production.
-    """
-
-    ACTIVE = "active"
-    ADVISORY = "advisory"
-
-
 class BasePlannerDefaults:
     # Namespace from DYN_NAMESPACE env var (injected by operator as "{k8s_namespace}-{dgd_name}")
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
@@ -88,9 +75,8 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     load_metric_samples = 10  # number of samples per interval
     load_min_observations = 5  # cold start threshold
 
-    # Advisory mode configuration
-    scaling_mode: ScalingMode = ScalingMode.ACTIVE
-    advisory_log_interval: int = 60  # seconds between advisory log entries
+    # Advisory mode: compute and log decisions without executing scaling
+    advisory = False
 
 
 class SubComponentType(str, Enum):

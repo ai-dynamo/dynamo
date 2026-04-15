@@ -24,7 +24,7 @@ import aiohttp.web
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import ScalingMode, TargetReplica
+from dynamo.planner.config.defaults import TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
@@ -181,9 +181,6 @@ class NativePlannerBase:
         # Live dashboard runner (started in _async_init)
         self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
 
-        # Advisory mode: throttle log output
-        self._last_advisory_log_s: float = 0.0
-
         # State machine (created after WorkerInfo is resolved)
         self._state_machine: Optional[PlannerStateMachine] = None
 
@@ -273,17 +270,10 @@ class NativePlannerBase:
         await self._bootstrap_regression()
 
         # Log operating mode at startup
-        mode = self.config.scaling_mode
-        if mode == ScalingMode.ADVISORY:
+        if self.config.advisory:
             logger.info(
-                "[ADVISORY] Planner started in ADVISORY mode — "
-                "scaling decisions will be logged but NOT executed. "
-                "Switch to 'active' mode to enable auto-scaling."
-            )
-        else:
-            logger.info(
-                "Planner started in ACTIVE mode — "
-                "scaling decisions will be executed automatically."
+                "[ADVISORY] Planner started in advisory mode — "
+                "scaling decisions will be logged but NOT executed."
             )
 
         # Start live dashboard if configured
@@ -598,7 +588,7 @@ class NativePlannerBase:
 
         Skipped in advisory mode (decisions are logged but not executed).
         """
-        if self.config.scaling_mode == ScalingMode.ADVISORY or not targets:
+        if self.config.advisory or not targets:
             return
         await self.connector.set_component_replicas(targets, blocking=blocking)
 
@@ -607,17 +597,7 @@ class NativePlannerBase:
     # ------------------------------------------------------------------
 
     def _log_decision_summary(self, effects: PlannerEffects) -> None:
-        """Log a periodic one-line summary of the scaling decision.
-
-        Printed in both active and advisory modes.  Throttled by
-        ``advisory_log_interval`` so it serves as a digest alongside
-        the detailed per-engine logs that fire every tick.
-        """
-        now = time.time()
-        if now - self._last_advisory_log_s < self.config.advisory_log_interval:
-            return
-        self._last_advisory_log_s = now
-
+        """Log a one-line summary of the scaling decision after each tick."""
         decision = effects.scale_to
         diag = effects.diagnostics
 
@@ -640,16 +620,12 @@ class NativePlannerBase:
         else:
             action = "scale_down"
 
-        mode_tag = (
-            "advisory" if self.config.scaling_mode == ScalingMode.ADVISORY else "active"
-        )
         logger.info(
-            "[summary] %s (%s) | current: prefill=%d decode=%d | "
+            "[summary] %s | current: prefill=%d decode=%d | "
             "recommended: prefill=%s decode=%s (delta: %+d / %+d) | "
             "load_reason=%s throughput_reason=%s | "
             "est_ttft=%.1fms est_itl=%.1fms",
             action.upper(),
-            mode_tag,
             current_p,
             current_d,
             rec_p if rec_p is not None else "-",
