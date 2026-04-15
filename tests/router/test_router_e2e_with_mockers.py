@@ -841,7 +841,7 @@ def test_mocker_router(
     "durable_kv_events", [False], ids=["nondurable"], indirect=True
 )
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-def test_mocker_router_single_worker_soak(
+def test_mocker_router_soak(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -858,7 +858,7 @@ def test_mocker_router_single_worker_soak(
     with MockerProcess(
         request,
         mocker_args=mocker_args,
-        num_mockers=1,
+        num_mockers=2,
         request_plane=request_plane,
     ) as mockers:
         frontend_port = get_unique_ports(
