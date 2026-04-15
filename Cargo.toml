@@ -12,6 +12,7 @@ members = [
     "lib/memory",
     "lib/kvbm-common",
     "lib/kvbm-config",
+    "lib/kvbm-connector",
     "lib/kvbm-engine",
     "lib/kvbm-kernels",
     "lib/kvbm-logical",
@@ -55,9 +56,13 @@ kvbm-engine = { path = "lib/kvbm-engine", version = "1.0.0" }
 kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
 kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
+kvbm-connector = { path = "lib/kvbm-connector", version = "0.1.0" }
+kvbm-scheduler = { path = "lib/kvbm-scheduler", version = "0.1.0" }
 
 # velo
-velo = { version = "0.1.0" }
+velo        = { version = "0.1.0" }
+velo-common = { version = "0.1.0" }
+
 
 # External dependencies
 anyhow = { version = "1" }
@@ -99,6 +104,7 @@ ordered-float = "4"
 parking_lot = "0.12.5"
 prometheus = { version = "0.14"}
 rand = { version = "0.9.2" }
+rand_chacha = { version = "0.9" }
 reqwest = { version = "0.12.24", default-features = false, features = [
     "multipart",
     "json",

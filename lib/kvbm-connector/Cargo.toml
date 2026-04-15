@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "kvbm-connector"
+version = "0.1.0"
+edition.workspace = true
+description.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[dependencies]
+# Internal workspace crates
+kvbm-common   = { workspace = true }
+kvbm-config   = { workspace = true }
+kvbm-engine   = { workspace = true }
+kvbm-logical  = { workspace = true }
+kvbm-physical = { workspace = true }
+
+# Velo (git crates — mapped from dynamo_nova / dynamo_nova_backend)
+velo        = { workspace = true }
+velo-common = { workspace = true }
+
+# Dynamo crates
+dynamo-memory = { workspace = true }
+dynamo-tokens = { workspace = true }
+
+# External
+anyhow         = { workspace = true }
+axum           = { workspace = true }
+bytes          = { workspace = true }
+cudarc         = { workspace = true }
+dashmap        = { workspace = true }
+derive_builder = { workspace = true }
+derive-getters = { workspace = true }
+figment        = { version = "0.10", features = ["env", "toml", "json"], optional = true }
+rand           = { workspace = true, optional = true }
+rand_chacha    = { workspace = true, optional = true }
+futures        = { workspace = true }
+parking_lot    = { workspace = true }
+serde          = { workspace = true }
+thiserror      = { workspace = true }
+tokio          = { workspace = true }
+tracing        = { workspace = true }
+uuid           = { workspace = true }
+oneshot        = { workspace = true }
+serde_json     = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+insta = { version = "1.41", features = ["json", "redactions"] }
+
+[features]
+testing = [
+    "kvbm-engine/testing",
+    "kvbm-logical/testing",
+    "kvbm-physical/testing",
+    "dep:figment",
+    "dep:rand",
+    "dep:rand_chacha",
+]
+# Gates NCCL-accelerated intra-pass layer-wise onboard (G2→G1 via cudarc).
+nccl = ["kvbm-engine/nccl"]
