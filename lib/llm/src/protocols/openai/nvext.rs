@@ -102,7 +102,7 @@ pub struct NvExtResponse {
     pub worker_id: Option<WorkerIdInfo>,
 
     /// Per-request timing information
-    /// Populated when client requests `extra_fields: ["timing"]`
+    /// Populated when client requests `extra_fields: ["timing"]` or via `query_instance_id`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timing: Option<TimingInfo>,
 
@@ -120,7 +120,8 @@ pub struct NvExtResponse {
 ///
 /// The OpenAI-compatible API should only include `nvext` response fields when the
 /// client explicitly opts in via `nvext.extra_fields`, except for the GAIE
-/// `query_instance_id` flow which automatically returns `worker_id` and `token_ids`.
+/// `query_instance_id` flow which automatically returns `worker_id`, `timing`,
+/// and `token_ids`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NvExtResponseFieldSelection {
     pub worker_id: bool,
@@ -142,14 +143,10 @@ impl NvExtResponseFieldSelection {
 
         Self {
             worker_id: has_extra_field("worker_id") || query_instance_id,
-            timing: has_extra_field("timing"),
+            timing: has_extra_field("timing") || query_instance_id,
             token_ids: query_instance_id,
             routed_experts: has_extra_field("routed_experts"),
         }
-    }
-
-    pub fn any(&self) -> bool {
-        self.worker_id || self.timing || self.token_ids || self.routed_experts
     }
 }
 
@@ -473,7 +470,6 @@ mod tests {
         let selection = NvExtResponseFieldSelection::from_nvext(None);
 
         assert_eq!(selection, NvExtResponseFieldSelection::default());
-        assert!(!selection.any());
     }
 
     #[test]
@@ -501,8 +497,78 @@ mod tests {
         let selection = NvExtResponseFieldSelection::from_nvext(Some(&nvext));
 
         assert!(selection.worker_id);
-        assert!(!selection.timing);
+        assert!(selection.timing); // query_instance_id auto-enables timing
         assert!(selection.token_ids);
         assert!(!selection.routed_experts);
+    }
+
+    #[test]
+    fn test_nvext_response_field_selection_worker_id_only() {
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["worker_id".to_string()])
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            NvExtResponseFieldSelection::from_nvext(Some(&nvext)),
+            NvExtResponseFieldSelection {
+                worker_id: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_nvext_response_field_selection_timing_only() {
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["timing".to_string()])
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            NvExtResponseFieldSelection::from_nvext(Some(&nvext)),
+            NvExtResponseFieldSelection {
+                timing: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_nvext_response_field_selection_routed_experts_only() {
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["routed_experts".to_string()])
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            NvExtResponseFieldSelection::from_nvext(Some(&nvext)),
+            NvExtResponseFieldSelection {
+                routed_experts: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_nvext_response_field_selection_multiple_extra_fields() {
+        let nvext = NvExt::builder()
+            .extra_fields(vec![
+                "worker_id".to_string(),
+                "timing".to_string(),
+                "routed_experts".to_string(),
+            ])
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            NvExtResponseFieldSelection::from_nvext(Some(&nvext)),
+            NvExtResponseFieldSelection {
+                worker_id: true,
+                timing: true,
+                token_ids: false, // only enabled via query_instance_id
+                routed_experts: true,
+            }
+        );
     }
 }
