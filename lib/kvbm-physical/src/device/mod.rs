@@ -11,8 +11,10 @@ pub mod detection;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
-#[cfg(feature = "xpu")]
+#[cfg(feature = "xpu-ze")]
 pub mod ze;
+#[cfg(feature = "xpu-sycl")]
+pub mod sycl;
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,8 @@ pub use traits::{DeviceContextOps, DeviceStreamOps, DeviceEventOps, DeviceMemPoo
 pub enum DeviceBackend {
     Cuda,
     Ze,
+    /// SYCL backend — pure SYCL implementation (no Level Zero Rust crate needed).
+    Sycl,
 }
 
 impl DeviceBackend {
@@ -33,6 +37,7 @@ impl DeviceBackend {
         match self {
             Self::Cuda => "CUDA",
             Self::Ze => "Level-Zero (XPU)",
+            Self::Sycl => "SYCL (XPU)",
         }
     }
 
@@ -46,9 +51,15 @@ impl DeviceBackend {
                 { false }
             }
             Self::Ze => {
-                #[cfg(feature = "xpu")]
+                #[cfg(feature = "xpu-ze")]
                 { ze::is_available() }
-                #[cfg(not(feature = "xpu"))]
+                #[cfg(not(feature = "xpu-ze"))]
+                { false }
+            }
+            Self::Sycl => {
+                #[cfg(feature = "xpu-sycl")]
+                { sycl::is_available() }
+                #[cfg(not(feature = "xpu-sycl"))]
                 { false }
             }
         }
@@ -61,7 +72,8 @@ impl FromStr for DeviceBackend {
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "cuda" | "gpu" | "nvidia" => Ok(Self::Cuda),
-            "ze" | "xpu" | "intel" | "level-zero" => Ok(Self::Ze),
+            "ze" | "level-zero" => Ok(Self::Ze),
+            "sycl" | "xpu" | "intel" => Ok(Self::Sycl),
             _ => bail!("Unknown device backend: {}", s),
         }
     }
@@ -85,10 +97,16 @@ impl DeviceContext {
                 { bail!("CUDA backend not compiled (enable 'cuda' feature)") }
             }
             DeviceBackend::Ze => {
-                #[cfg(feature = "xpu")]
+                #[cfg(feature = "xpu-ze")]
                 { Box::new(ze::ZeContext::new(device_id)?) }
-                #[cfg(not(feature = "xpu"))]
-                { bail!("Level-Zero backend not compiled (enable 'xpu' feature)") }
+                #[cfg(not(feature = "xpu-ze"))]
+                { bail!("Level-Zero backend not compiled (enable 'xpu-ze' feature)") }
+            }
+            DeviceBackend::Sycl => {
+                #[cfg(feature = "xpu-sycl")]
+                { Box::new(sycl::SyclContext::new(device_id)?) }
+                #[cfg(not(feature = "xpu-sycl"))]
+                { bail!("SYCL backend not compiled (enable 'xpu-sycl' feature)") }
             }
         };
 

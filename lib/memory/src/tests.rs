@@ -106,10 +106,17 @@ impl std::fmt::Debug for TestZeAllocator {
     }
 }
 
+// SAFETY: Device wraps a ze_device_handle_t which is process-global and immutable
+// after discovery. All mutable state is behind Mutex.
+#[cfg(feature = "testing-ze")]
+unsafe impl Send for TestZeAllocator {}
+#[cfg(feature = "testing-ze")]
+unsafe impl Sync for TestZeAllocator {}
+
 #[cfg(feature = "testing-ze")]
 impl TestZeAllocator {
     fn new(device_id: u32) -> anyhow::Result<Self> {
-        let drivers = level_zero::Driver::get()?;
+        let drivers = level_zero::drivers()?;
         let driver = drivers.into_iter().next()
             .ok_or_else(|| anyhow::anyhow!("No Level-Zero drivers found"))?;
         let devices = driver.devices()?;

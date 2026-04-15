@@ -74,6 +74,16 @@ fn main() {
             println!("cargo:rustc-cfg=stub_kernels");
         }
     }
+
+    // --- XPU SYCL kernels (opt-in) ---
+    println!("cargo:rerun-if-env-changed=KVBM_ENABLE_XPU_KERNELS");
+    println!(
+        "cargo:rerun-if-changed={}",
+        Path::new(&manifest_dir).join("sycl").display()
+    );
+    if env::var("KVBM_ENABLE_XPU_KERNELS").is_ok() {
+        build_sycl_library(&manifest_dir, &out_dir);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -378,4 +388,88 @@ fn add_cuda_library_paths() {
         println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
         println!("cargo:rustc-link-search=native=/usr/local/cuda/lib");
     }
+
+}
+
+/// Build SYCL XPU kernels from source using icpx.
+///
+/// Compiles all sycl/*.cpp files into libkvbm_kernels_xpu.so which provides
+/// extern "C" launchers called from tensor_kernels_xpu.rs:
+///   - tensor_permute_kernel.cpp  (block/universal permute)
+///   - vectorized_copy_kernel.cpp (vectorized copy)
+fn build_sycl_library(manifest_dir: &str, out_dir: &str) {
+    let sycl_dir = Path::new(manifest_dir).join("sycl");
+
+    // Collect all .cpp source files in sycl/.
+    let sycl_sources: Vec<_> = std::fs::read_dir(&sycl_dir)
+        .unwrap_or_else(|e| panic!("Cannot read sycl/ directory: {}", e))
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension().map_or(false, |ext| ext == "cpp") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if sycl_sources.is_empty() {
+        panic!("No .cpp files found in {}. Cannot build XPU kernels.", sycl_dir.display());
+    }
+
+    // Try to find icpx
+    let icpx = if Command::new("icpx").arg("--version").output().is_ok() {
+        "icpx".to_string()
+    } else if let Ok(oneapi_root) = env::var("ONEAPI_ROOT") {
+        let candidate = Path::new(&oneapi_root).join("compiler/latest/bin/icpx");
+        if candidate.exists() {
+            candidate.to_string_lossy().into_owned()
+        } else {
+            panic!(
+                "KVBM_ENABLE_XPU_KERNELS is set but icpx not found. \
+                 Install Intel oneAPI DPC++ compiler or set ONEAPI_ROOT."
+            );
+        }
+    } else {
+        panic!(
+            "KVBM_ENABLE_XPU_KERNELS is set but icpx not found. \
+             Install Intel oneAPI DPC++ compiler."
+        );
+    };
+
+    let so_path = Path::new(out_dir).join("libkvbm_kernels_xpu.so");
+
+    // Single-step compile + link: icpx -fsycl -shared -fPIC -O2 -o libkvbm_kernels_xpu.so *.cpp
+    let mut cmd = Command::new(&icpx);
+    cmd.arg("-fsycl")
+        .arg("-shared")
+        .arg("-fPIC")
+        .arg("-O2")
+        .arg("-o")
+        .arg(&so_path);
+
+    for src in &sycl_sources {
+        cmd.arg(src);
+        println!("cargo:rerun-if-changed={}", src.display());
+    }
+
+    println!(
+        "cargo:warning=Building XPU SYCL kernels ({} source files): {} -fsycl ...",
+        sycl_sources.len(),
+        icpx
+    );
+    let status = cmd.status().unwrap_or_else(|e| {
+        panic!("Failed to execute {}: {}", icpx, e);
+    });
+
+    if !status.success() {
+        panic!("icpx failed to compile SYCL XPU kernels");
+    }
+
+    println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-lib=dylib=kvbm_kernels_xpu");
+
+    // SYCL runtime
+    println!("cargo:rustc-link-lib=sycl");
+    println!("cargo:rustc-link-lib=stdc++");
 }

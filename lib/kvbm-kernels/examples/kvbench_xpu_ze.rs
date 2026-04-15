@@ -73,47 +73,47 @@
 //!
 //! ```sh
 //! # --- D2D, vectorized (CCS) --- fc_to_fc + lw_to_fc + fc_to_lw
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu_ze --features kvbench-xpu-ze --release -- \
 //!   --direction d2d --backend vectorized \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw 2>/dev/null
 //!
 //! # --- D2D, memcpy (BCS) --- fc_to_fc + lw_to_fc + fc_to_lw
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu_ze --features kvbench-xpu-ze --release -- \
 //!   --direction d2d --backend memcpy \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw 2>/dev/null
 //!
 //! # --- H2D, vectorized (CCS) --- pinned host mem only
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu_ze --features kvbench-xpu-ze --release -- \
 //!   --direction h2d --backend vectorized \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned 2>/dev/null
 //!
 //! # --- H2D, memcpy (BCS) --- pinned + system host mem
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu_ze --features kvbench-xpu-ze --release -- \
 //!   --direction h2d --backend memcpy \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned,system 2>/dev/null
 //!
 //! # --- D2H, vectorized (CCS) --- pinned host mem only
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu_ze --features kvbench-xpu-ze --release -- \
 //!   --direction d2h --backend vectorized \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned 2>/dev/null
 //!
 //! # --- D2H, memcpy (BCS) --- pinned + system host mem
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu_ze --features kvbench-xpu-ze --release -- \
 //!   --direction d2h --backend memcpy \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned,system 2>/dev/null
 //!
 //! # --- Cross-device D2D, memcpy (BCS) --- device 0 -> device 1
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu_ze --features kvbench-xpu-ze --release -- \
 //!   --direction d2dx --backend memcpy --device 0 --dst-device 1 \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw 2>/dev/null
 //!
 //! # --- Full sweep (all 6 table rows, same-device only) ---
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu_ze --features kvbench-xpu-ze --release -- \
 //!   --direction d2d,h2d,d2h --backend vectorized,memcpy \
 //!   --pattern fc_to_fc,lw_to_fc,fc_to_lw --host-mem pinned,system 2>/dev/null
 //!
 //! # --- Quick smoke test on device 1 ---
-//! cargo run --example kvbench_xpu --features kvbench-xpu --release -- \
+//! cargo run --example kvbench_xpu_ze --features kvbench-xpu-ze --release -- \
 //!   --device 1 --num-blocks 1,4 --tokens-per-block 16 \
 //!   --warmup 3 --iters 10
 //! ```
@@ -149,7 +149,7 @@ const OUTER_DIM: usize = 2; // K and V
 
 /// KV cache transfer benchmark for Intel XPU (Llama 3.1 70B, bf16).
 #[derive(Parser, Debug)]
-#[command(name = "kvbench_xpu", about = "KV cache transfer bandwidth benchmark (XPU)")]
+#[command(name = "kvbench_xpu_ze", about = "KV cache transfer bandwidth benchmark (XPU / Level Zero)")]
 struct Cli {
     /// Comma-separated number of blocks to benchmark.
     #[arg(
@@ -889,9 +889,38 @@ fn main() {
     let warmup_iters = cli.warmup;
     let timed_iters = cli.iters;
 
-    let total_tests =
-        tpb_options.len() * num_blocks_options.len() * directions.len()
-        * patterns.len() * backends.len() * host_mem_kinds.len();
+    // Pre-compute the real test count, accounting for skipped combos.
+    let total_tests = {
+        let base = tpb_options.len() * num_blocks_options.len() * patterns.len();
+        let mut count = 0usize;
+        for &dir in &directions {
+            for &be in &backends {
+                for &hm in &host_mem_kinds {
+                    // D2D/D2Dx: skip duplicate host-mem variants (keep pinned only).
+                    if matches!(dir, Direction::D2D | Direction::D2Dx)
+                        && !matches!(hm, HostMemKind::Pinned)
+                    {
+                        continue;
+                    }
+                    // D2Dx + vectorized: not supported.
+                    if matches!(dir, Direction::D2Dx)
+                        && matches!(be, Backend::Vectorized)
+                    {
+                        continue;
+                    }
+                    // vectorized + system heap (h2d/d2h): GPU can't access non-USM.
+                    if matches!(be, Backend::Vectorized)
+                        && matches!(hm, HostMemKind::System)
+                        && !matches!(dir, Direction::D2D | Direction::D2Dx)
+                    {
+                        continue;
+                    }
+                    count += base;
+                }
+            }
+        }
+        count
+    };
 
     // -- Create command lists -------------------------------------------------
     // BCS (copy engine) -- always needed.
@@ -962,6 +991,9 @@ fn main() {
     eprintln!("  Warmup: {warmup_iters}, Timed: {timed_iters}");
     eprintln!("  Work-group size: {COPY_WG_SIZE}");
     eprintln!("  BCS ordinal: {:?}", copy_ordinal);
+    if needs_compute {
+        eprintln!("  CCS ordinal: {}", ctx.compute_queue_ordinal(device).unwrap());
+    }
     eprintln!("  tokens_per_block: {:?}", tpb_options);
     eprintln!("  num_blocks: {:?}", num_blocks_options);
     eprintln!(
