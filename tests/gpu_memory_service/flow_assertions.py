@@ -226,3 +226,31 @@ def assert_kv_history(
     ]
     assert len(clear_counts) >= cleared_layouts
     assert all(count > 0 for count in clear_counts[:cleared_layouts])
+
+
+def wait_for_weights_state(
+    weights_gms,
+    expected_state,
+    *,
+    min_ro_sessions: int = 0,
+    expected_hash: str | None = None,
+    timeout: float = 30.0,
+):
+    """Poll until the weights GMS daemon reaches *expected_state*."""
+    deadline = time.monotonic() + timeout
+    while True:
+        ws = weights_gms.get_runtime_state()
+        if (
+            ws.state == expected_state
+            and ws.allocation_count > 0
+            and ws.memory_layout_hash
+            and ws.ro_session_count >= min_ro_sessions
+            and (expected_hash is None or ws.memory_layout_hash == expected_hash)
+        ):
+            return ws
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"Weights: state={ws.state} (want {expected_state}), "
+                f"allocs={ws.allocation_count}, hash={ws.memory_layout_hash}"
+            )
+        time.sleep(0.1)
