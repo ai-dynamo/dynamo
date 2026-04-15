@@ -118,8 +118,12 @@ async def worker() -> None:
 
     # Name the model. Use either the full path (vllm and sglang do the same),
     # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
+    # Normalize served_model_name to a list for consistent handling downstream.
     if not config.served_model_name:
-        config.served_model_name = config.engine_args.served_model_name = config.model
+        config.served_model_name = [config.model]
+    elif isinstance(config.served_model_name, str):
+        config.served_model_name = [config.served_model_name]
+    config.engine_args.served_model_name = config.served_model_name
 
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
@@ -444,9 +448,11 @@ def setup_vllm_engine(
 
     # Construct Prometheus gauges AFTER setup_multiprocess_prometheus() so Gauge objects
     # see the correct ValueClass (multiprocess vs in-memory).
+    # Use the primary name (first element) for metrics labeling.
+    primary_name = config.served_model_name[0] if config.served_model_name else ""
     component_gauges = LLMBackendMetrics(
         registry=DYNAMO_COMPONENT_REGISTRY,
-        model_name=config.served_model_name or "",
+        model_name=primary_name,
         component_name=config.component or "",
     )
 
@@ -585,7 +591,9 @@ def setup_vllm_engine(
     # Record model load time
     component_gauges.set_model_load_time(load_time)
 
-    logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+    logger.info(
+        f"VllmWorker for {config.engine_args.served_model_name} has been initialized"
+    )
 
     # update block_size in vllm_config based on final engine cache info for later use
     runtime_values = get_engine_cache_info(engine_client)
@@ -680,18 +688,30 @@ async def register_vllm_model(
         media_fetcher.timeout_ms(30000)
         media_fetcher.allow_direct_port(True)
 
+    # Extract primary name and aliases from served_model_name list
+    # First element is the primary name, rest are aliases
+    primary_name = (
+        config.served_model_name[0] if config.served_model_name else config.model
+    )
+    model_aliases = (
+        config.served_model_name[1:]
+        if config.served_model_name and len(config.served_model_name) > 1
+        else None
+    )
+
     await register_model(
         model_input,
         model_type,
         generate_endpoint,
         config.model,
-        config.served_model_name,
+        primary_name,
         context_length=vllm_config.model_config.max_model_len,
         kv_cache_block_size=runtime_values["block_size"],
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
         media_fetcher=media_fetcher,
+        model_aliases=model_aliases,
     )
 
 

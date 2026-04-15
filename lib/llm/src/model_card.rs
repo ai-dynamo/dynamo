@@ -208,6 +208,12 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
 
+    /// Alternative names for this model.
+    /// Allows the same model to be addressed by multiple names.
+    /// Corresponds to additional names in vllm's `--served-model-name`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+
     /// Model information
     pub model_info: Option<ModelInfoType>,
 
@@ -377,6 +383,13 @@ impl ModelDeploymentCard {
                 bytes_to_hash.extend(self.context_length.to_be_bytes());
                 bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
 
+                // Include aliases in checksum (sorted for determinism)
+                let mut sorted_aliases = self.aliases.clone();
+                sorted_aliases.sort();
+                for alias in sorted_aliases {
+                    bytes_to_hash.extend(alias.as_bytes());
+                }
+
                 // TODO: Do we want any of user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
@@ -486,6 +499,26 @@ impl ModelDeploymentCard {
     pub fn set_name(&mut self, name: &str) {
         self.display_name = name.to_string();
         self.slug = Slug::from_string(name);
+    }
+
+    /// Check if a given name matches this model's display_name or any alias.
+    pub fn matches_name(&self, name: &str) -> bool {
+        if self.display_name == name {
+            return true;
+        }
+        self.aliases.iter().any(|alias| alias == name)
+    }
+
+    /// Returns all names this model can be addressed by (display_name + aliases).
+    pub fn all_names(&self) -> Vec<&str> {
+        let mut names = vec![self.display_name.as_str()];
+        names.extend(self.aliases.iter().map(|s| s.as_str()));
+        names
+    }
+
+    /// Set alternative names for this model.
+    pub fn set_aliases(&mut self, aliases: Vec<String>) {
+        self.aliases = aliases;
     }
 
     pub fn source_path(&self) -> &str {
@@ -743,6 +776,7 @@ impl ModelDeploymentCard {
             slug: Slug::from_string(&display_name),
             display_name,
             source_path: None,
+            aliases: Default::default(),
             model_info,
             tokenizer,
             gen_config,

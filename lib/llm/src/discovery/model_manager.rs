@@ -51,6 +51,12 @@ pub enum ModelManagerError {
 
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
+
+    #[error("Alias '{alias}' is already registered to model '{existing_model}'")]
+    AliasConflict {
+        alias: String,
+        existing_model: String,
+    },
 }
 
 /// Central manager for model engines, routing, and configuration.
@@ -62,6 +68,10 @@ pub enum ModelManagerError {
 pub struct ModelManager {
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
+
+    /// Alias → model name mapping for O(1) alias resolution
+    /// Key: alias name, Value: primary model name (display_name)
+    alias_to_model: DashMap<String, String>,
 
     /// Per-instance model cards, keyed by instance path. Used for cleanup on worker removal.
     cards: DashMap<String, ModelDeploymentCard>,
@@ -83,6 +93,7 @@ impl ModelManager {
     pub fn new() -> Self {
         Self {
             models: DashMap::new(),
+            alias_to_model: DashMap::new(),
             cards: DashMap::new(),
             prefill_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
@@ -106,14 +117,64 @@ impl ModelManager {
             .map(|entry| entry.value().clone())
     }
 
+    /// Check if any of the provided names conflict with existing models.
+    /// Returns Ok(()) if no conflicts, or Err with the first conflict found.
+    /// Uses O(1) lookups via the models map and alias index.
+    pub fn check_name_conflicts(
+        &self,
+        new_model_name: &str,
+        aliases: &[String],
+    ) -> Result<(), ModelManagerError> {
+        for name in std::iter::once(new_model_name).chain(aliases.iter().map(String::as_str)) {
+            if self.models.contains_key(name) && name != new_model_name {
+                return Err(ModelManagerError::AliasConflict {
+                    alias: name.to_string(),
+                    existing_model: name.to_string(),
+                });
+            }
+            if let Some(existing_model) = self.alias_to_model.get(name)
+                && existing_model.value() != new_model_name
+            {
+                return Err(ModelManagerError::AliasConflict {
+                    alias: name.to_string(),
+                    existing_model: existing_model.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Register aliases for a model in the alias index.
+    /// Should be called after conflict check passes.
+    fn register_aliases(&self, model_name: &str, aliases: &[String]) {
+        for alias in aliases {
+            self.alias_to_model
+                .insert(alias.clone(), model_name.to_string());
+        }
+    }
+
+    /// Resolve a model name (which could be display_name or alias) to the actual model.
+    /// Returns the model name (for lookup in self.models) and the Model.
+    pub fn resolve_model(&self, name: &str) -> Option<(String, Arc<Model>)> {
+        if let Some(model) = self.models.get(name) {
+            return Some((name.to_string(), model.clone()));
+        }
+        if let Some(model_name) = self.alias_to_model.get(name)
+            && let Some(model) = self.models.get(model_name.value())
+        {
+            return Some((model_name.clone(), model.clone()));
+        }
+        None
+    }
+
     /// Remove a Model if it has no remaining WorkerSets.
     /// Uses atomic remove_if to avoid TOCTOU race between checking is_empty and removing.
     pub fn remove_model_if_empty(&self, model_name: &str) {
-        if self
+        if let Some((_, _)) = self
             .models
             .remove_if(model_name, |_, model| model.is_empty())
-            .is_some()
         {
+            self.alias_to_model.retain(|_, v| v != model_name);
             tracing::info!(model_name, "Removed empty model from manager");
         }
     }
@@ -142,6 +203,9 @@ impl ModelManager {
     /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
+        if !card.aliases.is_empty() {
+            self.register_aliases(card.name(), &card.aliases);
+        }
         self.cards.insert(key.to_string(), card);
         Ok(())
     }
@@ -155,14 +219,14 @@ impl ModelManager {
 
     /// Check if a decode model (chat or completions) is registered
     pub fn has_decode_model(&self, model: &str) -> bool {
-        self.models
-            .get(model)
-            .is_some_and(|m| m.has_decode_engine())
+        self.resolve_model(model)
+            .is_some_and(|(_, m)| m.has_decode_engine())
     }
 
     /// Check if a prefill model is registered
     pub fn has_prefill_model(&self, model: &str) -> bool {
-        self.models.get(model).is_some_and(|m| m.has_prefill())
+        self.resolve_model(model)
+            .is_some_and(|(_, m)| m.has_prefill())
     }
 
     /// Check if any model (decode or prefill) is registered.
@@ -238,9 +302,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
-        self.models
-            .get(model)
+        self.resolve_model(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .1
             .get_embeddings_engine()
     }
 
@@ -248,9 +312,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
-        self.models
-            .get(model)
+        self.resolve_model(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .1
             .get_completions_engine()
     }
 
@@ -258,9 +322,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
-        self.models
-            .get(model)
+        self.resolve_model(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .1
             .get_chat_engine()
     }
 
@@ -268,9 +332,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<TensorStreamingEngine, ModelManagerError> {
-        self.models
-            .get(model)
+        self.resolve_model(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .1
             .get_tensor_engine()
     }
 
@@ -278,9 +342,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
-        self.models
-            .get(model)
+        self.resolve_model(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .1
             .get_images_engine()
     }
 
@@ -288,9 +352,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
-        self.models
-            .get(model)
+        self.resolve_model(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .1
             .get_videos_engine()
     }
 
@@ -298,9 +362,9 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
-        self.models
-            .get(model)
+        self.resolve_model(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .1
             .get_audios_engine()
     }
 
@@ -316,9 +380,9 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
-        self.models
-            .get(model)
+        self.resolve_model(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .1
             .get_chat_engine_with_parsing()
     }
 
@@ -332,9 +396,9 @@ impl ModelManager {
         ),
         ModelManagerError,
     > {
-        self.models
-            .get(model)
+        self.resolve_model(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .1
             .get_completions_engine_with_parsing()
     }
 

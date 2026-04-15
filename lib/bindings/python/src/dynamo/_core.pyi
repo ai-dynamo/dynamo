@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Sequence,
     Tuple,
 )
 
@@ -1441,6 +1442,7 @@ async def register_model(
     media_fetcher: Optional[MediaFetcher] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
+    model_aliases: Optional[Sequence[str]] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.

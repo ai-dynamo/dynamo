@@ -37,6 +37,7 @@ pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     source_path: Option<PathBuf>,
     model_name: Option<String>,
+    model_aliases: Vec<String>,
     endpoint_id: Option<EndpointId>,
     context_length: Option<u32>,
     template_file: Option<PathBuf>,
@@ -72,6 +73,7 @@ impl Default for LocalModelBuilder {
             model_path: Default::default(),
             source_path: Default::default(),
             model_name: Default::default(),
+            model_aliases: Default::default(),
             endpoint_id: Default::default(),
             context_length: Default::default(),
             template_file: Default::default(),
@@ -108,6 +110,11 @@ impl LocalModelBuilder {
 
     pub fn model_name(&mut self, model_name: Option<String>) -> &mut Self {
         self.model_name = model_name;
+        self
+    }
+
+    pub fn model_aliases(&mut self, aliases: Vec<String>) -> &mut Self {
+        self.model_aliases = aliases;
         self
     }
 
@@ -245,6 +252,7 @@ impl LocalModelBuilder {
             let mut card = ModelDeploymentCard::with_name_only(
                 self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
             );
+            card.set_aliases(self.model_aliases.clone());
             card.kv_cache_block_size = self.kv_cache_block_size;
             card.migration_limit = self.migration_limit;
             card.user_data = self.user_data.take();
@@ -292,6 +300,7 @@ impl LocalModelBuilder {
         // This matches what vllm and sglang do.
         let alt = card.source_path().to_string();
         card.set_name(self.model_name.as_deref().unwrap_or(&alt));
+        card.set_aliases(self.model_aliases.clone());
 
         card.kv_cache_block_size = self.kv_cache_block_size;
 
