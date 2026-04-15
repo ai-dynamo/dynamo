@@ -57,6 +57,8 @@ pub struct SchedulerQueue<
     Sel: WorkerSelector<C> = DefaultWorkerSelector,
 > {
     pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
+    /// Serializes admission so worker selection always sees prior bookings.
+    admission_gate: Mutex<()>,
     /// Number of requests currently parked in the pending queue.
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
     pending_count: AtomicUsize,
@@ -96,6 +98,7 @@ impl<
         }
         Self {
             pending: Mutex::new(BinaryHeap::new()),
+            admission_gate: Mutex::new(()),
             pending_count: AtomicUsize::new(0),
             pending_isl_tokens: AtomicUsize::new(0),
             slots,
@@ -145,17 +148,19 @@ impl<
             return;
         }
 
+        let _admission = self.admission_gate.lock().await;
+        let decay_now = Instant::now();
+
         let Some(threshold) = self.threshold_frac else {
-            self.schedule(request, Instant::now()).await;
+            self.admit_one(request, decay_now).await;
             return;
         };
 
         if request.bypass_capacity_check() {
-            self.schedule(request, Instant::now()).await;
+            self.admit_one(request, decay_now).await;
             return;
         }
 
-        let decay_now = Instant::now();
         if self.all_workers_busy(
             threshold,
             request.allowed_worker_ids.as_ref(),
@@ -171,7 +176,7 @@ impl<
             self.pending_isl_tokens
                 .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
         } else {
-            self.schedule(request, decay_now).await;
+            self.admit_one(request, decay_now).await;
         }
     }
 
@@ -198,6 +203,7 @@ impl<
         }
 
         loop {
+            let _admission = self.admission_gate.lock().await;
             let decay_now = Instant::now();
             let mut heap = self.pending.lock().await;
             let Some(front) = heap.peek() else {
@@ -221,13 +227,13 @@ impl<
             self.pending_isl_tokens
                 .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
-            self.schedule(entry.request, decay_now).await;
+            self.admit_one(entry.request, decay_now).await;
         }
     }
 
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
-    async fn schedule(&self, mut request: SchedulingRequest, decay_now: Instant) {
+    async fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
         let (decode_blocks, prefill_tokens) = self
             .slots
             .potential_blocks_and_tokens_with_prefill_tracking(
@@ -396,17 +402,17 @@ impl<
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
     use std::time::Duration;
 
-    use tokio::sync::watch;
+    use tokio::sync::{Barrier, watch};
 
     use super::*;
-    use crate::protocols::OverlapScores;
+    use crate::protocols::{OverlapScores, WorkerSelectionResult, WorkerWithDpRank};
     use crate::scheduling::types::KvSchedulerError;
-    use crate::selector::DefaultWorkerSelector;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+    use crate::{DefaultWorkerSelector, WorkerSelector};
 
     fn decay_now() -> Instant {
         Instant::now()
@@ -427,6 +433,77 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct SelectorRendezvous {
+        arrivals: StdMutex<usize>,
+        cv: Condvar,
+    }
+
+    impl SelectorRendezvous {
+        fn wait_for_peer(&self) {
+            let mut arrivals = self.arrivals.lock().unwrap();
+            *arrivals += 1;
+
+            if *arrivals == 1 {
+                let _ = self
+                    .cv
+                    .wait_timeout(arrivals, Duration::from_millis(100))
+                    .unwrap();
+                return;
+            }
+
+            self.cv.notify_all();
+        }
+    }
+
+    #[derive(Clone)]
+    struct MinDecodeSelector {
+        rendezvous: Option<Arc<SelectorRendezvous>>,
+    }
+
+    impl WorkerSelector<SimpleWorkerConfig> for MinDecodeSelector {
+        fn select_worker(
+            &self,
+            workers: &HashMap<WorkerId, SimpleWorkerConfig>,
+            request: &SchedulingRequest,
+            block_size: u32,
+        ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+            if let Some(rendezvous) = &self.rendezvous {
+                rendezvous.wait_for_peer();
+            }
+
+            let Some(worker) = workers
+                .iter()
+                .flat_map(|(worker_id, config)| {
+                    let dp_start = config.data_parallel_start_rank();
+                    let dp_end = dp_start + config.data_parallel_size();
+                    (dp_start..dp_end)
+                        .map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
+                })
+                .min_by_key(|worker| {
+                    (
+                        request
+                            .prefill_tokens
+                            .get(worker)
+                            .copied()
+                            .unwrap_or(request.isl_tokens),
+                        request.decode_blocks.get(worker).copied().unwrap_or(0),
+                        worker.worker_id,
+                        worker.dp_rank,
+                    )
+                })
+            else {
+                return Err(KvSchedulerError::NoEndpoints);
+            };
+
+            Ok(WorkerSelectionResult {
+                worker,
+                required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
+                overlap_blocks: request.overlaps.scores.get(&worker).copied().unwrap_or(0),
+            })
+        }
+    }
+
     fn make_queue(
         num_workers: usize,
         block_size: u32,
@@ -438,6 +515,53 @@ mod tests {
     ) {
         let (queue, slots, _tx) =
             make_queue_with_sender(num_workers, block_size, isl, threshold_frac, None);
+        (queue, slots)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_custom_selector<Sel: WorkerSelector<SimpleWorkerConfig>>(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        selector: Sel,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, FcfsPolicy, Sel>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
+        for id in 0..num_workers as u64 {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            threshold_frac,
+            block_size,
+            selector,
+            FcfsPolicy,
+            None,
+        ));
+
         (queue, slots)
     }
 
@@ -557,6 +681,49 @@ mod tests {
                 *tokens, 0,
                 "worker {worker:?} still has {tokens} active tokens"
             );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_immediate_admissions_see_prior_booking() {
+        let selector = MinDecodeSelector {
+            rendezvous: Some(Arc::new(SelectorRendezvous::default())),
+        };
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 512, None, selector);
+        let barrier = Arc::new(Barrier::new(3));
+
+        let (req1, rx1) = make_request("req-1", 512);
+        let queue1 = Arc::clone(&queue);
+        let barrier1 = Arc::clone(&barrier);
+        let handle1 = tokio::spawn(async move {
+            barrier1.wait().await;
+            queue1.enqueue(req1).await;
+        });
+
+        let (req2, rx2) = make_request("req-2", 512);
+        let queue2 = Arc::clone(&queue);
+        let barrier2 = Arc::clone(&barrier);
+        let handle2 = tokio::spawn(async move {
+            barrier2.wait().await;
+            queue2.enqueue(req2).await;
+        });
+
+        barrier.wait().await;
+        handle1.await.unwrap();
+        handle2.await.unwrap();
+
+        let resp1 = rx1.await.unwrap().unwrap();
+        let resp2 = rx2.await.unwrap().unwrap();
+        assert_ne!(
+            resp1.best_worker, resp2.best_worker,
+            "second admission should see the first booking and choose the other idle worker"
+        );
+
+        for request_id in ["req-1", "req-2"] {
+            slots
+                .mark_prefill_completed(&request_id.to_string(), decay_now())
+                .unwrap();
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
         }
     }
 

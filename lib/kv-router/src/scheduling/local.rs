@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -27,7 +27,6 @@ where
     S: SchedulingPolicy,
     Sel: WorkerSelector<C>,
 {
-    request_tx: mpsc::Sender<SchedulingRequest>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     queue: Arc<SchedulerQueue<P, C, S, Sel>>,
     queue_updates: watch::Sender<()>,
@@ -109,9 +108,8 @@ where
             prefill_load_estimator,
         ));
         let (queue_updates, _) = watch::channel(());
-        let (request_tx, request_rx) = mpsc::channel::<SchedulingRequest>(1024);
-        let queue_clone = Arc::clone(&queue);
         let queue_remote_updates = Arc::clone(&queue);
+        let queue_periodic_updates = Arc::clone(&queue);
         let mut remote_state_updates = slots.subscribe_remote_state_changes();
         let remote_update_cancel_token = cancellation_token.clone();
         let queue_updates_remote = queue_updates.clone();
@@ -138,33 +136,23 @@ where
         });
 
         tokio::spawn(async move {
-            let mut request_rx = request_rx;
             let mut recheck_interval = tokio::time::interval(recheck_interval);
-            tracing::trace!("LocalScheduler background task started");
+            tracing::trace!("LocalScheduler periodic queue update task started");
 
             loop {
                 tokio::select! {
                     _ = cancellation_token.cancelled() => {
-                        tracing::trace!("LocalScheduler background task shutting down");
+                        tracing::trace!("LocalScheduler periodic queue update task shutting down");
                         break;
                     }
-                    request = request_rx.recv() => {
-                        let Some(request) = request else {
-                            tracing::warn!("LocalScheduler request channel closed");
-                            break;
-                        };
-                        tracing::trace!("received request to be scheduled");
-                        queue_clone.enqueue(request).await;
-                    }
                     _ = recheck_interval.tick() => {
-                        queue_clone.update().await;
+                        queue_periodic_updates.update().await;
                     }
                 }
             }
         });
 
         Self {
-            request_tx,
             slots,
             queue,
             queue_updates,
@@ -210,10 +198,7 @@ where
             resp_tx: Some(resp_tx),
         };
 
-        self.request_tx
-            .send(request)
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+        self.queue.enqueue(request).await;
 
         resp_rx
             .await
