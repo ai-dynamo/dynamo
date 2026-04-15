@@ -153,7 +153,7 @@ def _run_planner_replay(
     from dynamo.planner.offline.replay_adapter import ReplayPlannerAdapter
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
-    planner_config.no_operation = True
+    planner_config.advisory = True
 
     if planner_config.mode == "agg":
         if extra_engine_args is None:
