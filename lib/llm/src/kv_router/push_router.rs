@@ -635,25 +635,35 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
+        // Build the guard BEFORE constructing the stream so that a
+        // drop-before-first-poll (client disconnects immediately after the
+        // request is accepted) still triggers Drop and releases the scheduler
+        // slot + deferred session close.  If the guard were built inside the
+        // `async_stream::stream!` closure, it would never be constructed — and
+        // `chooser.free()` + `deferred_close` would never fire — in that case.
+        let guard = RequestGuard {
+            chooser: chooser.clone(),
+            scheduler_tracked,
+            context_id: context_id.clone(),
+            tracker: tracker.clone(),
+            request_metrics: request_metrics.clone(),
+            cumulative_osl: 0,
+            metrics_recorded: false,
+            freed: false,
+            prefill_marked: false,
+            first_token_recorded: false,
+            track_output_blocks: scheduler_tracked && track_output_blocks,
+            current_total_blocks: isl_tokens.div_ceil(block_size),
+            isl_tokens,
+            block_size,
+            expected_output_tokens,
+            deferred_close,
+        };
+
         let wrapped_stream = Box::pin(async_stream::stream! {
-            let mut guard = RequestGuard {
-                chooser: chooser.clone(),
-                scheduler_tracked,
-                context_id: context_id.clone(),
-                tracker: tracker.clone(),
-                request_metrics: request_metrics.clone(),
-                cumulative_osl: 0,
-                metrics_recorded: false,
-                freed: false,
-                prefill_marked: false,
-                first_token_recorded: false,
-                track_output_blocks: scheduler_tracked && track_output_blocks,
-                current_total_blocks: isl_tokens.div_ceil(block_size),
-                isl_tokens,
-                block_size,
-                expected_output_tokens,
-                deferred_close,
-            };
+            // Move guard into the stream closure. Drop fires here if the stream
+            // is polled to completion, or via the outer Drop if never polled.
+            let mut guard = guard;
 
             loop {
                 tokio::select! {

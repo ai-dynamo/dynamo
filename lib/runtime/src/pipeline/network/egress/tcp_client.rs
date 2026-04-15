@@ -151,6 +151,23 @@ struct PendingRequest {
     response_tx: oneshot::Sender<Result<Bytes>>,
 }
 
+/// RAII guard that decrements the inflight counter on drop.
+///
+/// Guarantees `fetch_sub` runs on ALL exit paths from `send_request`:
+/// - Normal return (success or `?` propagation)
+/// - `tokio::time::timeout` cancellation (future dropped mid-await)
+/// - Any other future drop (e.g., select! branch cancellation)
+///
+/// The guard must be constructed AFTER `inflight.fetch_add` and held until
+/// the caller no longer needs the slot counted.
+struct InflightGuard(Arc<AtomicU64>);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// TCP connection with lock-free submit and batched write/read tasks.
 ///
 /// Design: SegQueue submit → batched writer task → reader task → oneshot response
@@ -585,8 +602,13 @@ impl TcpConnection {
             anyhow::bail!("Connection unhealthy (tasks failed)");
         }
 
-        // Increment inflight before push (for capacity heuristic)
+        // Increment inflight counter and attach a RAII guard that decrements it
+        // on ALL exit paths: normal return, `?` propagation, timeout cancellation,
+        // or any other future drop.  Without the guard, a tokio::time::timeout
+        // drop would skip the fetch_sub, permanently inflating the counter and
+        // blocking idle-host cleanup (inflight > 0 guard in cleanup_idle_hosts).
         self.inflight.fetch_add(1, Ordering::Relaxed);
+        let _inflight_guard = InflightGuard(self.inflight.clone());
 
         // Lock-free submit: ~20-40ns
         self.submit_queue.push(PendingRequest {
@@ -597,17 +619,12 @@ impl TcpConnection {
         // Wake writer if it was sleeping
         self.writer_notify.notify_one();
 
-        // Await response
+        // Await response. On timeout the enclosing future is dropped here:
+        // `_inflight_guard` drops → fetch_sub runs automatically.
+        // `_permit` drops → semaphore slot is released automatically.
         let result = response_rx
             .await
             .map_err(|_| anyhow::anyhow!("Reader task closed"))?;
-
-        // Decrement inflight after response.
-        // NOTE: this decrement is NOT reached if the outer timeout drops this
-        // future before response_rx resolves, leaving the inflight counter
-        // temporarily inflated.  The RAII InflightGuard (bis/tcp-inflight-guard)
-        // fixes that; the admission semaphore above already bounds total memory.
-        self.inflight.fetch_sub(1, Ordering::Relaxed);
 
         if trace && let Some(start) = e2e_start {
             let e2e_ns = start.elapsed().as_nanos() as u64;
