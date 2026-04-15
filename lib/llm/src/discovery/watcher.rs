@@ -535,6 +535,9 @@ impl ModelWatcher {
         // If we timed out and the other task is still running, bail out rather
         // than proceeding with concurrent pipeline construction.
         if self.registering_worker_sets.contains(registration_key) {
+            // Save the model card so handle_delete can find it for cleanup.
+            self.manager
+                .save_model_card(&mcid.to_path(), card.clone())?;
             tracing::warn!(
                 model_name = card.name(),
                 namespace = namespace,
@@ -571,6 +574,9 @@ impl ModelWatcher {
                 .registering_worker_sets
                 .insert(registration_key.to_string())
             {
+                // Save the model card so handle_delete can find it for cleanup.
+                self.manager
+                    .save_model_card(&mcid.to_path(), card.clone())?;
                 tracing::debug!(
                     model_name = card.name(),
                     namespace = namespace,
