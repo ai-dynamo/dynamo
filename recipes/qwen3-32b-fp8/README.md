@@ -8,7 +8,7 @@ Production-ready deployments for **Qwen3-32B-FP8** with FP8 quantization using T
 |--------------|------|------|-------------|
 | [**trtllm/agg**](trtllm/agg/) | 2x GPU | Aggregated | TP2, round-robin routing |
 | [**trtllm/disagg**](trtllm/disagg/) | 8x GPU | Disaggregated | Prefill/decode separation |
-| [**vllm/disagg**](vllm/disagg/) | 8x GPU | Disaggregated | vLLM, 2× TP2 prefill + 1× TP4 decode |
+| [**vllm/disagg**](vllm/disagg/) | 8x GPU | Disaggregated | 2× TP2 prefill + 1× TP4 decode |
 
 ## Prerequisites
 
