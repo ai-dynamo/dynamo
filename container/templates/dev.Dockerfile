@@ -196,6 +196,13 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
 ARG TARGETARCH
 RUN --mount=from=wheel_builder,target=/wheel_builder \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
+{% if device == "xpu" %}
+        if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/intel/intel_nixl ]; then \
+            mkdir -p /opt/intel /etc/ld.so.conf.d; \
+            cp -r /wheel_builder/opt/intel/intel_nixl /opt/intel/; \
+            cp -r /wheel_builder/usr/local/ucx /usr/local/; \
+        fi; \
+{% else %}
         if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
             mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
             cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
@@ -205,6 +212,7 @@ RUN --mount=from=wheel_builder,target=/wheel_builder \
             cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
             echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
         fi; \
+{% endif %}
     fi
 
 {% if device == "xpu" %}
@@ -295,7 +303,14 @@ COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/cargo /usr/loc
 COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/maturin /usr/local/bin/maturin
 
 {% if framework == "sglang" %}
-# SGLang: Create venv with --system-site-packages to inherit runtime packages
+{% if device == "xpu" %}
+# SGLang XPU: venv already exists from the framework stage; just add uv and maturin
+COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
+RUN cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
+    chmod +x /opt/dynamo/venv/bin/uv && \
+    /opt/dynamo/venv/bin/uv pip install maturin[patchelf]
+{% else %}
+# SGLang CUDA: Create venv with --system-site-packages to inherit runtime packages
 COPY --from=ghcr.io/astral-sh/uv:0.10.7 /uv /tmp/uv-binary
 RUN mkdir -p /opt/dynamo/venv && \
     python3 -m venv --system-site-packages /opt/dynamo/venv && \
@@ -304,6 +319,7 @@ RUN mkdir -p /opt/dynamo/venv && \
     cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
     chmod +x /opt/dynamo/venv/bin/uv && \
     pip install --ignore-installed maturin[patchelf]
+{% endif %}
 {% elif framework == "dynamo" %}
 # framework=none: Create venv if runtime stage didn't already provide one
 RUN if [ ! -d /opt/dynamo/venv ]; then \
@@ -327,7 +343,11 @@ RUN --mount=type=bind,source=./container/deps/requirements.dev.txt,target=/tmp/r
     export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --index-strategy unsafe-best-match \
+{% if device == "xpu" %}
+        --extra-index-url https://download.pytorch.org/whl/xpu \
+{% else %}
         --extra-index-url https://download.pytorch.org/whl/cu130 \
+{% endif %}
         --requirement /tmp/requirements.dev.txt \
         --requirement /tmp/requirements.test.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \

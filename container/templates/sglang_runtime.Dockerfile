@@ -7,18 +7,26 @@
 ########## Runtime Image #########
 ##################################
 
+{% if device == "xpu" %}
+FROM framework AS runtime
+{% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+{% endif %}
 
+{% if device != "xpu" %}
 # NOTE: Unlike vLLM/TRTLLM, the SGLang upstream runtime image already ships with the full CUDA
 # toolkit (nvcc, nvlink, ptxas, etc.), so no selective COPY of CUDA binaries is needed here.
 
 # cleanup unnecessary libs (python3-blinker conflicts with pip-installed blinker from Flask/dash)
 RUN apt remove -y python3-apt python3-blinker && \
     pip uninstall -y termplotlib
+{% endif %}
 
+ARG TARGETARCH
+{% if device != "xpu" %}
 # This ARG is still utilized for SGLANG Version extraction
 ARG RUNTIME_IMAGE_TAG
-ARG TARGETARCH
+{% endif %}
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -67,13 +75,22 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /o
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 # NIXL environment and native libraries
+{% if device == "xpu" %}
+ENV NIXL_PREFIX=/opt/intel/intel_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
+{% else %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
+{% endif %}
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
 # Copy UCX and NIXL native libraries to system directories
 COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
 COPY --chown=dynamo:0 --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+{% if device == "xpu" %}
+{# XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated #}
+COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+{% endif %}
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 
@@ -84,10 +101,25 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH
 
+{% if device == "xpu" %}
+# For XPU builds SGLANG_VERSION is taken from the pinned SGLANG_REF build argument
+ARG SGLANG_REF
+ENV SGLANG_VERSION="${SGLANG_REF}"
+{% else %}
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
+{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
-# Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
+{% if device == "xpu" %}
+# XPU: install dynamo + NIXL into the venv inherited from the framework stage
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install \
+        /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% else %}
+# CUDA: install packages as root to system location (/usr/local/lib/python3.12/dist-packages)
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
@@ -95,17 +127,25 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         sglang==${SGLANG_VERSION}
+{% endif %}
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
-# Install NIXL wheel (pre-built C++ binary, not buildable from source) and sglang.
+# Install NIXL wheel only (pre-built C++ binary, not buildable from source).
+{% if device == "xpu" %}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% else %}
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         sglang==${SGLANG_VERSION}
 {% endif %}
+{% endif %}
 
-# Install gpu_memory_service wheel if enabled (all targets)
+{% if device != "xpu" %}
+# Install gpu_memory_service wheel if enabled (CUDA only)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
@@ -113,6 +153,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
     fi
+{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 # Copy benchmarks after wheel install so benchmarks changes don't invalidate the layer above
@@ -120,8 +161,17 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 {% endif %}
 
-# Install runtime dependencies (common + benchmarks) as root.
+# Install runtime dependencies (common + benchmarks).
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
+{% if device == "xpu" %}
+RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/deps/requirements.common.txt \
+    --mount=type=bind,source=container/deps/requirements.benchmark.txt,target=/tmp/deps/requirements.benchmark.txt \
+    --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
+    uv pip install \
+        --requirement /tmp/deps/requirements.common.txt \
+        --requirement /tmp/deps/requirements.benchmark.txt
+{% else %}
 RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/deps/requirements.common.txt \
     --mount=type=bind,source=container/deps/requirements.benchmark.txt,target=/tmp/deps/requirements.benchmark.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
@@ -132,16 +182,26 @@ RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/
         sglang==${SGLANG_VERSION} && \
     #TODO: Temporary change until upstream sglang runtime image is updated
     pip install --break-system-packages "urllib3>=2.6.3"
+{% endif %}
 
 {% if target not in ("dev", "local-dev") %}
 # Install benchmarks and fix permissions (dev/local-dev install from bind-mounted source if needed)
+{% if device == "xpu" %}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    cd /workspace/benchmarks && \
+    uv pip install . && \
+    chmod -R g+w /workspace/benchmarks
+{% else %}
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages . && \
     chmod -R g+w /workspace/benchmarks
 {% endif %}
+{% endif %}
 
+{% if device != "xpu" %}
 # Force-reinstall NVIDIA packages in a separate layer so requirements changes don't trigger re-download
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
@@ -161,6 +221,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
             nvidia-cutlass-dsl==4.3.1 \
             nvidia-cudnn-cu13==9.16.0.29; \
     fi
+{% endif %}
 
 # Switch back to dynamo user after package installations
 USER dynamo
@@ -190,11 +251,21 @@ USER root
 # Fix directory permissions: COPY --chmod only affects contents, not the directory itself
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
-    ln -s /workspace /sgl-workspace/dynamo
+{% if device == "xpu" %}
+    echo 'source /opt/intel/oneapi/setvars.sh --force' >> /etc/bash.bashrc && \
+    echo 'export LD_LIBRARY_PATH=/opt/dynamo/venv/lib:$LD_LIBRARY_PATH' >> /etc/bash.bashrc && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+{% endif %}
+    mkdir -p /sgl-workspace && \
+    ln -sf /workspace /sgl-workspace/dynamo
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
+{% if device == "xpu" %}
+CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
+{% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+{% endif %}

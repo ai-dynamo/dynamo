@@ -84,6 +84,12 @@ sglang:
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: v0.5.9-cu130-runtime
+  xpu:
+    base_image: intel/deep-learning-essentials
+    base_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    runtime_image: intel/deep-learning-essentials
+    runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    sglang_ref: aa78564e1a3ab684b7eafa3eba19a8654c90476f
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
