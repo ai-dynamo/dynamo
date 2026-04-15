@@ -327,6 +327,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             expected_output_tokens,
                             prefill_load_hint,
                         } => {
+                            self.ensure_worker_registered(event.worker);
                             self.request_to_worker
                                 .insert(event.request_id.clone(), event.worker);
 
@@ -1485,6 +1486,48 @@ mod tests {
         assert!(sequences.request_to_lora.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn replica_sync_add_lazily_registers_missing_worker() {
+        let sequences = ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            4,
+            HashMap::new(),
+            true,
+            0,
+            "test",
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+        let subscriber = VecSubscriber {
+            events: VecDeque::from(vec![Ok(ActiveSequenceEvent {
+                request_id: "req-1".to_string(),
+                worker,
+                data: ActiveSequenceEventData::AddRequest {
+                    token_sequence: Some(vec![1, 2, 3]),
+                    isl: 12,
+                    overlap: 0,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                },
+                router_id: 99,
+                lora_name: None,
+            })]),
+        };
+
+        sequences
+            .run_replica_sync(subscriber, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(sequences.num_workers(), 1);
+        assert_eq!(
+            sequences.request_to_worker.get("req-1").map(|entry| *entry),
+            Some(worker)
+        );
+        assert!(!sequences.prompt_registry.is_block_index_empty());
+        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
     }
 
     #[test]
