@@ -32,6 +32,11 @@ impl From<RouterModeArg> for ReplayRouterMode {
     }
 }
 
+fn is_bench_harness_invocation() -> bool {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    args.is_empty() || args.iter().all(|arg| arg == "--bench")
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "offline_replay_bench")]
 #[command(about = "Run offline replay directly in Rust for benchmarking and profiling")]
@@ -117,6 +122,11 @@ fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
 }
 
 fn main() -> Result<()> {
+    if is_bench_harness_invocation() {
+        eprintln!("offline_replay_bench: skipping no-arg harness invocation");
+        return Ok(());
+    }
+
     let args = Args::parse();
     let engine_args = build_engine_args(&args)?;
     let started_at = Instant::now();

@@ -115,6 +115,11 @@ struct AgentHintsBody {
     speculative_prefill: bool,
 }
 
+fn is_bench_harness_invocation() -> bool {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    args.is_empty() || args.iter().all(|arg| arg == "--bench")
+}
+
 // ---------------------------------------------------------------------------
 // Turn result
 // ---------------------------------------------------------------------------
@@ -533,6 +538,11 @@ fn print_per_turn_table(label: &str, stats: &[PerTurnStats]) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if is_bench_harness_invocation() {
+        eprintln!("multiturn_bench: skipping no-arg harness invocation");
+        return Ok(());
+    }
+
     let mut args = Args::parse();
 
     if args.ping {

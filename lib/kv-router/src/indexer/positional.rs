@@ -22,9 +22,10 @@
 //! in a `ThreadPoolIndexer`.
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{SyncIndexer, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
@@ -139,14 +140,24 @@ impl PositionalIndexer {
 // ============================================================================
 
 impl SyncIndexer for PositionalIndexer {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut worker_blocks = FxHashMap::default();
+        let counters = metrics.as_ref().map(|m| m.prebind());
 
         while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
-                    if let Err(e) = self.apply_event(&mut worker_blocks, event) {
-                        tracing::warn!("Failed to apply event: {:?}", e);
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event);
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
