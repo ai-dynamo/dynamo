@@ -407,7 +407,11 @@ impl TcpConnection {
                 // writev(). Larger batches loop inside write_all but still hit
                 // the kernel only as fast as it drains the socket buffer.
                 if let Err(e) = write_half.write_all(&send_buf).await {
-                    // Data may be partially on the wire — fail batch directly.
+                    // Data may be partially on the wire — the connection is in an
+                    // unrecoverable state (broken framing). Fail the entire batch,
+                    // clear the buffer defensively so stale data can never be
+                    // re-sent if reconnect-and-retry is ever added, then exit.
+                    send_buf.clear();
                     let err_msg = format!("Write failed: {}", e);
                     for tx in response_batch.drain(..) {
                         let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
