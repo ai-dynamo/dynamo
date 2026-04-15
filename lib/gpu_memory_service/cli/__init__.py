@@ -4,13 +4,7 @@
 """CLI for GPU Memory Service."""
 
 from gpu_memory_service.cli.args import Config, parse_args
-
-
-def main():
-    from gpu_memory_service.cli.runner import main as runner_main
-
-    return runner_main()
-
+from gpu_memory_service.cli.runner import main
 
 __all__ = [
     "Config",

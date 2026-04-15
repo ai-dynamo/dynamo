@@ -197,7 +197,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 
 	// Use SyncResource to create/update the checkpoint Job
 	modified, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*batchv1.Job, bool, error) {
-		job, err := buildCheckpointJob(ctx, r.Client, r.Config, ckpt, jobName)
+		job, err := buildCheckpointJob(r.Config, ckpt, jobName)
 		return job, false, err
 	})
 	if err != nil {

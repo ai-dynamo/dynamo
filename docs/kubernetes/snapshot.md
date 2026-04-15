@@ -142,16 +142,6 @@ spec:
             ...
 ```
 
-If this checkpoint should capture and restore GPU Memory Service helpers, set:
-
-```yaml
-spec:
-  gpuMemoryService:
-    enabled: true
-```
-
-`spec.gpuMemoryService` is outside `spec.identity`, so it does not change the checkpoint identity hash.
-
 For a full working example, see [deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml).
 
 Apply it:
@@ -271,8 +261,6 @@ spec:
           ...
         ...
 ```
-
-Auto mode only hashes `checkpoint.identity`. If you need GMS-specific checkpoint behavior, configure it on the `DynamoCheckpoint` object with `spec.gpuMemoryService.enabled`.
 
 Useful inspection commands:
 

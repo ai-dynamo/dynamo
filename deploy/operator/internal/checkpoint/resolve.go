@@ -28,14 +28,13 @@ import (
 )
 
 type CheckpointInfo struct {
-	Enabled          bool
-	Exists           bool
-	Identity         *nvidiacomv1alpha1.DynamoCheckpointIdentity
-	GPUMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec
-	Hash             string
-	ArtifactVersion  string
-	CheckpointName   string
-	Ready            bool
+	Enabled         bool
+	Exists          bool
+	Identity        *nvidiacomv1alpha1.DynamoCheckpointIdentity
+	Hash            string
+	ArtifactVersion string
+	CheckpointName  string
+	Ready           bool
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
@@ -45,14 +44,13 @@ func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*Checkp
 	}
 
 	return &CheckpointInfo{
-		Enabled:          true,
-		Exists:           true,
-		Identity:         &ckpt.Spec.Identity,
-		GPUMemoryService: ckpt.Spec.GPUMemoryService,
-		Hash:             hash,
-		ArtifactVersion:  checkpointArtifactVersion(ckpt),
-		CheckpointName:   ckpt.Name,
-		Ready:            ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		Enabled:         true,
+		Exists:          true,
+		Identity:        &ckpt.Spec.Identity,
+		Hash:            hash,
+		ArtifactVersion: checkpointArtifactVersion(ckpt),
+		CheckpointName:  ckpt.Name,
+		Ready:           ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
 	}, nil
 }
 

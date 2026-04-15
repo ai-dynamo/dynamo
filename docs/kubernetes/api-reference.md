@@ -302,7 +302,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Identity defines the inputs that determine checkpoint equivalence |  | Required: \{\} <br /> |
-| `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService enables checkpoint-time GPU Memory Service wiring.<br />It is intentionally outside spec.identity, so it does not affect the<br />checkpoint identity hash or deduplication. |  | Optional: \{\} <br /> |
 | `job` _[DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)_ | Job defines the configuration for the checkpoint creation Job |  | Required: \{\} <br /> |
 
 
@@ -877,7 +876,6 @@ via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GP
 
 
 _Appears in:_
-- [DynamoCheckpointSpec](#dynamocheckpointspec)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 

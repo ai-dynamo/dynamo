@@ -36,7 +36,6 @@ keywords = ["llm", "genai", "inference", "nvidia", "gpu", "memory", "dynamo"]
 
 [project.scripts]
 gpu-memory-service = "gpu_memory_service.cli.runner:main"
-gms-storage-client = "gpu_memory_service.cli.storage_runner:main"
 
 [project.optional-dependencies]
 test = [
