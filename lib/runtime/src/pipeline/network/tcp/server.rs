@@ -566,8 +566,14 @@ async fn tcp_listener(
                                         break;
                                     }
                                     Err(e) => {
-                                        // TODO(#171) - address fatal errors
-                                        panic!("{:?}", e);
+                                        // Malformed control message — kill the
+                                        // connection so only this stream is torn
+                                        // down.
+                                        tracing::warn!(
+                                            "malformed control message, closing connection: {e:?}"
+                                        );
+                                        control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                                        break;
                                     }
                                 }
                             }
@@ -579,9 +585,15 @@ async fn tcp_listener(
                                     break;
                                 };
                         }
-                        Some(Err(_)) => {
-                            // TODO(#171) - address fatal errors
-                            panic!("invalid message issued over socket; this should never happen");
+                        Some(Err(e)) => {
+                            // TCP RST or decode error from worker side — the
+                            // connection is broken.  Kill the request context and
+                            // break so only this stream is affected.
+                            tracing::warn!(
+                                "tcp stream read error from worker, closing connection: {e:?}"
+                            );
+                            control_tx.send(ControlMessage::Kill).await.expect("the control channel should not be closed");
+                            break;
                         }
                         None => {
                             // this is allowed but we try to avoid it
