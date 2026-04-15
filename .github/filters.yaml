@@ -152,12 +152,12 @@ trtllm:
   - '!**/*.rst'
 
 fastvideo:
-  - '!**/*.md'
-  - '!**/*.rst'
   - 'container/deps/fastvideo/**'
   - 'container/templates/fastvideo_*'
   - 'components/src/dynamo/fastvideo/**'
   - 'examples/backends/fastvideo/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 frontend:
   - *ci

@@ -129,7 +129,7 @@ jobs:
       target: runtime
       platform: 'linux/amd64,linux/arm64'
       cuda_version: '["13.1"]'
-      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
 

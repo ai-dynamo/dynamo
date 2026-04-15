@@ -21,7 +21,6 @@ x-backend-base: &backend-base
   #   - ${HOME}/.cache/huggingface:/home/dynamo/.cache/huggingface
   cap_add:
     - SYS_PTRACE
-  ipc: host
   shm_size: 8g
   ulimits:
     memlock: -1

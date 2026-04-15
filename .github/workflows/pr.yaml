@@ -547,7 +547,7 @@ jobs:
     name: fastvideo-runtime # This name overlaps with other fastvideo jobs to group them in the UI
     needs: [changed-files, fastvideo-build, fastvideo-test]
     if: |
-      always() &&
+      always() && !cancelled() &&
       (needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.fastvideo == 'true' || needs.changed-files.outputs.deploy == 'true') &&
       needs.fastvideo-build.result == 'success' &&
       (needs.fastvideo-test.result == 'success' || needs.fastvideo-test.result == 'skipped')
