@@ -269,7 +269,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 		Status:             metav1.ConditionTrue,
 		Reason:             "JobCreated",
 		Message:            fmt.Sprintf("Checkpoint job %s created", jobName),
-		LastTransitionTime: metav1.Now(),
+
 	})
 
 	if err := r.Status().Update(ctx, ckpt); err != nil {
@@ -344,7 +344,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 				Status:             metav1.ConditionFalse,
 				Reason:             "JobDeleted",
 				Message:            "Checkpoint job was deleted",
-				LastTransitionTime: metav1.Now(),
+		
 			})
 			if err := r.Status().Update(ctx, ckpt); err != nil {
 				return ctrl.Result{}, err
@@ -397,7 +397,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			Status:             metav1.ConditionTrue,
 			Reason:             observation.Reason,
 			Message:            observation.Message,
-			LastTransitionTime: metav1.Now(),
+	
 		})
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
@@ -414,7 +414,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			Status:             metav1.ConditionFalse,
 			Reason:             observation.Reason,
 			Message:            observation.Message,
-			LastTransitionTime: metav1.Now(),
+	
 		})
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
