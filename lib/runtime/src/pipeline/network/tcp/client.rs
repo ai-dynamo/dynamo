@@ -268,9 +268,14 @@ async fn handle_reader(
                         }
                     }
                     Some(Err(e)) => {
-                        // TODO(#171) - address fatal errors
-                        // in this case the binary representation of the message is invalid
-                        panic!("fatal error - failed to decode message from stream; invalid line protocol: {e:?}");
+                        // TCP RST from peer (e.g. server crash) or a protocol decode
+                        // error — both mean the stream is unrecoverable.  Break so
+                        // only this connection is torn down; other requests are not
+                        // affected.
+                        tracing::warn!(
+                            "tcp stream read error, closing connection: {e:?}"
+                        );
+                        break;
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
