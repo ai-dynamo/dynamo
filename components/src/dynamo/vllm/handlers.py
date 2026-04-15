@@ -420,7 +420,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.dp_range = get_dp_range_for_worker(self.engine_client.vllm_config)
         self._quiesce_controller = VllmEngineQuiesceController(self.engine_client)
         self._quiesce_lock = asyncio.Lock()
-        self._mm_kwargs_receiver = None
+        self._mm_kwargs_receiver: MmKwargsReceiver | None = None
 
         # Initialize InputParamManager for text-in-text-out mode
         tokenizer = None
@@ -1529,6 +1529,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # routing layer.  Fall back to computing from loaded image data.
         extra_args = request.get("extra_args") or {}
         forwarded_hashes = extra_args.get("mm_hashes")
+        mm_uuids: dict[str, Any] | None = None
         if forwarded_hashes:
             mm_uuids = {"image": forwarded_hashes}
         else:
@@ -1848,8 +1849,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             "multi_modal_data" in request and request["multi_modal_data"] is not None
         )
 
-        multi_modal_data = None
-        pre_rendered = None
+        multi_modal_data: Dict[str, Any] | None = None
+        pre_rendered: Dict[str, Any] | None = None
         if is_decode_only:
             # Decode mode: branch on model, not data.
             if is_qwen_vl_model(self.config.model):
