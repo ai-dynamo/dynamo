@@ -1125,7 +1125,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # We don't know whether this is enabled on the server or not.
         # We only get here if the users' request has set prompt_embeds, so trust them.
         model_config = SimpleNamespace(enable_prompt_embeds=True)
-        return safe_load_prompt_embeds(model_config, prompt_embeds_base64.encode())
+        try:
+            return safe_load_prompt_embeds(model_config, prompt_embeds_base64.encode())
+        except Exception as e:
+            logger.error(f"Failed to decode prompt_embeds: {e}")
+            raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
 
     def _create_prompt_from_embeddings(
         self, prompt_embeds_base64: str

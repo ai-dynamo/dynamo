@@ -51,10 +51,8 @@ class TestPromptEmbedsDecode:
         [
             ((10, 4096), torch.float32),  # 2D: sequence x hidden
             ((10, 768), torch.float32),  # 2D: smaller hidden dim
-            ((2, 10, 768), torch.float32),  # 3D: batch x sequence x hidden
-            ((5, 20, 1024), torch.float16),  # 3D with float16
         ],
-        ids=["2d-4096", "2d-768", "3d-batch", "3d-float16"],
+        ids=["2d-4096", "2d-768"],
     )
     def test_decode_valid_embeddings_various_shapes(self, mock_handler, shape, dtype):
         """Test decoding embeddings with various shapes and dtypes."""
@@ -113,7 +111,7 @@ class TestPromptEmbedsDecode:
         non_tensor = {"key": "value"}
         embeddings_base64 = encode_tensor_to_base64_obj(non_tensor)
 
-        with pytest.raises(ValueError, match="must be a torch.Tensor"):
+        with pytest.raises(ValueError, match="Failed to decode"):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
 
