@@ -85,8 +85,8 @@ impl TrafficAccumulator {
         }
     }
 
-    /// Record one externally arriving request.
-    pub(in crate::replay::offline) fn record_arrival(
+    /// Record one admitted request.
+    pub(in crate::replay::offline) fn on_request(
         &mut self,
         input_tokens: usize,
         output_tokens: usize,

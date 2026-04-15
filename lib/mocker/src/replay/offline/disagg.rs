@@ -374,8 +374,6 @@ impl DisaggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
-        self.traffic
-            .record_arrival(request.tokens.len(), request.max_output_tokens);
         let queued_request = request.clone();
         self.requests
             .insert(uuid, DisaggRequestState::new(request, arrival_time_ms));
@@ -499,6 +497,11 @@ impl DisaggRuntime {
                 .transition_log
                 .push(DisaggTransition::WorkloadCompleted { uuid: signal.uuid });
         }
+        let state = self.state(signal.uuid)?;
+        let original = state.original_request()?;
+        let input_tokens = original.tokens.len();
+        let output_tokens = original.max_output_tokens;
+        self.traffic.on_request(input_tokens, output_tokens);
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {
@@ -948,7 +951,7 @@ mod tests {
         config
     }
 
-    fn planner_staged_args(worker_type: WorkerType) -> MockEngineArgs {
+    fn scaling_test_args(worker_type: WorkerType) -> MockEngineArgs {
         MockEngineArgs::builder()
             .block_size(64)
             .num_gpu_blocks(512)
@@ -963,10 +966,10 @@ mod tests {
             .unwrap()
     }
 
-    fn planner_disagg_config() -> OfflineDisaggReplayConfig {
+    fn scaling_test_disagg_config() -> OfflineDisaggReplayConfig {
         OfflineDisaggReplayConfig {
-            prefill_args: planner_staged_args(WorkerType::Prefill),
-            decode_args: planner_staged_args(WorkerType::Decode),
+            prefill_args: scaling_test_args(WorkerType::Prefill),
+            decode_args: scaling_test_args(WorkerType::Decode),
             num_prefill_workers: 1,
             num_decode_workers: 1,
         }
@@ -1276,7 +1279,7 @@ mod tests {
 
     #[test]
     fn test_apply_scaling_drains_prefill_router_pending_immediately() {
-        let config = planner_disagg_config();
+        let config = scaling_test_disagg_config();
         let mut runtime = DisaggRuntime::new(
             &config,
             Some(planner_router_config()),
@@ -1300,27 +1303,6 @@ mod tests {
             DisaggPhase::RunningPrefill
         );
         assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
-    }
-
-    #[test]
-    fn test_planner_traffic_counts_external_arrivals_before_completion() {
-        let config = planner_disagg_config();
-        let mut runtime = DisaggRuntime::new(
-            &config,
-            None,
-            None,
-            VecDeque::from([request(1, 512, 128, 0.0), request(2, 512, 128, 0.1)]),
-            ReplayMode::Trace,
-            ReplayRouterMode::RoundRobin,
-        )
-        .unwrap();
-
-        runtime.advance_to(0.1).unwrap();
-        let (_, num_req, avg_isl, avg_osl) = runtime.drain_traffic();
-
-        assert_eq!(num_req, 2);
-        assert_eq!(avg_isl, 512.0);
-        assert_eq!(avg_osl, 128.0);
     }
 
     #[test]

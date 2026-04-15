@@ -288,11 +288,12 @@ impl AggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
-        self.traffic
-            .record_arrival(request.tokens.len(), request.max_output_tokens);
 
         if self.router.is_none() {
-            self.requests.insert(uuid, AggRequestState::new_running());
+            self.requests.insert(
+                uuid,
+                AggRequestState::new_running(request.tokens.len(), request.max_output_tokens),
+            );
             let worker_idx = self.next_worker();
             self.dispatch_to_worker(request, uuid, worker_idx)?;
             return Ok(uuid);
@@ -357,9 +358,11 @@ impl AggRuntime {
                 }
                 self.record_router_pending();
             }
-            self.requests.remove(&signal.uuid).ok_or_else(|| {
+            let removed_state = self.requests.remove(&signal.uuid).ok_or_else(|| {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
+            self.traffic
+                .on_request(removed_state.input_tokens, removed_state.output_tokens);
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
             self.progress.inc_completed();
@@ -715,19 +718,6 @@ mod tests {
             .enable_prefix_caching(true)
             .enable_chunked_prefill(true)
             .speedup_ratio(1000.0)
-            .build()
-            .unwrap()
-    }
-
-    fn planner_runtime_args() -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .block_size(64)
-            .num_gpu_blocks(512)
-            .max_num_batched_tokens(Some(8192))
-            .max_num_seqs(Some(8))
-            .enable_prefix_caching(true)
-            .enable_chunked_prefill(true)
-            .speedup_ratio(1.0)
             .build()
             .unwrap()
     }
@@ -1098,47 +1088,6 @@ mod tests {
             runtime.stats.assigned_worker_by_uuid[&Uuid::from_u128(2)],
             1
         );
-    }
-
-    #[test]
-    fn test_planner_traffic_counts_arrivals_before_completion() {
-        let args = planner_runtime_args();
-        let mut runtime = AggRuntime::new(
-            &args,
-            None,
-            None,
-            normalize_trace_requests(
-                vec![
-                    DirectRequest {
-                        tokens: vec![1; 512],
-                        max_output_tokens: 128,
-                        uuid: Some(Uuid::from_u128(1)),
-                        dp_rank: 0,
-                        arrival_timestamp_ms: Some(0.0),
-                    },
-                    DirectRequest {
-                        tokens: vec![2; 512],
-                        max_output_tokens: 128,
-                        uuid: Some(Uuid::from_u128(2)),
-                        dp_rank: 0,
-                        arrival_timestamp_ms: Some(0.1),
-                    },
-                ],
-                1.0,
-            )
-            .unwrap(),
-            1,
-            ReplayMode::Trace,
-            ReplayRouterMode::RoundRobin,
-        )
-        .unwrap();
-
-        runtime.advance_to(0.1).unwrap();
-        let (_, num_req, avg_isl, avg_osl) = runtime.drain_traffic();
-
-        assert_eq!(num_req, 2);
-        assert_eq!(avg_isl, 512.0);
-        assert_eq!(avg_osl, 128.0);
     }
 
     #[test]
