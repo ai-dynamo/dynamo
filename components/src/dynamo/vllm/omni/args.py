@@ -350,17 +350,21 @@ class OmniConfig(DynamoRuntimeConfig):
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "OmniConfig":
         config = super().from_cli_args(args)
-        config.diffusion = OmniDiffusionKwargs(
+        config.diffusion = dataclasses.replace(
+            OmniDiffusionKwargs(),
             **{
-                f.name: getattr(args, f.name, f.default)
+                f.name: getattr(args, f.name)
                 for f in dataclasses.fields(OmniDiffusionKwargs)
-            }
+                if hasattr(args, f.name)
+            },
         )
-        config.parallel = OmniParallelKwargs(
+        config.parallel = dataclasses.replace(
+            OmniParallelKwargs(),
             **{
-                f.name: getattr(args, f.name, f.default)
+                f.name: getattr(args, f.name)
                 for f in dataclasses.fields(OmniParallelKwargs)
-            }
+                if hasattr(args, f.name)
+            },
         )
         return config
 
