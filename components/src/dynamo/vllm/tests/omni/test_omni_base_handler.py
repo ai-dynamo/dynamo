@@ -25,11 +25,11 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-# Fields intentionally not in OmniParallelKwargs — must include a reason.
+# These fields are not exposed in OmniParallelKwargs, because they are derived from other fields.
 _SKIP_FIELDS = {
-    "sequence_parallel_size",  # derived: ulysses_degree * ring_degree
-    "enable_expert_parallel",  # MoE-only, no diffusion model uses this yet
-    "ulysses_mode",            # advanced Ulysses variant, not yet exposed
+    "sequence_parallel_size",
+    "enable_expert_parallel",
+    "ulysses_mode",
 }
 
 
@@ -64,13 +64,14 @@ class TestDiffusionParallelConfigCoverage:
         """Every DiffusionParallelConfig field must be in OmniParallelKwargs, engine_args, or _SKIP_FIELDS.
 
         When vllm-omni adds a new parallelism field to DiffusionParallelConfig, this test fails.
-        Fix by adding it to OmniParallelKwargs and OmniArgGroup, or to _SKIP_FIELDS with a reason.
+        Fix by adding it to OmniParallelKwargs and OmniArgGroup, or to _SKIP_FIELDS
         """
         parallel_kwarg_fields = {f.name for f in dataclasses.fields(OmniParallelKwargs)}
         engine_fields = _engine_args_fields()
 
         uncovered = [
-            f for f in _diffusion_parallel_fields()
+            f
+            for f in _diffusion_parallel_fields()
             if f not in _SKIP_FIELDS
             and f not in parallel_kwarg_fields
             and f not in engine_fields
@@ -82,7 +83,8 @@ class TestDiffusionParallelConfigCoverage:
 
     def test_tensor_parallel_size_read_from_engine_args(self):
         """tensor_parallel_size must come from engine_args (vLLM's --tensor-parallel-size),
-        not from OmniParallelKwargs, so it applies to both LLM encoder and diffusion transformer."""
+        not from OmniParallelKwargs, so it applies to both LLM encoder and diffusion transformer.
+        """
         config = _make_config()
         config.engine_args.tensor_parallel_size = 4
         with patch("dynamo.vllm.omni.base_handler.DiffusionParallelConfig") as MockCfg:
