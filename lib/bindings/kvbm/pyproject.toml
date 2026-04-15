@@ -26,7 +26,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "nixl[cu12]==1.0.1",
+    "nixl[cu12]==0.10.1",
     "pydantic>=2.0"
 ]
 classifiers = [
@@ -45,8 +45,8 @@ classifiers = [
 keywords = ["llm", "genai", "inference", "nvidia", "kvcache", "dynamo"]
 
 [project.optional-dependencies]
-cu12 = ["nixl[cu12]==1.0.1"]
-cu13 = ["nixl[cu13]==1.0.1"]
+cu12 = ["nixl[cu12]==0.10.1"]
+cu13 = ["nixl[cu13]==0.10.1"]
 dev = [
     "maturin>=1.0,<2.0",
     "patchelf",
