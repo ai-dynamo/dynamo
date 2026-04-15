@@ -272,6 +272,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
 
+        lora_path = self._resolve_lora(request)
+        if lora_path:
+            logging.debug(f"Request {context.id()} will use LoRA adapter: {lora_path}")
+
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
@@ -305,6 +309,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._session_kwargs(request),
+                lora_path=lora_path,
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
@@ -338,6 +344,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
                 data_parallel_rank=dp_rank,
+                **self._session_kwargs(request),
+                lora_path=lora_path,
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )

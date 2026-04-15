@@ -4,6 +4,7 @@
 use crate::component::{
     self, Component, ComponentBuilder, Endpoint, Instance, Namespace, RoutingOccupancyState,
 };
+use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
@@ -344,7 +345,34 @@ impl DistributedRuntime {
         Ok(self
             .tcp_server
             .get_or_try_init(async move {
-                let options = tcp::server::ServerOptions::default();
+                let port = match std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT) {
+                    Ok(p) => p.parse::<u16>().map_err(|_| {
+                        PipelineError::Generic(format!(
+                            "invalid {}: '{}' is not a valid port number",
+                            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+                            p
+                        ))
+                    })?,
+                    Err(_) => 0,
+                };
+                let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
+                    .ok()
+                    .filter(|h| !h.is_empty());
+
+                let host_suffix = interface
+                    .as_ref()
+                    .map_or(String::new(), |h| format!(" on host {h}"));
+                if port == 0 {
+                    tracing::info!(
+                        "TCP response stream server using OS-assigned port{host_suffix}"
+                    );
+                } else {
+                    tracing::info!(
+                        "TCP response stream server using fixed port {port}{host_suffix}"
+                    );
+                }
+
+                let options = tcp::server::ServerOptions { port, interface };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })
@@ -553,9 +581,18 @@ impl DistributedConfig {
         //
         // Historically we only connected to NATS when the request plane was NATS, which made
         // `DYN_REQUEST_PLANE=tcp|http` incompatible with KV routing modes that rely on NATS.
-        // If a NATS server is configured via env, enable the client regardless of request plane.
+        // Enable the NATS client when any of these hold:
+        // 1. Request plane is NATS
+        // 2. NATS_SERVER is explicitly configured
+        // 3. Event plane is NATS (the default)
+        let event_plane_is_nats =
+            std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
+                .map(|v| v.eq_ignore_ascii_case("nats"))
+                .unwrap_or(true);
+
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
+            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
+            || event_plane_is_nats;
 
         // DYN_DISCOVERY_BACKEND selects the discovery mechanism
         // Valid values: "kubernetes", "etcd" (default), "file", "mem"
@@ -595,8 +632,13 @@ impl DistributedConfig {
             ..Default::default()
         };
         let request_plane = RequestPlaneMode::from_env();
+        let event_plane_is_nats =
+            std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
+                .map(|v| v.eq_ignore_ascii_case("nats"))
+                .unwrap_or(true);
         let nats_enabled = request_plane.is_nats()
-            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
+            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok()
+            || event_plane_is_nats;
         DistributedConfig {
             discovery_backend: DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config))),
             nats_config: if nats_enabled {
