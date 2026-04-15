@@ -55,16 +55,34 @@ on:
         required: false
         type: string
         default: 'auto'
-      ecr_hostname:
-        description: 'ECR hostname (e.g. 123456.dkr.ecr.us-west-2.amazonaws.com)'
-        required: true
-        type: string
     secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
       HF_TOKEN:
         required: false
 
 jobs:
+  # Job 1: Compute the test image URI.
+  # secrets can't be used in container.image expressions, so we resolve it here
+  # and pass it as an output to the test job.
+  resolve-image:
+    runs-on: ubuntu-latest
+    outputs:
+      test_image: ${{ steps.resolve.outputs.test_image }}
+    steps:
+      - name: Resolve test image URI
+        id: resolve
+        run: |
+          ECR_HOSTNAME="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com"
+          TEST_IMAGE="${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}-test"
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+          echo "Resolved test image: ${TEST_IMAGE}"
+
+  # Job 2: Run tests inside the test image.
   test:
+    needs: [resolve-image]
     strategy:
       fail-fast: false
       matrix:
@@ -76,7 +94,7 @@ jobs:
     # container lifecycle, but GitHub Actions manages cgroup limits properly —
     # unlike a raw `docker run` inside a step which escapes cgroups under privileged DinD.
     container:
-      image: ${{ inputs.ecr_hostname }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}-test
+      image: ${{ needs.resolve-image.outputs.test_image }}
       options: >-
         --shm-size=200m
         --ulimit memlock=-1
