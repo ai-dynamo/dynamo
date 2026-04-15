@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -54,6 +55,13 @@ pub struct PrefillRouter {
     /// Namespace used to look up the correct WorkerSet's worker monitor
     namespace: String,
     is_eagle: bool,
+    /// Set to true when all prefill workers die. Checked in generate() to prevent
+    /// routing to dead workers. Cleared on reactivation when workers rejoin.
+    deactivated: AtomicBool,
+    /// Set to true when the prefill router has been activated (inner router populated).
+    /// Used by `can_serve_requests()` to gate enforce_disagg readiness so a cold-started
+    /// strict-disagg model isn't listed before the prefill has rendezvoused.
+    activated: AtomicBool,
 }
 
 impl Drop for PrefillRouter {
@@ -85,10 +93,10 @@ impl
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // If prefill router is not activated (no prefill workers discovered),
-        // this is aggregated mode — route directly to decode.
-        // With --enforce-disagg, fail instead of falling back.
-        if self.prefill_router.get().is_none() {
+        // If prefill router is not activated (no prefill workers discovered) or has been
+        // deactivated (all prefill workers died), this is aggregated mode -- route directly
+        // to decode. With --enforce-disagg, fail instead of falling back.
+        if self.prefill_router.get().is_none() || self.deactivated.load(Ordering::Relaxed) {
             if self.enforce_disagg {
                 return Err(anyhow::anyhow!(PrefillError::NotActivated));
             }
@@ -293,5 +301,103 @@ mod tests {
         assert_eq!(override_config.assume_kv_reuse, Some(false));
         assert_eq!(override_config.track_prefill_tokens, Some(false));
         assert_eq!(override_config.router_temperature, Some(0.7));
+    }
+
+    // -- Prefill death handling tests --
+
+    /// Helper: create a disabled PrefillRouter for testing deactivation behavior.
+    fn make_test_router(enforce_disagg: bool) -> Arc<PrefillRouter> {
+        PrefillRouter::disabled(
+            Arc::new(crate::discovery::ModelManager::new()),
+            RouterMode::RoundRobin,
+            enforce_disagg,
+        )
+    }
+
+    #[test]
+    fn test_deactivated_flag_blocks_when_enforce_disagg() {
+        let router = make_test_router(true);
+        // Not activated, so enforce_disagg blocks even before deactivation
+        assert!(
+            !router.can_serve_requests(),
+            "enforce_disagg must block before prefill activation"
+        );
+
+        router.deactivate();
+        assert!(router.is_deactivated());
+        assert!(
+            !router.can_serve_requests(),
+            "deactivated + enforce_disagg must block"
+        );
+    }
+
+    #[test]
+    fn test_deactivated_flag_allows_fallback_no_enforce() {
+        let router = make_test_router(false);
+        router.deactivate();
+        assert!(router.is_deactivated());
+        assert!(
+            router.can_serve_requests(),
+            "deactivated + !enforce_disagg must allow fallback"
+        );
+    }
+
+    #[test]
+    fn test_reactivate_clears_deactivated_no_enforce() {
+        let router = make_test_router(false);
+        router.deactivate();
+        // !enforce_disagg allows fallback even while deactivated
+        assert!(router.can_serve_requests());
+
+        router.reactivate();
+        assert!(!router.is_deactivated());
+        assert!(
+            router.can_serve_requests(),
+            "reactivated non-enforce router must serve requests"
+        );
+    }
+
+    #[test]
+    fn test_reactivate_clears_deactivated_enforce_needs_activation() {
+        // disabled() never sets the activated flag, so enforce_disagg stays blocked.
+        // In a real deployment, activate() sets the flag before the first
+        // deactivate/reactivate cycle, so this only exercises the flag reset.
+        let router = make_test_router(true);
+        router.deactivate();
+        assert!(!router.can_serve_requests());
+
+        router.reactivate();
+        assert!(!router.is_deactivated());
+        assert!(
+            !router.can_serve_requests(),
+            "enforce_disagg without activation still can't serve"
+        );
+    }
+
+    #[test]
+    fn test_fresh_router_not_deactivated() {
+        let router = make_test_router(true);
+        assert!(!router.is_deactivated());
+        // enforce_disagg + no prefill activation => not servable
+        assert!(!router.can_serve_requests());
+    }
+
+    #[test]
+    fn test_fresh_router_no_enforce_disagg_can_serve() {
+        let router = make_test_router(false);
+        assert!(!router.is_deactivated());
+        assert!(
+            router.can_serve_requests(),
+            "non-enforce_disagg router must be servable even without prefill activation"
+        );
+    }
+
+    #[test]
+    fn test_deactivate_is_idempotent() {
+        let router = make_test_router(true);
+        router.deactivate();
+        router.deactivate();
+        assert!(router.is_deactivated());
+        assert!(!router.can_serve_requests());
     }
 }

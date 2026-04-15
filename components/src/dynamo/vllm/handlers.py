@@ -191,7 +191,8 @@ def build_sampling_params(
     sampling_params.detokenize = False
 
     # Handle guided_decoding - convert to StructuredOutputsParams
-    guided_decoding = request["sampling_options"].get("guided_decoding")
+    sampling_options = request.get("sampling_options", {})
+    guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         sampling_params.structured_outputs = StructuredOutputsParams(
             json=guided_decoding.get("json"),
@@ -202,7 +203,7 @@ def build_sampling_params(
         )
 
     # Apply remaining sampling_options
-    for key, value in request["sampling_options"].items():
+    for key, value in sampling_options.items():
         # Skip guided_decoding - already handled above
         if key == "guided_decoding":
             continue
@@ -210,7 +211,7 @@ def build_sampling_params(
             setattr(sampling_params, key, value)
 
     # Apply stop_conditions
-    for key, value in request["stop_conditions"].items():
+    for key, value in request.get("stop_conditions", {}).items():
         if value is not None and hasattr(sampling_params, key):
             # Do not add stop key to sampling params - dynamo handles stop conditions directly
             if key == "stop":

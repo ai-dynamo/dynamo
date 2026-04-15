@@ -128,6 +128,9 @@ impl PrefillRouter {
         phase_transition_permit: Option<OwnedSemaphorePermit>,
     ) -> Result<(PrefillResult, Option<(u64, Option<u32>)>), PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
+        // Clone tracker before request is consumed by generate_to_worker.
+        // Used to record prefill_complete_time for KV transfer latency metric.
+        let tracker = request.tracker.clone();
         let mut prefill_response = router
             .generate_to_worker(request, target_worker)
             .await
@@ -148,6 +151,12 @@ impl PrefillRouter {
                 None,
             ));
         };
+
+        // Record when prefill result arrived at the router (for KV transfer latency metric).
+        // This is after drop(phase_transition_permit) and after first_output is received.
+        if let Some(ref tracker) = tracker {
+            tracker.record_prefill_complete();
+        }
 
         if let Some(err) = first_output.err() {
             return Err(PrefillError::PrefillError(
@@ -321,6 +330,7 @@ impl PrefillRouter {
                         lora_name,
                         priority_jump,
                         None,
+                        None,
                         allowed_worker_ids,
                     )
                     .await?;
@@ -345,9 +355,10 @@ impl PrefillRouter {
         }
     }
 
-    /// Check if disaggregated mode is currently active (prefill router activated)
+    /// Check if disaggregated mode is currently active (prefill router activated).
+    /// Uses the same `activated` flag as `can_serve_requests()` for consistency.
     pub fn is_activated(&self) -> bool {
-        self.prefill_router.get().is_some()
+        self.activated.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Whether disaggregated mode is strictly enforced (fail if no prefill workers).
