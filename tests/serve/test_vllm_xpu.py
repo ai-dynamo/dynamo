@@ -602,6 +602,7 @@ def test_serve_deployment(
 @pytest.mark.e2e
 @pytest.mark.xpu_2
 @pytest.mark.nightly
+@pytest.mark.multimodal
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
     request,
@@ -658,6 +659,7 @@ def test_multimodal_b64(
 @pytest.mark.e2e
 @pytest.mark.xpu_1
 @pytest.mark.pre_merge
+@pytest.mark.multimodal
 @pytest.mark.timeout(220)
 def test_multimodal_b64_frontend_decoding(
     request,
