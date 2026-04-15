@@ -6,6 +6,7 @@ pub mod multi_worker;
 mod prefill_tracker;
 mod prompt_registry;
 pub mod single;
+mod topology;
 
 pub use multi_worker::*;
 pub use single::*;

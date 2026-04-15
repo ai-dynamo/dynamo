@@ -49,7 +49,6 @@ pub(super) struct RequestState {
     prompt_blocks: Vec<(SequenceHash, Arc<()>)>,
     output_blocks: Vec<(SequenceHash, Arc<()>)>,
     started_at: Instant,
-    prefill: Option<PrefillLoadState>,
     expected_output_tokens: Option<u32>,
 }
 
@@ -108,53 +107,13 @@ impl ActiveSequences {
 
     #[cfg(any(test, debug_assertions))]
     fn assert_consistent(&self) {
-        let active_prefills: HashSet<RequestId> = self
-            .requests
-            .iter()
-            .filter(|(_, state)| state.prefill.is_some())
-            .map(|(request_id, _)| request_id.clone())
-            .collect();
-        let ordered_prefills: HashSet<RequestId> =
-            self.prefill.prefill_order.iter().cloned().collect();
-        let recomputed_prefill_sum: usize = self
-            .requests
-            .values()
-            .filter_map(|state| state.prefill)
-            .map(|prefill| prefill.initial_effective_prefill_tokens)
-            .sum();
-        assert_eq!(
-            ordered_prefills.len(),
-            self.prefill.prefill_order.len(),
-            "prefill_order contains duplicate request ids",
+        self.prefill.assert_consistent();
+        let active_prefills: HashSet<RequestId> = self.prefill.prefills.keys().cloned().collect();
+        let active_requests: HashSet<RequestId> = self.requests.keys().cloned().collect();
+        assert!(
+            active_prefills.is_subset(&active_requests),
+            "prefill tracker cannot reference missing request state",
         );
-        assert_eq!(
-            ordered_prefills, active_prefills,
-            "prefill_order must match requests with active prefill load",
-        );
-        assert_eq!(
-            self.prefill.prefill_full_tokens_sum, recomputed_prefill_sum,
-            "prefill_full_tokens_sum drifted from request state",
-        );
-        if let Some(oldest_request_id) = self.prefill.prefill_order.front() {
-            let Some((anchored_request_id, _)) = self.prefill.anchored_prefill.as_ref() else {
-                panic!("anchored_prefill must exist when prefill_order is non-empty");
-            };
-            assert!(
-                self.requests
-                    .get(oldest_request_id)
-                    .is_some_and(|state| state.prefill.is_some()),
-                "prefill_order front must point to an active prefill request",
-            );
-            assert_eq!(
-                anchored_request_id, oldest_request_id,
-                "anchored_prefill must match prefill_order.front()",
-            );
-        } else {
-            assert!(
-                self.prefill.anchored_prefill.is_none(),
-                "anchored_prefill must be absent when no active prefills remain",
-            );
-        }
         assert!(
             self.blocks
                 .fractional_blocks
@@ -188,12 +147,7 @@ impl ActiveSequences {
         request_id: &RequestId,
         decay_now: Instant,
     ) -> Option<PrefillLoadState> {
-        let prefill = {
-            let state = self.requests.get_mut(request_id)?;
-            state.prefill.take()?
-        };
-        self.prefill.remove(request_id, prefill, decay_now);
-        Some(prefill)
+        self.prefill.remove(request_id, decay_now)
     }
 
     fn active_prefill_tokens_at(&self, now: Instant) -> usize {
@@ -302,7 +256,6 @@ impl ActiveSequences {
                 prompt_blocks,
                 output_blocks: Vec::new(),
                 started_at,
-                prefill,
                 expected_output_tokens,
             },
         );
@@ -378,19 +331,7 @@ impl ActiveSequences {
     }
 
     fn prefill_load_snapshot(&self) -> PrefillLoadSnapshot {
-        let anchored_prefill =
-            self.prefill
-                .anchored_prefill
-                .as_ref()
-                .map(|(request_id, anchored_since)| {
-                    let prefill = self
-                        .requests
-                        .get(request_id)
-                        .and_then(|state| state.prefill)
-                        .expect("prefill_order front missing prefill load");
-                    (prefill, *anchored_since)
-                });
-        self.prefill.snapshot(anchored_prefill)
+        self.prefill.snapshot()
     }
 
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {

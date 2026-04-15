@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::single::{ActiveSequences, BlockPresenceDelta, RequestId};
+use super::topology::WorkerTable;
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores, PrefillLoadHint,
     WorkerWithDpRank,
@@ -102,35 +103,6 @@ pub struct SequenceRequest {
     pub lora_name: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// WorkerTable
-// ---------------------------------------------------------------------------
-
-struct WorkerTable {
-    slots: Vec<(WorkerWithDpRank, RwLock<ActiveSequences>)>,
-    index: HashMap<WorkerWithDpRank, usize>,
-}
-
-impl WorkerTable {
-    fn new(block_size: usize, dp_range: &HashMap<u64, (u32, u32)>) -> Self {
-        let mut slots = Vec::new();
-        let mut index = HashMap::new();
-        for (&worker_id, &(dp_start, dp_size)) in dp_range {
-            for dp_rank in dp_start..dp_start + dp_size {
-                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                let idx = slots.len();
-                slots.push((worker, RwLock::new(ActiveSequences::new(block_size))));
-                index.insert(worker, idx);
-            }
-        }
-        Self { slots, index }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ActiveSequencesMultiWorker
-// ---------------------------------------------------------------------------
-
 /// Multi-worker extension of [`ActiveSequences`] with per-worker `parking_lot::RwLock` for
 /// fine-grained concurrent access.
 ///
@@ -168,7 +140,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         assert!(block_size > 1, "block_size must be greater than 1");
         let (remote_state_updates, _) = watch::channel(());
         let workers = WorkerTable::new(block_size, &dp_range);
-        let prompt_registry = PromptRegistry::new(workers.slots.iter().map(|(worker, _)| *worker));
+        let prompt_registry = PromptRegistry::new(workers.workers());
 
         Self {
             workers: RwLock::new(workers),
@@ -439,27 +411,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// Worker removal in External mode will be handled separately via GAIE
     /// lifecycle events (not yet implemented). TODO (atchernych) once we upgrade to GAIE latest.
     pub fn register_external_workers(&self, dp_range: &HashMap<u64, (u32, u32)>) {
-        let mut table = self.workers.write();
-        let mut added_workers = Vec::new();
-        for (&worker_id, &(dp_start, dp_size)) in dp_range {
-            for dp_rank in dp_start..(dp_start + dp_size) {
-                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
-                if !table.index.contains_key(&worker) {
-                    tracing::debug!("Lazily registering external worker {:?}", worker);
-                    let idx = table.slots.len();
-                    table
-                        .slots
-                        .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
-                    table.index.insert(worker, idx);
-                    added_workers.push(worker);
-                }
-            }
-        }
-        drop(table);
+        let change = {
+            let mut table = self.workers.write();
+            table.register_external(self.block_size, dp_range)
+        };
 
-        for worker in added_workers {
-            self.prompt_registry.insert_empty_worker(worker);
+        for worker in &change.added {
+            tracing::debug!("Lazily registering external worker {:?}", worker);
         }
+        self.prompt_registry.apply_topology_change(change);
         self.validate_registry();
     }
 
@@ -467,72 +427,33 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// `new_dp_range` maps worker IDs to their data-parallel range (start, size).
     pub fn update_workers(&self, new_dp_range: &HashMap<u64, (u32, u32)>) {
-        let (removed_workers, added_workers) = {
+        let change = {
             let mut table = self.workers.write();
-
-            let mut target_workers: HashSet<WorkerWithDpRank> = HashSet::new();
-            for (&worker_id, &(dp_start, dp_size)) in new_dp_range {
-                for dp_rank in dp_start..(dp_start + dp_size) {
-                    target_workers.insert(WorkerWithDpRank::new(worker_id, dp_rank));
-                }
-            }
-
-            let removed_workers: Vec<WorkerWithDpRank> = table
-                .slots
-                .iter()
-                .map(|(worker, _)| *worker)
-                .filter(|worker| !target_workers.contains(worker))
-                .collect();
-
-            for worker in &removed_workers {
-                tracing::warn!("Removing worker {:?}", worker);
-
-                let requests_to_remove: Vec<RequestId> = self
-                    .request_to_worker
-                    .iter()
-                    .filter(|entry| entry.value() == worker)
-                    .map(|entry| entry.key().clone())
-                    .collect();
-
-                self.request_to_worker
-                    .retain(|_request_id, mapped_worker| mapped_worker != worker);
-
-                for request_id in requests_to_remove {
-                    self.request_to_lora.remove(&request_id);
-                }
-            }
-
-            let mut old: HashMap<WorkerWithDpRank, ActiveSequences> = table
-                .slots
-                .drain(..)
-                .map(|(w, lock)| (w, lock.into_inner()))
-                .collect();
-            table.index.clear();
-
-            let mut added_workers = Vec::new();
-
-            for worker in target_workers {
-                if !old.contains_key(&worker) {
-                    tracing::warn!("Adding worker {:?}", worker);
-                    added_workers.push(worker);
-                }
-                let idx = table.slots.len();
-                let seq = old
-                    .remove(&worker)
-                    .unwrap_or_else(|| ActiveSequences::new(self.block_size));
-                table.slots.push((worker, RwLock::new(seq)));
-                table.index.insert(worker, idx);
-            }
-
-            (removed_workers, added_workers)
+            table.reconcile(self.block_size, new_dp_range)
         };
 
-        for worker in removed_workers {
-            self.prompt_registry.remove_worker(worker);
+        for worker in &change.removed {
+            tracing::warn!("Removing worker {:?}", worker);
+
+            let requests_to_remove: Vec<RequestId> = self
+                .request_to_worker
+                .iter()
+                .filter(|entry| entry.value() == worker)
+                .map(|entry| entry.key().clone())
+                .collect();
+
+            self.request_to_worker
+                .retain(|_request_id, mapped_worker| mapped_worker != worker);
+
+            for request_id in requests_to_remove {
+                self.request_to_lora.remove(&request_id);
+            }
         }
-        for worker in added_workers {
-            self.prompt_registry.insert_empty_worker(worker);
+        for worker in &change.added {
+            tracing::warn!("Adding worker {:?}", worker);
         }
+
+        self.prompt_registry.apply_topology_change(change);
         self.validate_registry();
     }
 
@@ -547,14 +468,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         }
 
         tracing::debug!(?worker, "Lazily registering worker in slot tracker");
-        let idx = table.slots.len();
-        table
-            .slots
-            .push((worker, RwLock::new(ActiveSequences::new(self.block_size))));
-        table.index.insert(worker, idx);
+        let change = table.ensure_worker(self.block_size, worker);
         drop(table);
 
-        self.prompt_registry.insert_empty_worker(worker);
+        self.prompt_registry.apply_topology_change(change);
         self.validate_registry();
     }
 

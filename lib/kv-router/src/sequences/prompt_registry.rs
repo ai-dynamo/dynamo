@@ -9,6 +9,7 @@ use tokio::time::Instant;
 
 use super::prefill_tracker::{PrefillLoadSnapshot, added_prefill_tokens};
 use super::single::BlockPresenceDelta;
+use super::topology::WorkerTopologyChange;
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::{OverlapScores, WorkerWithDpRank};
 
@@ -78,12 +79,6 @@ impl PromptRegistry {
         registry
     }
 
-    pub(super) fn insert_empty_worker(&self, worker: WorkerWithDpRank) {
-        let mut inner = self.inner.write();
-        inner.workers.entry(worker).or_default();
-        inner.worker_blocks.entry(worker).or_default();
-    }
-
     pub(super) fn replace_worker_load_state(
         &self,
         worker: WorkerWithDpRank,
@@ -108,21 +103,29 @@ impl PromptRegistry {
         inner.workers.insert(worker, load);
     }
 
-    pub(super) fn remove_worker(&self, worker: WorkerWithDpRank) {
+    pub(super) fn apply_topology_change(&self, change: WorkerTopologyChange) {
         let mut inner = self.inner.write();
-        inner.workers.remove(&worker);
-        let Some(blocks) = inner.worker_blocks.remove(&worker) else {
-            return;
-        };
 
-        for hash in blocks {
-            let should_remove = inner.block_workers.get_mut(&hash).is_some_and(|workers| {
-                workers.remove(&worker);
-                workers.is_empty()
-            });
-            if should_remove {
-                inner.block_workers.remove(&hash);
+        for worker in change.removed {
+            inner.workers.remove(&worker);
+            let Some(blocks) = inner.worker_blocks.remove(&worker) else {
+                continue;
+            };
+
+            for hash in blocks {
+                let should_remove = inner.block_workers.get_mut(&hash).is_some_and(|workers| {
+                    workers.remove(&worker);
+                    workers.is_empty()
+                });
+                if should_remove {
+                    inner.block_workers.remove(&hash);
+                }
             }
+        }
+
+        for worker in change.added {
+            inner.workers.entry(worker).or_default();
+            inner.worker_blocks.entry(worker).or_default();
         }
     }
 
@@ -547,7 +550,10 @@ mod tests {
         expected_blocks.insert(worker_a, hash_set(&[1, 2, 3]));
         expected_blocks.insert(worker_b, hash_set(&[1, 2]));
 
-        registry.remove_worker(worker_a);
+        registry.apply_topology_change(WorkerTopologyChange {
+            added: Vec::new(),
+            removed: vec![worker_a],
+        });
         expected_loads.remove(&worker_a);
         expected_blocks.remove(&worker_a);
 

@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 use tokio::time::Instant;
 
 use super::single::RequestId;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PrefillLoadState {
     pub(super) initial_effective_prefill_tokens: usize,
     pub(super) expected_prefill_duration: Option<Duration>,
@@ -63,6 +63,7 @@ pub(super) fn added_prefill_tokens(block_size: usize, isl: usize, overlap: u32) 
 
 #[derive(Debug, Default)]
 pub(super) struct PrefillLoadTracker {
+    pub(super) prefills: HashMap<RequestId, PrefillLoadState>,
     pub(super) prefill_order: VecDeque<RequestId>,
     pub(super) prefill_full_tokens_sum: usize,
     pub(super) anchored_prefill: Option<(RequestId, Instant)>,
@@ -75,6 +76,7 @@ impl PrefillLoadTracker {
         prefill: PrefillLoadState,
         decay_now: Instant,
     ) {
+        self.prefills.insert(request_id.clone(), prefill);
         self.prefill_full_tokens_sum += prefill.initial_effective_prefill_tokens;
         let should_anchor = self.anchored_prefill.is_none();
         self.prefill_order.push_back(request_id.clone());
@@ -86,9 +88,9 @@ impl PrefillLoadTracker {
     pub(super) fn remove(
         &mut self,
         request_id: &RequestId,
-        prefill: PrefillLoadState,
         decay_now: Instant,
-    ) {
+    ) -> Option<PrefillLoadState> {
+        let prefill = self.prefills.remove(request_id)?;
         self.prefill_full_tokens_sum = self
             .prefill_full_tokens_sum
             .checked_sub(prefill.initial_effective_prefill_tokens)
@@ -108,6 +110,7 @@ impl PrefillLoadTracker {
         {
             self.set_anchor_to_front(decay_now);
         }
+        Some(prefill)
     }
 
     pub(super) fn set_anchor_to_front(&mut self, now: Instant) {
@@ -118,27 +121,73 @@ impl PrefillLoadTracker {
             .map(|request_id| (request_id, now));
     }
 
-    pub(super) fn snapshot(
-        &self,
-        anchored_prefill: Option<(PrefillLoadState, Instant)>,
-    ) -> PrefillLoadSnapshot {
+    pub(super) fn snapshot(&self) -> PrefillLoadSnapshot {
         PrefillLoadSnapshot {
             prefill_full_tokens_sum: self.prefill_full_tokens_sum,
-            anchored_prefill: anchored_prefill.map(|(prefill, anchored_since)| {
-                AnchoredPrefillSnapshot {
-                    initial_effective_prefill_tokens: prefill.initial_effective_prefill_tokens,
-                    expected_prefill_duration: prefill.expected_prefill_duration,
-                    anchored_since,
-                }
-            }),
+            anchored_prefill: self
+                .anchored_prefill
+                .as_ref()
+                .map(|(request_id, anchored_since)| {
+                    let prefill = self
+                        .prefills
+                        .get(request_id)
+                        .copied()
+                        .expect("anchored prefill missing request state");
+                    AnchoredPrefillSnapshot {
+                        initial_effective_prefill_tokens: prefill.initial_effective_prefill_tokens,
+                        expected_prefill_duration: prefill.expected_prefill_duration,
+                        anchored_since: *anchored_since,
+                    }
+                }),
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub(super) fn assert_consistent(&self) {
+        let active_prefills: HashSet<RequestId> = self.prefills.keys().cloned().collect();
+        let ordered_prefills: HashSet<RequestId> = self.prefill_order.iter().cloned().collect();
+        let recomputed_prefill_sum: usize = self
+            .prefills
+            .values()
+            .map(|prefill| prefill.initial_effective_prefill_tokens)
+            .sum();
+
+        assert_eq!(
+            ordered_prefills.len(),
+            self.prefill_order.len(),
+            "prefill_order contains duplicate request ids",
+        );
+        assert_eq!(
+            ordered_prefills, active_prefills,
+            "prefill_order must match active prefill requests",
+        );
+        assert_eq!(
+            self.prefill_full_tokens_sum, recomputed_prefill_sum,
+            "prefill_full_tokens_sum drifted from tracker state",
+        );
+        if let Some(oldest_request_id) = self.prefill_order.front() {
+            let Some((anchored_request_id, _)) = self.anchored_prefill.as_ref() else {
+                panic!("anchored_prefill must exist when prefill_order is non-empty");
+            };
+            assert!(
+                self.prefills.contains_key(oldest_request_id),
+                "prefill_order front must point to an active prefill request",
+            );
+            assert_eq!(
+                anchored_request_id, oldest_request_id,
+                "anchored_prefill must match prefill_order.front()",
+            );
+        } else {
+            assert!(
+                self.anchored_prefill.is_none(),
+                "anchored_prefill must be absent when no active prefills remain",
+            );
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
 
     fn prefill_state(tokens: usize, duration_secs: u64) -> PrefillLoadState {
@@ -148,29 +197,10 @@ mod tests {
         }
     }
 
-    fn snapshot_for(
-        tracker: &PrefillLoadTracker,
-        prefills: &HashMap<RequestId, PrefillLoadState>,
-    ) -> PrefillLoadSnapshot {
-        let anchored_prefill =
-            tracker
-                .anchored_prefill
-                .as_ref()
-                .map(|(request_id, anchored_since)| {
-                    (
-                        *prefills
-                            .get(request_id)
-                            .expect("anchored request must have prefill state"),
-                        *anchored_since,
-                    )
-                });
-        tracker.snapshot(anchored_prefill)
-    }
-
     #[test]
     fn snapshot_without_anchor_reports_zero_active_tokens() {
         let tracker = PrefillLoadTracker::default();
-        let snapshot = tracker.snapshot(None);
+        let snapshot = tracker.snapshot();
 
         assert_eq!(snapshot.active_tokens_at(Instant::now()), 0);
     }
@@ -179,7 +209,6 @@ mod tests {
     fn snapshot_only_decays_oldest_prefill() {
         let epoch = Instant::now();
         let mut tracker = PrefillLoadTracker::default();
-        let mut prefills = HashMap::new();
         let r1 = "r1".to_string();
         let r2 = "r2".to_string();
 
@@ -187,10 +216,8 @@ mod tests {
         let p2 = prefill_state(60, 6);
         tracker.insert(&r1, p1, epoch);
         tracker.insert(&r2, p2, epoch + Duration::from_secs(2));
-        prefills.insert(r1.clone(), p1);
-        prefills.insert(r2, p2);
 
-        let snapshot = snapshot_for(&tracker, &prefills);
+        let snapshot = tracker.snapshot();
         assert_eq!(
             snapshot.active_tokens_at(epoch + Duration::from_secs(2)),
             140
@@ -205,7 +232,6 @@ mod tests {
     fn removing_anchored_prefill_reanchors_front_and_resets_decay() {
         let epoch = Instant::now();
         let mut tracker = PrefillLoadTracker::default();
-        let mut prefills = HashMap::new();
         let r1 = "r1".to_string();
         let r2 = "r2".to_string();
 
@@ -213,11 +239,11 @@ mod tests {
         let p2 = prefill_state(40, 8);
         tracker.insert(&r1, p1, epoch);
         tracker.insert(&r2, p2, epoch);
-        prefills.insert(r1.clone(), p1);
-        prefills.insert(r2.clone(), p2);
 
-        tracker.remove(&r1, p1, epoch + Duration::from_secs(3));
-        prefills.remove(&r1);
+        assert_eq!(
+            tracker.remove(&r1, epoch + Duration::from_secs(3)),
+            Some(p1)
+        );
 
         assert_eq!(tracker.prefill_order, VecDeque::from([r2.clone()]));
         assert!(
@@ -227,7 +253,7 @@ mod tests {
                 .is_some_and(|(request_id, _)| request_id == &r2)
         );
 
-        let snapshot = snapshot_for(&tracker, &prefills);
+        let snapshot = tracker.snapshot();
         assert_eq!(
             snapshot.active_tokens_at(epoch + Duration::from_secs(3)),
             40
@@ -242,7 +268,6 @@ mod tests {
     fn removing_nonfront_prefill_preserves_existing_anchor() {
         let epoch = Instant::now();
         let mut tracker = PrefillLoadTracker::default();
-        let mut prefills = HashMap::new();
         let r1 = "r1".to_string();
         let r2 = "r2".to_string();
 
@@ -250,11 +275,11 @@ mod tests {
         let p2 = prefill_state(20, 4);
         tracker.insert(&r1, p1, epoch);
         tracker.insert(&r2, p2, epoch);
-        prefills.insert(r1.clone(), p1);
-        prefills.insert(r2.clone(), p2);
 
-        tracker.remove(&r2, p2, epoch + Duration::from_secs(2));
-        prefills.remove(&r2);
+        assert_eq!(
+            tracker.remove(&r2, epoch + Duration::from_secs(2)),
+            Some(p2)
+        );
 
         assert_eq!(tracker.prefill_order, VecDeque::from([r1.clone()]));
         assert!(
@@ -266,10 +291,36 @@ mod tests {
                 })
         );
 
-        let snapshot = snapshot_for(&tracker, &prefills);
+        let snapshot = tracker.snapshot();
         assert_eq!(
             snapshot.active_tokens_at(epoch + Duration::from_secs(2)),
             21
         );
+    }
+
+    #[test]
+    fn duplicate_cleanup_is_idempotent() {
+        let epoch = Instant::now();
+        let mut tracker = PrefillLoadTracker::default();
+        let r1 = "r1".to_string();
+        let r2 = "r2".to_string();
+        let p1 = prefill_state(50, 10);
+        let p2 = prefill_state(30, 10);
+
+        tracker.insert(&r1, p1, epoch);
+        tracker.insert(&r2, p2, epoch);
+        tracker.assert_consistent();
+
+        assert_eq!(tracker.remove(&r1, epoch), Some(p1));
+        assert_eq!(tracker.remove(&r1, epoch), None);
+        assert_eq!(tracker.prefill_full_tokens_sum, 30);
+        assert_eq!(tracker.prefill_order, VecDeque::from([r2.clone()]));
+
+        assert_eq!(tracker.remove(&r2, epoch), Some(p2));
+        assert_eq!(tracker.remove(&r2, epoch), None);
+        tracker.assert_consistent();
+        assert_eq!(tracker.prefill_full_tokens_sum, 0);
+        assert!(tracker.prefill_order.is_empty());
+        assert!(tracker.prefills.is_empty());
     }
 }
