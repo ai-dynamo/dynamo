@@ -160,6 +160,13 @@ struct TcpConnection {
     inflight: Arc<AtomicU64>,
     /// Max inflight for capacity heuristic (matches channel_buffer)
     channel_buffer: usize,
+    /// Bounded admission semaphore (permits == channel_buffer).
+    /// Callers must acquire a permit before pushing to submit_queue,
+    /// enforcing channel_buffer as a hard limit and preventing unbounded
+    /// SegQueue growth and heap OOM under sustained overload.
+    /// Permit is held for the lifetime of the call and released on drop
+    /// (success, error via `?`, or timeout/cancel future drop).
+    admission: Arc<tokio::sync::Semaphore>,
 }
 
 impl TcpConnection {
@@ -179,6 +186,7 @@ impl TcpConnection {
         let writer_notify = Arc::new(tokio::sync::Notify::new());
         let healthy = Arc::new(AtomicBool::new(true));
         let inflight = Arc::new(AtomicU64::new(0));
+        let admission = Arc::new(tokio::sync::Semaphore::new(channel_buffer));
 
         // Spawn writer task (batched via BufWriter)
         let writer_handle = {
@@ -186,6 +194,7 @@ impl TcpConnection {
             let response_q = response_queue.clone();
             let notify = writer_notify.clone();
             let healthy = healthy.clone();
+            let admission = admission.clone();
             tokio::spawn(async move {
                 if let Err(e) =
                     Self::writer_task(write_half, submit_q, response_q, notify, healthy.clone())
@@ -193,6 +202,9 @@ impl TcpConnection {
                 {
                     tracing::debug!("Writer task failed for {}: {}", addr, e);
                     healthy.store(false, Ordering::Relaxed);
+                    // Unblock any callers currently waiting to acquire a permit
+                    // so they fail fast via the post-acquire health re-check.
+                    admission.close();
                 }
             })
         };
@@ -202,12 +214,15 @@ impl TcpConnection {
             let response_q = response_queue.clone();
             let healthy = healthy.clone();
             let writer_notify = writer_notify.clone();
+            let admission = admission.clone();
             tokio::spawn(async move {
                 if let Err(e) =
                     Self::reader_task(read_half, response_q, healthy.clone(), writer_notify).await
                 {
                     tracing::debug!("Reader task failed for {}: {}", addr, e);
                     healthy.store(false, Ordering::Relaxed);
+                    // Unblock any callers currently waiting to acquire a permit.
+                    admission.close();
                 }
             })
         };
@@ -222,6 +237,7 @@ impl TcpConnection {
             healthy,
             inflight,
             channel_buffer,
+            admission,
         })
     }
 
@@ -517,6 +533,24 @@ impl TcpConnection {
             None
         };
 
+        // Bounded admission: block until a slot is free (channel_buffer hard limit).
+        // The permit is held for the duration of this call and released on drop,
+        // whether the caller returns normally, errors out, or the enclosing
+        // tokio::time::timeout drops this future mid-flight.
+        // This prevents unbounded SegQueue growth and heap OOM under overload.
+        let _permit = self
+            .admission
+            .acquire()
+            .await
+            .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
+
+        // Re-check health: the connection may have gone unhealthy while we
+        // were waiting for a permit.  Fail fast so the caller can retry on a
+        // fresh connection rather than pushing to a dead submit_queue.
+        if !self.healthy.load(Ordering::Relaxed) {
+            anyhow::bail!("Connection unhealthy (tasks failed)");
+        }
+
         // Increment inflight before push (for capacity heuristic)
         self.inflight.fetch_add(1, Ordering::Relaxed);
 
@@ -534,7 +568,11 @@ impl TcpConnection {
             .await
             .map_err(|_| anyhow::anyhow!("Reader task closed"))?;
 
-        // Decrement inflight after response
+        // Decrement inflight after response.
+        // NOTE: this decrement is NOT reached if the outer timeout drops this
+        // future before response_rx resolves, leaving the inflight counter
+        // temporarily inflated.  The RAII InflightGuard (bis/tcp-inflight-guard)
+        // fixes that; the admission semaphore above already bounds total memory.
         self.inflight.fetch_sub(1, Ordering::Relaxed);
 
         if trace && let Some(start) = e2e_start {
@@ -1012,6 +1050,10 @@ impl TcpConnectionPool {
                 let snap = host.snapshot.load();
                 for conn in snap.iter() {
                     conn.healthy.store(false, Ordering::Relaxed);
+                    // Unblock callers waiting on the admission semaphore so
+                    // they fail fast via the post-acquire health re-check,
+                    // rather than waiting for drain_pending to free permits.
+                    conn.admission.close();
                     conn.writer_notify.notify_one();
                     conn.reader_handle.abort();
                 }
