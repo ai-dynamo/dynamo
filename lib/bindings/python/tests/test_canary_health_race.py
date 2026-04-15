@@ -76,6 +76,8 @@ def teardown_module(module):
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.integration,
+    pytest.mark.pre_merge,
+    pytest.mark.timeout(30),
 ]
 
 
