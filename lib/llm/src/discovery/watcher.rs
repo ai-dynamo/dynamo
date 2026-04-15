@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
@@ -447,56 +448,17 @@ impl ModelWatcher {
             .registering_worker_sets
             .insert(registration_key.clone())
         {
-            // Another task is building the pipeline for this (model, namespace, type).
-            // Wait for it to finish so we can validate the new worker's checksum against
-            // the registered model. Without this, a concurrent worker with a mismatched
-            // checksum could sneak past the early check in `watch` (which sees get_model()
-            // return None while the first registration is in-flight).
-            let mut attempts = 0;
-            while self.registering_worker_sets.contains(&registration_key) && attempts < 300 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                attempts += 1;
-            }
-
-            // Now that registration has completed, validate checksum
-            if let Some(model) = self.manager.get_model(&model_name)
-                && !model.is_checksum_compatible(&ws_key, card.mdcsum())
+            if !self
+                .recover_concurrent_registration(
+                    mcid,
+                    card,
+                    &model_name,
+                    &namespace,
+                    &ws_key,
+                    &registration_key,
+                )
+                .await?
             {
-                tracing::error!(
-                    model_name = card.name(),
-                    namespace = namespace,
-                    new_checksum = card.mdcsum(),
-                    "Checksum for new worker does not match existing WorkerSet's checksum. \
-                     Drain all old workers in this namespace before deploying a new version."
-                );
-                return Ok(());
-            }
-
-            // If the first registration failed or timed out, no WorkerSet exists.
-            // Fall through to do_worker_set_registration instead of becoming a ghost
-            // worker (registered in cards but with no serving pipeline).
-            if self
-                .manager
-                .get_model(&model_name)
-                .is_none_or(|m| !m.has_worker_set(&ws_key))
-            {
-                tracing::warn!(
-                    model_name = card.name(),
-                    namespace = namespace,
-                    "Concurrent registration produced no WorkerSet, retrying"
-                );
-                // Re-insert so our own build is guarded
-                self.registering_worker_sets
-                    .insert(registration_key.clone());
-                // Fall through to do_worker_set_registration below
-            } else {
-                self.manager
-                    .save_model_card(&mcid.to_path(), card.clone())?;
-                tracing::debug!(
-                    model_name = card.name(),
-                    namespace = namespace,
-                    "Worker joined existing WorkerSet, skipping pipeline build"
-                );
                 return Ok(());
             }
         }
@@ -509,6 +471,72 @@ impl ModelWatcher {
         };
 
         self.do_worker_set_registration(mcid, card).await
+    }
+
+    /// Handle the case where another task is already building the pipeline for this
+    /// (model, namespace, type). This is a recovery path — it waits for the in-flight
+    /// registration to finish, then either joins the resulting WorkerSet or retries.
+    ///
+    /// Returns `true` if the caller should proceed with its own registration
+    /// (i.e. the other task failed), `false` if the worker was handled (joined or rejected).
+    async fn recover_concurrent_registration(
+        &self,
+        mcid: &ModelCardInstanceId,
+        card: &mut ModelDeploymentCard,
+        model_name: &str,
+        namespace: &str,
+        ws_key: &str,
+        registration_key: &str,
+    ) -> anyhow::Result<bool> {
+        // Wait for the in-flight registration to complete so we can validate
+        // the new worker's checksum. Without this, a concurrent worker with a
+        // mismatched checksum could sneak past the early check in `watch`.
+        let mut attempts = 0;
+        while self.registering_worker_sets.contains(registration_key) && attempts < 300 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            attempts += 1;
+        }
+
+        // Validate checksum against the registered model
+        if let Some(model) = self.manager.get_model(model_name)
+            && !model.is_checksum_compatible(ws_key, card.mdcsum())
+        {
+            tracing::error!(
+                model_name = card.name(),
+                namespace = namespace,
+                new_checksum = card.mdcsum(),
+                "Checksum for new worker does not match existing WorkerSet's checksum. \
+                 Drain all old workers in this namespace before deploying a new version."
+            );
+            return Ok(false);
+        }
+
+        // If the first registration failed or timed out, no WorkerSet exists.
+        // Fall through to do_worker_set_registration instead of becoming a ghost
+        // worker (registered in cards but with no serving pipeline).
+        if self
+            .manager
+            .get_model(model_name)
+            .is_none_or(|m| !m.has_worker_set(ws_key))
+        {
+            tracing::warn!(
+                model_name = card.name(),
+                namespace = namespace,
+                "Concurrent registration produced no WorkerSet, retrying"
+            );
+            self.registering_worker_sets
+                .insert(registration_key.to_string());
+            return Ok(true);
+        }
+
+        self.manager
+            .save_model_card(&mcid.to_path(), card.clone())?;
+        tracing::debug!(
+            model_name = card.name(),
+            namespace = namespace,
+            "Worker joined existing WorkerSet, skipping pipeline build"
+        );
+        Ok(false)
     }
 
     /// Build a complete WorkerSet with all engines for this (model, namespace)
