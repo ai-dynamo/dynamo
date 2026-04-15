@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,16 +64,7 @@ func InjectCheckpointIntoPodSpec(
 	if len(podSpec.Containers) == 0 {
 		return fmt.Errorf("no container found to inject checkpoint config")
 	}
-	var mainContainer *corev1.Container
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			mainContainer = &podSpec.Containers[i]
-			break
-		}
-	}
-	if mainContainer == nil {
-		return fmt.Errorf("main container not found in pod spec")
-	}
+	mainContainer := &podSpec.Containers[0]
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
 	}
@@ -94,5 +84,19 @@ func InjectCheckpointIntoPodSpec(
 
 	EnsurePodInfoVolume(podSpec)
 	EnsurePodInfoMount(mainContainer)
+	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
+		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
+			ctx,
+			reader,
+			namespace,
+			info.Hash,
+			info.ArtifactVersion,
+		)
+		if err != nil {
+			return err
+		}
+		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
+	}
+
 	return nil
 }
