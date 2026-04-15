@@ -9,15 +9,18 @@
 //! across workers in a cluster.
 
 mod cache;
+pub mod config;
 mod downloader;
 pub mod load_estimator;
+pub mod predictor;
 pub mod routing;
 mod source;
 pub mod state_tracker;
 
 pub use cache::LoRACache;
+pub use config::LoraAllocationConfig;
 pub use downloader::LoRADownloader;
-pub use load_estimator::{LoadEstimator, LoadEstimatorConfig, LoadSample};
+pub use load_estimator::{LoadEstimator, LoadEstimatorConfig};
 pub use routing::{
     AllocationAlgorithmType, LoraAllocator, LoraReplicaConfig, LoraRoutingTable, RendezvousHasher,
     create_lora_allocator,
