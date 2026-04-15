@@ -490,6 +490,7 @@ impl OfflineReplayRouter {
                 cached_tokens: selection.cached_tokens,
                 track_prefill_tokens: request.track_prefill_tokens,
                 expected_output_tokens: request.expected_output_tokens,
+                prefill_load_hint,
                 worker: selection.worker,
                 lora_name: None,
             })

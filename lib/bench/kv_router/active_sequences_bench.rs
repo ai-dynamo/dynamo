@@ -387,6 +387,7 @@ async fn apply_entry(
                     cached_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: Some(output_length as u32),
+                    prefill_load_hint: None,
                     worker,
                     lora_name: None,
                 })

@@ -20,7 +20,9 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::single::{ActiveSequences, RequestId};
-use crate::protocols::{ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
+use crate::protocols::{
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerWithDpRank,
+};
 
 // How often we force expire stale requests across all workers. See the comment
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
@@ -495,6 +497,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     cached_tokens: req.cached_tokens,
                     track_prefill_tokens: req.track_prefill_tokens,
                     expected_output_tokens: req.expected_output_tokens,
+                    prefill_load_hint: req.prefill_load_hint.clone(),
                 },
                 router_id: self.router_id,
                 lora_name: req.lora_name.clone(),
@@ -505,14 +508,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 .map_err(|e| SequenceError::ReplicaSyncPublishFailed(e.to_string()))?;
         }
 
-        self.add_request_local(req)
+        self.add_request_local(req, Instant::now())
     }
 
     pub fn add_request_sync(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         if self.replica_sync {
             tracing::warn!("add_request_sync bypasses replica-sync event publication");
         }
-        self.add_request_local(req)
+        self.add_request_local(req, Instant::now())
     }
 
     /// Send a mutation to the worker assigned to a request, optionally publishing
@@ -742,6 +745,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             isl,
             cached_tokens,
             true,
+            Instant::now(),
         )
     }
 
@@ -933,6 +937,7 @@ mod tests {
                 cached_tokens: 0,
                 track_prefill_tokens: false,
                 expected_output_tokens: None,
+                prefill_load_hint: None,
                 worker,
                 lora_name: None,
             })
