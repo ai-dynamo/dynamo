@@ -36,12 +36,19 @@ class TestSingleTurnDefault:
         lines = _run_main(
             tmp_path,
             [
-                "-n", "4",
-                "--images-per-request", "2",
-                "--image-size", "32", "32",
-                "--image-dir", str(tmp_path / "imgs"),
-                "--seed", "1",
-                "-o", str(tmp_path / "out.jsonl"),
+                "-n",
+                "4",
+                "--images-per-request",
+                "2",
+                "--image-size",
+                "32",
+                "32",
+                "--image-dir",
+                str(tmp_path / "imgs"),
+                "--seed",
+                "1",
+                "-o",
+                str(tmp_path / "out.jsonl"),
             ],
         )
         assert len(lines) == 4
@@ -59,22 +66,35 @@ class TestSlidingWindow:
             tmp_path,
             [
                 "sliding-window",
-                "--num-users", "2",
-                "--turns-per-user", "3",
-                "--window-size", "5",
-                "--image-size", "32", "32",
-                "--image-dir", str(tmp_path / "imgs"),
-                "--seed", "42",
-                "-o", str(tmp_path / "sw.jsonl"),
+                "--num-users",
+                "2",
+                "--turns-per-user",
+                "3",
+                "--window-size",
+                "5",
+                "--image-size",
+                "32",
+                "32",
+                "--image-dir",
+                str(tmp_path / "imgs"),
+                "--seed",
+                "42",
+                "-o",
+                str(tmp_path / "sw.jsonl"),
             ],
         )
 
         assert len(lines) == 6  # 2 users x 3 turns
 
         # Round-robin interleaving: user_0, user_1, user_0, user_1, ...
-        session_ids = [l["session_id"] for l in lines]
+        session_ids = [row["session_id"] for row in lines]
         assert session_ids == [
-            "user_0", "user_1", "user_0", "user_1", "user_0", "user_1"
+            "user_0",
+            "user_1",
+            "user_0",
+            "user_1",
+            "user_0",
+            "user_1",
         ]
 
         for line in lines:
@@ -85,13 +105,21 @@ class TestSlidingWindow:
             tmp_path,
             [
                 "sliding-window",
-                "--num-users", "1",
-                "--turns-per-user", "3",
-                "--window-size", "4",
-                "--image-size", "32", "32",
-                "--image-dir", str(tmp_path / "imgs"),
-                "--seed", "7",
-                "-o", str(tmp_path / "overlap.jsonl"),
+                "--num-users",
+                "1",
+                "--turns-per-user",
+                "3",
+                "--window-size",
+                "4",
+                "--image-size",
+                "32",
+                "32",
+                "--image-dir",
+                str(tmp_path / "imgs"),
+                "--seed",
+                "7",
+                "-o",
+                str(tmp_path / "overlap.jsonl"),
             ],
         )
 
@@ -101,6 +129,6 @@ class TestSlidingWindow:
             prev = lines[i]["images"]
             curr = lines[i + 1]["images"]
             # Sliding by 1: prev[1:] == curr[:-1]
-            assert prev[1:] == curr[:-1], (
-                f"Turn {i} and {i+1} should share 3/4 images"
-            )
+            assert (
+                prev[1:] == curr[:-1]
+            ), f"Turn {i} and {i + 1} should share 3/4 images"
