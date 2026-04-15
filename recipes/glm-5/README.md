@@ -60,6 +60,53 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+## Custom AMD64 Container Building
+
+This section describes how to build a Dynamo TensorRT-LLM runtime image from a specific Dynamo commit.
+
+### Prerequisites
+
+- An `AMD64` machine
+- `docker` and `git` command are installed.
+- `git-lfs` command is installed.
+- `pyyaml>=6.0` and `jinja2>=3.1` pip packages are installed.
+
+Run the following snippet to quickly check whether the prerequisite is satisfied:
+
+```bash
+command -v docker >/dev/null
+command -v git >/dev/null
+git lfs version >/dev/null
+python3 -c 'import importlib.metadata as m, re; \
+pv=tuple(map(int, re.match(r"^(\d+)\.(\d+)", m.version("PyYAML")).groups())); \
+jv=tuple(map(int, re.match(r"^(\d+)\.(\d+)", m.version("Jinja2")).groups())); \
+assert pv >= (6, 0), f"PyYAML>=6.0 required, found {m.version(\"PyYAML\")}"; \
+assert jv >= (3, 1), f"Jinja2>=3.1 required, found {m.version(\"Jinja2\")}"'
+```
+
+### Build
+
+Once the prerequisites are satisfied, fill out the `DESTINATION_IMAGE_TAG` in the code snippet below and run it to build your custom image. GLM-5 recipe is verified against Dynamo commit `e41e1715fdd48e567b08550f810ac74338cb9c26`.
+
+```bash
+DESTINATION_IMAGE_TAG="<CUSTOM_TAG_HERE>"
+ARCH="linux/amd64"
+DYNAMO_COMMIT="e41e1715fdd48e567b08550f810ac74338cb9c26"
+
+set -euo pipefail
+
+git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout "$DYNAMO_COMMIT"
+
+python3 container/render.py \
+  --framework=trtllm --target=runtime --platform="$ARCH" \
+  --output-short-filename --cuda-version=13.1
+
+docker build -f container/rendered.Dockerfile -t "${DESTINATION_IMAGE_TAG}" .
+docker push "${DESTINATION_IMAGE_TAG}"
+```
+
+Once the container is built, you can replace the container tag in your deploy yaml file with the custom container and serve the model on it.
+
 ## Model Details
 
 - **Model**: `zai-org/GLM-5-FP8`
