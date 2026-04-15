@@ -468,6 +468,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		// Set observedGeneration to track the spec we're processing
 		dgdr.Status.ObservedGeneration = dgdr.Generation
 
+		dgdr.AddStatusCondition(metav1.Condition{
+			Type:               nvidiacomv1beta1.ConditionTypeValidation,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: dgdr.Generation,
+			Reason:             "ValidationPassed",
+		})
+
 		// Initialize status — next reconcile will discover hardware and create the profiling job.
 		r.Recorder.Event(dgdr, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonInitialized, MessageInitialized)
 		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhasePending,
