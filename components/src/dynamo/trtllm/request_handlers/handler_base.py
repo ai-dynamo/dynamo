@@ -70,6 +70,7 @@ class TRTLLMEngineQuiesceController:
     def __init__(self, engine: TensorRTLLMEngine):
         self._engine = engine
         self._is_quiesced = False
+        self._wakeup_rpc_name: str | None = None
 
     @property
     def is_quiesced(self) -> bool:
@@ -107,13 +108,23 @@ class TRTLLMEngineQuiesceController:
                 "TRT-LLM does not expose _collective_rpc; skipping %s", method
             )
             return
-        try:
+
+        if method != "wakeup":
             rpc(method, args=(rpc_tags,), kwargs={}, non_block=False)
-        except Exception:
-            if method != "wakeup":
-                raise
-            # Some TRT-LLM versions use "wake_up" instead of "wakeup"
-            rpc("wake_up", args=(rpc_tags,), kwargs={}, non_block=False)
+            return
+
+        # Probe and cache the correct wakeup method name on the first call.
+        # Some TRT-LLM versions use "wake_up" instead of "wakeup".
+        if self._wakeup_rpc_name is None:
+            try:
+                rpc("wakeup", args=(rpc_tags,), kwargs={}, non_block=False)
+                self._wakeup_rpc_name = "wakeup"
+                return
+            except Exception as e:
+                logger.debug("'wakeup' RPC failed (%s); falling back to 'wake_up'", e)
+                self._wakeup_rpc_name = "wake_up"
+
+        rpc(self._wakeup_rpc_name, args=(rpc_tags,), kwargs={}, non_block=False)
 
     @staticmethod
     def _release_gms_weights() -> None:
