@@ -128,8 +128,6 @@ pub struct MooncakeRequest {
     pub output_length: u64,
 }
 
-
-
 /// Load the mooncake trace from disk into a flat list of requests.
 ///
 /// Supports two JSONL formats:

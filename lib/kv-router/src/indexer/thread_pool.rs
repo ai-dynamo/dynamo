@@ -12,7 +12,9 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
-use super::{KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer, WorkerTask};
+use super::{
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer, WorkerTask,
+};
 use crate::protocols::*;
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.

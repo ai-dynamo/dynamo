@@ -276,9 +276,9 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
     /// from a `Stored` event's block list.
     fn branch_key_for_stored_blocks(&self, blocks: &[KvCacheStoredBlockData]) -> u64 {
         let k = self.prefix_depth.min(blocks.len());
-        blocks[..k]
-            .iter()
-            .fold(FNV_OFFSET_BASIS, |h, block| fnv_fold(h, block.tokens_hash.0))
+        blocks[..k].iter().fold(FNV_OFFSET_BASIS, |h, block| {
+            fnv_fold(h, block.tokens_hash.0)
+        })
     }
 
     // --- routing table operations ---
@@ -386,7 +386,9 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
             let to_process = self.prefix_depth.min(store_data.blocks.len());
             let fnv = store_data.blocks[..to_process]
                 .iter()
-                .fold(FNV_OFFSET_BASIS, |h, block| fnv_fold(h, block.tokens_hash.0));
+                .fold(FNV_OFFSET_BASIS, |h, block| {
+                    fnv_fold(h, block.tokens_hash.0)
+                });
             let depth = to_process;
             let shard = self.assign_shard(fnv);
             let state = (depth < self.prefix_depth).then_some((fnv, depth));
@@ -402,8 +404,7 @@ impl<T: SyncIndexer> BranchShardedIndexer<T> {
         let (shard_idx, new_fnv_state) = self.compute_stored_routing(store_data);
 
         // Update eager block count before dispatching.
-        self.shard_block_counts[shard_idx]
-            .fetch_add(store_data.blocks.len(), Ordering::Relaxed);
+        self.shard_block_counts[shard_idx].fetch_add(store_data.blocks.len(), Ordering::Relaxed);
 
         // Record block → shard before dispatching so a fast continuation
         // can find entries immediately.
