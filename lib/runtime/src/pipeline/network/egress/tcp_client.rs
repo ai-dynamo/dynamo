@@ -273,27 +273,34 @@ impl TcpConnection {
         Ok(())
     }
 
-    /// Drain pending items from both queues, sending errors on all oneshot senders.
-    /// Called when the writer task exits to prevent orphaned callers waiting forever.
-    fn drain_pending(
-        submit_queue: &SegQueue<PendingRequest>,
-        response_queue: &SegQueue<oneshot::Sender<Result<Bytes>>>,
-    ) {
+    /// Drain the submit queue, sending errors on all oneshot senders.
+    /// Called when the writer task exits to prevent orphaned callers waiting
+    /// forever on requests that were never processed.
+    ///
+    /// NOTE: response_queue is intentionally NOT drained here. Items in
+    /// response_queue are for requests already flushed to the wire -- the
+    /// reader may still deliver their responses. If the reader also exits,
+    /// the remaining oneshot senders are dropped when the TcpConnection is
+    /// cleaned up, and callers receive a RecvError caught by the outer timeout.
+    fn drain_pending(submit_queue: &SegQueue<PendingRequest>) {
         while let Some(req) = submit_queue.pop() {
             let _ = req
                 .response_tx
                 .send(Err(anyhow::anyhow!("Connection closed")));
         }
-        while let Some(tx) = response_queue.pop() {
-            let _ = tx.send(Err(anyhow::anyhow!("Connection closed")));
-        }
     }
 
     /// Writer task: drains SegQueue, batches via BufWriter, single flush per batch.
     ///
-    /// Critical ordering: ALL response_txs are pushed to response_queue BEFORE
-    /// any data hits the wire. This guarantees the reader can always find the
-    /// matching response_tx even if the server responds before flush completes.
+    /// Flush-boundary tracking: response_txs are held locally during the write
+    /// phase and only pushed to response_queue AFTER flush succeeds. This way:
+    /// - On write/flush error, callers in the current batch get immediate errors
+    ///   (not "Connection closed" via drain_pending)
+    /// - Previously flushed batches stay in response_queue for the reader to
+    ///   deliver -- they are NOT erroneously killed by drain_pending
+    /// - The reader spins briefly if a response arrives before the writer pushes
+    ///   the response_tx, but this is safe (BufWriter doesn't send data until
+    ///   flush, so the server can't respond before the push)
     async fn writer_task(
         write_half: tokio::io::WriteHalf<TcpStream>,
         submit_queue: Arc<SegQueue<PendingRequest>>,
@@ -342,12 +349,8 @@ impl TcpConnection {
                     continue; // spurious wakeup
                 }
 
-                // Phase 1: Push ALL response_txs BEFORE any data hits the wire
-                for tx in response_batch.drain(..) {
-                    response_queue.push(tx);
-                }
-
-                // Phase 2: Write batch to BufWriter (buffered, no syscalls yet)
+                // Phase 1: Write batch to BufWriter (buffered, no syscalls yet).
+                // response_txs stay local — they are NOT in response_queue yet.
                 let write_start = if trace {
                     Some(std::time::Instant::now())
                 } else {
@@ -356,16 +359,32 @@ impl TcpConnection {
 
                 for data in &encoded_batch {
                     if let Err(e) = writer.write_all(data).await {
-                        // Don't decrement inflight here — response_txs were already
-                        // pushed to response_queue (Phase 1). drain_pending() will
-                        // send errors, and each caller decrements its own inflight.
+                        // Write failed before flush: data is in BufWriter memory,
+                        // not on the wire. Fail the entire batch directly.
+                        let err_msg = format!("Write failed: {}", e);
+                        for tx in response_batch.drain(..) {
+                            let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+                        }
                         return Err(e.into());
                     }
                 }
 
-                // Phase 3: Single flush = single write(2) syscall for entire batch
+                // Phase 2: Single flush = single write(2) syscall for entire batch.
                 if let Err(e) = writer.flush().await {
+                    // Flush failed: data may be partially on the wire.
+                    // Ambiguous — fail the batch directly (safest).
+                    let err_msg = format!("Flush failed: {}", e);
+                    for tx in response_batch.drain(..) {
+                        let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+                    }
                     return Err(e.into());
+                }
+
+                // Phase 3: Flush succeeded — data is committed to the wire.
+                // NOW push response_txs to response_queue so the reader can
+                // match them with incoming responses.
+                for tx in response_batch.drain(..) {
+                    response_queue.push(tx);
                 }
 
                 // Check if reader has exited (e.g., peer closed connection).
@@ -412,10 +431,12 @@ impl TcpConnection {
         }
         .await;
 
-        // On exit (error or clean), drain any pending requests/responses
-        // so callers aren't left waiting forever on their oneshot receivers.
+        // On exit, drain only the submit_queue (unprocessed requests).
+        // response_queue items are for committed (flushed) data — the reader
+        // may still deliver their responses. If it can't, the oneshot senders
+        // drop when TcpConnection is cleaned up and callers get RecvError.
         healthy.store(false, Ordering::Relaxed);
-        Self::drain_pending(&submit_queue, &response_queue);
+        Self::drain_pending(&submit_queue);
 
         result
     }
@@ -664,7 +685,10 @@ impl HostPool {
         // Atomic snapshot update (no RwLock!)
         self.snapshot.store(Arc::new(new_snap.clone()));
 
-        // Check if a healthy conn is now available (another task may have added one)
+        // Re-check the snapshot for a usable connection. When need_connect
+        // is true, require available_capacity() > 0 to avoid returning a
+        // saturated connection and defeating pool growth. This is consistent
+        // with the hot-path check and the retry check in Phase B.
         {
             let guard = self.snapshot.load();
             let conns = &**guard;
@@ -672,8 +696,9 @@ impl HostPool {
                 let start = self.counter.fetch_add(1, Ordering::Relaxed) as usize;
                 for i in 0..conns.len() {
                     let idx = (start + i) % conns.len();
-                    if conns[idx].is_healthy() {
-                        return Ok(conns[idx].clone());
+                    let conn = &conns[idx];
+                    if conn.is_healthy() && (!need_connect || conn.available_capacity() > 0) {
+                        return Ok(conn.clone());
                     }
                 }
             }
@@ -781,8 +806,26 @@ impl HostPool {
             );
         }
 
+        // All connect attempts failed. Fall back to any healthy connection
+        // (even if saturated) rather than dropping the request — SegQueue
+        // backpressure handles overload gracefully.
+        {
+            let guard = self.snapshot.load();
+            let conns = &**guard;
+            let len = conns.len();
+            if len > 0 {
+                let start = self.counter.fetch_add(1, Ordering::Relaxed) as usize;
+                for i in 0..len {
+                    let idx = (start + i) % len;
+                    if conns[idx].is_healthy() {
+                        return Ok(conns[idx].clone());
+                    }
+                }
+            }
+        }
+
         anyhow::bail!(
-            "Failed to get TCP connection to {} after {} retries (connect contention)",
+            "No healthy TCP connection to {} after {} connect retries",
             self.addr,
             MAX_CONNECT_RETRIES
         )
