@@ -31,11 +31,21 @@ use tokio_util::codec::FramedRead;
 /// Default timeout for TCP request acknowledgment
 const DEFAULT_TCP_REQUEST_TIMEOUT_SECS: u64 = 5;
 
-/// Default connection pool size per host
-const DEFAULT_POOL_SIZE: usize = 100;
+/// Default connection pool size per host.
+/// Paired with REQUEST_CHANNEL_BUFFER: 50 × 1024 = 51,200 concurrent slots per host.
+/// At sub-10ms transport latency a single connection handles ~1,024 in-flight requests,
+/// so 50 connections is generous while keeping per-host FD/task overhead reasonable.
+const DEFAULT_POOL_SIZE: usize = 50;
 
-/// Buffer size for request channel per connection (backpressure control)
-const REQUEST_CHANNEL_BUFFER: usize = 256;
+/// Admission semaphore permits (and pipelining depth) per connection.
+/// Raised from 256 to 1024 for high-throughput frontends (1M+ RPS across ~100 backends).
+/// At 1ms round-trip a single connection already supports ~1,000 concurrent requests,
+/// so deeper pipelining avoids unnecessary connection proliferation and lets the
+/// BufWriter writer task drain larger batches per flush (fewer syscalls at high rate).
+/// Head-of-line blocking stays acceptable because the TCP transport layer targets
+/// sub-ms latency; later requests rarely wait long behind earlier ones.
+/// Per-host ceiling: DEFAULT_POOL_SIZE(50) x REQUEST_CHANNEL_BUFFER(1024) = 51,200.
+const REQUEST_CHANNEL_BUFFER: usize = 1024;
 
 /// Maximum retries when another task is connecting (prevents unbounded recursion)
 const MAX_CONNECT_RETRIES: usize = 5;
