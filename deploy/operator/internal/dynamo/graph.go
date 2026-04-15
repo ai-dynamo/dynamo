@@ -1372,6 +1372,7 @@ func GenerateGrovePodCliqueSet(
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Labels = maps.Clone(dynamoDeployment.Spec.Labels)
 	gangSet.Annotations = maps.Clone(dynamoDeployment.Spec.Annotations)
+	injectVolcanoQueueAnnotation(gangSet, dynamoDeployment.Annotations)
 	gangSet.Spec.Replicas = 1
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
 		PublishNotReadyAddresses: true,
