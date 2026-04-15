@@ -70,7 +70,7 @@ sglang = [
 fastvideo = [
     "uvloop",
     "fastvideo @ git+https://github.com/hao-ai-lab/FastVideo.git@833a33b66318125ac449f05a87aa7ada1a1b120d",
-    "flash-attn==2.8.3",
+    "flash-attn-4==4.0.0b8",
 ]
 
 mocker = [

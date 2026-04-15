@@ -114,7 +114,8 @@ uv pip install \
 uv pip install --prerelease=allow "ai-dynamo[fastvideo]"
 ```
 
-FastVideo installs the upstream framework from a Git URL. Install `torch` and `torchvision` first from the
+FastVideo installs the upstream framework from a Git URL plus a beta
+`flash-attn-4` dependency. Install `torch` and `torchvision` first from the
 PyTorch index that matches your local CUDA runtime, then install
 `ai-dynamo[fastvideo]` so the rest of the dependency resolution stays on the
 stack you selected. The released FastVideo container remains the smoothest
