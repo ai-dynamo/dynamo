@@ -558,21 +558,22 @@ impl SharedTcpServer {
     }
 
     async fn write_loop(
-        write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: tokio::io::WriteHalf<TcpStream>,
         mut response_rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
     ) -> Result<()> {
-        let mut writer = tokio::io::BufWriter::with_capacity(WRITE_BUF_CAPACITY, write_half);
+        let mut batch = BytesMut::with_capacity(WRITE_BUF_CAPACITY);
 
         while let Some(first) = response_rx.recv().await {
-            writer.write_all(&first).await?;
+            batch.extend_from_slice(&first);
 
             // Drain all immediately available responses into the same batch
             while let Ok(response) = response_rx.try_recv() {
-                writer.write_all(&response).await?;
+                batch.extend_from_slice(&response);
             }
 
-            // Single flush for entire batch (replaces per-response flush)
-            writer.flush().await?;
+            // Single write for entire batch — goes straight to socket, nothing buffered
+            write_half.write_all(&batch).await?;
+            batch.clear();
         }
         Ok(())
     }
