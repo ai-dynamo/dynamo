@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated video diffusion serving with TensorRT-LLM backend.
-# Uses Wan2.1-T2V-1.3B-Diffusers by default (1 GPU).
+# Aggregated image diffusion serving with TensorRT-LLM backend.
+# Uses FLUX.1-dev by default (1 GPU).
 
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -64,7 +64,7 @@ CURL
 # run frontend
 python3 -m dynamo.frontend &
 
-# run video diffusion worker
+# run image diffusion worker
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \

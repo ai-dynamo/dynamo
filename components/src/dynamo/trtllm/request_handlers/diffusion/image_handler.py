@@ -147,7 +147,7 @@ class ImageGenerationHandler(BaseGenerativeHandler):
         start_time = time.time()
         request_id = str(uuid.uuid4())
 
-        logger.info(f"Received generation request: {request_id}")
+        logger.debug(f"Received generation request: {request_id}")
 
         # Parse request
         req = NvCreateImageRequest(**request)
@@ -169,7 +169,7 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             else self.config.default_guidance_scale
         )
 
-        logger.info(
+        logger.debug(
             f"Request {request_id}: prompt='{req.prompt[:50]}...', "
             f"size={width}x{height}, images={num_images_per_prompt}, steps={num_inference_steps}"
         )
@@ -209,7 +209,7 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             # [gluo FIXME] currently only take the first image but the protocol supports multiple images
             # verify if TRT-LLM will generate multiple images, relax this constraint if that's the case
             image_np = images[0].cpu().numpy()
-            logger.info(
+            logger.debug(
                 f"Request {request_id}: encoding image output "
                 f"(shape={image_np.shape}) to PNG"
             )
@@ -256,7 +256,7 @@ class ImageGenerationHandler(BaseGenerativeHandler):
             data=[image_data],
         )
 
-        logger.info(f"Request {request_id} completed in {inference_time:.2f}s")
+        logger.debug(f"Request {request_id} completed in {inference_time:.2f}s")
 
         yield response.model_dump()
 
