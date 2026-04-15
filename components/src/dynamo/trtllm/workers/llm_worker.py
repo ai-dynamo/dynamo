@@ -284,11 +284,14 @@ async def init_llm_worker(
     }
 
     arg_map["load_format"] = engine_load_format
-    # Always enable sleep_config — cuMem VMM has zero overhead when unused
-    # and is required for GMS weight sharing.
-    from tensorrt_llm.llmapi.llm_args import SleepConfig
 
-    arg_map["sleep_config"] = SleepConfig()
+    # Enable sleep_config when GMS manages weights — required for GMS
+    # unmap/remap. Conditional because SleepConfig contains unpicklable
+    # lambdas that break MPI-based multi-rank distribution.
+    if config.load_format == "gms":
+        from tensorrt_llm.llmapi.llm_args import SleepConfig
+
+        arg_map["sleep_config"] = SleepConfig()
 
     # Add guided decoding backend if specified
     if config.guided_decoding_backend is not None:
@@ -675,7 +678,8 @@ async def init_llm_worker(
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
-                _register_memory_routes(runtime, handler)
+                if config.load_format == "gms":
+                    _register_memory_routes(runtime, handler)
 
                 encoder_cache = getattr(handler, "_encoder_cache", None)
                 if encoder_cache is not None:
@@ -696,7 +700,8 @@ async def init_llm_worker(
                 consolidator_publisher.shutdown()
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
-            _register_memory_routes(runtime, handler)
+            if config.load_format == "gms":
+                _register_memory_routes(runtime, handler)
             await endpoint.serve_endpoint(
                 handler.generate, health_check_payload=health_check_payload
             )

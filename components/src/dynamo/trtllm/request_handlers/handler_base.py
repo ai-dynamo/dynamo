@@ -338,6 +338,12 @@ class HandlerBase(BaseGenerativeHandler):
                 return {"status": "ok", "message": "Memory released"}
             except Exception as exc:
                 logger.error("release_memory_occupation failed: %s", exc)
+                # Rollback: TRT-LLM has no pause_generation(), so we
+                # manually unregistered the endpoint and set reject flag
+                # above. Restore both on failure.
+                if self.generate_endpoint is not None:
+                    await self.generate_endpoint.register_endpoint_instance()
+                await self._set_reject_new_requests(False)
                 return {"status": "error", "message": str(exc)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:

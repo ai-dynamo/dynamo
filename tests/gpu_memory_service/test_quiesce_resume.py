@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import time
 
 import pytest
 from gpu_memory_service.server.fsm import ServerState
