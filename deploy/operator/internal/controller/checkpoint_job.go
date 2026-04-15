@@ -4,6 +4,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -16,6 +17,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func buildCheckpointWorkerDefaultEnv(
@@ -41,13 +43,18 @@ func buildCheckpointWorkerDefaultEnv(
 		DynamoNamespace:                dynamoNamespace,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: ckpt.Namespace,
-		DiscoveryBackend:               discoveryBackend,
-		WorkerHashSuffix:               workerHashSuffix,
+		Discovery: dynamo.DiscoveryContext{
+			Backend: discoveryBackend,
+			Mode:    configv1alpha1.KubeDiscoveryModePod,
+		},
+		WorkerHashSuffix: workerHashSuffix,
 	})
 	return defaultContainer.Env
 }
 
 func buildCheckpointJob(
+	ctx context.Context,
+	reader ctrlclient.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
 	jobName string,
@@ -74,31 +81,51 @@ func buildCheckpointJob(
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
-	if len(podTemplate.Spec.Containers) > 0 {
-		mainContainer := &podTemplate.Spec.Containers[0]
-		mainContainer.Env = dynamo.MergeEnvs(
-			buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
-			mainContainer.Env,
-		)
-		dynamo.AddStandardEnvVars(mainContainer, config)
-		mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
-			Name:  consts.EnvReadyForCheckpointFile,
-			Value: config.Checkpoint.ReadyForCheckpointFilePath,
-		})
-		mainContainer.ReadinessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				Exec: &corev1.ExecAction{
-					Command: []string{"cat", config.Checkpoint.ReadyForCheckpointFilePath},
-				},
-			},
-			InitialDelaySeconds: 15,
-			PeriodSeconds:       2,
-		}
-		mainContainer.LivenessProbe = nil
-		mainContainer.StartupProbe = nil
-		checkpoint.EnsurePodInfoMount(mainContainer)
-		dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
+	mainContainer, err := snapshotprotocol.ResolveCheckpointWorkerContainer(&podTemplate.Spec)
+	if err != nil {
+		return nil, err
 	}
+	mainContainer.Env = dynamo.MergeEnvs(
+		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
+		mainContainer.Env,
+	)
+	dynamo.AddStandardEnvVars(mainContainer, config)
+	mainContainer.Env = append(mainContainer.Env, corev1.EnvVar{
+		Name:  consts.EnvReadyForCheckpointFile,
+		Value: config.Checkpoint.ReadyForCheckpointFilePath,
+	})
+	mainContainer.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"cat", config.Checkpoint.ReadyForCheckpointFilePath},
+			},
+		},
+		InitialDelaySeconds: 15,
+		PeriodSeconds:       2,
+	}
+	mainContainer.LivenessProbe = nil
+	mainContainer.StartupProbe = nil
+	checkpoint.EnsurePodInfoMount(mainContainer)
+	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
+
+	var gmsSidecars []corev1.Container
+	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
+		storage, err := checkpoint.ResolveGMSCheckpointStorage(
+			ctx,
+			reader,
+			ckpt.Namespace,
+			hash,
+			ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
+		)
+		if err != nil {
+			return nil, err
+		}
+		gmsSidecars, err = checkpoint.BuildGMSCheckpointJobSidecars(&podTemplate.Spec, mainContainer, storage)
+		if err != nil {
+			return nil, err
+		}
+	}
+	podTemplate.Spec.Containers = append(podTemplate.Spec.Containers, gmsSidecars...)
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds
 	if activeDeadlineSeconds == nil {
@@ -107,10 +134,8 @@ func buildCheckpointJob(
 	}
 
 	wrapLaunchJob := false
-	if len(podTemplate.Spec.Containers) != 0 {
-		if gpus, ok := podTemplate.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
-			wrapLaunchJob = gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
-		}
+	if gpus, ok := mainContainer.Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]; ok {
+		wrapLaunchJob = gpus.Cmp(*resource.NewQuantity(1, resource.DecimalSI)) > 0
 	}
 	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
 

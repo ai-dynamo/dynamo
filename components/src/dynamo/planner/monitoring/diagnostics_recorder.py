@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+import plotly.graph_objects as go  # type: ignore[import-untyped]
+from plotly.subplots import make_subplots  # type: ignore[import-untyped]
+
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import PlannerEffects, TickDiagnostics, TickInput
 from dynamo.planner.monitoring.traffic_metrics import Metrics
@@ -97,7 +100,7 @@ class DiagnosticsRecorder:
 
     @property
     def enabled(self) -> bool:
-        return self._interval_s > 0
+        return self._interval_s > 0 or self.config.live_dashboard_port != 0
 
     def record(
         self,
@@ -193,21 +196,11 @@ class DiagnosticsRecorder:
             self._last_report_s = self._snapshots[0].timestamp_s
         return now_s - self._last_report_s >= self._interval_s
 
-    def generate_report(self) -> Optional[str]:
-        if not self._snapshots:
-            return None
+    def _build_report_html(self, snaps: list[TickSnapshot]) -> str:
+        """Build the HTML report string from the given snapshots.
 
-        try:
-            import plotly.graph_objects as go  # type: ignore[import-untyped]
-            from plotly.subplots import make_subplots  # type: ignore[import-untyped]
-        except ImportError:
-            logger.warning(
-                "plotly is not installed -- cannot generate HTML report. "
-                "Install with: pip install plotly"
-            )
-            return None
-
-        snaps = self._snapshots
+        This method has no side effects (no file I/O, no snapshot clearing).
+        """
         ts = [s.timestamp_s for s in snaps]
         labels = [
             datetime.fromtimestamp(t, tz=timezone.utc).strftime("%H:%M:%S") for t in ts
@@ -588,6 +581,17 @@ class DiagnosticsRecorder:
             margin=dict(t=100),
         )
 
+        return fig.to_html(include_plotlyjs=True, full_html=True)
+
+    def generate_report(self) -> Optional[str]:
+        """Generate a periodic report, write it to disk, and clear snapshots."""
+        if not self._snapshots:
+            return None
+
+        snaps = list(self._snapshots)
+        html = self._build_report_html(snaps)
+        ts = [s.timestamp_s for s in snaps]
+
         output_dir = self.config.report_output_dir
         os.makedirs(output_dir, exist_ok=True)
         self._report_count += 1
@@ -597,12 +601,23 @@ class DiagnosticsRecorder:
         filename = f"planner_report_{ts_label}_{self._report_count:03d}.html"
         filepath = os.path.join(output_dir, filename)
 
-        fig.write_html(filepath, include_plotlyjs=True, full_html=True)
+        with open(filepath, "w") as f:
+            f.write(html)
         logger.info(f"Planner diagnostics report written to {filepath}")
 
         self._last_report_s = ts[-1]
         self._snapshots.clear()
         return filepath
+
+    def render_live_html(self) -> Optional[str]:
+        """Render the current accumulated snapshots as HTML without side effects.
+
+        Unlike ``generate_report()``, this does NOT clear snapshots or write
+        to disk.  Intended for the live dashboard HTTP endpoint.
+        """
+        if not self._snapshots:
+            return None
+        return self._build_report_html(list(self._snapshots))
 
     def finalize(self) -> Optional[str]:
         if self._snapshots:
