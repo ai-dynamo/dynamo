@@ -139,7 +139,15 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 
 ARG WORKSPACE_DIR=/workspace
 WORKDIR ${WORKSPACE_DIR}
-COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
+
+# Copy tests, deploy and components for CI with correct ownership
+COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
+COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
+COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/fastvideo /workspace/components/src/dynamo/fastvideo
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
 RUN chmod g+w ${WORKSPACE_DIR}
 
 ARG DYNAMO_COMMIT_SHA
