@@ -51,14 +51,26 @@ def _get_free_port(low=10000, high=32000):
 _SYSTEM_PORT = _get_free_port()
 
 # Set health check env vars at import time so the runtime fixture picks them up.
-# The conftest.py runtime fixture creates the DRT, which reads these.
-# Note: DYN_SYSTEM_PORT enables the system status server (replaces deprecated DYN_SYSTEM_ENABLED).
-# Health is determined by endpoints that register with health_check_payload (replaces
-# deprecated DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS).
-os.environ["DYN_SYSTEM_PORT"] = str(_SYSTEM_PORT)
-os.environ["DYN_HEALTH_CHECK_ENABLED"] = "true"
-os.environ["DYN_CANARY_WAIT_TIME"] = "2"
-os.environ["DYN_HEALTH_CHECK_REQUEST_TIMEOUT"] = "1"
+# Save previous values so teardown_module can restore them (prevent env pollution).
+_ENV_OVERRIDES = {
+    "DYN_SYSTEM_PORT": str(_SYSTEM_PORT),
+    "DYN_HEALTH_CHECK_ENABLED": "true",
+    "DYN_CANARY_WAIT_TIME": "2",
+    "DYN_HEALTH_CHECK_REQUEST_TIMEOUT": "1",
+}
+_SAVED_ENV = {}
+for _key, _value in _ENV_OVERRIDES.items():
+    _SAVED_ENV[_key] = os.environ.get(_key)
+    os.environ[_key] = _value
+
+
+def teardown_module(module):
+    """Restore environment variables to prevent pollution of other test modules."""
+    for key, prev in _SAVED_ENV.items():
+        if prev is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = prev
 
 pytestmark = [
     pytest.mark.gpu_0,

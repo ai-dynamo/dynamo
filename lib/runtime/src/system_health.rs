@@ -70,9 +70,18 @@ impl SystemHealth {
         health_path: String,
         live_path: String,
     ) -> Self {
+        // When canary health checks are enabled, endpoints must start as NotReady
+        // so the canary is the sole authority on readiness. Without this, endpoints
+        // seeded from starting_health_status=Ready would appear healthy before the
+        // canary has verified end-to-end functionality.
+        let initial_endpoint_status = if health_check_enabled {
+            HealthStatus::NotReady
+        } else {
+            starting_health_status.clone()
+        };
         let mut endpoint_health = HashMap::new();
         for endpoint in &use_endpoint_health_status {
-            endpoint_health.insert(endpoint.clone(), starting_health_status.clone());
+            endpoint_health.insert(endpoint.clone(), initial_endpoint_status.clone());
         }
 
         // Create the channel for endpoint registration notifications
