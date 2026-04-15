@@ -55,7 +55,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
           workingDir: /workspace/examples/backends/trtllm
           command:
             - python3
@@ -79,7 +79,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
           ports:
             - name: metrics
               containerPort: 9085
@@ -123,7 +123,7 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
           workingDir: /workspace/
           command:
             - python3
@@ -149,7 +149,7 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0
           workingDir: /workspace/
           command:
             - python3

@@ -23,7 +23,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           env:
             - name: OTEL_SERVICE_NAME
               value: "dynamo-frontend"
@@ -41,7 +41,7 @@ spec:
             ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           workingDir: /workspace/examples/backends/vllm
           command:
           - python3
@@ -69,7 +69,7 @@ spec:
             ephemeral-storage: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           workingDir: /workspace/examples/backends/vllm
           command:
           - python3

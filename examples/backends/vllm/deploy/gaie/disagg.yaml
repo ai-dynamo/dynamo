@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:1.1.0
           imagePullPolicy: IfNotPresent
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE

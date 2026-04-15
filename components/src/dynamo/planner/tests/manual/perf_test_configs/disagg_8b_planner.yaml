@@ -40,7 +40,7 @@ spec:
           memory: "100Gi"
       extraPodSpec:
         mainContainer:
-          image: my-registry/dynamo-frontend:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.0
           workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
@@ -72,7 +72,7 @@ spec:
         failureThreshold: 10
       extraPodSpec:
         mainContainer:
-          image: my-registry/dynamo-planner:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0
           ports:
             - name: metrics
               containerPort: 9085
@@ -125,7 +125,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -179,7 +179,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: my-registry/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3

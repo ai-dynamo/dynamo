@@ -26,7 +26,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -42,7 +42,7 @@ spec:
           - name: gpu
             resourceClaimTemplateName: gpu-template
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           resources:
             claims:
               - name: gpu
@@ -76,7 +76,7 @@ spec:
           - name: gpu
             resourceClaimTemplateName: gpu-template
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.0
           resources:
             claims:
               - name: gpu

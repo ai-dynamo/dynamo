@@ -16,5 +16,5 @@ overrides:
   dgd:
     spec:
       imagePullSecrets:
-        - name: my-registry-secret
+        - name: nvcr.io/nvidia/ai-dynamo-secret
         - name: nvcr-pull-secret

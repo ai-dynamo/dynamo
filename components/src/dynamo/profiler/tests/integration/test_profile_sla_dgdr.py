@@ -553,7 +553,7 @@ class TestThoroughMockedOverrides:
         secrets = config["spec"].get("imagePullSecrets")
         assert secrets is not None, "imagePullSecrets should be present"
         secret_names = [s["name"] for s in secrets]
-        assert "my-registry-secret" in secret_names
+        assert "nvcr.io/nvidia/ai-dynamo-secret" in secret_names
         assert "nvcr-pull-secret" in secret_names
 
 

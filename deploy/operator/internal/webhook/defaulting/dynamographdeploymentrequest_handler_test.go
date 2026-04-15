@@ -94,8 +94,8 @@ func TestDGDRDefaulter_Default(t *testing.T) {
 			name:          "CREATE with preset image is not overwritten",
 			version:       "1.0.0",
 			operation:     admissionv1.Create,
-			initialImage:  "my-registry/my-image:custom",
-			expectedImage: "my-registry/my-image:custom",
+			initialImage:  "nvcr.io/nvidia/ai-dynamo/my-image:custom",
+			expectedImage: "nvcr.io/nvidia/ai-dynamo/my-image:custom",
 		},
 		{
 			name:          "CREATE with unknown operator version leaves image empty",

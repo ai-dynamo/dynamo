@@ -178,7 +178,7 @@ kubectl apply -f agg_user_workload.yaml -n ${NAMESPACE}
 
 ```bash
 export DEPLOYMENT_FILE=agg.yaml
-export FASTVIDEO_IMAGE=<my-registry/fastvideo-runtime:my-tag>
+export FASTVIDEO_IMAGE=<nvcr.io/nvidia/ai-dynamo/fastvideo-runtime:1.1.0>
 
 yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FASTVIDEO_IMAGE)' \
   ${DEPLOYMENT_FILE} > ${DEPLOYMENT_FILE}.generated

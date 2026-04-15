@@ -36,7 +36,7 @@ The baseten variant uses a text-only backend built on the underlying DeepSeek-V3
 
 ### Quick Start
 
-The baseten deploy manifest ships with a placeholder image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag`.
+The baseten deploy manifest ships with a placeholder image `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0`.
 Update the `image:` fields in [`trtllm/agg/baseten/deploy.yaml`](trtllm/agg/baseten/deploy.yaml) to your actual Dynamo release tag before deploying.
 
 ```bash
@@ -89,7 +89,7 @@ The nvidia variant supports text inference with reasoning parsing (`--dyn-reason
 
 ### Quick Start
 
-The nvidia deploy manifests use the placeholder top-of-tree image: `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag`
+The nvidia deploy manifests use the placeholder top-of-tree image: `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.0`
 
 Before deploying, update the `image:` fields in the manifest you plan to use.
 
