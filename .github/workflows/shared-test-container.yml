@@ -1,24 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Prototype: Run tests using the test image as a container job.
-# Eliminates Docker-in-Docker (DinD), reducing memory usage and preventing node OOM.
+# Prototype: Run CPU-only tests inside the prebuilt test image via GitHub Actions
+# `container:` job — no Docker-in-Docker nesting.
 #
-# How it works on ARC runners:
-#   - The ARC runner has DinD as a sidecar (required for GitHub Actions container jobs)
-#   - GitHub Actions `container:` tells the runner to exec steps inside the specified image
-#   - The DinD sidecar pulls and runs the container, but the test processes run directly
-#     inside it — no nested docker run, so memory is properly cgroup-limited
-#   - MinIO runs as a GitHub Actions service container, also managed by the DinD sidecar
+# Why this exists:
+#   The current shared-test.yml runs `docker run <image> pytest` inside a privileged
+#   DinD sidecar. The DinD container escapes cgroup memory limits, causing OOM kills
+#   on 8GB nodes and zombie pods that block the runner pool for hours.
 #
-# vs the current shared-test.yml approach:
-#   - Current: runner step does `docker run <test-image> sh -c "pytest ..."`
-#     This spawns a NEW container inside DinD with privileged mode, escaping cgroup limits.
-#   - This workflow: GitHub Actions runs steps inside the container natively.
-#     The container is managed by the runner agent, respecting resource limits.
+# How it works:
+#   1. resolve-image job computes the ECR test image URI (secrets can't be used in
+#      container.image expressions directly)
+#   2. test job runs inside the prebuilt test image via `container:` — GitHub Actions
+#      manages the container lifecycle with proper cgroup enforcement
+#   3. No nested `docker run`, no privileged DinD escape
 #
-# This is a drop-in replacement for shared-test.yml for CPU-only test suites
-# (like planner) that don't need GPU passthrough.
+# Note: The test image is distroless (no bash, grep, mv, etc.) so all steps use
+# `shell: sh` and Python for any file operations.
 
 name: Shared Container Test
 
@@ -65,8 +64,7 @@ on:
 
 jobs:
   # Job 1: Compute the test image URI.
-  # secrets can't be used in container.image expressions, so we resolve it here
-  # and pass it as an output to the test job.
+  # Secrets can't be used in container.image expressions, so we resolve it here.
   resolve-image:
     runs-on: ubuntu-latest
     outputs:
@@ -80,7 +78,7 @@ jobs:
           echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
           echo "Resolved test image: ${TEST_IMAGE}"
 
-  # Job 2: Run tests inside the test image.
+  # Job 2: Run tests inside the prebuilt test image.
   test:
     needs: [resolve-image]
     strategy:
@@ -90,9 +88,6 @@ jobs:
     name: ${{ inputs.test_type }} cpu, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
 
-    # Run steps inside the test image. The ARC runner's DinD sidecar handles the
-    # container lifecycle, but GitHub Actions manages cgroup limits properly —
-    # unlike a raw `docker run` inside a step which escapes cgroups under privileged DinD.
     container:
       image: ${{ needs.resolve-image.outputs.test_image }}
       options: >-
@@ -114,19 +109,23 @@ jobs:
 
       - name: Run CPU tests
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+        shell: sh
         run: |
           set +e
 
           # Activate the virtualenv from the test image
           export PATH="/opt/dynamo/venv/bin:${PATH}"
           export VIRTUAL_ENV="/opt/dynamo/venv"
-          # Add source paths so pytest can discover test modules
           export PYTHONPATH="${GITHUB_WORKSPACE}/components/src:${GITHUB_WORKSPACE}:${PYTHONPATH}"
 
-          case "${{ inputs.parallel_mode }}" in
+          # Create output dirs (no mkdir in distroless image)
+          python3 -c "import os; os.makedirs('${{ github.workspace }}/test-results/allure-results', exist_ok=True)"
+
+          PARALLEL_MODE="${{ inputs.parallel_mode }}"
+          case "${PARALLEL_MODE}" in
             "auto")   PARALLEL_OPTS="-n auto" ;;
             "none"|"0") PARALLEL_OPTS="-n 0" ;;
-            *)        PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}" ;;
+            *)        PARALLEL_OPTS="-n ${PARALLEL_MODE}" ;;
           esac
 
           pytest ${PARALLEL_OPTS} \
@@ -146,25 +145,39 @@ jobs:
           exit 0
 
       - name: Process Test Results
+        shell: sh
         run: |
-          JUNIT_FILE="${{ github.workspace }}/test-results/pytest_test_report.xml"
-          STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
-          echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
+          export PATH="/opt/dynamo/venv/bin:${PATH}"
+          python3 << 'PYEOF'
+          import os, sys, re, shutil
 
-          if [[ -f "$JUNIT_FILE" ]]; then
-            TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
-            FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
-            ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
-            echo "${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
+          workspace = os.environ.get("GITHUB_WORKSPACE", ".")
+          junit_file = os.path.join(workspace, "test-results", "pytest_test_report.xml")
+          test_type = "${{ inputs.test_type }}".replace(" ", "_").replace(",", "_")
+          env_file = os.environ.get("GITHUB_ENV", "")
 
-            JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_${{ matrix.platform }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
-            mv "$JUNIT_FILE" "${{ github.workspace }}/test-results/$JUNIT_NAME"
-          else
-            echo "Test results file not found"
-            FAILED_TESTS=1
-          fi
+          if env_file:
+              with open(env_file, "a") as f:
+                  f.write(f"STR_TEST_TYPE={test_type}\n")
 
-          exit ${TEST_EXIT_CODE}
+          if os.path.isfile(junit_file):
+              content = open(junit_file).read()
+              total = re.search(r'tests="(\d+)"', content)
+              failed = re.search(r'failures="(\d+)"', content)
+              errors = re.search(r'errors="(\d+)"', content)
+              total = total.group(1) if total else "0"
+              failed = failed.group(1) if failed else "0"
+              errors = errors.group(1) if errors else "0"
+              print(f"{total} tests completed ({failed} failed, {errors} errors)")
+
+              junit_name = f"pytest_test_report_${{ inputs.test_suite_name }}_{test_type}_${{ matrix.platform }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+              shutil.move(junit_file, os.path.join(workspace, "test-results", junit_name))
+          else:
+              print("Test results file not found")
+
+          test_exit = int(os.environ.get("TEST_EXIT_CODE", "1"))
+          sys.exit(test_exit)
+          PYEOF
 
       - name: Upload Test Results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
