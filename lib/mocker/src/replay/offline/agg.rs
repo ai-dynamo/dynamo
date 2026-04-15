@@ -524,6 +524,10 @@ impl AggRuntime {
             if self.engine.mark_worker_ready(worker_id) {
                 if let Some(router) = self.router.as_mut() {
                     router.add_worker(worker_id)?;
+                    // Drain any requests that were queued while all workers
+                    // were busy — the new worker may have capacity for them.
+                    let effects = router.try_drain_pending(self.now_ms)?;
+                    self.dispatch_router_admissions(effects.admissions)?;
                 }
                 changed = true;
             }

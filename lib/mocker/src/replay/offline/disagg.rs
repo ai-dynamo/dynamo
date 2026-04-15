@@ -717,6 +717,8 @@ impl DisaggRuntime {
                     if self.prefill_engine.mark_worker_ready(worker_id) {
                         if let Some(router) = self.prefill_router.as_mut() {
                             router.add_worker(worker_id)?;
+                            let effects = router.try_drain_pending(self.now_ms)?;
+                            self.dispatch_prefill_admissions(effects.admissions)?;
                         }
                         changed = true;
                     }
@@ -725,6 +727,8 @@ impl DisaggRuntime {
                     if self.decode_engine.mark_worker_ready(worker_id) {
                         if let Some(router) = self.decode_router.as_mut() {
                             router.add_worker(worker_id)?;
+                            let effects = router.try_drain_pending(self.now_ms)?;
+                            self.dispatch_decode_admissions(effects.admissions)?;
                         }
                         changed = true;
                     }
