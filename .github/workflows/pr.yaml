@@ -238,7 +238,7 @@ jobs:
     with:
       framework: dynamo
       target: planner
-      cuda_version: '["cpu"]'
+      version_selector: '["cpu"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 45
