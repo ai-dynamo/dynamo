@@ -541,13 +541,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updateProfilingSubPhase(
 		Reason:             reason,
 		Message:            message,
 	})
-	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
-		Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
-		Status:             metav1.ConditionFalse,
-		ObservedGeneration: dgdr.Generation,
-		Reason:             reason,
-		Message:            message,
-	})
+	setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseProfiling)
 
 	return r.Status().Update(ctx, dgdr)
 }
@@ -576,28 +570,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleProfilingPhase(ctx contex
 			failureReason = profilingPhaseFailureReason(dgdr.Status.ProfilingPhase)
 		}
 
-		// Set phase and conditions directly so we can use sub-phase-specific failure
-		// reason on both Profiling and Succeeded conditions. (updatePhaseWithCondition
-		// would hardcode Succeeded reason to generic "Failed".)
-		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseFailed
-		meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: dgdr.Generation,
-			Reason:             failureReason,
-			Message:            failureMessage,
-		})
-		dgdr.AddStatusCondition(metav1.Condition{
-			Type:               nvidiacomv1beta1.ConditionTypeProfiling,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: dgdr.Generation,
-			Reason:             failureReason,
-			Message:            failureMessage,
-		})
-		if err := r.Status().Update(ctx, dgdr); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
+		// updatePhaseWithCondition sets Profiling first, then setSucceededCondition
+		// surfaces the failure reason in the aggregate Succeeded condition.
+		return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed,
+			nvidiacomv1beta1.ConditionTypeProfiling, metav1.ConditionFalse, failureReason, failureMessage)
 	}
 
 	if !completed {
@@ -791,7 +767,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	logger.Info("DGD was deleted by user, transitioning to Failed phase")
 
 	dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseFailed
-	setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseFailed)
 
 	r.Recorder.Event(dgdr, corev1.EventTypeWarning, nvidiacomv1beta1.EventReasonDeploymentDeleted,
 		fmt.Sprintf(MessageDeploymentDeleted, dgdr.Status.DGDName))
@@ -799,12 +774,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDGDDeleted(ctx context.Co
 	dgdr.Status.DGDName = ""
 	dgdr.Status.DeploymentInfo = nil
 
+	// Set the specific condition before the aggregate so setSucceededCondition can surface it.
 	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 		Type:    nvidiacomv1beta1.ConditionTypeDeploymentReady,
 		Status:  metav1.ConditionFalse,
 		Reason:  nvidiacomv1beta1.EventReasonDeploymentDeleted,
 		Message: "Deployment was deleted by user. Create a new DGDR to redeploy.",
 	})
+	setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseFailed)
 
 	return ctrl.Result{}, r.Status().Update(ctx, dgdr)
 }
@@ -981,6 +958,21 @@ func (r *DynamoGraphDeploymentRequestReconciler) createAdditionalResources(ctx c
 func (r *DynamoGraphDeploymentRequestReconciler) handleFailedPhase(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	logger.Info("DGDR is in failed phase", "name", dgdr.Name)
+
+	// Re-sync the Succeeded condition so that operator upgrades that improve
+	// failure messages take effect on already-failed DGDRs.
+	setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseFailed)
+	if err := r.Status().Update(ctx, dgdr); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Re-sync the Succeeded condition so that operator upgrades that improve
+	// failure messages take effect on already-failed DGDRs.
+	if setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseFailed) {
+		if err := r.Status().Update(ctx, dgdr); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	// Could implement retry logic here if desired
 	return ctrl.Result{}, nil
@@ -1914,7 +1906,8 @@ func updateDeploymentInfo(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, d
 }
 
 // setSucceededCondition sets the aggregate Succeeded condition based on the current phase.
-func setSucceededCondition(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, phase nvidiacomv1beta1.DGDRPhase) {
+// It returns true if the condition was actually changed.
+func setSucceededCondition(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, phase nvidiacomv1beta1.DGDRPhase) bool {
 	var status metav1.ConditionStatus
 	var reason, message string
 
@@ -1931,11 +1924,26 @@ func setSucceededCondition(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, 
 		status, reason, message = metav1.ConditionTrue, "Deployed", "Deployment is healthy"
 	case nvidiacomv1beta1.DGDRPhaseFailed:
 		status, reason, message = metav1.ConditionFalse, "Failed", "DGDR has failed"
+		for _, entry := range []struct {
+			condType string
+			prefix   string
+		}{
+			{nvidiacomv1beta1.ConditionTypeValidation, "Validation failed: "},
+			{nvidiacomv1beta1.ConditionTypeProfiling, "Profiling failed: "},
+			{nvidiacomv1beta1.ConditionTypeSpecGenerated, "Spec generation failed: "},
+			{nvidiacomv1beta1.ConditionTypeDeploymentReady, "Deployment failed: "},
+		} {
+			if c := meta.FindStatusCondition(dgdr.Status.Conditions, entry.condType); c != nil && c.Status == metav1.ConditionFalse && c.Message != "" {
+				reason = c.Reason
+				message = entry.prefix + c.Message
+				break
+			}
+		}
 	default:
 		status, reason, message = metav1.ConditionFalse, "Unknown", "Unknown phase"
 	}
 
-	meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
+	return meta.SetStatusCondition(&dgdr.Status.Conditions, metav1.Condition{
 		Type:               nvidiacomv1beta1.ConditionTypeSucceeded,
 		Status:             status,
 		ObservedGeneration: dgdr.Generation,
@@ -1967,18 +1975,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) updatePhaseWithCondition(
 	message string,
 ) (ctrl.Result, error) {
 	dgdr.Status.Phase = phase
-	setSucceededCondition(dgdr, phase)
 
-	condition := metav1.Condition{
+	// Set the specific condition first so setSucceededCondition can surface it.
+	dgdr.AddStatusCondition(metav1.Condition{
 		Type:               conditionType,
 		Status:             status,
 		ObservedGeneration: dgdr.Generation,
-		LastTransitionTime: metav1.Now(),
 		Reason:             reason,
 		Message:            message,
-	}
+	})
 
-	dgdr.AddStatusCondition(condition)
+	setSucceededCondition(dgdr, phase)
 
 	if err := r.Status().Update(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
