@@ -626,27 +626,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
-        let mut response_stream = self
-            .inner
-            .direct(updated_request, instance_id)
-            .instrument(tracing::info_span!(
-                "kv_router.route_request",
-                request_id = %context_id,
-                worker_id = instance_id,
-                dp_rank = ?backend_dp_rank,
-                overlap_blocks = ?overlap_amount,
-                phase = ?phase,
-            ))
-            .await?;
-        let stream_context = response_stream.context();
-        let context_for_monitoring = stream_context.clone();
 
-        // Build the guard BEFORE constructing the stream so that a
-        // drop-before-first-poll (client disconnects immediately after the
-        // request is accepted) still triggers Drop and releases the scheduler
-        // slot + deferred session close.  If the guard were built inside the
-        // `async_stream::stream!` closure, it would never be constructed — and
-        // `chooser.free()` + `deferred_close` would never fire — in that case.
+        // Build the guard BEFORE calling direct() so that its Drop covers the
+        // error path as well as the drop-before-first-poll path.
+        //
+        // Without this, if direct().await? below returns Err, both the
+        // scheduler slot (booked by find_best_match with update_states=true)
+        // and the SessionCloseAction (obtained above via on_routed) are leaked:
+        // SessionCloseAction has no Drop impl, so dropping it never sends the
+        // close_session RPC; chooser.free() is only called via RequestGuard::Drop.
+        //
+        // All guard fields are available here (deferred_close was just obtained;
+        // isl_tokens/block_size/tracker were set before request.into_parts()).
         let guard = RequestGuard {
             chooser: chooser.clone(),
             scheduler_tracked,
@@ -665,6 +656,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             expected_output_tokens,
             deferred_close,
         };
+
+        let mut response_stream = self
+            .inner
+            .direct(updated_request, instance_id)
+            .instrument(tracing::info_span!(
+                "kv_router.route_request",
+                request_id = %context_id,
+                worker_id = instance_id,
+                dp_rank = ?backend_dp_rank,
+                overlap_blocks = ?overlap_amount,
+                phase = ?phase,
+            ))
+            .await?;
+        // If direct() returned Err above, guard drops here →
+        // RequestGuard::Drop fires → chooser.free() + deferred_close.execute().
+        let stream_context = response_stream.context();
+        let context_for_monitoring = stream_context.clone();
 
         let wrapped_stream = Box::pin(async_stream::stream! {
             // Move guard into the stream closure. Drop fires here if the stream
