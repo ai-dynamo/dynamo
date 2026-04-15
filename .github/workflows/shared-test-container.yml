@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Prototype: Run tests using the test image as a container job.
+# Eliminates Docker-in-Docker (DinD), reducing memory usage and preventing node OOM.
+#
+# How it works on ARC runners:
+#   - The ARC runner has DinD as a sidecar (required for GitHub Actions container jobs)
+#   - GitHub Actions `container:` tells the runner to exec steps inside the specified image
+#   - The DinD sidecar pulls and runs the container, but the test processes run directly
+#     inside it — no nested docker run, so memory is properly cgroup-limited
+#   - MinIO runs as a GitHub Actions service container, also managed by the DinD sidecar
+#
+# vs the current shared-test.yml approach:
+#   - Current: runner step does `docker run <test-image> sh -c "pytest ..."`
+#     This spawns a NEW container inside DinD with privileged mode, escaping cgroup limits.
+#   - This workflow: GitHub Actions runs steps inside the container natively.
+#     The container is managed by the runner agent, respecting resource limits.
+#
+# This is a drop-in replacement for shared-test.yml for CPU-only test suites
+# (like planner) that don't need GPU passthrough.
+
+name: Shared Container Test
+
+on:
+  workflow_call:
+    inputs:
+      test_suite_name:
+        description: 'Test suite name (e.g. planner)'
+        required: true
+        type: string
+      test_type:
+        description: 'Test type (e.g. CPU Test)'
+        required: true
+        type: string
+      target_tag_plain:
+        description: 'Plain runtime image tag prefix from the build workflow'
+        required: true
+        type: string
+      platform:
+        description: 'Target platforms to test as a JSON array'
+        required: true
+        type: string
+      cpu_only_test_markers:
+        description: 'CPU-only pytest markers'
+        required: true
+        type: string
+      cpu_only_test_timeout_minutes:
+        description: 'Timeout in minutes for CPU tests'
+        required: false
+        type: number
+        default: 30
+      parallel_mode:
+        description: 'Parallelization mode: auto, none, or number of workers'
+        required: false
+        type: string
+        default: 'auto'
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      HF_TOKEN:
+        required: false
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(inputs.platform) }}
+    name: ${{ inputs.test_type }} cpu, ${{ matrix.platform }}
+    runs-on: ${{ matrix.platform == 'amd64' && 'prod-tester-amd-gpu-v1' || 'prod-tester-arm-v1' }}
+
+    # Run steps inside the test image. The ARC runner's DinD sidecar handles the
+    # container lifecycle, but GitHub Actions manages cgroup limits properly —
+    # unlike a raw `docker run` inside a step which escapes cgroups under privileged DinD.
+    container:
+      image: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.target_tag_plain }}-test
+      options: >-
+        --shm-size=200m
+        --ulimit memlock=-1
+        --ulimit stack=67108864
+        --memory=6g
+
+    # MinIO as a native service container — replaces the manual `docker run minio` in pytest action.
+    services:
+      minio:
+        image: quay.io/minio/minio
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+          - 9001:9001
+        options: >-
+          --memory=256m
+          --health-cmd "curl -sf http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # Service containers are reachable by hostname on the job network.
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      DYNAMO_TEST_FRAMEWORK: dynamo
+      DYNAMO_TEST_PLATFORM: ${{ matrix.platform }}
+      DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
+      DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Run CPU tests
+        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+        working-directory: /workspace
+        run: |
+          set +e
+
+          case "${{ inputs.parallel_mode }}" in
+            "auto")   PARALLEL_OPTS="-n auto" ;;
+            "none"|"0") PARALLEL_OPTS="-n 0" ;;
+            *)        PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}" ;;
+          esac
+
+          pytest ${PARALLEL_OPTS} \
+            --dist=loadscope \
+            --continue-on-collection-errors \
+            -v --tb=short \
+            --basetemp=/tmp/pytest_temp \
+            -o cache_dir=/tmp/.pytest_cache \
+            --junitxml=${{ github.workspace }}/test-results/pytest_test_report.xml \
+            --alluredir=${{ github.workspace }}/test-results/allure-results \
+            --durations=10 \
+            -m "${{ inputs.cpu_only_test_markers }}"
+
+          TEST_EXIT_CODE=$?
+          echo "Tests completed with exit code: ${TEST_EXIT_CODE}"
+          echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+          exit 0
+
+      - name: Process Test Results
+        run: |
+          JUNIT_FILE="${{ github.workspace }}/test-results/pytest_test_report.xml"
+          STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
+          echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
+
+          if [[ -f "$JUNIT_FILE" ]]; then
+            TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+            FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+            ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
+            echo "${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
+
+            JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_${{ matrix.platform }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+            mv "$JUNIT_FILE" "${{ github.workspace }}/test-results/$JUNIT_NAME"
+          else
+            echo "Test results file not found"
+            FAILED_TESTS=1
+          fi
+
+          exit ${TEST_EXIT_CODE}
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ matrix.platform }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
+          retention-days: 7
+
+      - name: Upload Allure Results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: allure-results-dynamo-${{ env.STR_TEST_TYPE }}-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/allure-results/
+          retention-days: 7
+          if-no-files-found: ignore
