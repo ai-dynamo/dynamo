@@ -447,8 +447,7 @@ impl ModelWatcher {
         if !self
             .registering_worker_sets
             .insert(registration_key.clone())
-        {
-            if !self
+            && !self
                 .recover_concurrent_registration(
                     mcid,
                     card,
@@ -458,9 +457,8 @@ impl ModelWatcher {
                     &registration_key,
                 )
                 .await?
-            {
-                return Ok(());
-            }
+        {
+            return Ok(());
         }
 
         // RAII guard ensures the registration key is removed even if
