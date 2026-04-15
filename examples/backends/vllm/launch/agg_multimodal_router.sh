@@ -127,7 +127,7 @@ COMMON_ENV=(
 )
 
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((18079 + i * 2))
+    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
     KV_EVENTS_PORT=$((${KV_EVENTS_PORT_BASE:-29080} + i - 1))
 
     if [[ "${SINGLE_GPU}" == "true" ]]; then
@@ -234,7 +234,7 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     echo "Frontend ${f}: http://127.0.0.1:$((HTTP_PORT + f - 1))"
 done
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i: http://127.0.0.1:$((18079 + i * 2))/health"
+    echo "Worker $i: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
 done
 echo
 echo "Architecture: ${NUM_FRONTENDS}x Frontend (vLLM processor + KvRouter) -> ${NUM_WORKERS}x vLLM backend"
