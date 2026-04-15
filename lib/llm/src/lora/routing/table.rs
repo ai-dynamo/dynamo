@@ -214,6 +214,7 @@ mod tests {
                 replica_factor: 1,
                 replica_set: workers.clone(),
                 updated_at: Instant::now(),
+                is_active: true,
             };
             table.update_allocation(format!("lora-{}", i), config);
         }
@@ -236,6 +237,7 @@ mod tests {
                 replica_factor: 1,
                 replica_set: workers.clone(),
                 updated_at: Instant::now(),
+                is_active: true,
             };
             table.update_allocation(format!("lora-{}", i), config);
         }
