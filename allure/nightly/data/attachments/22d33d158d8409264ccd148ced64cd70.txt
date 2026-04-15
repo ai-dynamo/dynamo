@@ -1,0 +1,1 @@
+[2m2026-04-15T04:56:57.624198Z[0m [32m INFO[0m [2mkubernetes.set_component_replicas[0m[2m:[0m Updating prefill component component1 to desired replica count 3

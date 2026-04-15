@@ -1,1 +1,1 @@
-{"id":"2b0f0b9ac473730d0c94071d65080d28","fullName":"tests.serve.test_vllm_omni#test_omni_serve_deployment","name":"test_omni_serve_deployment[omni_t2v]","status":"passed","testResultsByEnv":{"vllm-amd64":"071fd88be744cce55f541ce93ab0034c"}}
+{"id":"2b0f0b9ac473730d0c94071d65080d28","fullName":"tests.serve.test_vllm_omni#test_omni_serve_deployment","name":"test_omni_serve_deployment[omni_t2v]","status":"passed","testResultsByEnv":{"vllm-amd64":"dd73d30253338103d04f947a5a232613"}}

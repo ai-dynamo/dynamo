@@ -1,0 +1,1 @@
+INFO     dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler:image_diffusion_handler.py:58 Image diffusion worker handler initialized with fs_url=s3://my-bucket/images, url_base=http://localhost:8008/images

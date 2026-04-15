@@ -1,1 +1,1 @@
-{"id":"95f05ae7e214f7b7a0ce4dd95d162b98","fullName":"tests.serve.test_vllm#test_multimodal_b64_frontend_decoding","name":"test_multimodal_b64_frontend_decoding","status":"passed","testResultsByEnv":{"vllm-amd64":"6be3f3079774245d7f498419c73a4f90"}}
+{"id":"95f05ae7e214f7b7a0ce4dd95d162b98","fullName":"tests.serve.test_vllm#test_multimodal_b64_frontend_decoding","name":"test_multimodal_b64_frontend_decoding","status":"passed","testResultsByEnv":{"vllm-amd64":"d625374a7d10bb65ca0d2918dac5199c"}}

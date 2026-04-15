@@ -1,2 +1,0 @@
-[2m2026-04-14T20:26:55.202555Z[0m [32m INFO[0m [2mkubernetes_api.wait_for_graph_deployment_ready[0m[2m:[0m [Attempt 1/2] (status: False, message: Deployment is not ready)
-[2m2026-04-14T20:26:55.303021Z[0m [32m INFO[0m [2mkubernetes_api.wait_for_graph_deployment_ready[0m[2m:[0m [Attempt 2/2] (status: False, message: Deployment is not ready)

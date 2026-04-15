@@ -1,0 +1,11 @@
+[2m2026-04-15T04:56:58.252825Z[0m [32m INFO[0m [2mprofile_sla._extract_profiler_params[0m[2m:[0m Profiler config: model=Qwen/Qwen2.5-0.5B, backend=vllm, system=l40s, total_gpus=4, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=rapid, picking=autoscale
+[2m2026-04-15T04:56:58.254783Z[0m [31mERROR[0m [2mprofile_sla.run_profile[0m[2m:[0m Profile job failed with error
+Traceback (most recent call last):
+  File "/workspace/components/src/dynamo/profiler/profile_sla.py", line 325, in run_profile
+    validate_dgdr_dynamo_features(dgdr, aic_supported)
+  File "/workspace/components/src/dynamo/profiler/utils/dgdr_validate.py", line 163, in validate_dgdr_dynamo_features
+    raise ValueError(
+ValueError: AIC does not support Qwen/Qwen2.5-0.5B on l40s and BackendType.Vllm. pre_deployment_sweeping_mode in PlannerConfig can only be 'thorough' when AIC does not support the model/hardware/backend combination. 
+[2m2026-04-15T04:56:58.255374Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
+[2m2026-04-15T04:56:58.255432Z[0m [32m INFO[0m [2mdynamo_deployment.cleanup_remaining_deployments[0m[2m:[0m No deployments to clean up
+[2m2026-04-15T04:56:58.255474Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

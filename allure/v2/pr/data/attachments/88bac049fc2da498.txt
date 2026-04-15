@@ -1,2 +1,0 @@
-[2m2026-04-14T20:26:55.028468Z[0m [32m INFO[0m [2mprotocol.apply_dgd_overrides[0m[2m:[0m Ignoring envelope field(s) ['apiVersion', 'kind'] from overrides.dgd — these are controlled by the deployment template and cannot be overridden.
-[2m2026-04-14T20:26:55.028602Z[0m [32m INFO[0m [2mprotocol.apply_dgd_overrides[0m[2m:[0m Ignoring metadata identity field(s) ['name', 'namespace', 'uid', 'resourceVersion'] from overrides.dgd — use the DGD template to set these.

@@ -1,0 +1,208 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4264 -js --store_dir /tmp/nats_rjyx_ijn in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4264
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4264
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+DEBUG    asyncio:selector_events.py:64 Using selector: EpollSelector
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2452 --advertise-client-urls http://0.0.0.0:2452 --listen-peer-urls http://0.0.0.0:2453 --initial-advertise-peer-urls http://localhost:2453 --initial-cluster default=http://localhost:2453 --data-dir /tmp/etcd_oja3p4g1 in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2452
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2452
+INFO     VLLMWorkerProcess:managed_process.py:437 Running command: python3 -m dynamo.vllm --model Qwen/Qwen3-VL-2B-Instruct --enable-multimodal --gpu-memory-utilization 0.85 --max-model-len 8192 --served-model-name Qwen/Qwen3-VL-2B-Instruct__internal --kv-events-config {"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:10046","enable_kv_cache_events": true} in /workspace
+INFO     VLLMWorkerProcess:managed_process.py:690 Checking URL http://localhost:10044/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 72
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 73
+INFO     VLLMWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:10044/health (status code 503) (attempt=21, elapsed=20.0s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 73
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+INFO     VLLMWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:10044/health (status code 503) (attempt=41, elapsed=40.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+INFO     VLLMWorkerProcess:managed_process.py:742 Still waiting for URL http://localhost:10044/health (status code 503) (attempt=61, elapsed=60.1s)
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 503 74
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10044
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10044 "GET /health HTTP/1.1" 200 180
+INFO     VLLMWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:10044/health (attempt=65, elapsed=64.1s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 57,
+    "nanos": 92088706
+  },
+  "endpoints": {
+    "clear_kv_blocks": "ready",
+    "worker_kv_indexer_query_dp0": "ready",
+    "get_perf_metrics": "ready",
+    "generate": "ready"
+  }
+}
+INFO     VLLMMMRouterWorkerProcess:managed_process.py:437 Running command: python3 -m examples.backends.vllm.mm_router_worker --model Qwen/Qwen3-VL-2B-Instruct --namespace dynamo --component mm_router --endpoint generate --downstream-component backend --downstream-endpoint generate --block-size 16 in /workspace
+INFO     VLLMMMRouterWorkerProcess:managed_process.py:690 Checking URL http://localhost:10045/health
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10045
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10045
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10045
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10045
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10045
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10045
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10045
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10045
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10045 "GET /health HTTP/1.1" 503 95
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10045
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10045 "GET /health HTTP/1.1" 200 89
+INFO     VLLMMMRouterWorkerProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:10045/health (attempt=9, elapsed=8.0s)
+Response:
+{
+  "status": "ready",
+  "uptime": {
+    "secs": 1,
+    "nanos": 354520899
+  },
+  "endpoints": {
+    "generate": "ready"
+  }
+}
+INFO     FrontendProcess:managed_process.py:437 Running command: python3 -m dynamo.frontend --http-port 10043 --router-mode round-robin in /workspace
+INFO     FrontendProcess:managed_process.py:690 Checking URL http://localhost:10043/v1/models
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10043
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10043
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10043
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10043
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10043 "GET /v1/models HTTP/1.1" 200 222
+INFO     FrontendProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:10043/v1/models (attempt=4, elapsed=3.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct__internal",
+      "object": "model",
+      "created": 1776229862,
+      "owned_by": "nvidia"
+    },
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct",
+      "object": "model",
+      "created": 1776229862,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10043
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10043 "POST /v1/chat/completions HTTP/1.1" 200 414
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10043
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10043 "POST /v1/chat/completions HTTP/1.1" 200 488
+DEBUG    urllib3.connectionpool:connectionpool.py:241 Starting new HTTP connection (1): localhost:10043
+DEBUG    urllib3.connectionpool:connectionpool.py:544 http://localhost:10043 "POST /v1/chat/completions HTTP/1.1" 200 489

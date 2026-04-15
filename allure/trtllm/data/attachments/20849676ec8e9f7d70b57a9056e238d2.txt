@@ -1,0 +1,1 @@
+Min endpoint test: P=2, D=2

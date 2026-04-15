@@ -1,0 +1,4 @@
+INFO     dynamo.planner.core.prefill:prefill.py:66 Prefill engine w1:dp0: estimated TTFT 10650.00ms (queued_prefill=10000, avg_isl=650.0)
+INFO     dynamo.planner.core.prefill:prefill.py:66 Prefill engine w2:dp0: estimated TTFT 8650.00ms (queued_prefill=8000, avg_isl=650.0)
+INFO     dynamo.planner.core.base:base.py:781 Load-based prefill TTFT: workers=2, sla=5.0ms, estimates=['10650.0', '8650.0']
+INFO     dynamo.planner.core.base:base.py:787 Load-based prefill TTFT: ALL engines above SLA (5.0ms), scaling up to 3

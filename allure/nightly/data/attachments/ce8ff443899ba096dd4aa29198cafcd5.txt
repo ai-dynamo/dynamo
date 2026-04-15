@@ -1,0 +1,170 @@
+INFO     dynamo.profiler.profile_sla:profile_sla.py:101 Profiler config: model=Qwen/Qwen3-32B, backend=auto, system=h200_sxm, total_gpus=8, isl=4000, osl=1000, ttft=2000.0, itl=30.0, e2e_latency=None, strategy=rapid, picking=default
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Agg worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Prefill worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Decode worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.sdk.perf_database:perf_database.py:272 Loading database for system='h200_sxm', backend='sglang', version='0.5.9'
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Agg worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Prefill worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Decode worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.sdk.perf_database:perf_database.py:272 Loading database for system='h200_sxm', backend='vllm', version='0.12.0'
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Agg worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Prefill worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Decode worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.cli.main:main.py:939 Starting experiment: agg_trtllm
+INFO     aiconfigurator.sdk.task:task.py:1380 Starting Pareto Analysis for agg_Qwen/Qwen3-32B_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30 in agg mode (autoscale=False)...
+INFO     aiconfigurator.sdk.task:task.py:1111 Task agg_Qwen/Qwen3-32B_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30: Using database mode: SILICON
+INFO     aiconfigurator.sdk.task:task.py:1156 Task agg_Qwen/Qwen3-32B_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30: Listing parallelism configs to evaluate: 
+INFO     aiconfigurator.sdk.task:task.py:1159 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1159 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1159 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1159 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1161 Task agg_Qwen/Qwen3-32B_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30: Running agg pareto
+INFO     aiconfigurator.cli.main:main.py:947 Experiment agg_trtllm completed with 243 results.
+INFO     aiconfigurator.cli.main:main.py:939 Starting experiment: disagg_trtllm
+INFO     aiconfigurator.sdk.task:task.py:1380 Starting Pareto Analysis for disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30 in disagg mode (autoscale=False)...
+INFO     aiconfigurator.sdk.task:task.py:1215 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30: Using prefill database mode: SILICON
+INFO     aiconfigurator.sdk.task:task.py:1262 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30: Listing prefill parallelism configs to evaluate: 
+INFO     aiconfigurator.sdk.task:task.py:1265 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1265 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1265 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1265 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1276 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30: Using decode database mode: SILICON
+INFO     aiconfigurator.sdk.task:task.py:1323 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30: Listing decode parallelism configs to evaluate: 
+INFO     aiconfigurator.sdk.task:task.py:1326 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1326 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1326 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1326 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1341 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_2000_30: Running disagg pareto
+INFO     aiconfigurator.cli.main:main.py:947 Experiment disagg_trtllm completed with 36 results.
+INFO     aiconfigurator.cli.main:main.py:939 Starting experiment: agg_sglang
+INFO     aiconfigurator.sdk.task:task.py:1380 Starting Pareto Analysis for agg_Qwen/Qwen3-32B_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30 in agg mode (autoscale=False)...
+INFO     aiconfigurator.sdk.task:task.py:1111 Task agg_Qwen/Qwen3-32B_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30: Using database mode: SILICON
+INFO     aiconfigurator.sdk.task:task.py:1156 Task agg_Qwen/Qwen3-32B_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30: Listing parallelism configs to evaluate: 
+INFO     aiconfigurator.sdk.task:task.py:1159 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1159 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1159 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1159 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1161 Task agg_Qwen/Qwen3-32B_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30: Running agg pareto
+INFO     aiconfigurator.cli.main:main.py:947 Experiment agg_sglang completed with 244 results.
+INFO     aiconfigurator.cli.main:main.py:939 Starting experiment: disagg_sglang
+INFO     aiconfigurator.sdk.task:task.py:1380 Starting Pareto Analysis for disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30 in disagg mode (autoscale=False)...
+INFO     aiconfigurator.sdk.task:task.py:1215 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30: Using prefill database mode: SILICON
+INFO     aiconfigurator.sdk.task:task.py:1262 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30: Listing prefill parallelism configs to evaluate: 
+INFO     aiconfigurator.sdk.task:task.py:1265 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1265 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1265 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1265 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1276 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30: Using decode database mode: SILICON
+INFO     aiconfigurator.sdk.task:task.py:1323 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30: Listing decode parallelism configs to evaluate: 
+INFO     aiconfigurator.sdk.task:task.py:1326 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1326 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1326 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1326 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+WARNING  aiconfigurator.sdk.task:task.py:1335 SGLang non-wideep disaggregated serving requires the same TP size for prefill and decode workers. Configurations with different TP sizes will be filtered out. 
+INFO     aiconfigurator.sdk.task:task.py:1341 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_sglang_0.5.9_4000_1000_0_2000_30: Running disagg pareto
+INFO     aiconfigurator.cli.main:main.py:947 Experiment disagg_sglang completed with 38 results.
+INFO     aiconfigurator.cli.main:main.py:939 Starting experiment: agg_vllm
+INFO     aiconfigurator.sdk.task:task.py:1380 Starting Pareto Analysis for agg_Qwen/Qwen3-32B_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30 in agg mode (autoscale=False)...
+INFO     aiconfigurator.sdk.task:task.py:1111 Task agg_Qwen/Qwen3-32B_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30: Using database mode: SILICON
+INFO     aiconfigurator.sdk.task:task.py:1156 Task agg_Qwen/Qwen3-32B_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30: Listing parallelism configs to evaluate: 
+INFO     aiconfigurator.sdk.task:task.py:1159 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1159 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1159 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1159 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1161 Task agg_Qwen/Qwen3-32B_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30: Running agg pareto
+INFO     aiconfigurator.cli.main:main.py:947 Experiment agg_vllm completed with 254 results.
+INFO     aiconfigurator.cli.main:main.py:939 Starting experiment: disagg_vllm
+INFO     aiconfigurator.sdk.task:task.py:1380 Starting Pareto Analysis for disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30 in disagg mode (autoscale=False)...
+INFO     aiconfigurator.sdk.task:task.py:1215 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30: Using prefill database mode: SILICON
+INFO     aiconfigurator.sdk.task:task.py:1262 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30: Listing prefill parallelism configs to evaluate: 
+INFO     aiconfigurator.sdk.task:task.py:1265 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1265 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1265 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1265 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1276 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30: Using decode database mode: SILICON
+INFO     aiconfigurator.sdk.task:task.py:1323 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30: Listing decode parallelism configs to evaluate: 
+INFO     aiconfigurator.sdk.task:task.py:1326 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1326 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1326 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1326 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+INFO     aiconfigurator.sdk.task:task.py:1341 Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_vllm_0.12.0_4000_1000_0_2000_30: Running disagg pareto
+INFO     aiconfigurator.cli.main:main.py:947 Experiment disagg_vllm completed with 36 results.
+INFO     aiconfigurator.cli.report_and_save:report_and_save.py:442 
+********************************************************************************
+*                     Dynamo aiconfigurator Final Results                      *
+********************************************************************************
+  ----------------------------------------------------------------------------
+  Input Configuration & SLA Target:
+    Model: Qwen/Qwen3-32B (is_moe: False)
+    Total GPUs: 8
+    Best Experiment Chosen: [1magg at 966.87 tokens/s/gpu (disagg 0.98x better)[0m
+  ----------------------------------------------------------------------------
+  Overall Best Configuration:
+    - Best Throughput: 7,734.97 tokens/s
+    - Per-GPU Throughput: 966.87 tokens/s/gpu
+    - Per-User Throughput: 35.37 tokens/s/user
+    - Request Rate: 7.74 req/s
+    - TTFT: 987.84ms
+    - TPOT: 28.27ms
+    - Request Latency: 29233.94ms
+  ----------------------------------------------------------------------------
+  Pareto Frontier:
+         Qwen/Qwen3-32B Pareto Frontier: tokens/s/gpu_cluster vs tokens/s/user  [0m
+      ┌────────────────────────────────────────────────────────────────────────┐[0m
+1450.0┤ [0m[38;2;144;238;144m••[0m agg                                                                 │[0m
+      │ [0m[38;2;200;200;200mff[0m disagg                                                              │[0m
+      │ [0m[38;2;255;215;0mxx[0m agg best                                                            │[0m
+1208.3┤     [0m[38;2;144;238;144m••[0m                                                                 │[0m
+      │       [0m[38;2;144;238;144m••[0m                                                               │[0m
+      │       [0m[38;2;200;200;200mf[0m [0m[38;2;144;238;144m••[0m                                                             │[0m
+ 966.7┤        [0m[38;2;200;200;200mfff[0m[38;2;255;215;0mx[0m[38;2;200;200;200mff[0m                                                          │[0m
+      │              [0m[38;2;200;200;200mfffff[0m                                                     │[0m
+ 725.0┤                [0m[38;2;144;238;144m•••[0m[38;2;200;200;200mf[0m                                                    │[0m
+      │                   [0m[38;2;144;238;144m•[0m[38;2;200;200;200mf[0m[38;2;144;238;144m••[0m                                                 │[0m
+      │                     [0m[38;2;200;200;200mffff[0m[38;2;144;238;144m•[0m                                              │[0m
+ 483.3┤                         [0m[38;2;200;200;200mff[0m[38;2;144;238;144m••[0m                                           │[0m
+      │                           [0m[38;2;200;200;200mf[0m [0m[38;2;144;238;144m••••••[0m                                     │[0m
+      │                            [0m[38;2;200;200;200mfffff[0m  [0m[38;2;144;238;144m••••••••[0m                             │[0m
+ 241.7┤                                 [0m[38;2;200;200;200mff[0m        [0m[38;2;144;238;144m•••••••••[0m                    │[0m
+      │                                   [0m[38;2;200;200;200mff[0m               [0m[38;2;144;238;144m••••••••[0m            │[0m
+      │                                     [0m[38;2;200;200;200mfffff[0m                 [0m[38;2;144;238;144m•[0m            │[0m
+   0.0┤                                                            [0m[38;2;144;238;144m••[0m          │[0m
+      └┬─────────────────┬─────────────────┬────────────────┬─────────────────┬┘[0m
+       0                55                110              165              220 [0m
+tokens/s/gpu_cluster                 tokens/s/user                              [0m
+
+  ----------------------------------------------------------------------------
+  Deployment Details:
+    (p) stands for prefill, (d) stands for decode, bs stands for batch size, a replica stands for the smallest scalable unit xPyD of the disagg system
+    Some math: total gpus used = replicas * gpus/replica
+               gpus/replica = (p)gpus/worker * (p)workers + (d)gpus/worker * (d)workers; for Agg, gpus/replica = gpus/worker
+               gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined [4mnumbers[0m are the actual values in math)
+
+agg Top Configurations: (Sorted by tokens/s/gpu)
++------+---------+--------------+---------------+-------+---------+-----------------+--------------+-------------------+----------+--------------+-------------+----------+-----+
+| Rank | backend | [1mtokens/s/gpu[0m | tokens/s/user | req/s |   TTFT  | request_latency | concurrency  | total_gpus (used) | replicas | gpus/replica | gpus/worker | parallel |  bs |
++------+---------+--------------+---------------+-------+---------+-----------------+--------------+-------------------+----------+--------------+-------------+----------+-----+
+|  1   |   vllm  |    [1m966.87[0m    |     35.37     |  7.74 |  987.84 |     29233.94    | 224 (=112x2) |     8 (8=2x4)     |    2     |      4       |  4 (=[4m4[0mx[4m1[0mx[4m1[0m) |  tp[4m4[0mpp[4m1[0m  | 112 |
+|  2   |  trtllm |    [1m937.03[0m    |     33.89     |  7.50 |  574.53 |     30054.52    | 224 (=112x2) |     8 (8=2x4)     |    2     |      4       |  4 (=[4m4[0mx[4m1[0mx[4m1[0m) |  tp[4m4[0mpp[4m1[0m  | 112 |
+|  3   |   vllm  |    [1m936.29[0m    |     34.10     |  7.50 |  846.13 |     30145.62    | 224 (=56x4)  |     8 (8=4x2)     |    4     |      2       |  2 (=[4m2[0mx[4m1[0mx[4m1[0m) |  tp[4m2[0mpp[4m1[0m  |  56 |
+|  4   |  sglang |    [1m926.31[0m    |     33.48     |  7.42 |  558.50 |     30396.70    | 224 (=112x2) |     8 (8=2x4)     |    2     |      4       |  4 (=[4m4[0mx[4m1[0mx[4m1[0m) |  tp[4m4[0mpp[4m1[0m  | 112 |
+|  5   |  trtllm |    [1m908.44[0m    |     33.93     |  7.28 | 1523.59 |     30967.29    | 224 (=56x4)  |     8 (8=4x2)     |    4     |      2       |  2 (=[4m2[0mx[4m1[0mx[4m1[0m) |  tp[4m2[0mpp[4m1[0m  |  56 |
++------+---------+--------------+---------------+-------+---------+-----------------+--------------+-------------------+----------+--------------+-------------+----------+-----+
+
+disagg Top Configurations: (Sorted by tokens/s/gpu)
++------+---------+--------------+---------------+-------+--------+-----------------+--------------+-------------------+----------+--------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+| Rank | backend | [1mtokens/s/gpu[0m | tokens/s/user | req/s |  TTFT  | request_latency | concurrency  | total_gpus (used) | replicas | gpus/replica | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
++------+---------+--------------+---------------+-------+--------+-----------------+--------------+-------------------+----------+--------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+|  1   |   vllm  |    [1m944.03[0m    |     34.17     |  7.55 | 711.90 |     29947.64    | 240 (=240x1) |     8 (8=1x8)     |    1     | 8 (=4x1+1x4) |     4      |    1 (=[4m1[0mx[4m1[0m)    |    tp[4m1[0mpp[4m1[0m   |   1   |     1      |    4 (=[4m4[0mx[4m1[0m)    |    tp[4m4[0mpp[4m1[0m   |  240  |
+|  2   |  trtllm |    [1m925.20[0m    |     40.30     |  7.40 | 875.35 |     25667.54    | 208 (=208x1) |     8 (8=1x8)     |    1     | 8 (=4x1+1x4) |     4      |    1 (=[4m1[0mx[4m1[0m)    |    tp[4m1[0mpp[4m1[0m   |   1   |     1      |    4 (=[4m4[0mx[4m1[0m)    |    tp[4m4[0mpp[4m1[0m   |  208  |
+|  3   |  trtllm |    [1m925.20[0m    |     34.09     |  7.40 | 875.35 |     30180.02    | 256 (=128x2) |     8 (8=2x4)     |    2     | 4 (=2x1+1x2) |     2      |    1 (=[4m1[0mx[4m1[0m)    |    tp[4m1[0mpp[4m1[0m   |   1   |     1      |    2 (=[4m2[0mx[4m1[0m)    |    tp[4m2[0mpp[4m1[0m   |  128  |
+|  4   |   vllm  |    [1m892.17[0m    |     33.40     |  7.14 | 711.90 |     30617.97    | 232 (=116x2) |     8 (8=2x4)     |    2     | 4 (=2x1+1x2) |     2      |    1 (=[4m1[0mx[4m1[0m)    |    tp[4m1[0mpp[4m1[0m   |   1   |     1      |    2 (=[4m2[0mx[4m1[0m)    |    tp[4m2[0mpp[4m1[0m   |  116  |
+|  5   |  sglang |    [1m866.41[0m    |     33.60     |  6.93 | 441.77 |     30177.01    | 224 (=112x2) |     8 (8=2x4)     |    2     | 4 (=1x2+1x2) |     1      |    2 (=[4m2[0mx[4m1[0m)    |    tp[4m2[0mpp[4m1[0m   |   1   |     1      |    2 (=[4m2[0mx[4m1[0m)    |    tp[4m2[0mpp[4m1[0m   |  112  |
++------+---------+--------------+---------------+-------+--------+-----------------+--------------+-------------------+----------+--------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+********************************************************************************
+INFO     aiconfigurator.cli.main:main.py:1024 All experiments completed in 55.73 seconds
+INFO     dynamo.profiler.profile_sla:profile_sla.py:213 Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1)
+INFO     dynamo.profiler.profile_sla:profile_sla.py:265 Final DGD config saved to /tmp/pytest_temp/popen-gw7/test_no_planner_no_load0/profiling_results/final_config.yaml
+INFO     dynamo.profiler.profile_sla:profile_sla.py:472 Performing final cleanup of any remaining deployments...
+INFO     deploy.utils.dynamo_deployment:dynamo_deployment.py:510 No deployments to clean up
+INFO     dynamo.profiler.profile_sla:profile_sla.py:474 Final cleanup completed.

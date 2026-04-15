@@ -1,1 +1,1 @@
-{"id":"64e94a84db9a656b3921129ac0351a99","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_args#test_omni_config_invalid_boundary_ratio","name":"test_omni_config_invalid_boundary_ratio[-0.1]","status":"passed","testResultsByEnv":{"default":"f1bc59752a320f80914cc455fa3beb28"}}
+{"id":"64e94a84db9a656b3921129ac0351a99","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_args#test_omni_config_invalid_boundary_ratio","name":"test_omni_config_invalid_boundary_ratio[1.01]","status":"passed","testResultsByEnv":{"default":"c914a7f92e1363d3db331a2ff39cac69"}}

@@ -1,0 +1,110 @@
+[2m2026-04-15T04:58:10.785597Z[0m [32m INFO[0m [2mprofile_sla._extract_profiler_params[0m[2m:[0m Profiler config: model=Qwen/Qwen3-32B, backend=trtllm, system=h200_sxm, total_gpus=64, isl=4000, osl=1000, ttft=35000.0, itl=35000.0, e2e_latency=35000.0, strategy=rapid, picking=load_match
+[2m2026-04-15T04:58:10.823342Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Agg worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-15T04:58:10.859002Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Prefill worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-15T04:58:10.859100Z[0m [32m INFO[0m [2mmodels._apply_model_quant_defaults[0m[2m:[0m Resolved quant modes for Decode worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+[2m2026-04-15T04:58:10.859164Z[0m [32m INFO[0m [2mmain._execute_task_configs[0m[2m:[0m Starting experiment: agg
+[2m2026-04-15T04:58:10.860888Z[0m [32m INFO[0m [2mtask.run[0m[2m:[0m Starting Pareto Analysis for agg_Qwen/Qwen3-32B_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0 in agg mode (autoscale=False)...
+[2m2026-04-15T04:58:14.203630Z[0m [32m INFO[0m [2mtask.run_agg[0m[2m:[0m Task agg_Qwen/Qwen3-32B_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0: Using database mode: SILICON
+[2m2026-04-15T04:58:14.203832Z[0m [32m INFO[0m [2mtask.run_agg[0m[2m:[0m Task agg_Qwen/Qwen3-32B_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0: Listing parallelism configs to evaluate: 
+[2m2026-04-15T04:58:14.203883Z[0m [32m INFO[0m [2mtask.run_agg[0m[2m:[0m 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:14.203921Z[0m [32m INFO[0m [2mtask.run_agg[0m[2m:[0m 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:14.203954Z[0m [32m INFO[0m [2mtask.run_agg[0m[2m:[0m 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:14.203984Z[0m [32m INFO[0m [2mtask.run_agg[0m[2m:[0m 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:14.204020Z[0m [32m INFO[0m [2mtask.run_agg[0m[2m:[0m Task agg_Qwen/Qwen3-32B_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0: Running agg pareto
+[2m2026-04-15T04:58:20.960892Z[0m [32m INFO[0m [2mmain._execute_task_configs[0m[2m:[0m Experiment agg completed with 157 results.
+[2m2026-04-15T04:58:20.960982Z[0m [32m INFO[0m [2mmain._execute_task_configs[0m[2m:[0m Starting experiment: disagg
+[2m2026-04-15T04:58:20.964744Z[0m [32m INFO[0m [2mtask.run[0m[2m:[0m Starting Pareto Analysis for disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0 in disagg mode (autoscale=False)...
+[2m2026-04-15T04:58:23.466258Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0: Using prefill database mode: SILICON
+[2m2026-04-15T04:58:23.466455Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0: Listing prefill parallelism configs to evaluate: 
+[2m2026-04-15T04:58:23.466500Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:23.466534Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:23.466563Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:23.466614Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:25.953838Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0: Using decode database mode: SILICON
+[2m2026-04-15T04:58:25.954046Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0: Listing decode parallelism configs to evaluate: 
+[2m2026-04-15T04:58:25.954093Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m 1) tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:25.954128Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m 2) tp=2, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:25.954158Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m 3) tp=4, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:25.954189Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m 4) tp=8, pp=1, dp=1, moe_tp=1, moe_ep=1
+[2m2026-04-15T04:58:25.954233Z[0m [32m INFO[0m [2mtask.run_disagg[0m[2m:[0m Task disagg_Qwen/Qwen3-32B_h200_sxm_h200_sxm_trtllm_1.2.0rc5_4000_1000_0_35000.0_35000.0: Running disagg pareto
+[2m2026-04-15T04:58:30.850018Z[0m [32m INFO[0m [2mmain._execute_task_configs[0m[2m:[0m Experiment disagg completed with 36 results.
+[2m2026-04-15T04:58:30.884588Z[0m [32m INFO[0m [2mreport_and_save.log_final_summary[0m[2m:[0m 
+********************************************************************************
+*                     Dynamo aiconfigurator Final Results                      *
+********************************************************************************
+  ----------------------------------------------------------------------------
+  Input Configuration & SLA Target:
+    Model: Qwen/Qwen3-32B (is_moe: False)
+    Total GPUs: 64
+    Target Load: 5.0 req/s
+    agg GPUs needed: 6 (replicas: 3)
+    disagg GPUs needed: 8 (replicas: 1)
+    Best Experiment Chosen: \x1b[1magg\x1b[0m
+  ----------------------------------------------------------------------------
+  Overall Best Configuration:
+    - Best Throughput: 10.67 tokens/s
+    - Per-GPU Throughput: 0.17 tokens/s/gpu
+    - Per-User Throughput: 31.04 tokens/s/user
+    - Request Rate: 61.09 req/s
+    - TTFT: 1621.12ms
+    - TPOT: 32.22ms
+    - Request Latency: 33809.10ms
+  ----------------------------------------------------------------------------
+  Pareto Frontier:
+       Qwen/Qwen3-32B Pareto Frontier: tokens/s/gpu_cluster vs request_latency  \x1b[0m
+    ┌──────────────────────────────────────────────────────────────────────────┐\x1b[0m
+1200┤ \x1b[0m\x1b[38;2;144;238;144m••\x1b[0m agg                                                                   │\x1b[0m
+    │ \x1b[0m\x1b[38;2;200;200;200mff\x1b[0m disagg                                                                │\x1b[0m
+    │ \x1b[0m\x1b[38;2;255;215;0mxx\x1b[0m agg best                                                              │\x1b[0m
+1000┤                                                                \x1b[0m\x1b[38;2;200;200;200mf\x1b[0m\x1b[38;2;255;215;0mx\x1b[0m\x1b[38;2;200;200;200mf\x1b[0m       │\x1b[0m
+    │                                                \x1b[0m\x1b[38;2;200;200;200mffffffffffffffff\x1b[0m          │\x1b[0m
+    │                                   \x1b[0m\x1b[38;2;200;200;200mfffffffffffff\x1b[0m\x1b[38;2;144;238;144m•••••\x1b[0m                     │\x1b[0m
+ 800┤                                   \x1b[0m\x1b[38;2;200;200;200mf\x1b[0m     \x1b[0m\x1b[38;2;144;238;144m••••••\x1b[0m                           │\x1b[0m
+    │                                   \x1b[0m\x1b[38;2;200;200;200mf\x1b[0m  \x1b[0m\x1b[38;2;144;238;144m•••\x1b[0m                                 │\x1b[0m
+ 600┤                                   \x1b[0m\x1b[38;2;200;200;200mf\x1b[0m\x1b[38;2;144;238;144m••\x1b[0m                                    │\x1b[0m
+    │                               \x1b[0m\x1b[38;2;200;200;200mffff\x1b[0m\x1b[38;2;144;238;144m•\x1b[0m                                      │\x1b[0m
+    │                         \x1b[0m\x1b[38;2;144;238;144m••\x1b[0m\x1b[38;2;200;200;200mffff\x1b[0m\x1b[38;2;144;238;144m••\x1b[0m                                         │\x1b[0m
+ 400┤                    \x1b[0m\x1b[38;2;144;238;144m••\x1b[0m\x1b[38;2;200;200;200mfffff\x1b[0m                                               │\x1b[0m
+    │                 \x1b[0m\x1b[38;2;144;238;144m•••\x1b[0m                                                      │\x1b[0m
+    │              \x1b[0m\x1b[38;2;144;238;144m•••\x1b[0m                                                         │\x1b[0m
+ 200┤            \x1b[0m\x1b[38;2;144;238;144m•••\x1b[0m                                                           │\x1b[0m
+    │                                                                          │\x1b[0m
+    │                                                                          │\x1b[0m
+   0┤                                                                          │\x1b[0m
+    └┬─────────────────┬──────────────────┬─────────────────┬─────────────────┬┘\x1b[0m
+     0               9425               18850             28275           37700 \x1b[0m
+tokens/s/gpu_cluster               request_latency                              \x1b[0m
+
+  ----------------------------------------------------------------------------
+  Deployment Details:
+    (p) stands for prefill, (d) stands for decode, bs stands for batch size, a replica stands for the smallest scalable unit xPyD of the disagg system
+    Some math: total gpus used = replicas * gpus/replica
+               gpus/replica = (p)gpus/worker * (p)workers + (d)gpus/worker * (d)workers; for Agg, gpus/replica = gpus/worker
+               gpus/worker = tp * pp * dp = etp * ep * pp for MoE models; tp * pp for dense models (underlined \x1b[4mnumbers\x1b[0m are the actual values in math)
+
+agg Top Configurations: (Sorted by tokens/s/gpu)
++------+---------+--------------+---------------+-------+---------+-----------------+----------------+-------------------+----------+--------------+-------------+----------+-----+
+| Rank | backend | \x1b[1mtokens/s/gpu\x1b[0m | tokens/s/user | req/s |   TTFT  | request_latency |  concurrency   | total_gpus (used) | replicas | gpus/replica | gpus/worker | parallel |  bs |
++------+---------+--------------+---------------+-------+---------+-----------------+----------------+-------------------+----------+--------------+-------------+----------+-----+
+|  1   |  trtllm |    \x1b[1m975.41\x1b[0m    |     30.83     | 62.50 |  579.34 |     32983.58    | 2048 (=128x16) |    64 (64=16x4)   |    16    |      4       |  4 (=\x1b[4m4\x1b[0mx\x1b[4m1\x1b[0mx\x1b[4m1\x1b[0m) |  tp\x1b[4m4\x1b[0mpp\x1b[4m1\x1b[0m  | 128 |
+|  2   |  trtllm |    \x1b[1m953.32\x1b[0m    |     31.04     | 61.09 | 1621.12 |     33809.10    | 2048 (=64x32)  |    64 (64=32x2)   |    32    |      2       |  2 (=\x1b[4m2\x1b[0mx\x1b[4m1\x1b[0mx\x1b[4m1\x1b[0m) |  tp\x1b[4m2\x1b[0mpp\x1b[4m1\x1b[0m  |  64 |
+|  3   |  trtllm |    \x1b[1m834.37\x1b[0m    |     30.20     | 53.46 |  675.28 |     33759.92    | 1792 (=224x8)  |    64 (64=8x8)    |    8     |      8       |  8 (=\x1b[4m8\x1b[0mx\x1b[4m1\x1b[0mx\x1b[4m1\x1b[0m) |  tp\x1b[4m8\x1b[0mpp\x1b[4m1\x1b[0m  | 224 |
+|  4   |  trtllm |    \x1b[1m698.83\x1b[0m    |     31.34     | 44.80 | 2037.64 |     33915.21    | 1536 (=24x64)  |    64 (64=64x1)   |    64    |      1       |  1 (=\x1b[4m1\x1b[0mx\x1b[4m1\x1b[0mx\x1b[4m1\x1b[0m) |  tp\x1b[4m1\x1b[0mpp\x1b[4m1\x1b[0m  |  24 |
++------+---------+--------------+---------------+-------+---------+-----------------+----------------+-------------------+----------+--------------+-------------+----------+-----+
+
+disagg Top Configurations: (Sorted by tokens/s/gpu)
++------+---------+--------------+---------------+-------+--------+-----------------+---------------+-------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+| Rank | backend | \x1b[1mtokens/s/gpu\x1b[0m | tokens/s/user | req/s |  TTFT  | request_latency |  concurrency  | total_gpus (used) | replicas |  gpus/replica  | (p)workers | (p)gpus/worker | (p)parallel | (p)bs | (d)workers | (d)gpus/worker | (d)parallel | (d)bs |
++------+---------+--------------+---------------+-------+--------+-----------------+---------------+-------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+|  1   |  trtllm |    \x1b[1m899.24\x1b[0m    |     30.51     | 57.55 | 875.35 |     33614.58    | 2048 (=512x4) |    64 (64=4x16)   |    4     | 16 (=8x1+1x8)  |     8      |    1 (=\x1b[4m1\x1b[0mx\x1b[4m1\x1b[0m)    |    tp\x1b[4m1\x1b[0mpp\x1b[4m1\x1b[0m   |   1   |     1      |    8 (=\x1b[4m8\x1b[0mx\x1b[4m1\x1b[0m)    |    tp\x1b[4m8\x1b[0mpp\x1b[4m1\x1b[0m   |  512  |
+|  2   |  trtllm |    \x1b[1m820.52\x1b[0m    |     57.48     | 52.51 | 875.35 |     18253.96    |  992 (=124x8) |    64 (64=8x8)    |    8     |  8 (=4x1+1x4)  |     4      |    1 (=\x1b[4m1\x1b[0mx\x1b[4m1\x1b[0m)    |    tp\x1b[4m1\x1b[0mpp\x1b[4m1\x1b[0m   |   1   |     1      |    4 (=\x1b[4m4\x1b[0mx\x1b[4m1\x1b[0m)    |    tp\x1b[4m4\x1b[0mpp\x1b[4m1\x1b[0m   |  124  |
+|  3   |  trtllm |    \x1b[1m710.70\x1b[0m    |     29.69     | 45.49 | 262.70 |     33913.01    | 1664 (=208x8) |    64 (64=8x8)    |    8     |  8 (=1x4+4x1)  |     1      |    4 (=\x1b[4m4\x1b[0mx\x1b[4m1\x1b[0m)    |    tp\x1b[4m4\x1b[0mpp\x1b[4m1\x1b[0m   |   1   |     4      |    1 (=\x1b[4m1\x1b[0mx\x1b[4m1\x1b[0m)    |    tp\x1b[4m1\x1b[0mpp\x1b[4m1\x1b[0m   |   52  |
+|  4   |  trtllm |    \x1b[1m693.90\x1b[0m    |     37.66     | 44.41 | 875.35 |     27400.80    | 1296 (=648x2) |    64 (48=2x24)   |    2     | 24 (=12x1+6x2) |     12     |    1 (=\x1b[4m1\x1b[0mx\x1b[4m1\x1b[0m)    |    tp\x1b[4m1\x1b[0mpp\x1b[4m1\x1b[0m   |   1   |     6      |    2 (=\x1b[4m2\x1b[0mx\x1b[4m1\x1b[0m)    |    tp\x1b[4m2\x1b[0mpp\x1b[4m1\x1b[0m   |  108  |
++------+---------+--------------+---------------+-------+--------+-----------------+---------------+-------------------+----------+----------------+------------+----------------+-------------+-------+------------+----------------+-------------+-------+
+********************************************************************************
+[2m2026-04-15T04:58:30.884752Z[0m [32m INFO[0m [2mmain._execute_task_configs[0m[2m:[0m All experiments completed in 20.03 seconds
+[2m2026-04-15T04:58:30.926681Z[0m [32m INFO[0m [2mprofile_sla._execute_strategy[0m[2m:[0m Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1)
+[2m2026-04-15T04:58:30.930036Z[0m [32m INFO[0m [2mprofile_sla._write_final_output[0m[2m:[0m Final DGD config saved to /tmp/pytest_temp/popen-gw4/test_e2e_latency_sla0/profiling_results/final_config.yaml
+[2m2026-04-15T04:58:30.930482Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
+[2m2026-04-15T04:58:30.930536Z[0m [32m INFO[0m [2mdynamo_deployment.cleanup_remaining_deployments[0m[2m:[0m No deployments to clean up
+[2m2026-04-15T04:58:30.930576Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

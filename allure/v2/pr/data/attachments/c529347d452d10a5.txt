@@ -1,3 +1,0 @@
-[2m2026-04-14T20:26:54.983934Z[0m [32m INFO[0m [2mscale_handler.__init__[0m[2m:[0m ScaleRequestHandler initialized for namespaces: ['default-model-a']
-[2m2026-04-14T20:26:54.984011Z[0m [32m INFO[0m [2mscale_handler.__init__[0m[2m:[0m GPU budget enforcement DISABLED (unlimited)
-[2m2026-04-14T20:26:54.985134Z[0m [32m INFO[0m [2mscale_handler._populate_k8s_connectors[0m[2m:[0m Discovered 1 existing DGDs: ['model-a']

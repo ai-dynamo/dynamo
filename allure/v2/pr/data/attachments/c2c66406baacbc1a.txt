@@ -1,0 +1,103 @@
+INFO     NatsServer:managed_process.py:437 Running command: nats-server --trace -p 4261 in /workspace
+INFO     NatsServer:managed_process.py:662 Checking Port: 4261
+INFO     NatsServer:managed_process.py:670 SUCCESS: Check Port: 4261
+INFO     NatsServer:managed_process.py:775 Running custom health check '_nats_ready'
+INFO     NatsServer:managed_process.py:795 SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+INFO     EtcdServer:managed_process.py:437 Running command: etcd --listen-client-urls http://0.0.0.0:2464 --advertise-client-urls http://0.0.0.0:2464 --listen-peer-urls http://0.0.0.0:2465 --initial-advertise-peer-urls http://localhost:2465 --initial-cluster default=http://localhost:2465 --data-dir /tmp/etcd_fns1_bsy in /workspace
+INFO     EtcdServer:managed_process.py:662 Checking Port: 2464
+INFO     EtcdServer:managed_process.py:670 SUCCESS: Check Port: 2464
+INFO     test_deployment[raw_embeddings_epd-2]:common.py:43 Starting raw_embeddings_epd test_deployment
+INFO     test_deployment[raw_embeddings_epd-2]:common.py:49 Using model: llava-hf/llava-v1.6-mistral-7b-hf
+INFO     test_deployment[raw_embeddings_epd-2]:common.py:50 Script: agg_raw_embeddings_llava.sh
+INFO     EngineProcess:managed_process.py:437 Running command: bash /workspace/tests/serve/launch/agg_raw_embeddings_llava.sh in /workspace/tests/serve
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8070/v1/models
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8070/v1/models (attempt=1, elapsed=0.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "llava-hf/llava-v1.6-mistral-7b-hf",
+      "object": "model",
+      "created": 1776230875,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+INFO     EngineProcess:managed_process.py:690 Checking URL http://localhost:8070/health
+INFO     EngineProcess:managed_process.py:710 SUCCESS: Check URL: http://localhost:8070/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.tensorrt_llm.generate",
+    "dyn://dynamo.tensorrt_llm_encode.generate"
+  ],
+  "instances": [
+    {
+      "component": "tensorrt_llm",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7937486108344976651,
+      "transport": {
+        "tcp": "10.1.65.230:39009/6e279d8f9980050b/generate"
+      }
+    },
+    {
+      "component": "tensorrt_llm_encode",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 7937486108344976649,
+      "transport": {
+        "tcp": "10.1.65.230:41737/6e279d8f99800509/generate"
+      }
+    }
+  ]
+}
+INFO     test_deployment[raw_embeddings_epd-2]:common.py:124 TESTING: Payload: ChatPayload
+INFO     tests.utils.client:client.py:94 Sending request (curl equivalent):
+curl -X POST "http://localhost:8070/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Describe what this image shows."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "file:///tmp/llava_embeddings.pt"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 160,
+  "stream": false,
+  "logprobs": false,
+  "model": "llava-hf/llava-v1.6-mistral-7b-hf"
+}'
+INFO     tests.utils.client:client.py:111 Received response: status=200, elapsed=10.28s
+INFO     tests.utils.payloads:payloads.py:99 SUCCESS: Found 1/4 expected keywords: ['image']
+INFO     tests.utils.engine_process:engine_process.py:104 Extracted content: 
+This image shows a scenic view of a mountainous landscape. In the foreground, there is a winding road that curves to the left, leading the viewer's eye towards the mountains. The road is flanked by tr...
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3586
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 4707
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 4260
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3576
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 4249
+INFO     EngineProcess:managed_process.py:558 Sending SIGTERM to process group: 3228
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3230 name: tee
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3230 tee
+INFO     EngineProcess:managed_process.py:31 Terminating PID: 3229 name: sed
+INFO     EngineProcess:managed_process.py:36 Sending SIGTERM (kill): 3229 sed
+INFO     EtcdServer:managed_process.py:558 Sending SIGTERM to process group: 3212
+INFO     EtcdServer:managed_process.py:31 Terminating PID: 3213 name: sed
+INFO     EtcdServer:managed_process.py:36 Sending SIGTERM (kill): 3213 sed
+INFO     NatsServer:managed_process.py:558 Sending SIGTERM to process group: 3200
+INFO     NatsServer:managed_process.py:31 Terminating PID: 3201 name: sed
+INFO     NatsServer:managed_process.py:36 Sending SIGTERM (kill): 3201 sed

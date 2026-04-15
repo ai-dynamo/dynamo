@@ -1,6 +1,0 @@
-INFO     load_generator:load_generator.py:80 Generating load: 1.0 req/s for 1s
-INFO     load_generator:load_generator.py:84 Using request_rate=1.0 req/s
-INFO     load_generator:load_generator.py:95 Adjusted parameters: duration=1s, request_count=1
-INFO     load_generator:load_generator.py:129 Running command: aiperf profile --model nvidia/Llama-3.1-8B-Instruct-FP8 --tokenizer nvidia/Llama-3.1-8B-Instruct-FP8 --endpoint-type chat --url localhost:8000 --streaming --synthetic-input-tokens-mean 4000 --output-tokens-mean 150 --request-rate 1.0 --request-count 1 --num-dataset-entries 20 --artifact-dir /tmp/tmp99qocjgu -v
-INFO     load_generator:load_generator.py:130 Expected duration: 1s, timeout: 122s
-ERROR    load_generator:load_generator.py:164 aiperf timed out

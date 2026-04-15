@@ -1,1 +1,1 @@
-{"id":"4226f41ef55db20ce08e4ccdf1837f13","fullName":"components.src.dynamo.planner.tests.unit.test_replica_calculation.TestReplicaCalculation#test_gpu_budget_constraint","name":"test_gpu_budget_constraint","status":"passed","testResultsByEnv":{"default":"0d658681a0741406c3ff650b21ad392e"}}
+{"id":"4226f41ef55db20ce08e4ccdf1837f13","fullName":"components.src.dynamo.planner.tests.unit.test_replica_calculation.TestReplicaCalculation#test_gpu_budget_constraint","name":"test_gpu_budget_constraint","status":"passed","testResultsByEnv":{"default":"e6fd5670b93641ad87e72297b91f2786"}}

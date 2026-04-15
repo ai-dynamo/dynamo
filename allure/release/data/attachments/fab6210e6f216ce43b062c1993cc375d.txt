@@ -1,0 +1,6 @@
+INFO     dynamo.planner.core.prefill:prefill.py:82 Correction factor (prefill TTFT): 1.000
+INFO     dynamo.planner.core.base:base.py:557 Predicted load: num_req=20.00, isl=3000.00, osl=150.00
+INFO     dynamo.planner.core.prefill:prefill.py:110 Prefill calculation: 1000.00(p_thpt) / 80000.00(p_engine_cap) = 1(num_p)
+WARNING  dynamo.planner.core.decode:decode.py:71 No decode workers found for correction factor, skipping correction update
+INFO     dynamo.planner.core.base:base.py:557 Predicted load: num_req=20.00, isl=3000.00, osl=150.00
+INFO     dynamo.planner.core.decode:decode.py:126 Decode calculation: 50.00(d_thpt) / 20000.00(d_engine_cap) = 1(num_d)

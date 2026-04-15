@@ -1,0 +1,4 @@
+[TEST] 2026-04-15T05:37:16 WARNING dynamo.trtllm.request_handlers.video_diffusion.video_handler: Invalid size format: 832480, using defaults
+[TEST] 2026-04-15T05:37:16 WARNING dynamo.trtllm.request_handlers.video_diffusion.video_handler: Invalid size format: 832, using defaults
+[TEST] 2026-04-15T05:37:16 WARNING dynamo.trtllm.request_handlers.video_diffusion.video_handler: Invalid size format: widthxheight, using defaults
+[TEST] 2026-04-15T05:37:16 WARNING dynamo.trtllm.request_handlers.video_diffusion.video_handler: Invalid size format: 832x, using defaults

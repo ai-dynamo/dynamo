@@ -1,0 +1,1 @@
+[2m2026-04-15T04:56:57.574506Z[0m [32m INFO[0m [2mkubernetes_api.update_service_replicas[0m[2m:[0m Scaled DGDSA test-deployment-test-component to 1 replicas

@@ -1,0 +1,6 @@
+INFO     aiconfigurator.sdk.perf_database:perf_database.py:272 Loading database for system='h200_sxm', backend='vllm', version='0.12.0'
+INFO     aiconfigurator.sdk.utils:utils.py:769 Quant inference result: quant_algo=None, kv_cache_quant_algo=None, quant_dynamic=None
+INFO     aiconfigurator.sdk.utils:utils.py:868 Loaded model config for Qwen/Qwen3-32B: architecture=Qwen3ForCausalLM, layers=64, n=64, n_kv=8, d=128, hidden_size=5120, inter_size=25600, vocab=151936, context=40960, topk=0, num_experts=0, moe_inter_size=25600, extra_params={'architecture': 'Qwen3ForCausalLM', 'use_qk_norm': True}
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     dynamo._internal.aic:aic.py:102 AIC session initialized: backend=vllm, system=h200_sxm, model=Qwen/Qwen3-32B, tp=1
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Qwen3ForCausalLM: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half

@@ -1,0 +1,1 @@
+ERROR    dynamo.vllm.handlers:handlers.py:1156 Failed to decode prompt_embeds: prompt_embeds must be a torch.Tensor, got <class 'dict'>

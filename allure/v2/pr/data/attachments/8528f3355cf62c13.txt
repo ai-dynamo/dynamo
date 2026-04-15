@@ -1,1 +1,0 @@
-[2m2026-04-14T20:26:55.121557Z[0m [32m INFO[0m [2mrapid._run_default_sim[0m[2m:[0m AIC picked aggregated config but interpolation data is required — overriding to 'disagg' to support mocker/throughput-scaling.

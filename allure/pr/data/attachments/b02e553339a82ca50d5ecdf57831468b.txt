@@ -1,0 +1,2 @@
+INFO     dynamo.planner.connectors.global_planner:global_planner.py:134 Delegating scale request to GlobalPlanner: DGD=d, prefill=[1], decode=[]
+ERROR    dynamo.planner.connectors.global_planner:global_planner.py:148 GlobalPlanner scaling failed: Failed

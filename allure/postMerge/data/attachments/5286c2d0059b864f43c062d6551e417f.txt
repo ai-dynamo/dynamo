@@ -1,0 +1,141 @@
+[2m2026-04-15T05:14:13.195819Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4283 in /workspace
+[2m2026-04-15T05:14:13.196818Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4283
+[2m2026-04-15T05:14:13.297533Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4283
+[2m2026-04-15T05:14:13.297799Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-15T05:14:13.299653Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-15T05:14:13.300332Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2389 --advertise-client-urls http://0.0.0.0:2389 --listen-peer-urls http://0.0.0.0:2390 --initial-advertise-peer-urls http://localhost:2390 --initial-cluster default=http://localhost:2390 --data-dir /tmp/etcd_juwua7mi in /workspace
+[2m2026-04-15T05:14:13.301191Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2389
+[2m2026-04-15T05:14:13.401850Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2389
+[2m2026-04-15T05:14:13.406372Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting multimodal_e_pd_qwen test_deployment
+[2m2026-04-15T05:14:13.406447Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-VL-2B-Instruct
+[2m2026-04-15T05:14:13.406497Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: disagg_multimodal_e_pd.sh
+[2m2026-04-15T05:14:13.407318Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/disagg_multimodal_e_pd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-gpu in /workspace/examples/backends/vllm
+[2m2026-04-15T05:14:13.409209Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8038/v1/models
+[2m2026-04-15T05:14:16.069069Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:14:16.069599Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:14:21.070752Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:14:21.071216Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:14:26.072373Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:14:26.072849Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:14:31.074004Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:14:31.074453Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:14:35.434662Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Still waiting for URL http://localhost:8038/v1/models (custom check failed) (attempt=13, elapsed=21.0s)
+[2m2026-04-15T05:14:36.075145Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:14:36.075664Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:14:41.076668Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:14:41.077093Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:14:46.077831Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:14:46.078246Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:14:51.079293Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:14:51.079664Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:14:51.452127Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8038/v1/models (attempt=21, elapsed=37.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-VL-2B-Instruct",
+      "object": "model",
+      "created": 1776230090,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-15T05:14:51.452263Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8038/health
+[2m2026-04-15T05:14:52.454897Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8038/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics",
+    "dyn://dynamo.encode.generate"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 4633532831551047179,
+      "transport": {
+        "tcp": "10.1.0.246:32861/404d9d8f8fb5c60b/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 4633532831551047179,
+      "transport": {
+        "tcp": "10.1.0.246:32861/404d9d8f8fb5c60b/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 4633532831551047179,
+      "transport": {
+        "tcp": "10.1.0.246:32861/404d9d8f8fb5c60b/get_perf_metrics"
+      }
+    },
+    {
+      "component": "encode",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 4633532831551047177,
+      "transport": {
+        "tcp": "10.1.0.246:34951/404d9d8f8fb5c609/generate"
+      }
+    }
+  ]
+}
+[2m2026-04-15T05:14:52.455153Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-15T05:14:52.455548Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8038/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "What colors are in the following image? Respond only with the colors."
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "http://localhost:8827/llm-graphic.png"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 100,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "model": "Qwen/Qwen3-VL-2B-Instruct"
+}'
+[2m2026-04-15T05:14:52.501526Z[0m [32m INFO[0m [2m_internal._log[0m[2m:[0m 127.0.0.1 - - [15/Apr/2026 05:14:52] "GET /llm-graphic.png HTTP/1.1" 200 -
+[2m2026-04-15T05:14:55.548034Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=3.09s
+[2m2026-04-15T05:14:55.548340Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['green']
+[2m2026-04-15T05:14:55.548395Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+purple, white, green, black
+[2m2026-04-15T05:14:55.549465Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6679
+[2m2026-04-15T05:14:56.079800Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:14:56.080256Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:15:01.080921Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:15:01.081368Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:15:01.255298Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6681 name: tee
+[2m2026-04-15T05:15:01.255432Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6681 tee
+[2m2026-04-15T05:15:01.255854Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6680 name: sed
+[2m2026-04-15T05:15:01.255944Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6680 sed
+[2m2026-04-15T05:15:01.260591Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6666
+[2m2026-04-15T05:15:01.361336Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6667 name: sed
+[2m2026-04-15T05:15:01.361450Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6667 sed
+[2m2026-04-15T05:15:01.362320Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 6654
+[2m2026-04-15T05:15:01.463193Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 6655 name: sed
+[2m2026-04-15T05:15:01.463296Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 6655 sed

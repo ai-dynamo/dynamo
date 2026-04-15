@@ -1,0 +1,2 @@
+INFO     dynamo.profiler.rapid:rapid.py:116 Auto backend resolved to 'vllm' for naive fallback.
+INFO     dynamo.profiler.rapid:rapid.py:117 AIC does not support this combo — falling back to naive config generation.

@@ -1,6 +1,0 @@
-[2m2026-04-14T20:26:55.257974Z[0m [32m INFO[0m [2mload_generator.generate_load[0m[2m:[0m Generating load: 1.0 req/s for 1s
-[2m2026-04-14T20:26:55.258086Z[0m [32m INFO[0m [2mload_generator.generate_load[0m[2m:[0m Using request_rate=1.0 req/s
-[2m2026-04-14T20:26:55.258185Z[0m [32m INFO[0m [2mload_generator.generate_load[0m[2m:[0m Adjusted parameters: duration=1s, request_count=1
-[2m2026-04-14T20:26:55.258257Z[0m [32m INFO[0m [2mload_generator.generate_load[0m[2m:[0m Running command: aiperf profile --model nvidia/Llama-3.1-8B-Instruct-FP8 --tokenizer nvidia/Llama-3.1-8B-Instruct-FP8 --endpoint-type chat --url localhost:8000 --streaming --synthetic-input-tokens-mean 4000 --output-tokens-mean 150 --request-rate 1.0 --request-count 1 --num-dataset-entries 20 --artifact-dir /tmp/tmp99qocjgu -v
-[2m2026-04-14T20:26:55.258319Z[0m [32m INFO[0m [2mload_generator.generate_load[0m[2m:[0m Expected duration: 1s, timeout: 122s
-[2m2026-04-14T20:26:55.258880Z[0m [31mERROR[0m [2mload_generator.generate_load[0m[2m:[0m aiperf timed out

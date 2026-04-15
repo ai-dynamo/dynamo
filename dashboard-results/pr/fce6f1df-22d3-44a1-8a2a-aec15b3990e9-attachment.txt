@@ -1,0 +1,1 @@
+[2m2026-04-15T04:56:05.517280Z[0m [31mERROR[0m [2margs._validate_parser_flags[0m[2m:[0m Cannot use both --tool-call-parser and --dyn-tool-call-parser.

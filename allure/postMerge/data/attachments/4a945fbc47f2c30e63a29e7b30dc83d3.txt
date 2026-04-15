@@ -1,0 +1,9 @@
+[2m2026-04-15T04:56:57.869549Z[0m [32m INFO[0m [2mprofile_sla._extract_profiler_params[0m[2m:[0m Profiler config: model=Qwen/Qwen3-32B, backend=trtllm, system=h200_sxm, total_gpus=64, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=thorough, picking=load_match
+[2m2026-04-15T04:56:57.870088Z[0m [32m INFO[0m [2mutils._infer_quantization_fields[0m[2m:[0m Quant inference result: quant_algo=None, kv_cache_quant_algo=None, quant_dynamic=None
+[2m2026-04-15T04:56:57.870174Z[0m [32m INFO[0m [2mutils.get_model_config_from_model_path[0m[2m:[0m Loaded model config for Qwen/Qwen3-32B: architecture=Qwen3ForCausalLM, layers=64, n=64, n_kv=8, d=128, hidden_size=5120, inter_size=25600, vocab=151936, context=40960, topk=0, num_experts=0, moe_inter_size=25600, extra_params={'architecture': 'Qwen3ForCausalLM', 'use_qk_norm': True}
+[2m2026-04-15T04:56:57.928687Z[0m [32m INFO[0m [2mprofile_sla._execute_strategy[0m[2m:[0m Dry run mode — skipping deployment and benchmarking.
+[2m2026-04-15T04:56:57.928781Z[0m [32m INFO[0m [2mprofile_sla._execute_strategy[0m[2m:[0m Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1)
+[2m2026-04-15T04:56:57.929921Z[0m [33m WARN[0m [2mprofile_sla._write_final_output[0m[2m:[0m Dry run mode — no DGD config produced (expected).
+[2m2026-04-15T04:56:57.931159Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
+[2m2026-04-15T04:56:57.931234Z[0m [32m INFO[0m [2mdynamo_deployment.cleanup_remaining_deployments[0m[2m:[0m No deployments to clean up
+[2m2026-04-15T04:56:57.931277Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.

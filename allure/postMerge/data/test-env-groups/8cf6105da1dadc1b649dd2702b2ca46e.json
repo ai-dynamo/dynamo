@@ -1,1 +1,1 @@
-{"id":"8cf6105da1dadc1b649dd2702b2ca46e","fullName":"tests.frontend.test_prepost#test_stream_interval_1","name":"test_stream_interval_1","status":"passed","testResultsByEnv":{"vllm-amd64":"3567810478f3d65597aadc07af92a1d3","vllm-arm64":"ae159a941032a54c7e261fc2d045f625"}}
+{"id":"8cf6105da1dadc1b649dd2702b2ca46e","fullName":"tests.frontend.test_prepost#test_stream_interval_1","name":"test_stream_interval_1","status":"passed","testResultsByEnv":{"vllm-arm64":"7a63912572331a9b3b2ffc3a3535ecdc","vllm-amd64":"3affbba34aaedf866bf648c2881bce46"}}

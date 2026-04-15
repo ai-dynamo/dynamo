@@ -1,1 +1,1 @@
-{"id":"e41ebe0c9159ce15d3cc93104ec4549e","fullName":"components.src.dynamo.vllm.tests.omni.test_audio_handler.TestIsTtsModel#test_qwen3_tts_detected","name":"test_qwen3_tts_detected","status":"passed","testResultsByEnv":{"default":"e26cdc9aa22f0a69703e0992fcb865b5"}}
+{"id":"e41ebe0c9159ce15d3cc93104ec4549e","fullName":"components.src.dynamo.vllm.tests.omni.test_audio_handler.TestIsTtsModel#test_qwen3_tts_detected","name":"test_qwen3_tts_detected","status":"passed","testResultsByEnv":{"default":"80f8000fe4e1f663e60b1784d1a86eb6"}}

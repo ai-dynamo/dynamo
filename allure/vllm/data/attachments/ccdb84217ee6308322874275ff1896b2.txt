@@ -1,0 +1,293 @@
+[2m2026-04-15T05:09:04.686975Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: nats-server --trace -p 4276 in /workspace
+[2m2026-04-15T05:09:04.687982Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 4276
+[2m2026-04-15T05:09:04.788612Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 4276
+[2m2026-04-15T05:09:04.788885Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m Running custom health check '_nats_ready'
+[2m2026-04-15T05:09:04.790812Z[0m [32m INFO[0m [2mmanaged_process._check_func[0m[2m:[0m SUCCESS: Custom health check '_nats_ready' passed (attempt=1, elapsed=0.0s)
+[2m2026-04-15T05:09:04.791496Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: etcd --listen-client-urls http://0.0.0.0:2473 --advertise-client-urls http://0.0.0.0:2473 --listen-peer-urls http://0.0.0.0:2474 --initial-advertise-peer-urls http://localhost:2474 --initial-cluster default=http://localhost:2474 --data-dir /tmp/etcd_kq6obj54 in /workspace
+[2m2026-04-15T05:09:04.792343Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m Checking Port: 2473
+[2m2026-04-15T05:09:04.892980Z[0m [32m INFO[0m [2mmanaged_process._check_port[0m[2m:[0m SUCCESS: Check Port: 2473
+[2m2026-04-15T05:09:04.897037Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Starting aggregated test_deployment
+[2m2026-04-15T05:09:04.897106Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Using model: Qwen/Qwen3-0.6B
+[2m2026-04-15T05:09:04.897154Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m Script: agg.sh
+[2m2026-04-15T05:09:04.897348Z[0m [32m INFO[0m [2mmanaged_process._start_process[0m[2m:[0m Running command: bash /workspace/examples/backends/vllm/launch/agg.sh in /workspace/examples/backends/vllm
+[2m2026-04-15T05:09:04.898586Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8057/v1/models
+[2m2026-04-15T05:09:05.073673Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:05.073794Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:06.075354Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:06.075468Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:06.075855Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::lease[0m[2m:[0m Failed to establish keep-alive stream [3mlease_id[0m[2m=[0m4059042403985691653 [3merror[0m[2m=[0mgrpc request error: code: 'The service is currently unavailable', message: "tcp connect error", source: tonic::transport::Error(Transport, ConnectError(ConnectError("tcp connect error", 127.0.0.1:2471, Os { code: 111, kind: ConnectionRefused, message: "Connection refused" })))
+[2m2026-04-15T05:09:08.076002Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:08.076094Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:11.134538Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:11.134635Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:11.135009Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::lease[0m[2m:[0m Failed to establish keep-alive stream [3mlease_id[0m[2m=[0m4059042403985691653 [3merror[0m[2m=[0mgrpc request error: code: 'The service is currently unavailable', message: "tcp connect error", source: tonic::transport::Error(Transport, ConnectError(ConnectError("tcp connect error", 127.0.0.1:2471, Os { code: 111, kind: ConnectionRefused, message: "Connection refused" })))
+[2m2026-04-15T05:09:14.606597Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:14.606704Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:14.658219Z[0m [31mERROR[0m [2mdynamo_runtime::transports::etcd::lease[0m[2m:[0m Unable to maintain lease. Check etcd server status [3merror[0m[2m=[0mUnable to reconnect to ETCD cluster: deadline exceeded
+[2m2026-04-15T05:09:14.658262Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:14.759471Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:14.759934Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:14.961254Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:14.961830Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:15.363429Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:15.363940Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:16.164887Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:16.165420Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:17.766152Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:17.766684Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:20.968777Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:20.969310Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:25.970518Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:25.971145Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:26.923579Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8057/v1/models (attempt=13, elapsed=21.0s)
+Response:
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1776229765,
+      "owned_by": "nvidia"
+    }
+  ]
+}
+[2m2026-04-15T05:09:26.923999Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m Checking URL http://localhost:8057/health
+[2m2026-04-15T05:09:27.926499Z[0m [32m INFO[0m [2mmanaged_process._check_url[0m[2m:[0m SUCCESS: Check URL: http://localhost:8057/health (attempt=1, elapsed=0.0s)
+Response:
+{
+  "status": "healthy",
+  "endpoints": [
+    "dyn://dynamo.backend.clear_kv_blocks",
+    "dyn://dynamo.backend.generate",
+    "dyn://dynamo.backend.get_perf_metrics"
+  ],
+  "instances": [
+    {
+      "component": "backend",
+      "endpoint": "clear_kv_blocks",
+      "namespace": "dynamo",
+      "instance_id": 2927512997628783369,
+      "transport": {
+        "tcp": "10.1.0.246:45945/28a09d8f8b00ab09/clear_kv_blocks"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "generate",
+      "namespace": "dynamo",
+      "instance_id": 2927512997628783369,
+      "transport": {
+        "tcp": "10.1.0.246:45945/28a09d8f8b00ab09/generate"
+      }
+    },
+    {
+      "component": "backend",
+      "endpoint": "get_perf_metrics",
+      "namespace": "dynamo",
+      "instance_id": 2927512997628783369,
+      "transport": {
+        "tcp": "10.1.0.246:45945/28a09d8f8b00ab09/get_perf_metrics"
+      }
+    }
+  ]
+}
+[2m2026-04-15T05:09:27.926903Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-15T05:09:27.927103Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8057/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-15T05:09:30.972287Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:30.972685Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:35.973802Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:35.974227Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:40.975343Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:40.975783Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:43.158605Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=15.23s
+[2m2026-04-15T05:09:43.158981Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-04-15T05:09:43.159042Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-04-15T05:09:43.159143Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8057/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-15T05:09:45.976939Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:45.977423Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:50.395879Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=7.24s
+[2m2026-04-15T05:09:50.396344Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 5/6 expected keywords: ['AI', 'knock', 'joke', 'think', 'intelligence']
+[2m2026-04-15T05:09:50.396404Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-04-15T05:09:50.396512Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8057/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Tell me a knock knock joke about AI."
+    }
+  ],
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-15T05:09:50.978501Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:50.978869Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:55.980013Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:09:55.980443Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:09:57.629725Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=7.23s
+[2m2026-04-15T05:09:57.630288Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 5/6 expected keywords: ['AI', 'knock', 'joke', 'think', 'intelligence']
+[2m2026-04-15T05:09:57.630345Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user wants a knock knock joke about AI. Let me start by thinking about the structure of a typical joke. Usually, it's a setup, a punchline, and a twist. Since it's about AI, I need t...
+[2m2026-04-15T05:09:57.630403Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: CompletionPayload
+[2m2026-04-15T05:09:57.630557Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8057/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-15T05:10:00.981059Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:00.981524Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:05.982720Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:05.983235Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:10.984299Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:10.984736Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:12.596350Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=14.97s
+[2m2026-04-15T05:10:12.596772Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-04-15T05:10:12.596831Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+[2m2026-04-15T05:10:12.596918Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8057/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-15T05:10:15.987710Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:15.988170Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:20.989012Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:20.989469Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:25.990626Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:25.991073Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:27.429610Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=14.83s
+[2m2026-04-15T05:10:27.430048Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-04-15T05:10:27.430108Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+[2m2026-04-15T05:10:27.430193Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8057/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "prompt": "Tell me a knock knock joke about AI.",
+  "max_tokens": 1000,
+  "temperature": 0.0,
+  "stream": false,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-15T05:10:30.992213Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:30.992604Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:35.993265Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:35.993713Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:40.995570Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:40.996009Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:42.231056Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=14.80s
+[2m2026-04-15T05:10:42.231576Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 4/6 expected keywords: ['AI', 'knock', 'joke', 'think']
+[2m2026-04-15T05:10:42.231637Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+ 
+
+Okay, so I need to come up with a knock knock joke about AI. Let me think. First, the setup: there are four knocks. Each knock is a question or a statement. The answer to each question is a differe...
+[2m2026-04-15T05:10:42.231696Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: ChatPayload
+[2m2026-04-15T05:10:42.231855Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl -X POST "http://localhost:8057/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Can you write me a song?"
+    }
+  ],
+  "max_tokens": 32,
+  "stream": false,
+  "logprobs": false,
+  "temperature": 0.0,
+  "stop": [
+    "song"
+  ],
+  "include_stop_str_in_output": true,
+  "model": "Qwen/Qwen3-0.6B"
+}'
+[2m2026-04-15T05:10:42.426458Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.19s
+[2m2026-04-15T05:10:42.426965Z[0m [32m INFO[0m [2mpayloads.validate[0m[2m:[0m SUCCESS: Found 1/1 expected keywords: ['song']
+[2m2026-04-15T05:10:42.427020Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+<think>
+Okay, the user asked me to write a song
+[2m2026-04-15T05:10:42.427071Z[0m [32m INFO[0m [2mcommon.run_serve_deployment[0m[2m:[0m TESTING: Payload: VLLMMetricsPayload
+[2m2026-04-15T05:10:42.427182Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Sending request (curl equivalent):
+curl "http://localhost:8115/metrics"
+[2m2026-04-15T05:10:42.436861Z[0m [32m INFO[0m [2mclient.send_request[0m[2m:[0m Received response: status=200, elapsed=0.01s
+[2m2026-04-15T05:10:42.437567Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found 12 unique dynamo_component_* metrics (minimum required: 7)
+[2m2026-04-15T05:10:42.437796Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_requests_total with count: 7
+[2m2026-04-15T05:10:42.437992Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_uptime_seconds = 90.596262519s
+[2m2026-04-15T05:10:42.438178Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_total_blocks = 10876.0
+[2m2026-04-15T05:10:42.438369Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_gpu_cache_usage_percent = 0.00018390804597701038
+[2m2026-04-15T05:10:42.438563Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found dynamo_component_model_load_time_seconds = 11.49s
+[2m2026-04-15T05:10:42.438858Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: Found 82 unique vllm:* metrics (minimum required: 56)
+[2m2026-04-15T05:10:42.439075Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: vLLM metrics include dynamo_namespace label (found 96 metrics)
+[2m2026-04-15T05:10:42.439321Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: vLLM metrics include dynamo_component label (found 96 metrics)
+[2m2026-04-15T05:10:42.439542Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: vLLM metrics include dynamo_endpoint label (found 96 metrics)
+[2m2026-04-15T05:10:42.439738Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: vLLM metrics include model label (found 96 metrics)
+[2m2026-04-15T05:10:42.439929Z[0m [32m INFO[0m [2mpayloads._validate_metric_checks[0m[2m:[0m SUCCESS: vLLM metrics include model_name label (found 96 metrics)
+[2m2026-04-15T05:10:42.439982Z[0m [32m INFO[0m [2mengine_process.check_response[0m[2m:[0m Extracted content: 
+# HELP dynamo_component_cancellation_total Total number of requests cancelled by work handler
+# TYPE dynamo_component_cancellation_total counter
+dynamo_component_cancellation_total{dynamo_component="b...
+[2m2026-04-15T05:10:42.440907Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5599
+[2m2026-04-15T05:10:45.997020Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Successfully reconnected to ETCD cluster
+[2m2026-04-15T05:10:45.997853Z[0m [33m WARN[0m [2mdynamo_runtime::transports::etcd::connector[0m[2m:[0m Reconnecting to ETCD cluster at: ["http://localhost:2471"]
+[2m2026-04-15T05:10:47.846911Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5601 name: tee
+[2m2026-04-15T05:10:47.847056Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5601 tee
+[2m2026-04-15T05:10:47.847472Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5600 name: sed
+[2m2026-04-15T05:10:47.847560Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5600 sed
+[2m2026-04-15T05:10:47.851908Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5586
+[2m2026-04-15T05:10:47.952967Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5587 name: sed
+[2m2026-04-15T05:10:47.953172Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5587 sed
+[2m2026-04-15T05:10:47.954024Z[0m [32m INFO[0m [2mmanaged_process._terminate_process_group[0m[2m:[0m Sending SIGTERM to process group: 5574
+[2m2026-04-15T05:10:48.054889Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Terminating PID: 5575 name: sed
+[2m2026-04-15T05:10:48.055118Z[0m [32m INFO[0m [2mmanaged_process.terminate_process[0m[2m:[0m Sending SIGTERM (kill): 5575 sed

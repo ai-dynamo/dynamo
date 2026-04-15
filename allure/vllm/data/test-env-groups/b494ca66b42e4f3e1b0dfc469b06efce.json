@@ -1,1 +1,1 @@
-{"id":"b494ca66b42e4f3e1b0dfc469b06efce","fullName":"tests.basic.test_cuda_version_consistency#test_cuda_major_consistency","name":"test_cuda_major_consistency","status":"skipped","testResultsByEnv":{"default":"abbc2e41b6f2dc3d85eff3ecc4ca496b"}}
+{"id":"b494ca66b42e4f3e1b0dfc469b06efce","fullName":"tests.basic.test_cuda_version_consistency#test_cuda_major_consistency","name":"test_cuda_major_consistency","status":"skipped","testResultsByEnv":{"default":"aeed80e6d8c1693d8769bcfe85d09f75"}}

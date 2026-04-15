@@ -1,0 +1,56 @@
+INFO     dynamo.profiler.profile_sla:profile_sla.py:101 Profiler config: model=Qwen/Qwen3-32B, backend=trtllm, system=h200_sxm, total_gpus=64, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=thorough, picking=load_match
+INFO     aiconfigurator.sdk.utils:utils.py:769 Quant inference result: quant_algo=None, kv_cache_quant_algo=None, quant_dynamic=None
+INFO     aiconfigurator.sdk.utils:utils.py:868 Loaded model config for Qwen/Qwen3-32B: architecture=Qwen3ForCausalLM, layers=64, n=64, n_kv=8, d=128, hidden_size=5120, inter_size=25600, vocab=151936, context=40960, topk=0, num_experts=0, moe_inter_size=25600, extra_params={'architecture': 'Qwen3ForCausalLM', 'use_qk_norm': True}
+WARNING  dynamo.profiler.thorough:thorough.py:347 THOROUGH mode: only disagg configurations are supported.
+INFO     aiconfigurator.generator.naive:naive.py:141 Estimated model weight size for Qwen/Qwen3-32B: 60.83 GiB (32.66B params)
+INFO     aiconfigurator.generator.enumerate:enumerate.py:446 AIC disagg support for Qwen/Qwen3-32B on h200_sxm/trtllm: True
+INFO     aiconfigurator.generator.naive:naive.py:200 TP calculation: model=60.83GiB, vram=141.00GiB, required=91.24GiB (1.5x), min_tp=1, selected_tp=1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:463 Minimum GPUs per engine (memory fit): 1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:485 Parallel lists: is_moe=False, enable_wideep=False, min_gpus=1, prefill_max_gpus=8, decode_max_gpus=8, prefill_num_gpu_list=[1, 2, 4, 8], prefill_dp_list=[1], prefill_moe_ep_list=[1]
+INFO     aiconfigurator.generator.enumerate:enumerate.py:567 Enumerated 4 prefill configs, 4 decode configs
+INFO     aiconfigurator.generator.enumerate:enumerate.py:595 Building prefill DGD: tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:595 Building prefill DGD: tp=2 pp=1 dp=1 moe_tp=1 moe_ep=1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:595 Building prefill DGD: tp=4 pp=1 dp=1 moe_tp=1 moe_ep=1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:595 Building prefill DGD: tp=8 pp=1 dp=1 moe_tp=1 moe_ep=1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:639 Building decode DGD: tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:639 Building decode DGD: tp=2 pp=1 dp=1 moe_tp=1 moe_ep=1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:639 Building decode DGD: tp=4 pp=1 dp=1 moe_tp=1 moe_ep=1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:639 Building decode DGD: tp=8 pp=1 dp=1 moe_tp=1 moe_ep=1
+INFO     aiconfigurator.generator.enumerate:enumerate.py:680 Enumeration complete: 4 prefill DGDs, 4 decode DGDs
+INFO     dynamo.profiler.thorough:thorough.py:364 Enumerated 4 prefill candidates, 4 decode candidates
+INFO     dynamo.profiler.thorough:thorough.py:98 Profiling prefill candidate tp1 with 1 GPUs...
+INFO     dynamo.profiler.thorough:thorough.py:116 Waiting for prefill deployment to be ready...
+INFO     dynamo.profiler.thorough:thorough.py:124 Prefill deployment ready
+INFO     dynamo.profiler.thorough:thorough.py:98 Profiling prefill candidate tp2 with 2 GPUs...
+INFO     dynamo.profiler.thorough:thorough.py:116 Waiting for prefill deployment to be ready...
+INFO     dynamo.profiler.thorough:thorough.py:124 Prefill deployment ready
+INFO     dynamo.profiler.thorough:thorough.py:98 Profiling prefill candidate tp4 with 4 GPUs...
+INFO     dynamo.profiler.thorough:thorough.py:116 Waiting for prefill deployment to be ready...
+INFO     dynamo.profiler.thorough:thorough.py:124 Prefill deployment ready
+INFO     dynamo.profiler.thorough:thorough.py:98 Profiling prefill candidate tp8 with 8 GPUs...
+INFO     dynamo.profiler.thorough:thorough.py:116 Waiting for prefill deployment to be ready...
+INFO     dynamo.profiler.thorough:thorough.py:124 Prefill deployment ready
+INFO     dynamo.profiler.thorough:thorough.py:200 Profiling decode candidate tp1 with 1 GPUs...
+INFO     dynamo.profiler.thorough:thorough.py:218 Waiting for decode deployment to be ready...
+INFO     dynamo.profiler.thorough:thorough.py:226 Decode deployment ready
+INFO     dynamo.profiler.thorough:thorough.py:245 Sweeping num_request: [1, 4, 8]
+INFO     dynamo.profiler.thorough:thorough.py:200 Profiling decode candidate tp2 with 2 GPUs...
+INFO     dynamo.profiler.thorough:thorough.py:218 Waiting for decode deployment to be ready...
+INFO     dynamo.profiler.thorough:thorough.py:226 Decode deployment ready
+INFO     dynamo.profiler.thorough:thorough.py:245 Sweeping num_request: [1, 4, 8]
+INFO     dynamo.profiler.thorough:thorough.py:200 Profiling decode candidate tp4 with 4 GPUs...
+INFO     dynamo.profiler.thorough:thorough.py:218 Waiting for decode deployment to be ready...
+INFO     dynamo.profiler.thorough:thorough.py:226 Decode deployment ready
+INFO     dynamo.profiler.thorough:thorough.py:245 Sweeping num_request: [1, 4, 8]
+INFO     dynamo.profiler.thorough:thorough.py:200 Profiling decode candidate tp8 with 8 GPUs...
+INFO     dynamo.profiler.thorough:thorough.py:218 Waiting for decode deployment to be ready...
+INFO     dynamo.profiler.thorough:thorough.py:226 Decode deployment ready
+INFO     dynamo.profiler.thorough:thorough.py:245 Sweeping num_request: [1, 4, 8]
+INFO     aiconfigurator.sdk.perf_database:perf_database.py:272 Loading database for system='h200_sxm', backend='trtllm', version='1.2.0rc5'
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Prefill worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     aiconfigurator.sdk.models:models.py:149 Resolved quant modes for Decode worker: gemm=GEMMQuantMode.float16 moe=MoEQuantMode.float16 kvcache=KVCacheQuantMode.float16 fmha=FMHAQuantMode.float16 comm=CommQuantMode.half
+INFO     dynamo.profiler.profile_sla:profile_sla.py:213 Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp8 (8 GPUs, tp=8 pp=1 dp=1 moe_tp=1 moe_ep=1)
+INFO     dynamo.profiler.profile_sla:profile_sla.py:265 Final DGD config saved to /tmp/pytest_temp/popen-gw0/test_thorough_no_planner_with_0/profiling_results/final_config.yaml
+INFO     dynamo.profiler.profile_sla:profile_sla.py:472 Performing final cleanup of any remaining deployments...
+INFO     deploy.utils.dynamo_deployment:dynamo_deployment.py:510 No deployments to clean up
+INFO     dynamo.profiler.profile_sla:profile_sla.py:474 Final cleanup completed.

@@ -1,0 +1,1 @@
+[2m2026-04-15T04:56:57.694655Z[0m [32m INFO[0m [2mrapid._run_naive_fallback[0m[2m:[0m AIC does not support this combo — falling back to naive config generation.

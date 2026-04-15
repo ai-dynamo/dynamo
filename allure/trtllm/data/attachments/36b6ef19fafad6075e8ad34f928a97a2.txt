@@ -1,0 +1,10 @@
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:67 ScaleRequestHandler initialized for namespaces: ['app-ns']
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:85 GPU budget enforcement DISABLED (unlimited)
+INFO     dynamo.global_planner.scale_handler:scale_handler.py:236 Processing scale request from app-ns for DGD my-dgd in K8s namespace default
+ERROR    dynamo.global_planner.scale_handler:scale_handler.py:306 Error processing scale request: Scaling failed
+Traceback (most recent call last):
+  File "/workspace/components/src/dynamo/global_planner/scale_handler.py", line 282, in scale_request
+    await connector.set_component_replicas(
+  File "/usr/local/lib/python3.12/unittest/mock.py", line 2291, in _execute_mock_call
+    raise effect
+Exception: Scaling failed

@@ -1,4 +1,0 @@
-[2m2026-04-14T20:26:55.220163Z[0m [32m INFO[0m [2mdecode.load_plan_adjustment[0m[2m:[0m Decode engine w1:dp0: estimated ITL 833.50ms (sched_kv=5000, queued_kv=3000, avg_decode_len=325.0)
-[2m2026-04-14T20:26:55.220398Z[0m [32m INFO[0m [2mdecode.load_plan_adjustment[0m[2m:[0m Decode engine w2:dp0: estimated ITL 733.50ms (sched_kv=4500, queued_kv=2500, avg_decode_len=325.0)
-[2m2026-04-14T20:26:55.220467Z[0m [32m INFO[0m [2mbase._load_based_scaling_decision_from_estimates[0m[2m:[0m Load-based decode ITL: workers=2, sla=5.0ms, estimates=['833.5', '733.5']
-[2m2026-04-14T20:26:55.220514Z[0m [32m INFO[0m [2mbase._load_based_scaling_decision_from_estimates[0m[2m:[0m Load-based decode ITL: ALL engines above SLA (5.0ms), scaling up to 3

@@ -1,0 +1,2 @@
+[2m2026-04-15T05:03:20.757013Z[0m [32m INFO[0m [2mhandlers.sleep[0m[2m:[0m [Sleep] Unregistered endpoint from discovery - worker removed from routing pool
+[2m2026-04-15T05:03:20.757905Z[0m [32m INFO[0m [2mhandlers.wake_up[0m[2m:[0m [Wake] Re-registered endpoint to discovery - worker added back to routing pool

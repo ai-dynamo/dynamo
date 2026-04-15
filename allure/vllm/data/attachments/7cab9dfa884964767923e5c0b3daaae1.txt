@@ -1,0 +1,3 @@
+[2m2026-04-15T05:00:56.145115Z[0m [32m INFO[0m [2mpatches.patch_empty_cache[0m[2m:[0m [GMS] Patched torch.cuda.empty_cache
+[2m2026-04-15T05:00:56.145267Z[0m [32m INFO[0m [2mpatches.patch_memory_snapshot[0m[2m:[0m [GMS Patch] Patched MemorySnapshot.measure
+[2m2026-04-15T05:00:56.145321Z[0m [32m INFO[0m [2mworker[0m[2m:[0m [GMS] Worker module loaded - model loader registered, all patches applied

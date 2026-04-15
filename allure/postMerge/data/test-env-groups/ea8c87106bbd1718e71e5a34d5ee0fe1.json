@@ -1,1 +1,1 @@
-{"id":"ea8c87106bbd1718e71e5a34d5ee0fe1","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_args#test_omni_config_invalid_video_fps","name":"test_omni_config_invalid_video_fps[-1]","status":"passed","testResultsByEnv":{"default":"971cc2a5afee4dc1fbd227b030b6cfdf"}}
+{"id":"ea8c87106bbd1718e71e5a34d5ee0fe1","fullName":"components.src.dynamo.vllm.tests.omni.test_omni_args#test_omni_config_invalid_video_fps","name":"test_omni_config_invalid_video_fps[0]","status":"passed","testResultsByEnv":{"default":"b87ba2bc97fcd0ed1c59c356ed6b93f2"}}

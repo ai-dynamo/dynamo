@@ -1,0 +1,1 @@
+WARNING  dynamo.planner.monitoring.traffic_metrics:traffic_metrics.py:238 No prometheus metric data available for dynamo_component_router_requests_total, use 0 instead

@@ -1,0 +1,2 @@
+[2m2026-04-15T04:56:09.371997Z[0m [32m INFO[0m [2mimage_diffusion_handler.__init__[0m[2m:[0m Image diffusion worker handler initialized with fs_url=file:///tmp/images, url_base=file:///tmp/images
+[2m2026-04-15T04:56:09.373210Z[0m [32m INFO[0m [2mimage_diffusion_handler.cleanup[0m[2m:[0m Image diffusion generator cleanup complete

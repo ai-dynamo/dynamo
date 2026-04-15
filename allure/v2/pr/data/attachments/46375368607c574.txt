@@ -1,0 +1,11 @@
+[2m2026-04-15T04:56:57.733859Z[0m [32m INFO[0m [2mprofile_sla._extract_profiler_params[0m[2m:[0m Profiler config: model=Qwen/Qwen2.5-0.5B, backend=vllm, system=l40s, total_gpus=4, isl=4000, osl=1000, ttft=2000.0, itl=50.0, e2e_latency=None, strategy=rapid, picking=default
+[2m2026-04-15T04:56:58.072765Z[0m [32m INFO[0m [2mutils._infer_quantization_fields[0m[2m:[0m Quant inference result: quant_algo=None, kv_cache_quant_algo=None, quant_dynamic=None
+[2m2026-04-15T04:56:58.072883Z[0m [32m INFO[0m [2mutils.get_model_config_from_model_path[0m[2m:[0m Loaded model config for Qwen/Qwen2.5-0.5B: architecture=Qwen2ForCausalLM, layers=24, n=14, n_kv=2, d=64, hidden_size=896, inter_size=4864, vocab=151936, context=32768, topk=0, num_experts=0, moe_inter_size=4864, extra_params=None
+[2m2026-04-15T04:56:58.119256Z[0m [32m INFO[0m [2mrapid._run_naive_fallback[0m[2m:[0m AIC does not support this combo — falling back to naive config generation.
+[2m2026-04-15T04:56:58.121622Z[0m [32m INFO[0m [2mnaive._estimate_model_weight_bytes[0m[2m:[0m Estimated model weight size for Qwen/Qwen2.5-0.5B: 0.98 GiB (0.53B params)
+[2m2026-04-15T04:56:58.121711Z[0m [32m INFO[0m [2mnaive._calculate_min_tp[0m[2m:[0m TP calculation: model=0.98GiB, vram=44.99GiB, required=1.47GiB (1.5x), min_tp=1, selected_tp=1
+[2m2026-04-15T04:56:58.196047Z[0m [32m INFO[0m [2mprofile_sla._execute_strategy[0m[2m:[0m Selected prefill: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1), decode: tp1 (1 GPUs, tp=1 pp=1 dp=1 moe_tp=1 moe_ep=1)
+[2m2026-04-15T04:56:58.199223Z[0m [32m INFO[0m [2mprofile_sla._write_final_output[0m[2m:[0m Final DGD config saved to /tmp/pytest_temp/popen-gw5/test_no_planner_naive_fallback0/profiling_results/final_config.yaml
+[2m2026-04-15T04:56:58.204860Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Performing final cleanup of any remaining deployments...
+[2m2026-04-15T04:56:58.204980Z[0m [32m INFO[0m [2mdynamo_deployment.cleanup_remaining_deployments[0m[2m:[0m No deployments to clean up
+[2m2026-04-15T04:56:58.205054Z[0m [32m INFO[0m [2mprofile_sla.run_profile[0m[2m:[0m Final cleanup completed.
