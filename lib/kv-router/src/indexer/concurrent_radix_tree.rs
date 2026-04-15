@@ -33,6 +33,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use crate::active_set::reconcile_active_workers;
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Block.
@@ -236,16 +237,8 @@ impl ConcurrentRadixTree {
                 let child_count = guard.workers.len();
 
                 if child_count != active_count {
-                    // Workers changed: either dropped out (child < active) or
-                    // stale entries exist (child > active). In both cases,
-                    // retain only workers present in the child, scoring dropouts.
-                    active.retain(|w| {
-                        if guard.workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, matched_depth);
-                            false
-                        }
+                    reconcile_active_workers(&mut active, &guard.workers, |worker| {
+                        scores.scores.insert(worker, matched_depth);
                     });
                     active_count = active.len();
 
