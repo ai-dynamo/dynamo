@@ -5,12 +5,12 @@ use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
 use super::super::runtime_utils::WorkerCompletionPayload;
-use crate::common::protocols::DirectRequest;
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot};
 use crate::loadgen::ReplayRequestHashes;
 use crate::scheduler::AdmissionEvent;
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::replay::offline) enum ReplayMode {
+pub(in crate::replay) enum ReplayMode {
     Trace,
     Concurrency { max_in_flight: usize },
 }
@@ -39,6 +39,9 @@ pub(in crate::replay::offline) struct EngineEffects {
     pub(in crate::replay::offline) pass_start_kv_events: Vec<RouterEvent>,
     pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload>,
     pub(in crate::replay::offline) scheduled_completions: Vec<ScheduledWorkerCompletion>,
+    /// Forward pass metrics snapshots emitted by workers during this drive cycle,
+    /// keyed by worker index. Collected for planner integration.
+    pub(in crate::replay::offline) fpm_snapshots: Vec<(usize, ForwardPassSnapshot)>,
 }
 
 impl EngineEffects {
@@ -60,4 +63,58 @@ pub(in crate::replay::offline) struct ReadyArrival {
     pub(in crate::replay::offline) request: DirectRequest,
     pub(in crate::replay::offline) arrival_time_ms: f64,
     pub(in crate::replay::offline) replay_hashes: Option<ReplayRequestHashes>,
+}
+
+/// Accumulates traffic statistics between planner ticks for deriving
+/// `TrafficObservation` (num_req, avg ISL, avg OSL over a window).
+#[derive(Debug)]
+pub(in crate::replay::offline) struct TrafficAccumulator {
+    window_start_ms: f64,
+    num_req: usize,
+    total_isl: usize,
+    total_osl: usize,
+}
+
+impl TrafficAccumulator {
+    pub(in crate::replay::offline) fn new() -> Self {
+        Self {
+            window_start_ms: 0.0,
+            num_req: 0,
+            total_isl: 0,
+            total_osl: 0,
+        }
+    }
+
+    /// Record one admitted request.
+    pub(in crate::replay::offline) fn on_request(
+        &mut self,
+        input_tokens: usize,
+        output_tokens: usize,
+    ) {
+        self.num_req += 1;
+        self.total_isl += input_tokens;
+        self.total_osl += output_tokens;
+    }
+
+    /// Drain the accumulator at the given simulated time, returning
+    /// (duration_s, num_req, avg_isl, avg_osl) and resetting counters.
+    pub(in crate::replay::offline) fn drain(&mut self, now_ms: f64) -> (f64, usize, f64, f64) {
+        let duration_s = (now_ms - self.window_start_ms) / 1000.0;
+        let num_req = self.num_req;
+        let avg_isl = if num_req > 0 {
+            self.total_isl as f64 / num_req as f64
+        } else {
+            0.0
+        };
+        let avg_osl = if num_req > 0 {
+            self.total_osl as f64 / num_req as f64
+        } else {
+            0.0
+        };
+        self.window_start_ms = now_ms;
+        self.num_req = 0;
+        self.total_isl = 0;
+        self.total_osl = 0;
+        (duration_s, num_req, avg_isl, avg_osl)
+    }
 }

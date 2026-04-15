@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub(super) use super::components::ReplayMode;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-    ScheduledWorkerCompletion, WorkerAdmission,
+    ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
@@ -22,7 +22,7 @@ use super::runtime_utils::{
 #[cfg(test)]
 use super::state::DisaggRequestSnapshot;
 use super::state::{DisaggPhase, DisaggRequestState};
-use crate::common::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
+use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArgs, OutputSignal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, TraceCollector,
@@ -60,7 +60,7 @@ pub(super) struct DisaggRuntimeStats {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct DisaggRuntimeStats;
 
-pub(super) struct DisaggRuntime {
+pub(in crate::replay) struct DisaggRuntime {
     now_ms: f64,
     next_prefill_worker_idx: usize,
     next_decode_worker_idx: usize,
@@ -75,11 +75,16 @@ pub(super) struct DisaggRuntime {
     events: BinaryHeap<SimulationEvent>,
     progress: ReplayProgress,
     stats: DisaggRuntimeStats,
+    /// Forward pass metrics accumulated between planner ticks, keyed by (stage, worker_idx).
+    prefill_fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    decode_fpm_buffer: Vec<(usize, ForwardPassSnapshot)>,
+    /// Traffic statistics accumulated between planner ticks.
+    traffic: TrafficAccumulator,
 }
 
 impl DisaggRuntime {
     /// Create a disaggregated offline runtime seeded from an explicit request queue.
-    pub(super) fn new(
+    pub(in crate::replay) fn new(
         config: &OfflineDisaggReplayConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -97,7 +102,7 @@ impl DisaggRuntime {
     }
 
     /// Create a disaggregated offline runtime whose admissions come from a workload driver.
-    pub(super) fn new_workload(
+    pub(in crate::replay) fn new_workload(
         config: &OfflineDisaggReplayConfig,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -147,7 +152,8 @@ impl DisaggRuntime {
             }
         };
 
-        let prefill_engine = EngineComponent::new(
+        let prefill_capture_kv = prefill_router.is_some();
+        let mut prefill_engine = EngineComponent::new(
             SimulationWorkerStage::Prefill,
             EnginePassMode::Hidden,
             (0..config.num_prefill_workers)
@@ -155,12 +161,13 @@ impl DisaggRuntime {
                     super::state::OfflineWorkerState::new(
                         worker_idx,
                         config.prefill_args.clone(),
-                        prefill_router.is_some(),
+                        prefill_capture_kv,
                     )
                 })
                 .collect(),
         );
-        let decode_engine = EngineComponent::new(
+        prefill_engine.set_scaling_args(config.prefill_args.clone(), prefill_capture_kv);
+        let mut decode_engine = EngineComponent::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
             (0..config.num_decode_workers)
@@ -173,6 +180,7 @@ impl DisaggRuntime {
                 })
                 .collect(),
         );
+        decode_engine.set_scaling_args(config.decode_args.clone(), false);
 
         Ok(Self {
             now_ms: 0.0,
@@ -192,6 +200,9 @@ impl DisaggRuntime {
             stats: DisaggRuntimeStats::default(),
             #[cfg(not(test))]
             stats: DisaggRuntimeStats,
+            prefill_fpm_buffer: Vec::new(),
+            decode_fpm_buffer: Vec::new(),
+            traffic: TrafficAccumulator::new(),
         })
     }
 
@@ -209,20 +220,28 @@ impl DisaggRuntime {
                 .map_or(0, OfflineReplayRouter::pending_count)
     }
 
-    /// Pick the next prefill worker in round-robin order.
+    /// Pick the next active prefill worker in round-robin order.
     fn next_prefill_worker(&mut self) -> usize {
-        let worker_idx = self.next_prefill_worker_idx;
-        self.next_prefill_worker_idx =
-            (self.next_prefill_worker_idx + 1) % self.prefill_engine.worker_count();
-        worker_idx
+        let active = self.prefill_engine.active_worker_ids();
+        debug_assert!(
+            !active.is_empty(),
+            "no active prefill workers for round-robin"
+        );
+        let idx = self.next_prefill_worker_idx % active.len();
+        self.next_prefill_worker_idx = idx + 1;
+        active[idx]
     }
 
-    /// Pick the next decode worker in round-robin order.
+    /// Pick the next active decode worker in round-robin order.
     fn next_decode_worker(&mut self) -> usize {
-        let worker_idx = self.next_decode_worker_idx;
-        self.next_decode_worker_idx =
-            (self.next_decode_worker_idx + 1) % self.decode_engine.worker_count();
-        worker_idx
+        let active = self.decode_engine.active_worker_ids();
+        debug_assert!(
+            !active.is_empty(),
+            "no active decode workers for round-robin"
+        );
+        let idx = self.next_decode_worker_idx % active.len();
+        self.next_decode_worker_idx = idx + 1;
+        active[idx]
     }
 
     /// Track the peak number of requests parked in each stage router.
@@ -355,7 +374,6 @@ impl DisaggRuntime {
             request.tokens.len(),
             request.max_output_tokens,
         );
-
         let queued_request = request.clone();
         self.requests
             .insert(uuid, DisaggRequestState::new(request, arrival_time_ms));
@@ -479,6 +497,11 @@ impl DisaggRuntime {
                 .transition_log
                 .push(DisaggTransition::WorkloadCompleted { uuid: signal.uuid });
         }
+        let state = self.state(signal.uuid)?;
+        let original = state.original_request()?;
+        let input_tokens = original.tokens.len();
+        let output_tokens = original.max_output_tokens;
+        self.traffic.on_request(input_tokens, output_tokens);
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {
@@ -626,6 +649,7 @@ impl DisaggRuntime {
     }
 
     fn handle_prefill_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
+        self.prefill_fpm_buffer.extend(effects.fpm_snapshots);
         self.record_prefill_admissions(effects.admissions);
         self.apply_prefill_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
@@ -651,6 +675,7 @@ impl DisaggRuntime {
     }
 
     fn handle_decode_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
+        self.decode_fpm_buffer.extend(effects.fpm_snapshots);
         for payload in effects.immediate_completions {
             let payload = self.decode_engine.on_scheduled_completion(payload)?;
             self.process_decode_pass(
@@ -691,6 +716,105 @@ impl DisaggRuntime {
                 .map(|(uuid, state)| (*uuid, state.debug_snapshot()))
                 .collect();
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Planner integration: step-based execution
+    // ------------------------------------------------------------------
+
+    /// Advance the simulation up to `until_ms` simulated time, then pause.
+    /// Returns `true` if the replay is done (no more work).
+    pub(in crate::replay) fn advance_to(&mut self, until_ms: f64) -> Result<bool> {
+        self.drain_current_timestamp()?;
+
+        while !self.is_done() {
+            let Some(next_timestamp_ms) = self.next_timestamp() else {
+                bail!(
+                    "offline disagg replay reached a dead end with {} in-flight requests remaining",
+                    self.cluster_in_flight()
+                );
+            };
+
+            if next_timestamp_ms > until_ms {
+                break;
+            }
+
+            self.now_ms = next_timestamp_ms;
+            self.drain_current_timestamp()?;
+        }
+
+        Ok(self.is_done())
+    }
+
+    /// Current simulated time in milliseconds.
+    pub(in crate::replay) fn now_ms(&self) -> f64 {
+        self.now_ms
+    }
+
+    pub(in crate::replay) fn active_prefill_count(&self) -> usize {
+        self.prefill_engine.active_worker_ids().len()
+    }
+
+    pub(in crate::replay) fn active_decode_count(&self) -> usize {
+        self.decode_engine.active_worker_ids().len()
+    }
+
+    pub(in crate::replay) fn total_prefill_count(&self) -> usize {
+        self.prefill_engine.worker_count()
+    }
+
+    pub(in crate::replay) fn total_decode_count(&self) -> usize {
+        self.decode_engine.worker_count()
+    }
+
+    /// Drain accumulated prefill FPM snapshots since the last drain.
+    pub(in crate::replay) fn drain_prefill_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
+        std::mem::take(&mut self.prefill_fpm_buffer)
+    }
+
+    /// Drain accumulated decode FPM snapshots since the last drain.
+    pub(in crate::replay) fn drain_decode_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
+        std::mem::take(&mut self.decode_fpm_buffer)
+    }
+
+    /// Drain accumulated traffic stats since the last drain.
+    pub(in crate::replay) fn drain_traffic(&mut self) -> (f64, usize, f64, f64) {
+        self.traffic.drain(self.now_ms)
+    }
+
+    /// Apply a scaling decision with separate prefill and decode targets.
+    /// Newly marked workers are removed from the router immediately so no
+    /// new requests land on them while they drain in-flight work.
+    pub(in crate::replay) fn apply_scaling(
+        &mut self,
+        target_prefill: usize,
+        target_decode: usize,
+    ) -> Result<()> {
+        let (added, newly_marked) = self.prefill_engine.apply_target_count(target_prefill);
+        if let Some(router) = self.prefill_router.as_mut() {
+            for id in added {
+                router.add_worker(id)?;
+            }
+            for id in newly_marked {
+                router.remove_worker(id)?;
+            }
+        }
+        let (added, newly_marked) = self.decode_engine.apply_target_count(target_decode);
+        if let Some(router) = self.decode_router.as_mut() {
+            for id in added {
+                router.add_worker(id)?;
+            }
+            for id in newly_marked {
+                router.remove_worker(id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Finalize the replay and return the simulation report directly.
+    pub(in crate::replay) fn finalize_report(self) -> crate::replay::TraceSimulationReport {
+        self.progress.finish();
+        self.collector.finish()
     }
 
     /// Run the staged offline replay until both prefill and decode pipelines are drained.

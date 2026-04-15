@@ -1,9 +1,5 @@
 # Kimi-K2.5 nvidia/Kimi-K2.5-NVFP4 — Aggregated Deployments on Kubernetes
 
-> Upstream TensorRT-LLM does not yet include native support for Kimi K2.5. This recipe works around that limitation by directly patching the container image with an append-only patch that registers `KimiK25ForConditionalGeneration` on the DeepSeek-V3 code path. See [`patch/`](patch/) for the patch script and full instructions.
-
-> **Note**: The two standard deployment (`deploy.yaml` and `deploy-kvbm.yaml`) for nvidia/Kimi-K2.5-NVFP4 model requires a patched TensorRT-LLM container image because upstream TRT-LLM support for Kimi K2.5 has not yet been released. You must build the patched image before deploying either configuration below. See patch/ for the script and instructions. **`deploy-specdec.yaml` speculative decoding recipe doesn't need the image patch**.
-
 > **Text only:** Current upstream TensorRT-LLM supports Kimi-K2.5 models by loading the DeepSeek-V3
 > text backbone (`text_config`) only. The vision encoder is not loaded, so image inputs are not
 > processed. Full multimodal support requires native upstream TRT-LLM support for Kimi K2.5.
@@ -22,7 +18,6 @@ This directory contains three aggregated deployment configurations for the `nvid
 - 1x8 B200 GPUs or 8x4 GB200 GPUs
 - A `hf-token-secret` Secret containing your Hugging Face token
 - A pre-existing `model-cache` PVC
-- `deploy.yaml` and `deploy-kvbm.yaml` require a patched image tag such as `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag-patched`. You must build a patched image and update the `image:` fields before deploying. See [patch instructions](patch/) for details.
 - `deploy-specdec.yaml` uses `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag` and works with a current top-of-tree Dynamo TRT-LLM image
 
 ---
@@ -32,7 +27,6 @@ This directory contains three aggregated deployment configurations for the `nvid
 Uses [`deploy.yaml`](deploy.yaml). This is the simpler configuration -- aggregated serving with KV-aware routing, no CPU-offloaded KV cache.
 
 ```bash
-# Update the image in deploy.yaml to your patched image, then:
 kubectl apply -f deploy.yaml -n ${NAMESPACE}
 ```
 
@@ -47,7 +41,6 @@ This creates:
 Uses [`deploy-kvbm.yaml`](deploy-kvbm.yaml). This configuration adds CPU-offloaded KV cache via the KV Block Manager (KVBM), which allows larger effective context by spilling KV cache to host memory.
 
 ```bash
-# Update the image in deploy-kvbm.yaml to your patched image, then:
 kubectl apply -f deploy-kvbm.yaml -n ${NAMESPACE}
 ```
 
@@ -83,7 +76,7 @@ This scrapes `/metrics` on port `6880` (named `kvbm`) every 5 seconds from worke
 
 ## Aggregated Deployment with EAGLE Speculative Decoding and KV-aware routing
 
-Uses [`deploy-specdec.yaml`](deploy-specdec.yaml). This performant configuration runs KV-aware aggregated serving with EAGLE speculative decoding on GB200 and does not require the patched image used by the standard and KVBM manifests.
+Uses [`deploy-specdec.yaml`](deploy-specdec.yaml). This performant configuration runs KV-aware aggregated serving with EAGLE speculative decoding on GB200.
 
 ### Speculative Decoding Prerequisites
 

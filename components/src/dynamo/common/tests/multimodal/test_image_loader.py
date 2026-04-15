@@ -176,10 +176,22 @@ async def test_retry_after_failure(loader: ImageLoader) -> None:
 # --- Error contract preserved for non-HTTP ---
 
 
-async def test_file_not_found_normalized(loader: ImageLoader) -> None:
-    """file:// path that doesn't exist should raise ValueError, not FileNotFoundError."""
-    with pytest.raises(ValueError, match="Failed to load image"):
+async def test_file_url_is_rejected(loader: ImageLoader) -> None:
+    """file:// inputs should be rejected before any local file read is attempted."""
+    with pytest.raises(ValueError, match="Invalid image source scheme"):
         await loader.load_image("file:///nonexistent/path/img.png")
+
+
+@pytest.mark.parametrize("url_factory", [lambda p: p.as_uri(), lambda p: str(p)])
+async def test_local_file_inputs_are_rejected(
+    loader: ImageLoader, tmp_path, url_factory
+) -> None:
+    """Local filesystem image inputs must be rejected for both file:// and bare paths."""
+    image_path = tmp_path / "secret.png"
+    Image.new("RGB", (1, 1), color="red").save(image_path, format="PNG")
+
+    with pytest.raises(ValueError, match="Invalid image source scheme"):
+        await loader.load_image(url_factory(image_path))
 
 
 async def test_data_url_invalid_base64_normalized(loader: ImageLoader) -> None:

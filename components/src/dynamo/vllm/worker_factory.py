@@ -17,7 +17,10 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
-from dynamo.common.utils.prometheus import LLMBackendMetrics
+from dynamo.common.utils.prometheus import (
+    LLMBackendMetrics,
+    register_embedding_cache_metrics,
+)
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 
@@ -317,6 +320,16 @@ class WorkerFactory:
             handler.fpm_relays = fpm_relays
 
         self.setup_metrics_collection(config, generate_endpoint, logger)
+
+        embedding_cache = getattr(handler, "embedding_cache_manager", None)
+        if embedding_cache is not None:
+            register_embedding_cache_metrics(
+                endpoint=generate_endpoint,
+                cache=embedding_cache,
+                model_name=config.served_model_name or config.model,
+                component_name=config.component,
+            )
+
         # Register sleep/wake_up engine routes
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)
@@ -541,6 +554,16 @@ class WorkerFactory:
             handler.fpm_relays = fpm_relays
 
         self.setup_metrics_collection(config, generate_endpoint, logger)
+
+        embedding_cache = getattr(handler, "embedding_cache_manager", None)
+        if embedding_cache is not None:
+            register_embedding_cache_metrics(
+                endpoint=generate_endpoint,
+                cache=embedding_cache,
+                model_name=config.served_model_name or config.model,
+                component_name=config.component,
+            )
+
         # Register sleep/wake_up engine routes
         runtime.register_engine_route("sleep", handler.sleep)
         runtime.register_engine_route("wake_up", handler.wake_up)

@@ -61,6 +61,7 @@ def _make_config(tmp_dir: str, **overrides) -> PlannerConfig:
         metric_reporting_prometheus_port=0,
         report_interval_hours=0.5,
         report_output_dir=tmp_dir,
+        live_dashboard_port=0,
     )
     defaults.update(overrides)
     return PlannerConfig.model_construct(**defaults)

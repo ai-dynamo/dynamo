@@ -231,7 +231,7 @@ echo "\n=== Installing LMCache from source ==="
 # (undefined symbol: c10::cuda::c10_cuda_check_implementation).
 # Build from source AFTER vLLM so c_ops.so compiles against the installed PyTorch.
 # Ref: https://docs.lmcache.ai/getting_started/installation.html#install-latest-lmcache-from-source
-if [ "$DEVICE" = "cuda" ] && [[ "$CUDA_VERSION_MAJOR" == "12" ]] && [ "$ARCH" = "amd64" ]; then
+if [ "$DEVICE" = "cuda" ]; then
     git clone --depth 1 --branch v${LMCACHE_REF} https://github.com/LMCache/LMCache.git ${INSTALLATION_DIR}/lmcache
     cd ${INSTALLATION_DIR}/lmcache
     uv pip install -r requirements/build.txt
@@ -256,7 +256,7 @@ elif [ "$DEVICE" = "xpu" ] && [ "$ARCH" = "amd64" ]; then
     uv pip install lmcache==${LMCACHE_REF}
     echo "✓ LMCache ${LMCACHE_REF} installed from PyPI (XPU)"
 else
-    echo "⚠ Skipping LMCache (ARM64 or CUDA 13 not supported)"
+    echo "⚠ Skipping LMCache for DEVICE=${DEVICE} ARCH=${ARCH} (not supported)"
 fi
 
 if [ "$DEVICE" = "cuda" ]; then

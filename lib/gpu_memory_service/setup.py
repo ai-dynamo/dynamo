@@ -98,6 +98,12 @@ setup(
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],
     },
+    entry_points={
+        "console_scripts": [
+            "gpu-memory-service=gpu_memory_service.cli.runner:main",
+            "gms-storage-client=gpu_memory_service.cli.storage_runner:main",
+        ]
+    },
     ext_modules=_create_ext_modules(),
     cmdclass={"build_ext": BuildExtension},
 )

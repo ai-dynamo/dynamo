@@ -9,69 +9,91 @@ import (
 )
 
 func EnsurePodInfoVolume(podSpec *corev1.PodSpec) {
-	for _, volume := range podSpec.Volumes {
-		if volume.Name == commonconsts.PodInfoVolumeName {
-			return
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name != commonconsts.PodInfoVolumeName {
+			continue
 		}
+		if podSpec.Volumes[i].DownwardAPI == nil {
+			podSpec.Volumes[i].VolumeSource.DownwardAPI = &corev1.DownwardAPIVolumeSource{}
+		}
+		// Merge required items into existing downwardAPI volume.
+		source := podSpec.Volumes[i].DownwardAPI
+		pathToIndex := make(map[string]int, len(source.Items))
+		for j := range source.Items {
+			pathToIndex[source.Items[j].Path] = j
+		}
+		for _, item := range podInfoItems() {
+			if idx, ok := pathToIndex[item.Path]; ok {
+				source.Items[idx] = item
+				continue
+			}
+			source.Items = append(source.Items, item)
+			pathToIndex[item.Path] = len(source.Items) - 1
+		}
+		return
 	}
 
 	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 		Name: commonconsts.PodInfoVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			DownwardAPI: &corev1.DownwardAPIVolumeSource{
-				Items: []corev1.DownwardAPIVolumeFile{
-					{
-						Path: "pod_name",
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: commonconsts.PodInfoFieldPodName,
-						},
-					},
-					{
-						Path: "pod_uid",
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: commonconsts.PodInfoFieldPodUID,
-						},
-					},
-					{
-						Path: "pod_namespace",
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: commonconsts.PodInfoFieldPodNamespace,
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynNamespace,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoNamespace + "']",
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynNamespaceWorkerSuffix,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoWorkerHash + "']",
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynComponent,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoComponentType + "']",
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynParentDGDName,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoGraphDeploymentName + "']",
-						},
-					},
-					{
-						Path: commonconsts.PodInfoFileDynParentDGDNamespace,
-						FieldRef: &corev1.ObjectFieldSelector{
-							FieldPath: commonconsts.PodInfoFieldPodNamespace,
-						},
-					},
-				},
+				Items: podInfoItems(),
 			},
 		},
 	})
+}
+
+func podInfoItems() []corev1.DownwardAPIVolumeFile {
+	return []corev1.DownwardAPIVolumeFile{
+		{
+			Path: "pod_name",
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: commonconsts.PodInfoFieldPodName,
+			},
+		},
+		{
+			Path: "pod_uid",
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: commonconsts.PodInfoFieldPodUID,
+			},
+		},
+		{
+			Path: "pod_namespace",
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: commonconsts.PodInfoFieldPodNamespace,
+			},
+		},
+		{
+			Path: commonconsts.PodInfoFileDynNamespace,
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoNamespace + "']",
+			},
+		},
+		{
+			Path: commonconsts.PodInfoFileDynNamespaceWorkerSuffix,
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoWorkerHash + "']",
+			},
+		},
+		{
+			Path: commonconsts.PodInfoFileDynComponent,
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoComponentType + "']",
+			},
+		},
+		{
+			Path: commonconsts.PodInfoFileDynParentDGDName,
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.labels['" + commonconsts.KubeLabelDynamoGraphDeploymentName + "']",
+			},
+		},
+		{
+			Path: commonconsts.PodInfoFileDynParentDGDNamespace,
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: commonconsts.PodInfoFieldPodNamespace,
+			},
+		},
+	}
 }
 
 func EnsurePodInfoMount(container *corev1.Container) {

@@ -309,6 +309,48 @@ impl OfflineReplayRouter {
         self.pending.len()
     }
 
+    /// Register a new worker with the router, cloning the config from existing workers.
+    pub(crate) fn add_worker(&mut self, worker_id: usize) -> Result<()> {
+        let config = self
+            .workers_with_configs
+            .values()
+            .next()
+            .ok_or_else(|| anyhow!("cannot add worker to router with no existing workers"))?
+            .clone();
+        let wid = worker_id as WorkerId;
+        self.workers_with_configs.insert(wid, config);
+
+        // Rebuild the slots with the full worker set
+        let dp_range: HashMap<u64, (u32, u32)> = self
+            .workers_with_configs
+            .keys()
+            .map(|&id| (id, (0u32, 1u32)))
+            .collect();
+        self.slots.update_workers(&dp_range);
+
+        // Enable queueing if we now have more than one worker
+        if self.workers_with_configs.len() > 1 && self.queue_threshold.is_none() {
+            self.queue_threshold = self.config.router_queue_threshold;
+        }
+
+        Ok(())
+    }
+
+    /// Remove a worker from routing eligibility.
+    ///
+    /// Only removes the worker from the config map so the selector won't
+    /// pick it for new requests.  The radix tree and active-sequence slots
+    /// are left intact so that in-flight requests on this worker can still
+    /// complete (free / mark_prefill_completed) and KV events can still
+    /// reference existing blocks without "parent block not found" errors.
+    /// Stale slot and indexer state is harmless — the selector and
+    /// `all_workers_busy` both skip workers absent from `workers_with_configs`.
+    pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
+        let wid = worker_id as WorkerId;
+        self.workers_with_configs.remove(&wid);
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_snapshot(&self, now_ms: f64) -> OfflineRouterSnapshot {
         let decay_now = self.decay_now(now_ms);
