@@ -61,22 +61,46 @@ impl RequestState {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(super) struct BlockPresenceDelta {
-    pub blocks_became_present: Vec<SequenceHash>,
-    pub blocks_became_absent: Vec<SequenceHash>,
+pub(super) struct PromptMembershipStore {
+    pub parent: Option<SequenceHash>,
+    pub hashes: Vec<SequenceHash>,
 }
 
-impl BlockPresenceDelta {
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct PromptMembershipRemove {
+    pub hashes: Vec<SequenceHash>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct PromptMembershipDelta {
+    pub stores: Vec<PromptMembershipStore>,
+    pub removes: Vec<PromptMembershipRemove>,
+}
+
+impl PromptMembershipDelta {
     fn extend(&mut self, other: Self) {
-        self.blocks_became_present
-            .extend(other.blocks_became_present);
-        self.blocks_became_absent.extend(other.blocks_became_absent);
+        self.stores.extend(other.stores);
+        self.removes.extend(other.removes);
+    }
+
+    fn push_store(&mut self, parent: Option<SequenceHash>, hashes: Vec<SequenceHash>) {
+        if hashes.is_empty() {
+            return;
+        }
+        self.stores.push(PromptMembershipStore { parent, hashes });
+    }
+
+    fn push_remove(&mut self, hashes: Vec<SequenceHash>) {
+        if hashes.is_empty() {
+            return;
+        }
+        self.removes.push(PromptMembershipRemove { hashes });
     }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct SequenceMutationOutcome {
-    pub block_delta: BlockPresenceDelta,
+    pub membership_delta: PromptMembershipDelta,
     pub expired_request_ids: HashSet<RequestId>,
 }
 
@@ -224,16 +248,38 @@ impl ActiveSequences {
         let started_at = Instant::now();
 
         let prompt_blocks = match token_sequence {
-            Some(sequence) => sequence
-                .into_iter()
-                .map(|block| {
-                    let acquire = self.blocks.touch_block(&block);
-                    if acquire.became_present_on_worker {
-                        outcome.block_delta.blocks_became_present.push(block);
-                    }
-                    (block, acquire.rc)
-                })
-                .collect(),
+            Some(sequence) => {
+                let mut first_new_prompt_idx = None;
+                let prompt_blocks: Vec<_> = sequence
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, block)| {
+                        let acquire = self.blocks.touch_block(&block);
+                        if acquire.became_present_on_worker && first_new_prompt_idx.is_none() {
+                            first_new_prompt_idx = Some(idx);
+                        }
+                        (block, acquire.rc)
+                    })
+                    .collect();
+
+                if let Some(first_new_prompt_idx) = first_new_prompt_idx {
+                    debug_assert!(
+                        prompt_blocks[first_new_prompt_idx..]
+                            .iter()
+                            .all(|(hash, _)| self.blocks.unique_blocks.contains_key(hash))
+                    );
+                    let parent = first_new_prompt_idx
+                        .checked_sub(1)
+                        .map(|idx| prompt_blocks[idx].0);
+                    let hashes = prompt_blocks[first_new_prompt_idx..]
+                        .iter()
+                        .map(|(hash, _)| *hash)
+                        .collect();
+                    outcome.membership_delta.push_store(parent, hashes);
+                }
+
+                prompt_blocks
+            }
             None => Vec::new(),
         };
 
@@ -348,6 +394,14 @@ impl ActiveSequences {
         self.blocks.unique_blocks.keys().copied().collect()
     }
 
+    #[cfg(test)]
+    pub(super) fn active_prompt_hashes(&self) -> FxHashSet<SequenceHash> {
+        self.requests
+            .values()
+            .flat_map(|state| state.prompt_blocks.iter().map(|(hash, _)| *hash))
+            .collect()
+    }
+
     /// Free all blocks associated with a request.
     ///
     /// This implicitly calls [`Self::mark_prefill_completed`] first, so callers do not need
@@ -356,33 +410,42 @@ impl ActiveSequences {
         &mut self,
         request_id: &RequestId,
         decay_now: Instant,
-    ) -> BlockPresenceDelta {
+    ) -> PromptMembershipDelta {
         let _ = self.remove_prefill_load(request_id, decay_now);
 
         let Some(request_state) = self.requests.remove(request_id) else {
             tracing::warn!("Trying to free non-existent request {request_id}");
-            return BlockPresenceDelta::default();
+            return PromptMembershipDelta::default();
         };
 
         let _ = request_state.expected_output_tokens;
-        let mut block_delta = BlockPresenceDelta::default();
+        let mut membership_delta = PromptMembershipDelta::default();
+        let mut first_absent_prompt_idx = None;
+        let prompt_hashes: Vec<_> = request_state
+            .prompt_blocks
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect();
 
-        for (block_hash, rc) in request_state.prompt_blocks {
+        for (idx, (block_hash, rc)) in request_state.prompt_blocks.into_iter().enumerate() {
             drop(rc);
-            if self.blocks.try_remove_block(&block_hash) {
-                block_delta.blocks_became_absent.push(block_hash);
+            if self.blocks.try_remove_block(&block_hash) && first_absent_prompt_idx.is_none() {
+                first_absent_prompt_idx = Some(idx);
             }
+        }
+
+        if let Some(first_absent_prompt_idx) = first_absent_prompt_idx {
+            let prompt_remove = prompt_hashes[first_absent_prompt_idx..].to_vec();
+            membership_delta.push_remove(prompt_remove);
         }
 
         for (block_hash, rc) in request_state.output_blocks {
             drop(rc);
-            if self.blocks.try_remove_block(&block_hash) {
-                block_delta.blocks_became_absent.push(block_hash);
-            }
+            self.blocks.try_remove_block(&block_hash);
         }
 
         self.validate_state();
-        block_delta
+        membership_delta
     }
 
     /// Add an output block with a random hash and optional fractional decay weight.
@@ -441,7 +504,7 @@ impl ActiveSequences {
 
         for request_id in &outcome.expired_request_ids {
             tracing::warn!("Expiring stale request: {}", request_id);
-            outcome.block_delta.extend(self.free(request_id, now));
+            outcome.membership_delta.extend(self.free(request_id, now));
         }
 
         self.validate_state();
@@ -462,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn test_block_presence_delta_only_reports_first_add_and_last_remove() {
+    fn test_prompt_membership_delta_only_reports_first_add_and_last_remove() {
         let mut seq_manager = ActiveSequences::new(4);
         let decay_now = Instant::now();
 
@@ -476,8 +539,16 @@ mod tests {
             None,
             decay_now,
         );
-        assert_eq!(first.block_delta.blocks_became_present, vec![1, 2]);
-        assert!(first.block_delta.blocks_became_absent.is_empty());
+        assert_eq!(
+            first.membership_delta,
+            PromptMembershipDelta {
+                stores: vec![PromptMembershipStore {
+                    parent: None,
+                    hashes: vec![1, 2],
+                }],
+                removes: Vec::new(),
+            }
+        );
         assert!(first.expired_request_ids.is_empty());
 
         let second = seq_manager.add_request_with_prefill_tracking(
@@ -490,16 +561,29 @@ mod tests {
             None,
             decay_now,
         );
-        assert_eq!(second.block_delta.blocks_became_present, vec![3]);
-        assert!(second.block_delta.blocks_became_absent.is_empty());
+        assert_eq!(
+            second.membership_delta,
+            PromptMembershipDelta {
+                stores: vec![PromptMembershipStore {
+                    parent: Some(2),
+                    hashes: vec![3],
+                }],
+                removes: Vec::new(),
+            }
+        );
 
         let first_free = seq_manager.free(&"r1".to_string(), decay_now);
-        assert!(first_free.blocks_became_present.is_empty());
-        assert!(first_free.blocks_became_absent.is_empty());
+        assert!(first_free.removes.is_empty());
+        assert!(first_free.stores.is_empty());
 
         let second_free = seq_manager.free(&"r2".to_string(), decay_now);
-        assert!(second_free.blocks_became_present.is_empty());
-        assert_eq!(second_free.blocks_became_absent, vec![1, 2, 3]);
+        assert!(second_free.stores.is_empty());
+        assert_eq!(
+            second_free.removes,
+            vec![PromptMembershipRemove {
+                hashes: vec![1, 2, 3],
+            }]
+        );
     }
 
     #[test]
@@ -517,7 +601,13 @@ mod tests {
             None,
             decay_now,
         );
-        assert_eq!(outcome.block_delta.blocks_became_present, vec![1, 2, 3]);
+        assert_eq!(
+            outcome.membership_delta.stores,
+            vec![PromptMembershipStore {
+                parent: None,
+                hashes: vec![1, 2, 3],
+            }]
+        );
         assert_eq!(
             seq_manager.active_block_hashes(),
             [1, 2, 3].into_iter().collect()
@@ -540,11 +630,10 @@ mod tests {
 
         let free_delta = seq_manager.free(&"r1".to_string(), decay_now);
         assert_eq!(
-            free_delta
-                .blocks_became_absent
-                .into_iter()
-                .collect::<FxHashSet<_>>(),
-            [1, 2, 3, output_hash].into_iter().collect()
+            free_delta.removes,
+            vec![PromptMembershipRemove {
+                hashes: vec![1, 2, 3],
+            }]
         );
     }
 

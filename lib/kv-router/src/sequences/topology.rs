@@ -1,21 +1,54 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 
+use super::prompt_membership_trie::WorkerLookup;
 use super::single::ActiveSequences;
 use crate::protocols::WorkerWithDpRank;
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Clone)]
+pub(super) struct RemovedWorkerState {
+    pub(super) worker: WorkerWithDpRank,
+    pub(super) trie_lookup: Arc<RwLock<WorkerLookup>>,
+}
+
+impl std::fmt::Debug for RemovedWorkerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemovedWorkerState")
+            .field("worker", &self.worker)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Default, Clone)]
 pub(super) struct WorkerTopologyChange {
     pub(super) added: Vec<WorkerWithDpRank>,
-    pub(super) removed: Vec<WorkerWithDpRank>,
+    pub(super) removed: Vec<RemovedWorkerState>,
+}
+
+pub(super) struct WorkerSlot {
+    pub(super) worker: WorkerWithDpRank,
+    pub(super) sequences: RwLock<ActiveSequences>,
+    pub(super) trie_lookup: Arc<RwLock<WorkerLookup>>,
+}
+
+impl WorkerSlot {
+    fn new(worker: WorkerWithDpRank, block_size: usize) -> Self {
+        Self {
+            worker,
+            sequences: RwLock::new(ActiveSequences::new(block_size)),
+            trie_lookup: Arc::new(RwLock::new(WorkerLookup::default())),
+        }
+    }
 }
 
 pub(super) struct WorkerTable {
-    pub(super) slots: Vec<(WorkerWithDpRank, RwLock<ActiveSequences>)>,
+    pub(super) slots: Vec<WorkerSlot>,
     pub(super) index: FxHashMap<WorkerWithDpRank, usize>,
 }
 
@@ -25,14 +58,14 @@ impl WorkerTable {
         let mut index = FxHashMap::default();
         for worker in workers_from_dp_range(dp_range) {
             let idx = slots.len();
-            slots.push((worker, RwLock::new(ActiveSequences::new(block_size))));
+            slots.push(WorkerSlot::new(worker, block_size));
             index.insert(worker, idx);
         }
         Self { slots, index }
     }
 
     pub(super) fn workers(&self) -> impl Iterator<Item = WorkerWithDpRank> + '_ {
-        self.slots.iter().map(|(worker, _)| *worker)
+        self.slots.iter().map(|slot| slot.worker)
     }
 
     pub(super) fn register_external(
@@ -47,8 +80,7 @@ impl WorkerTable {
             }
 
             let idx = self.slots.len();
-            self.slots
-                .push((worker, RwLock::new(ActiveSequences::new(block_size))));
+            self.slots.push(WorkerSlot::new(worker, block_size));
             self.index.insert(worker, idx);
             change.added.push(worker);
         }
@@ -63,17 +95,10 @@ impl WorkerTable {
         let target_workers: FxHashSet<WorkerWithDpRank> =
             workers_from_dp_range(new_dp_range).into_iter().collect();
 
-        let removed = self
-            .slots
-            .iter()
-            .map(|(worker, _)| *worker)
-            .filter(|worker| !target_workers.contains(worker))
-            .collect();
-
-        let mut old: FxHashMap<WorkerWithDpRank, ActiveSequences> = self
+        let mut old: FxHashMap<WorkerWithDpRank, WorkerSlot> = self
             .slots
             .drain(..)
-            .map(|(worker, lock)| (worker, lock.into_inner()))
+            .map(|slot| (slot.worker, slot))
             .collect();
         self.index.clear();
 
@@ -83,12 +108,20 @@ impl WorkerTable {
                 added.push(worker);
             }
             let idx = self.slots.len();
-            let seq = old
+            let slot = old
                 .remove(&worker)
-                .unwrap_or_else(|| ActiveSequences::new(block_size));
-            self.slots.push((worker, RwLock::new(seq)));
+                .unwrap_or_else(|| WorkerSlot::new(worker, block_size));
+            self.slots.push(slot);
             self.index.insert(worker, idx);
         }
+
+        let removed = old
+            .into_values()
+            .map(|slot| RemovedWorkerState {
+                worker: slot.worker,
+                trie_lookup: slot.trie_lookup,
+            })
+            .collect();
 
         WorkerTopologyChange { added, removed }
     }
@@ -103,8 +136,7 @@ impl WorkerTable {
         }
 
         let idx = self.slots.len();
-        self.slots
-            .push((worker, RwLock::new(ActiveSequences::new(block_size))));
+        self.slots.push(WorkerSlot::new(worker, block_size));
         self.index.insert(worker, idx);
         WorkerTopologyChange {
             added: vec![worker],
@@ -186,7 +218,7 @@ mod tests {
 
         {
             let idx = table.index[&existing];
-            let mut seq = table.slots[idx].1.write();
+            let mut seq = table.slots[idx].sequences.write();
             let outcome = seq.add_request(
                 "req-1".to_string(),
                 Some(vec![1, 2, 3]),
@@ -195,21 +227,31 @@ mod tests {
                 None,
                 Instant::now(),
             );
-            assert_eq!(outcome.block_delta.blocks_became_present, vec![1, 2, 3]);
+            assert_eq!(outcome.membership_delta.stores[0].hashes, vec![1, 2, 3],);
         }
 
         let change = table.reconcile(4, &HashMap::from([(1, (0, 1)), (3, (0, 1))]));
 
         assert_eq!(change.added, vec![added]);
-        assert_eq!(change.removed, vec![removed]);
+        assert_eq!(
+            change
+                .removed
+                .iter()
+                .map(|state| state.worker)
+                .collect::<Vec<_>>(),
+            vec![removed]
+        );
         assert!(table.index.contains_key(&existing));
         assert!(table.index.contains_key(&added));
         assert!(!table.index.contains_key(&removed));
 
         let existing_idx = table.index[&existing];
-        assert_eq!(table.slots[existing_idx].1.read().active_blocks(), 3);
+        assert_eq!(
+            table.slots[existing_idx].sequences.read().active_blocks(),
+            3
+        );
 
         let added_idx = table.index[&added];
-        assert_eq!(table.slots[added_idx].1.read().active_blocks(), 0);
+        assert_eq!(table.slots[added_idx].sequences.read().active_blocks(), 0);
     }
 }
