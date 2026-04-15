@@ -9,7 +9,6 @@
 //! transport (e.g., NATS EventPublisher, Prometheus gauges) so that all business logic lives in
 //! this crate while the runtime glue stays in `lib/llm`.
 
-use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -19,10 +18,8 @@ use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-#[cfg(any(test, debug_assertions))]
-use rustc_hash::{FxHashMap, FxHashSet};
-
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
+use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, BlockPresenceDelta, RequestId};
 use super::topology::WorkerTable;
 use crate::protocols::{
@@ -116,8 +113,7 @@ pub struct SequenceRequest {
 /// and metrics infrastructure.
 pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     workers: RwLock<WorkerTable>,
-    request_to_worker: DashMap<RequestId, WorkerWithDpRank>,
-    request_to_lora: DashMap<RequestId, String>,
+    request_index: RequestIndex,
     prompt_registry: PromptRegistry,
     block_size: usize,
     router_id: u64,
@@ -146,8 +142,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         Self {
             workers: RwLock::new(workers),
-            request_to_worker: DashMap::new(),
-            request_to_lora: DashMap::new(),
+            request_index: RequestIndex::default(),
             prompt_registry,
             block_size,
             router_id,
@@ -156,33 +151,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             replica_sync,
             worker_type,
         }
-    }
-
-    #[cfg(any(test, debug_assertions))]
-    fn assert_registry_consistent(&self) {
-        let table = self.workers.read();
-        let worker_guards: Vec<_> = table
-            .slots
-            .iter()
-            .map(|(worker, lock)| (*worker, lock.read()))
-            .collect();
-        let expected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadSnapshot> = worker_guards
-            .iter()
-            .map(|(worker, seq)| (*worker, seq.worker_load_snapshot()))
-            .collect();
-        let expected_blocks: FxHashMap<WorkerWithDpRank, FxHashSet<SequenceHash>> = worker_guards
-            .iter()
-            .map(|(worker, seq)| (*worker, seq.active_block_hashes()))
-            .collect();
-
-        self.prompt_registry
-            .assert_consistent_with_workers(&expected_loads, &expected_blocks);
-    }
-
-    #[inline]
-    fn validate_registry(&self) {
-        #[cfg(any(test, debug_assertions))]
-        self.assert_registry_consistent();
     }
 
     #[cfg(any(test, feature = "bench"))]
@@ -200,14 +168,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         );
 
         assert!(
-            self.request_to_worker.is_empty(),
+            self.request_index.is_empty(),
             "expected no active request-to-worker mappings, found {}",
-            self.request_to_worker.len(),
-        );
-        assert!(
-            self.request_to_lora.is_empty(),
-            "expected no active request-to-lora mappings, found {}",
-            self.request_to_lora.len(),
+            self.request_index.worker_len(),
         );
         assert!(
             self.get_active_lora_counts().is_empty(),
@@ -337,13 +300,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             prefill_load_hint,
                         } => {
                             self.ensure_worker_registered(event.worker);
-                            self.request_to_worker
-                                .insert(event.request_id.clone(), event.worker);
-
-                            if let Some(ref lora_name) = event.lora_name {
-                                self.request_to_lora
-                                    .insert(event.request_id.clone(), lora_name.clone());
-                            }
+                            self.request_index.set_request(
+                                event.request_id.clone(),
+                                event.worker,
+                                event.lora_name.clone(),
+                            );
 
                             let table = self.workers.read();
                             if let Some(&idx) = table.index.get(&event.worker) {
@@ -368,11 +329,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                     (outcome.expired_request_ids, load)
                                 };
                                 drop(table);
-                                self.validate_registry();
-                                for expired_id in &expired_request_ids {
-                                    self.request_to_worker.remove(expired_id);
-                                    self.request_to_lora.remove(expired_id);
-                                }
+                                self.request_index.remove_requests(expired_request_ids.iter());
                                 self.publish_worker_load_snapshot(event.worker, load, decay_now);
                                 continue;
                             } else {
@@ -383,9 +340,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                             }
                         }
                         ActiveSequenceEventData::Free => {
-                            if let Some((_, worker)) =
-                                self.request_to_worker.remove(&event.request_id)
-                            {
+                            if let Some(worker) = self.request_index.remove_request(&event.request_id) {
                                 let table = self.workers.read();
                                 if let Some(&idx) = table.index.get(&worker) {
                                     let load = {
@@ -396,16 +351,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                         load
                                     };
                                     drop(table);
-                                    self.validate_registry();
                                     self.publish_worker_load_snapshot(worker, load, decay_now);
                                     remote_capacity_changed = true;
                                 }
                             }
-                            self.request_to_lora.remove(&event.request_id);
                         }
                         ActiveSequenceEventData::MarkPrefillCompleted => {
-                            let worker =
-                                self.request_to_worker.get(&event.request_id).map(|r| *r);
+                            let worker = self.request_index.worker_for(&event.request_id);
                             if let Some(worker) = worker {
                                 let table = self.workers.read();
                                 if let Some(&idx) = table.index.get(&worker) {
@@ -416,7 +368,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                                         self.replace_worker_load_state(worker, load);
                                     }
                                     drop(table);
-                                    self.validate_registry();
                                     remote_capacity_changed = true;
                                 }
                             }
@@ -457,7 +408,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             tracing::debug!("Lazily registering external worker {:?}", worker);
         }
         self.prompt_registry.apply_topology_change(change);
-        self.validate_registry();
     }
 
     /// Update the set of workers, adding and removing as needed.
@@ -471,27 +421,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         for worker in &change.removed {
             tracing::warn!("Removing worker {:?}", worker);
-
-            let requests_to_remove: Vec<RequestId> = self
-                .request_to_worker
-                .iter()
-                .filter(|entry| entry.value() == worker)
-                .map(|entry| entry.key().clone())
-                .collect();
-
-            self.request_to_worker
-                .retain(|_request_id, mapped_worker| mapped_worker != worker);
-
-            for request_id in requests_to_remove {
-                self.request_to_lora.remove(&request_id);
-            }
+            self.request_index.remove_worker_requests(*worker);
         }
         for worker in &change.added {
             tracing::warn!("Adding worker {:?}", worker);
         }
 
         self.prompt_registry.apply_topology_change(change);
-        self.validate_registry();
     }
 
     fn ensure_worker_registered(&self, worker: WorkerWithDpRank) {
@@ -509,7 +445,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         drop(table);
 
         self.prompt_registry.apply_topology_change(change);
-        self.validate_registry();
     }
 
     fn add_request_local(
@@ -531,17 +466,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         self.ensure_worker_registered(worker);
 
-        if let Some(existing_worker) = self.request_to_worker.get(&request_id) {
+        if let Err(existing_worker) =
+            self.request_index
+                .try_insert_request(request_id.clone(), worker, lora_name)
+        {
             return Err(SequenceError::DuplicateRequest {
                 request_id,
-                worker: *existing_worker,
+                worker: existing_worker,
             });
-        }
-
-        self.request_to_worker.insert(request_id.clone(), worker);
-
-        if let Some(lora) = lora_name {
-            self.request_to_lora.insert(request_id.clone(), lora);
         }
 
         let (expired_request_ids, load) = {
@@ -565,12 +497,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.apply_worker_block_delta_and_load(worker, outcome.block_delta, load);
             (outcome.expired_request_ids, load)
         };
-        self.validate_registry();
 
-        for expired_id in &expired_request_ids {
-            self.request_to_worker.remove(expired_id);
-            self.request_to_lora.remove(expired_id);
-        }
+        self.request_index
+            .remove_requests(expired_request_ids.iter());
 
         self.publish_worker_load_snapshot(worker, load, decay_now);
 
@@ -606,13 +535,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> BlockPresenceDelta,
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
-        let worker = self
-            .request_to_worker
-            .get(request_id)
-            .map(|entry| *entry)
-            .ok_or_else(|| SequenceError::RequestNotFound {
+        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
+            SequenceError::RequestNotFound {
                 request_id: request_id.clone(),
-            })?;
+            }
+        })?;
 
         let load = {
             let table = self.workers.read();
@@ -626,11 +553,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.apply_worker_block_delta_and_load(worker, delta, load);
             load
         };
-        self.validate_registry();
 
         if remove_mapping {
-            self.request_to_worker.remove(request_id);
-            self.request_to_lora.remove(request_id);
+            self.request_index.remove_request(request_id);
         }
 
         self.publish_worker_load_snapshot(worker, load, decay_now);
@@ -644,13 +569,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         decay_now: Instant,
         mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
     ) -> Result<(), SequenceError> {
-        let worker = self
-            .request_to_worker
-            .get(request_id)
-            .map(|entry| *entry)
-            .ok_or_else(|| SequenceError::RequestNotFound {
+        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
+            SequenceError::RequestNotFound {
                 request_id: request_id.clone(),
-            })?;
+            }
+        })?;
 
         let load = {
             let table = self.workers.read();
@@ -664,7 +587,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.replace_worker_load_state(worker, load);
             load
         };
-        self.validate_registry();
 
         self.publish_worker_load_snapshot(worker, load, decay_now);
 
@@ -679,18 +601,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> BlockPresenceDelta,
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
-        let worker = self
-            .request_to_worker
-            .get(request_id)
-            .map(|entry| *entry)
-            .ok_or_else(|| SequenceError::RequestNotFound {
+        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
+            SequenceError::RequestNotFound {
                 request_id: request_id.clone(),
-            })?;
+            }
+        })?;
 
-        let lora_name = self
-            .request_to_lora
-            .get(request_id)
-            .map(|entry| entry.value().clone());
+        let lora_name = self.request_index.lora_for(request_id);
         self.spawn_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
@@ -714,18 +631,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         event_data: ActiveSequenceEventData,
         mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
     ) -> Result<(), SequenceError> {
-        let worker = self
-            .request_to_worker
-            .get(request_id)
-            .map(|entry| *entry)
-            .ok_or_else(|| SequenceError::RequestNotFound {
+        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
+            SequenceError::RequestNotFound {
                 request_id: request_id.clone(),
-            })?;
+            }
+        })?;
 
-        let lora_name = self
-            .request_to_lora
-            .get(request_id)
-            .map(|entry| entry.value().clone());
+        let lora_name = self.request_index.lora_for(request_id);
         self.spawn_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
@@ -746,7 +658,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// [`ActiveSequences::free`], so callers do not need to call
     /// [`Self::mark_prefill_completed`] before freeing a completed request.
     pub fn free(&self, request_id: &RequestId, decay_now: Instant) -> Result<(), SequenceError> {
-        if !self.request_to_worker.contains_key(request_id) {
+        if !self.request_index.contains(request_id) {
             tracing::debug!("Request {request_id} not found, already freed (idempotent)");
             return Ok(());
         }
@@ -790,13 +702,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         request_id: &RequestId,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
-        let worker = self
-            .request_to_worker
-            .get(request_id)
-            .map(|entry| *entry)
-            .ok_or_else(|| SequenceError::RequestNotFound {
+        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
+            SequenceError::RequestNotFound {
                 request_id: request_id.clone(),
-            })?;
+            }
+        })?;
 
         let load = {
             let table = self.workers.read();
@@ -821,7 +731,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             );
             load
         };
-        self.validate_registry();
 
         self.publish_worker_load_snapshot(worker, load, Instant::now());
 
@@ -892,14 +801,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
     ) {
-        #[cfg(feature = "bench")]
-        let start = tokio::time::Instant::now();
-
-        #[cfg(feature = "bench")]
-        let num_workers = self.num_workers();
-
-        let (potential_blocks, potential_tokens) = self
-            .prompt_registry
+        self.prompt_registry
             .potential_blocks_and_tokens_with_prefill_tracking(
                 token_sequence,
                 isl,
@@ -907,19 +809,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 track_prefill_tokens,
                 self.block_size,
                 decay_now,
-            );
-
-        #[cfg(feature = "bench")]
-        {
-            let total_elapsed = start.elapsed();
-            tracing::info!(
-                num_workers,
-                total_us = total_elapsed.as_micros() as u64,
-                "potential_blocks_and_tokens completed"
-            );
-        }
-
-        (potential_blocks, potential_tokens)
+            )
     }
 
     /// Query all workers for their current number of active blocks.
@@ -943,12 +833,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for entry in self.request_to_lora.iter() {
-            let lora_name = entry.value().clone();
-            *counts.entry(lora_name).or_insert(0) += 1;
-        }
-        counts
+        self.request_index.active_lora_counts()
     }
 
     /// Force expire stale requests across all workers (one-shot).
@@ -962,26 +847,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let now = Instant::now();
         let table = self.workers.read();
         let mut removed_request_count = 0;
-        let mut registry_changed = false;
         for (worker, lock) in &table.slots {
             let mut seq = lock.write();
             let outcome = seq.force_expiry();
             if !outcome.expired_request_ids.is_empty() {
                 let load = seq.worker_load_snapshot();
                 self.apply_worker_block_delta_and_load(*worker, outcome.block_delta, load);
-                registry_changed = true;
-                for expired_id in &outcome.expired_request_ids {
-                    self.request_to_worker.remove(expired_id);
-                    self.request_to_lora.remove(expired_id);
-                    removed_request_count += 1;
-                }
+                removed_request_count += outcome.expired_request_ids.len();
+                self.request_index
+                    .remove_requests(outcome.expired_request_ids.iter());
                 self.publish_worker_load_snapshot(*worker, load, now);
             }
         }
         drop(table);
-        if registry_changed {
-            self.validate_registry();
-        }
         let duration = now.elapsed();
         tracing::debug!(
             duration = duration.as_secs_f64(),
@@ -1315,8 +1193,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(331)).await;
         sequences.force_expire_requests_across_all_workers();
 
-        assert!(sequences.request_to_worker.is_empty());
-        assert!(sequences.request_to_lora.is_empty());
+        assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
     }
@@ -1425,8 +1302,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(sequences.request_to_worker.is_empty());
-        assert!(sequences.request_to_lora.is_empty());
+        assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
     }
@@ -1466,7 +1342,7 @@ mod tests {
 
         assert_eq!(sequences.num_workers(), 1);
         assert_eq!(
-            sequences.request_to_worker.get("req-1").map(|entry| *entry),
+            sequences.request_index.worker_for(&"req-1".to_string()),
             Some(worker)
         );
         assert!(!sequences.prompt_registry.is_block_index_empty());
@@ -1499,7 +1375,7 @@ mod tests {
         sequences.update_workers(&HashMap::new());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert!(sequences.active_blocks().is_empty());
-        assert!(sequences.request_to_worker.is_empty());
+        assert!(sequences.request_index.is_empty());
 
         sequences.update_workers(&HashMap::from([(1_u64, (0_u32, 1_u32))]));
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));

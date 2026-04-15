@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dashmap::{DashMap, mapref::entry::Entry};
 use dynamo_tokens::SequenceHash;
-use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use tokio::time::Instant;
@@ -28,53 +28,51 @@ impl WorkerLoadSnapshot {
 }
 
 #[derive(Debug, Default)]
-struct PromptRegistryInner {
-    block_workers: FxHashMap<SequenceHash, FxHashSet<WorkerWithDpRank>>,
-    worker_blocks: FxHashMap<WorkerWithDpRank, FxHashSet<SequenceHash>>,
-    workers: FxHashMap<WorkerWithDpRank, WorkerLoadSnapshot>,
-}
-
-#[derive(Debug, Default)]
 pub(super) struct PromptRegistry {
-    // TODO: This global RwLock is still coarse. Revisit lock granularity separately.
-    inner: RwLock<PromptRegistryInner>,
+    // WARNING: `block_workers` membership and `workers` load are only eventually consistent.
+    // Each mutation still starts from one worker-local source of truth: we mutate the chosen
+    // `ActiveSequences`, derive an exact `BlockPresenceDelta` plus `WorkerLoadSnapshot`, then
+    // apply those updates into these concurrent maps. That means the registry converges to the
+    // correct final state after the write finishes, but reads can observe a mixed membership/load
+    // state in the middle of that publish sequence that never existed atomically, which can yield
+    // suboptimal routing. We accept that gap temporarily to remove the coarse global registry
+    // lock; restoring a coherent published snapshot is still a follow-up item.
+    block_workers: DashMap<SequenceHash, FxHashSet<WorkerWithDpRank>>,
+    worker_blocks: DashMap<WorkerWithDpRank, FxHashSet<SequenceHash>>,
+    workers: DashMap<WorkerWithDpRank, WorkerLoadSnapshot>,
 }
 
 impl PromptRegistry {
-    fn apply_block_delta_inner(
-        inner: &mut PromptRegistryInner,
-        worker: WorkerWithDpRank,
-        block_delta: BlockPresenceDelta,
-    ) {
-        inner.worker_blocks.entry(worker).or_default();
+    fn ensure_worker_entries(&self, worker: WorkerWithDpRank) {
+        self.workers.entry(worker).or_default();
+        self.worker_blocks.entry(worker).or_default();
+    }
 
+    fn apply_block_delta(&self, worker: WorkerWithDpRank, block_delta: BlockPresenceDelta) {
+        self.worker_blocks.entry(worker).or_default();
         for hash in block_delta.blocks_became_absent {
-            if let Some(worker_blocks) = inner.worker_blocks.get_mut(&worker) {
+            if let Some(mut worker_blocks) = self.worker_blocks.get_mut(&worker) {
                 worker_blocks.remove(&hash);
             }
-            let should_remove = inner.block_workers.get_mut(&hash).is_some_and(|workers| {
-                workers.remove(&worker);
-                workers.is_empty()
-            });
-            if should_remove {
-                inner.block_workers.remove(&hash);
+
+            if let Entry::Occupied(mut entry) = self.block_workers.entry(hash) {
+                entry.get_mut().remove(&worker);
+                if entry.get().is_empty() {
+                    entry.remove();
+                }
             }
         }
 
         for hash in block_delta.blocks_became_present {
-            inner.worker_blocks.entry(worker).or_default().insert(hash);
-            inner.block_workers.entry(hash).or_default().insert(worker);
+            self.worker_blocks.entry(worker).or_default().insert(hash);
+            self.block_workers.entry(hash).or_default().insert(worker);
         }
     }
 
     pub(super) fn new(workers: impl IntoIterator<Item = WorkerWithDpRank>) -> Self {
         let registry = Self::default();
-        {
-            let mut inner = registry.inner.write();
-            for worker in workers {
-                inner.workers.entry(worker).or_default();
-                inner.worker_blocks.entry(worker).or_default();
-            }
+        for worker in workers {
+            registry.ensure_worker_entries(worker);
         }
         registry
     }
@@ -84,10 +82,8 @@ impl PromptRegistry {
         worker: WorkerWithDpRank,
         load: WorkerLoadSnapshot,
     ) {
-        let mut inner = self.inner.write();
-        inner.workers.entry(worker).or_default();
-        inner.worker_blocks.entry(worker).or_default();
-        inner.workers.insert(worker, load);
+        self.ensure_worker_entries(worker);
+        self.workers.insert(worker, load);
     }
 
     pub(super) fn apply_block_delta_and_load(
@@ -96,41 +92,35 @@ impl PromptRegistry {
         block_delta: BlockPresenceDelta,
         load: WorkerLoadSnapshot,
     ) {
-        let mut inner = self.inner.write();
-        Self::apply_block_delta_inner(&mut inner, worker, block_delta);
-        inner.workers.entry(worker).or_default();
-        inner.worker_blocks.entry(worker).or_default();
-        inner.workers.insert(worker, load);
+        self.ensure_worker_entries(worker);
+        self.apply_block_delta(worker, block_delta);
+        self.workers.insert(worker, load);
     }
 
     pub(super) fn apply_topology_change(&self, change: WorkerTopologyChange) {
-        let mut inner = self.inner.write();
-
         for worker in change.removed {
-            inner.workers.remove(&worker);
-            let Some(blocks) = inner.worker_blocks.remove(&worker) else {
+            self.workers.remove(&worker);
+            let Some((_, blocks)) = self.worker_blocks.remove(&worker) else {
                 continue;
             };
 
             for hash in blocks {
-                let should_remove = inner.block_workers.get_mut(&hash).is_some_and(|workers| {
-                    workers.remove(&worker);
-                    workers.is_empty()
-                });
-                if should_remove {
-                    inner.block_workers.remove(&hash);
+                if let Entry::Occupied(mut entry) = self.block_workers.entry(hash) {
+                    entry.get_mut().remove(&worker);
+                    if entry.get().is_empty() {
+                        entry.remove();
+                    }
                 }
             }
         }
 
         for worker in change.added {
-            inner.workers.entry(worker).or_default();
-            inner.worker_blocks.entry(worker).or_default();
+            self.ensure_worker_entries(worker);
         }
     }
 
     fn linear_scan_drain(
-        inner: &PromptRegistryInner,
+        &self,
         query: &[SequenceHash],
         active: &mut FxHashSet<WorkerWithDpRank>,
         matched_depth: &mut FxHashMap<WorkerWithDpRank, usize>,
@@ -146,7 +136,7 @@ impl PromptRegistry {
                 break;
             }
 
-            let Some(workers) = inner.block_workers.get(hash) else {
+            let Some(workers) = self.block_workers.get(hash) else {
                 for worker in active.drain() {
                     matched_depth.insert(worker, pos);
                 }
@@ -157,14 +147,14 @@ impl PromptRegistry {
                 continue;
             }
 
-            reconcile_active_workers(active, workers, |worker| {
+            reconcile_active_workers(active, workers.value(), |worker| {
                 matched_depth.insert(worker, pos);
             });
         }
     }
 
     fn compute_overlap_depths(
-        inner: &PromptRegistryInner,
+        &self,
         token_sequence: Option<&[SequenceHash]>,
     ) -> (usize, FxHashMap<WorkerWithDpRank, usize>) {
         let mut matched_depth = FxHashMap::default();
@@ -175,17 +165,18 @@ impl PromptRegistry {
         {
             // TODO: This is generic cached-block overlap with prefix-drain semantics. It is
             // weaker than the positional/indexer path and output blocks still use random hashes.
-            if let Some(first_workers) = inner.block_workers.get(&query[0]) {
-                let mut active = first_workers.clone();
+            // It also no longer observes membership and load atomically because the registry is
+            // intentionally eventually consistent across its concurrent maps.
+            if let Some(first_workers) = self.block_workers.get(&query[0]) {
+                let mut active = first_workers.value().clone();
                 let mut current_pos = 0;
 
                 while current_pos < query.len().saturating_sub(1) && !active.is_empty() {
                     let next_pos = (current_pos + OVERLAP_JUMP_SIZE).min(query.len() - 1);
 
-                    match inner.block_workers.get(&query[next_pos]) {
+                    match self.block_workers.get(&query[next_pos]) {
                         None => {
-                            Self::linear_scan_drain(
-                                inner,
+                            self.linear_scan_drain(
                                 query,
                                 &mut active,
                                 &mut matched_depth,
@@ -198,8 +189,7 @@ impl PromptRegistry {
                             current_pos = next_pos;
                         }
                         Some(_) => {
-                            Self::linear_scan_drain(
-                                inner,
+                            self.linear_scan_drain(
                                 query,
                                 &mut active,
                                 &mut matched_depth,
@@ -222,7 +212,7 @@ impl PromptRegistry {
 
     #[expect(clippy::too_many_arguments)]
     fn project_loads_from_overlap(
-        inner: &PromptRegistryInner,
+        &self,
         query_len: usize,
         matched_depth: &FxHashMap<WorkerWithDpRank, usize>,
         isl: usize,
@@ -234,9 +224,11 @@ impl PromptRegistry {
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
     ) {
-        let mut potential_blocks = HashMap::with_capacity(inner.workers.len());
-        let mut potential_tokens = HashMap::with_capacity(inner.workers.len());
-        for (&worker, load) in &inner.workers {
+        let mut potential_blocks = HashMap::with_capacity(self.workers.len());
+        let mut potential_tokens = HashMap::with_capacity(self.workers.len());
+        for entry in &self.workers {
+            let worker = *entry.key();
+            let load = *entry.value();
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
             let new_blocks = query_len.saturating_sub(overlap_depth);
             let active_tokens = load.active_tokens(decay_now);
@@ -266,10 +258,8 @@ impl PromptRegistry {
         HashMap<WorkerWithDpRank, usize>,
         HashMap<WorkerWithDpRank, usize>,
     ) {
-        let inner = self.inner.read();
-        let (query_len, matched_depth) = Self::compute_overlap_depths(&inner, token_sequence);
-        Self::project_loads_from_overlap(
-            &inner,
+        let (query_len, matched_depth) = self.compute_overlap_depths(token_sequence);
+        self.project_loads_from_overlap(
             query_len,
             &matched_depth,
             isl,
@@ -281,20 +271,16 @@ impl PromptRegistry {
     }
 
     pub(super) fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
-        let inner = self.inner.read();
-        inner
-            .workers
+        self.workers
             .iter()
-            .map(|(&worker, load)| (worker, load.active_blocks))
+            .map(|entry| (*entry.key(), entry.value().active_blocks))
             .collect()
     }
 
     pub(super) fn active_tokens(&self, decay_now: Instant) -> HashMap<WorkerWithDpRank, usize> {
-        let inner = self.inner.read();
-        inner
-            .workers
+        self.workers
             .iter()
-            .map(|(&worker, load)| (worker, load.active_tokens(decay_now)))
+            .map(|entry| (*entry.key(), entry.value().active_tokens(decay_now)))
             .collect()
     }
 
@@ -303,14 +289,12 @@ impl PromptRegistry {
         decay_now: Instant,
         mut predicate: impl FnMut(WorkerWithDpRank, usize) -> bool,
     ) -> bool {
-        let inner = self.inner.read();
-        inner
-            .workers
+        self.workers
             .iter()
-            .any(|(&worker, load)| predicate(worker, load.active_tokens(decay_now)))
+            .any(|entry| predicate(*entry.key(), entry.value().active_tokens(decay_now)))
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(test)]
     pub(super) fn assert_consistent_with_workers(
         &self,
         expected_loads: &FxHashMap<WorkerWithDpRank, WorkerLoadSnapshot>,
@@ -327,24 +311,38 @@ impl PromptRegistry {
             }
         }
 
-        let inner = self.inner.read();
+        let actual_loads: FxHashMap<_, _> = self
+            .workers
+            .iter()
+            .map(|entry| (*entry.key(), *entry.value()))
+            .collect();
+        let actual_worker_blocks: FxHashMap<_, _> = self
+            .worker_blocks
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect();
+        let actual_block_workers: FxHashMap<_, _> = self
+            .block_workers
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect();
         assert_eq!(
-            inner.workers, *expected_loads,
+            actual_loads, *expected_loads,
             "prompt registry worker loads drifted from per-worker state",
         );
         assert_eq!(
-            inner.worker_blocks, *expected_blocks,
+            actual_worker_blocks, *expected_blocks,
             "prompt registry worker block membership drifted from per-worker state",
         );
         assert_eq!(
-            inner.block_workers, expected_block_workers,
+            actual_block_workers, expected_block_workers,
             "prompt registry reverse index drifted from per-worker state",
         );
     }
 
     #[cfg(any(test, feature = "bench"))]
     pub(super) fn is_block_index_empty(&self) -> bool {
-        self.inner.read().block_workers.is_empty()
+        self.block_workers.is_empty()
     }
 }
 

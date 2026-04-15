@@ -26,7 +26,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 use rustc_hash::FxHashSet;
 
 use super::block_tracker::BlockTracker;
@@ -343,7 +343,7 @@ impl ActiveSequences {
         }
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(test)]
     pub(super) fn active_block_hashes(&self) -> FxHashSet<SequenceHash> {
         self.blocks.unique_blocks.keys().copied().collect()
     }

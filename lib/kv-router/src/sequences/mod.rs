@@ -5,6 +5,7 @@ mod block_tracker;
 pub mod multi_worker;
 mod prefill_tracker;
 mod prompt_registry;
+mod request_maps;
 pub mod single;
 mod topology;
 
