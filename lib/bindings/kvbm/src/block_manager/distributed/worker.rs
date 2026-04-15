@@ -8,10 +8,63 @@ use utils::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 
 use llm_rs::block_manager::distributed::{
     BlockTransferHandler as RustBlockTransferHandler, KvbmWorker as KvbmWorkerImpl,
-    KvbmWorkerConfig,
+    KvbmWorkerConfig, NcclConfig,
 };
+#[cfg(feature = "nccl")]
+use llm_rs::block_manager::distributed::{NcclBootstrap, NcclCommOwned};
 use llm_rs::block_manager::layout::LayoutType;
 use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
+
+/// Build NcclConfig from Python parameters.
+///
+/// Returns an error if NCCL parameters are provided but the NCCL feature is not enabled.
+fn build_nccl_config(
+    rank: Option<i32>,
+    world_size: Option<i32>,
+    nccl_comm_ptr: Option<usize>,
+) -> anyhow::Result<NcclConfig> {
+    // Check if the user is trying to use replicated mode
+    let wants_replicated = rank.is_some() || world_size.is_some() || nccl_comm_ptr.is_some();
+
+    #[cfg(feature = "nccl")]
+    {
+        match (rank, world_size, nccl_comm_ptr) {
+            (Some(r), Some(ws), Some(ptr)) if ptr != 0 => {
+                use cudarc::nccl::sys::ncclComm_t;
+                Ok(unsafe { NcclConfig::enabled(ptr as ncclComm_t, r, ws) })
+            }
+            (Some(r), Some(ws), Some(0)) => anyhow::bail!(
+                "NCCL replicated mode requires a valid communicator: rank={}, world_size={}, nccl_comm_ptr=0 (invalid). \
+                 Provide a non-null nccl_comm_ptr or omit rank/world_size/nccl_comm_ptr for sharded mode.",
+                r,
+                ws
+            ),
+            (r, ws, ptr) if wants_replicated => anyhow::bail!(
+                "NCCL replicated mode requires rank, world_size, and nccl_comm_ptr together; \
+                 partial or invalid configuration is not allowed. Got rank={:?}, world_size={:?}, nccl_comm_ptr={:?}. \
+                 Provide all three (with nccl_comm_ptr != 0) or omit all for sharded mode.",
+                r,
+                ws,
+                ptr
+            ),
+            _ => Ok(NcclConfig::disabled()),
+        }
+    }
+    #[cfg(not(feature = "nccl"))]
+    {
+        if wants_replicated {
+            anyhow::bail!(
+                "NCCL replicated mode requested (rank={:?}, world_size={:?}, nccl_comm_ptr={:?}) \
+                 but kvbm was not built with the 'nccl' feature enabled. \
+                 Please rebuild with 'nccl' feature or use sharded mode (omit rank/world_size/nccl_comm_ptr).",
+                rank,
+                world_size,
+                nccl_comm_ptr
+            );
+        }
+        Ok(NcclConfig::disabled())
+    }
+}
 
 /// A wrapper around a layout type.
 /// This is used to convert between the Python and Rust layout types.
@@ -132,6 +185,9 @@ impl BlockTransferHandler {
 pub struct KvbmWorker {
     inner: Arc<Mutex<KvbmWorkerImpl>>,
     _drt: Option<Arc<rs::DistributedRuntime>>,
+    /// Keeps the NCCL communicator alive for the worker lifetime; dropped with the worker.
+    #[cfg(feature = "nccl")]
+    _nccl_comm: Option<Arc<NcclCommOwned>>,
 }
 
 impl KvbmWorker {
@@ -143,8 +199,8 @@ impl KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
+    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false, device_layout_type=None, host_layout_type=None, disk_layout_type=None, rank=None, world_size=None, nccl_comm_ref=None))]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
     fn new(
         num_device_blocks: usize,
         page_size: usize,
@@ -156,6 +212,9 @@ impl KvbmWorker {
         device_layout_type: Option<PyLayoutType>,
         host_layout_type: Option<PyLayoutType>,
         disk_layout_type: Option<PyLayoutType>,
+        rank: Option<i32>,
+        world_size: Option<i32>,
+        nccl_comm_ref: Option<PyObject>,
     ) -> PyResult<Self> {
         let drt: Option<Arc<rs::DistributedRuntime>> = Python::with_gil(|py| {
             if let Some(obj) = drt {
@@ -173,6 +232,27 @@ impl KvbmWorker {
             let vllm_tensor = VllmTensor::new(tensor.clone()).map_err(to_pyerr)?;
             vllm_tensors.push(Arc::new(vllm_tensor));
         }
+
+        // Own the NCCL communicator for the worker lifetime; NcclConfig gets a borrowed handle.
+        #[cfg(feature = "nccl")]
+        let _nccl_comm = nccl_comm_ref.as_ref().and_then(|obj| {
+            Python::with_gil(|py| {
+                obj.downcast_bound::<PyNcclCommRef>(py)
+                    .ok()
+                    .map(|r| r.borrow().get_arc())
+            })
+        });
+        #[cfg(feature = "nccl")]
+        let nccl_comm_ptr = _nccl_comm.as_ref().map(|a| a.as_raw() as usize);
+        #[cfg(not(feature = "nccl"))]
+        let nccl_comm_ptr: Option<usize> = None;
+        #[cfg(not(feature = "nccl"))]
+        let _ = nccl_comm_ref;
+
+        // Build NcclConfig from owned comm (borrowed handle only)
+        let nccl_config = build_nccl_config(rank, world_size, nccl_comm_ptr).map_err(to_pyerr)?;
+        // When NCCL is disabled, pass None for rank/world_size so the worker is consistently in sharded mode.
+        let worker_rank = if nccl_config.is_enabled() { rank } else { None };
 
         let config = KvbmWorkerConfig::builder()
             .cancel_token(get_current_cancel_token())
@@ -198,6 +278,8 @@ impl KvbmWorker {
             )
             .leader_pub_url(get_leader_zmq_pub_url())
             .leader_ack_url(get_leader_zmq_ack_url())
+            .rank(worker_rank)
+            .nccl_config(nccl_config)
             .build()
             .map_err(to_pyerr)?;
 
@@ -211,6 +293,182 @@ impl KvbmWorker {
         Ok(Self {
             inner: Arc::new(Mutex::new(worker)),
             _drt: drt,
+            #[cfg(feature = "nccl")]
+            _nccl_comm,
         })
+    }
+}
+
+/// Owning wrapper for an NCCL communicator; calls ncclCommDestroy on drop.
+///
+/// Returned by NcclBootstrap.init_communicator. Pass this object to workers
+/// (e.g. KvbmWorker, PyTrtllmKvConnectorWorker) so they keep the comm alive.
+/// The raw handle is exposed via as_raw() for NcclConfig; ownership stays here.
+#[cfg(feature = "nccl")]
+#[pyclass(name = "NcclCommRef")]
+pub struct PyNcclCommRef {
+    inner: Arc<NcclCommOwned>,
+}
+
+#[cfg(feature = "nccl")]
+#[pymethods]
+impl PyNcclCommRef {
+    /// Raw ncclComm_t pointer as an integer (borrowed; do not destroy).
+    /// Used by NcclConfig; the communicator is owned by this ref.
+    fn as_raw(&self) -> usize {
+        self.inner.as_raw() as usize
+    }
+}
+
+#[cfg(feature = "nccl")]
+impl PyNcclCommRef {
+    /// Clone the inner Arc so a worker can hold ownership until drop.
+    pub fn get_arc(&self) -> Arc<NcclCommOwned> {
+        Arc::clone(&self.inner)
+    }
+}
+
+/// Python wrapper for NCCL bootstrap functionality.
+///
+/// This class provides methods to generate, serialize, deserialize,
+/// and initialize NCCL communicators for KVBM's replicated mode.
+///
+/// Usage pattern:
+/// 1. Rank 0: Call `NcclBootstrap.generate(world_size)` to create a new unique ID
+/// 2. Rank 0: Call `serialize()` and broadcast to other ranks via MPI
+/// 3. Other ranks: Call `NcclBootstrap.deserialize(bytes)` to reconstruct
+/// 4. All ranks: Call `init_communicator(rank)` collectively to create the comm
+#[cfg(feature = "nccl")]
+#[pyclass(name = "NcclBootstrap")]
+pub struct PyNcclBootstrap {
+    inner: NcclBootstrap,
+}
+
+#[cfg(feature = "nccl")]
+#[pymethods]
+impl PyNcclBootstrap {
+    /// Generate a new unique ID for NCCL communicator initialization.
+    /// This should only be called on rank 0.
+    ///
+    /// Args:
+    ///     world_size: The total number of ranks that will participate
+    ///
+    /// Returns:
+    ///     A new PyNcclBootstrap instance
+    #[staticmethod]
+    fn generate(world_size: i32) -> PyResult<Self> {
+        let inner = NcclBootstrap::generate(world_size).map_err(to_pyerr)?;
+        Ok(Self { inner })
+    }
+
+    /// Serialize the bootstrap data for distribution to other ranks.
+    ///
+    /// Returns:
+    ///     bytes: The serialized bootstrap data (136 bytes)
+    fn serialize<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let bytes = self.inner.serialize();
+        Ok(pyo3::types::PyBytes::new(py, &bytes))
+    }
+
+    /// Deserialize bootstrap data received from rank 0.
+    ///
+    /// Args:
+    ///     data: The serialized bootstrap data (136 bytes)
+    ///
+    /// Returns:
+    ///     A new PyNcclBootstrap instance
+    #[staticmethod]
+    fn deserialize(data: &[u8]) -> PyResult<Self> {
+        let inner = NcclBootstrap::deserialize(data).map_err(to_pyerr)?;
+        Ok(Self { inner })
+    }
+
+    /// Initialize the NCCL communicator.
+    ///
+    /// IMPORTANT: This is a collective operation!
+    /// All ranks must call this function together with matching parameters.
+    /// The function will block until all ranks have called it.
+    ///
+    /// Returns an owning NcclCommRef; keep it alive for the lifetime of any
+    /// worker using this communicator. The communicator is destroyed when
+    /// the last reference is dropped.
+    ///
+    /// Args:
+    ///     rank: This rank's ID (0 to world_size-1)
+    ///
+    /// Returns:
+    ///     NcclCommRef: Owning wrapper; use .as_raw() for the raw handle if needed
+    fn init_communicator(&self, rank: i32) -> PyResult<PyNcclCommRef> {
+        let comm = self.inner.init_communicator(rank).map_err(to_pyerr)?;
+        let owned = unsafe { NcclCommOwned::from_raw(comm) };
+        Ok(PyNcclCommRef {
+            inner: Arc::new(owned),
+        })
+    }
+
+    /// Get the world size for this bootstrap.
+    fn world_size(&self) -> i32 {
+        self.inner.world_size()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stub implementations when nccl feature is disabled (match .pyi; raise on use)
+// ---------------------------------------------------------------------------
+
+#[cfg(not(feature = "nccl"))]
+const NCCL_UNAVAILABLE_MSG: &str = "kvbm was not built with the 'nccl' feature. Rebuild with --features nccl to use NcclBootstrap/NcclCommRef.";
+
+#[cfg(not(feature = "nccl"))]
+#[pyclass(name = "NcclCommRef")]
+pub struct PyNcclCommRef;
+
+#[cfg(not(feature = "nccl"))]
+#[pymethods]
+impl PyNcclCommRef {
+    fn as_raw(&self) -> PyResult<usize> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
+    }
+}
+
+#[cfg(not(feature = "nccl"))]
+#[pyclass(name = "NcclBootstrap")]
+pub struct PyNcclBootstrap;
+
+#[cfg(not(feature = "nccl"))]
+#[pymethods]
+impl PyNcclBootstrap {
+    #[staticmethod]
+    fn generate(_world_size: i32) -> PyResult<Self> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
+    }
+
+    fn serialize<'py>(&self, _py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
+    }
+
+    #[staticmethod]
+    fn deserialize(_data: &[u8]) -> PyResult<Self> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
+    }
+
+    fn init_communicator(&self, _rank: i32) -> PyResult<PyNcclCommRef> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
+    }
+
+    fn world_size(&self) -> PyResult<i32> {
+        Err(pyo3::exceptions::PyRuntimeError::new_err(
+            NCCL_UNAVAILABLE_MSG,
+        ))
     }
 }

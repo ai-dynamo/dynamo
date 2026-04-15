@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::future::Future;
+use std::time::Duration;
 
 use dynamo_tokens::{SequenceHash, Token};
 use rustc_hash::FxHashMap;
@@ -360,17 +361,23 @@ pub struct WorkerSelectionResult {
 
 /// Active load metrics for a worker, used for busy detection.
 ///
-/// Published by workers (with only `active_decode_blocks`) and by the scheduler
-/// (with both `active_decode_blocks` and `active_prefill_tokens`).
+/// Published by workers (with `kv_used_blocks`) and by the scheduler (with
+/// `active_decode_blocks` and `active_prefill_tokens`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ActiveLoad {
     pub worker_id: WorkerId,
     #[serde(default)]
     pub dp_rank: DpRank,
-    /// Number of active KV cache blocks on the worker (decode phase).
+    /// Scheduler-reported decode block load.
     pub active_decode_blocks: Option<u64>,
     /// Number of active prefill tokens (from scheduler's view).
     pub active_prefill_tokens: Option<u64>,
+    /// Total KV blocks currently in use on the worker.
+    ///
+    /// This is published by workers only and is the authoritative signal for
+    /// backend KV occupancy used by busy detection.
+    #[serde(default)]
+    pub kv_used_blocks: Option<u64>,
 }
 
 /// A [`LocalBlockHash`] is a hash computed from the token IDs, optional multimodal metadata,
@@ -429,6 +436,12 @@ pub struct ActiveSequenceEvent {
     pub lora_name: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillLoadHint {
+    pub initial_effective_prefill_tokens: usize,
+    pub expected_prefill_duration: Option<Duration>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveSequenceEventData {
     AddRequest {
@@ -438,6 +451,8 @@ pub enum ActiveSequenceEventData {
         #[serde(default = "default_track_prefill_tokens")]
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
+        #[serde(default)]
+        prefill_load_hint: Option<PrefillLoadHint>,
     },
     Free,
     MarkPrefillCompleted,

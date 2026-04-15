@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use crate::ConcurrentRadixTree;
+use crate::ConcurrentRadixTreeCompressed;
 use crate::ThreadPoolIndexer;
 use crate::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
 use crate::protocols::{LocalBlockHash, OverlapScores, RouterEvent, WorkerId};
@@ -14,7 +14,7 @@ use crate::protocols::{LocalBlockHash, OverlapScores, RouterEvent, WorkerId};
 #[derive(Clone)]
 pub enum Indexer {
     Single(KvIndexer),
-    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTree>>),
+    Concurrent(Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>),
 }
 
 impl Indexer {
@@ -57,7 +57,7 @@ impl Indexer {
 pub fn create_indexer(block_size: u32, num_threads: usize) -> Indexer {
     if num_threads > 1 {
         Indexer::Concurrent(Arc::new(ThreadPoolIndexer::new(
-            ConcurrentRadixTree::new(),
+            ConcurrentRadixTreeCompressed::new(),
             num_threads,
             block_size,
         )))

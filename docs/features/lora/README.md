@@ -308,5 +308,5 @@ This works end-to-end across the publisher pipeline, the KV consolidator (for de
 - [Feature Matrix](../../reference/feature-matrix.md) - Backend compatibility overview
 - [vLLM Backend](../../backends/vllm/README.md) - vLLM-specific configuration
 - [Dynamo Operator](../../kubernetes/dynamo-operator.md) - Kubernetes operator overview
-- [KV-Aware Routing](../../components/router/router-guide.md) - LoRA-aware request routing
+- [Routing Concepts](../../components/router/router-concepts.md) - LoRA-aware request routing
 - [KV Events for Custom Engines](../../integrations/kv-events-custom-engines.md) - Publishing LoRA-aware KV events

@@ -135,29 +135,6 @@ data:
       {{- if ne (.Values.checkpoint.readyForCheckpointFilePath | toString) "/tmp/ready-for-checkpoint" }}
       readyForCheckpointFilePath: {{ .Values.checkpoint.readyForCheckpointFilePath | quote }}
       {{- end }}
-      storage:
-        {{- if and .Values.checkpoint.storage.type (ne (.Values.checkpoint.storage.type | toString) "pvc") }}
-        type: {{ .Values.checkpoint.storage.type | quote }}
-        {{- end }}
-        {{- if or (eq (.Values.checkpoint.storage.type | toString) "pvc") (not .Values.checkpoint.storage.type) }}
-        pvc:
-          pvcName: {{ (.Values.checkpoint.storage.pvc.pvcName | default "snapshot-pvc") | quote }}
-          basePath: {{ (.Values.checkpoint.storage.pvc.basePath | default "/checkpoints") | quote }}
-        {{- end }}
-        {{- if eq .Values.checkpoint.storage.type "s3" }}
-        s3:
-          uri: {{ .Values.checkpoint.storage.s3.uri | quote }}
-          {{- if .Values.checkpoint.storage.s3.credentialsSecretRef }}
-          credentialsSecretRef: {{ .Values.checkpoint.storage.s3.credentialsSecretRef | quote }}
-          {{- end }}
-        {{- end }}
-        {{- if eq .Values.checkpoint.storage.type "oci" }}
-        oci:
-          uri: {{ .Values.checkpoint.storage.oci.uri | quote }}
-          {{- if .Values.checkpoint.storage.oci.credentialsSecretRef }}
-          credentialsSecretRef: {{ .Values.checkpoint.storage.oci.credentialsSecretRef | quote }}
-          {{- end }}
-        {{- end }}
     {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}
     discovery:

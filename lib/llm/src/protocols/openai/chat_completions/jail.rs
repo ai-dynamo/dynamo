@@ -4,7 +4,7 @@
 use async_stream::stream;
 use dynamo_protocols::types::{
     ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionMessageToolCallChunk,
-    ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, Role,
+    ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType, Role,
 };
 
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
@@ -232,17 +232,22 @@ impl ChoiceJailState {
 
                         // Handle trailing content if any
                         if !trailing_part.is_empty() {
-                            #[allow(deprecated)]
-                            let trailing_choice = create_choice_stream(
-                                choice.index,
-                                choice.delta.role,
-                                trailing_part,
-                                None,
-                                choice.finish_reason,
-                                None,
-                                choice.logprobs.clone(),
-                            );
-                            emissions.push(ChoiceEmission::Trailing(trailing_choice));
+                            if jail_stream.should_start_jail(trailing_part) {
+                                self.is_jailed = true;
+                                self.accumulated_content = trailing_part.to_string();
+                            } else {
+                                #[allow(deprecated)]
+                                let trailing_choice = create_choice_stream(
+                                    choice.index,
+                                    choice.delta.role,
+                                    trailing_part,
+                                    None,
+                                    choice.finish_reason,
+                                    None,
+                                    choice.logprobs.clone(),
+                                );
+                                emissions.push(ChoiceEmission::Trailing(trailing_choice));
+                            }
                         }
                     } else {
                         // Start jailing with the marker and suffix
@@ -347,23 +352,29 @@ impl ChoiceJailState {
                     emissions.push(ChoiceEmission::Content(unjailed_choice));
                 }
 
-                // Handle trailing content if any
-                if !trailing_part.is_empty() {
-                    #[allow(deprecated)]
-                    let trailing_choice = create_choice_stream(
-                        choice.index,
-                        choice.delta.role,
-                        trailing_part,
-                        None,
-                        choice.finish_reason,
-                        None,
-                        choice.logprobs.clone(),
-                    );
-                    emissions.push(ChoiceEmission::Trailing(trailing_choice));
-                }
-
-                // End jailing
+                // End jailing before processing trailing content
+                let trailing_owned = trailing_part.to_string();
                 self.end_jail();
+
+                // Handle trailing content if any
+                if !trailing_owned.is_empty() {
+                    if jail_stream.should_start_jail(&trailing_owned) {
+                        self.is_jailed = true;
+                        self.accumulated_content = trailing_owned;
+                    } else {
+                        #[allow(deprecated)]
+                        let trailing_choice = create_choice_stream(
+                            choice.index,
+                            choice.delta.role,
+                            &trailing_owned,
+                            None,
+                            choice.finish_reason,
+                            None,
+                            choice.logprobs.clone(),
+                        );
+                        emissions.push(ChoiceEmission::Trailing(trailing_choice));
+                    }
+                }
             }
             // If not unjailing, don't emit anything (still accumulating)
         }
@@ -682,13 +693,13 @@ impl JailedStream {
                 let dummy_response = NvCreateChatCompletionStreamResponse {
                     inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                         id: last_stream_id,
-                        object: "chat.completion.chunk".to_string(),
+                    object: "chat.completion.chunk".to_string(),
                         created: last_stream_created,
                         model: last_stream_model,
-                        choices: Vec::new(),
-                        usage: None,
-                        service_tier: None,
-                        system_fingerprint: None,
+                    choices: Vec::new(),
+                    usage: None,
+                    service_tier: None,
+                    system_fingerprint: None,
                     },
                     nvext: None,
                 };
@@ -770,7 +781,7 @@ impl JailedStream {
     async fn should_end_jail(&self, accumulated_content: &str) -> (bool, usize) {
         match &self.jail_mode {
             JailMode::MarkerBased => {
-                // Path 1: End sequence detected
+                // Path 1: End sequence detected via naive string search.
                 let end_marker_info = if !self.jail_end_sequences.is_empty() {
                     self.jail_end_sequences.iter().find_map(|seq| {
                         accumulated_content
@@ -784,9 +795,11 @@ impl JailedStream {
                 // Path 2: Complete tool call(s) can be parsed (early exit)
                 let early_exit = self.should_exit_jail_early(accumulated_content).await;
 
-                if let Some((end_pos, _)) = end_marker_info {
-                    (true, end_pos)
-                } else if early_exit {
+                // When a tool_call_parser is active, prefer Path 2 over Path 1 so
+                // that `find_tool_call_end_position` advances past all consecutive
+                // parallel tool calls instead of splitting at the first end tag.
+                // Fall back to Path 1 when parsing fails (e.g. malformed content).
+                if early_exit {
                     // For early exit, find where the complete tool call ends
                     if let Some(parser) = &self.tool_call_parser {
                         let tools_slice = self.tool_definitions.as_deref();
@@ -806,6 +819,8 @@ impl JailedStream {
                     } else {
                         (false, accumulated_content.len())
                     }
+                } else if let Some((end_pos, _)) = end_marker_info {
+                    (true, end_pos)
                 } else {
                     (false, accumulated_content.len())
                 }
@@ -898,7 +913,7 @@ impl JailedStream {
                         .map(|(idx, tool_call)| ChatCompletionMessageToolCallChunk {
                             index: (tool_call_offset + idx) as u32,
                             id: Some(tool_call.id),
-                            r#type: Some(tool_call.r#type),
+                            r#type: Some(FunctionType::Function),
                             function: Some(FunctionCallStream {
                                 name: Some(tool_call.function.name),
                                 arguments: Some(tool_call.function.arguments),
@@ -967,7 +982,7 @@ impl JailedStream {
         ChatCompletionMessageToolCallChunk {
             index,
             id: Some(format!("call-{}", Uuid::new_v4())),
-            r#type: Some(dynamo_protocols::types::ChatCompletionToolType::Function),
+            r#type: Some(FunctionType::Function),
             function: Some(FunctionCallStream {
                 name: Some(name),
                 arguments: Some(arguments),
@@ -1305,5 +1320,199 @@ impl JailedStreamBuilder {
 impl Default for JailedStreamBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_protocols::types::CreateChatCompletionStreamResponse;
+    use futures::stream;
+
+    /// Helper: build a single-choice stream chunk with text content
+    #[allow(deprecated)]
+    fn text_chunk(text: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                role: Some(Role::Assistant),
+                content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                    text.to_string(),
+                )),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            stop_reason: None,
+            logprobs: None,
+        };
+
+        Annotated {
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: CreateChatCompletionStreamResponse {
+                    id: "id-42".to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: 0,
+                    model: "test-model".to_string(),
+                    choices: vec![choice],
+                    usage: None,
+                    service_tier: None,
+                    system_fingerprint: None,
+                },
+                nvext: None,
+            }),
+            id: None,
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// Collect all emitted tool calls from the jailed stream output
+    fn collect_tool_calls(
+        responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Vec<(String, String)> {
+        let mut tool_calls = Vec::new();
+        for resp in responses {
+            if let Some(ref data) = resp.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref tcs) = choice.delta.tool_calls {
+                        for tc in tcs {
+                            if let Some(ref func) = tc.function {
+                                let name = func.name.clone().unwrap_or_default();
+                                let args = func.arguments.clone().unwrap_or_default();
+                                tool_calls.push((name, args));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        tool_calls
+    }
+
+    /// Collect all emitted text content from the jailed stream output
+    fn collect_text_content(
+        responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> String {
+        responses
+            .iter()
+            .flat_map(|r| r.data.iter())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter_map(|c| {
+                if let Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(t)) =
+                    &c.delta.content
+                {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_multi_tool_call_single_chunk() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"PST\"}}\n</tool_call>",
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+
+        assert!(
+            tool_calls.len() >= 2,
+            "Expected at least 2 tool calls, got {}: {:?}",
+            tool_calls.len(),
+            tool_calls
+        );
+
+        let names: Vec<&str> = tool_calls.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"get_weather"),
+            "Missing get_weather tool call. Got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"get_time"),
+            "Missing get_time tool call. Got: {:?}",
+            names
+        );
+    }
+
+    #[tokio::test]
+    async fn test_multi_tool_call_multiple_chunks() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![
+            text_chunk("<tool_call>\n{\"name\": \"get_weather\", \"arguments\""),
+            text_chunk(
+                ": {\"location\": \"SF\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"get_time\"",
+            ),
+            text_chunk(", \"arguments\": {\"timezone\": \"PST\"}}\n</tool_call>"),
+        ];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+
+        assert!(
+            tool_calls.len() >= 2,
+            "Expected at least 2 tool calls, got {}: {:?}",
+            tool_calls.len(),
+            tool_calls
+        );
+
+        let names: Vec<&str> = tool_calls.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"get_weather"),
+            "Missing get_weather tool call. Got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"get_time"),
+            "Missing get_time tool call. Got: {:?}",
+            names
+        );
+    }
+
+    #[tokio::test]
+    async fn test_trailing_text_not_re_jailed() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>\nDone!",
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "Expected exactly 1 tool call, got {}: {:?}",
+            tool_calls.len(),
+            tool_calls
+        );
+        assert_eq!(tool_calls[0].0, "get_weather");
+
+        let all_text = collect_text_content(&responses);
+        assert!(
+            all_text.contains("Done!"),
+            "Trailing text 'Done!' should appear in output. Got text: {:?}",
+            all_text
+        );
     }
 }

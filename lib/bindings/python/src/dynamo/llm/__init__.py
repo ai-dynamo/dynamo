@@ -5,6 +5,7 @@
 
 import logging
 
+from dynamo._core import AicPerfConfig as AicPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmEventRelay as FpmEventRelay
@@ -24,6 +25,7 @@ from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
+from dynamo._core import PlannerReplayBridge as PlannerReplayBridge
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import ReasoningConfig as ReasoningConfig
@@ -57,6 +59,7 @@ def run_mocker_trace_replay(
     replay_concurrency=None,
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
+    trace_block_size=512,
 ):
     return _run_mocker_trace_replay(
         trace_file,
@@ -67,4 +70,5 @@ def run_mocker_trace_replay(
         replay_mode="offline",
         router_mode=router_mode,
         arrival_speedup_ratio=arrival_speedup_ratio,
+        trace_block_size=trace_block_size,
     )

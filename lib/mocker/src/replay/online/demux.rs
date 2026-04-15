@@ -7,10 +7,10 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::common::protocols::OutputSignal;
-use crate::replay::router::ReplayRouter;
 use crate::replay::{TraceCollector, TraceSimulationReport};
 use crate::scheduler::AdmissionEvent;
 
+use super::ReplayRouter;
 use super::state::{ArrivalEvent, RequestRegistry, SharedLiveRuntimeStats, now_ms};
 
 async fn process_output_signal(

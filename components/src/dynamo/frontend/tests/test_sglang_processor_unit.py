@@ -17,6 +17,7 @@ import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
+    _normalize_prompt_token_ids,
     convert_tools,
     create_parsers,
     preprocess_chat_request,
@@ -26,8 +27,17 @@ from dynamo.frontend.sglang_processor import (
     _build_dynamo_preproc,
     _init_worker,
     _map_finish_reason,
+    _runtime_config_parser_name,
 )
 from dynamo.frontend.utils import PreprocessError, random_call_id, random_uuid
+
+# Needs sglang packages (gpu_1 container).  No need for parallel marker.
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
 
 MODEL = "Qwen/Qwen3-0.6B"
 
@@ -426,6 +436,46 @@ class TestCreateParsers:
         )
         assert tcp is not None
         assert rp is not None
+
+
+class TestNormalizePromptTokenIds:
+    def test_batch_encoding_like_object_uses_input_ids(self):
+        class FakeBatchEncoding:
+            def __init__(self):
+                self.input_ids = [11, 22, 33]
+
+            def __iter__(self):
+                yield from ("input_ids", "attention_mask")
+
+        assert _normalize_prompt_token_ids(FakeBatchEncoding()) == [11, 22, 33]
+
+    def test_mapping_uses_input_ids(self):
+        assert _normalize_prompt_token_ids(
+            {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}
+        ) == [1, 2, 3]
+
+
+class TestRuntimeConfigParserName:
+    def test_missing_runtime_config_returns_none(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return None
+
+        assert _runtime_config_parser_name(FakeMdc(), "tool_call_parser") is None
+
+    def test_missing_key_returns_none(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return {"reasoning_parser": "qwen3"}
+
+        assert _runtime_config_parser_name(FakeMdc(), "tool_call_parser") is None
+
+    def test_reads_non_empty_string_value(self):
+        class FakeMdc:
+            def runtime_config(self):
+                return {"tool_call_parser": "hermes"}
+
+        assert _runtime_config_parser_name(FakeMdc(), "tool_call_parser") == "hermes"
 
 
 # ---------------------------------------------------------------------------

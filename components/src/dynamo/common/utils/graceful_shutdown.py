@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import signal
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Coroutine, Iterable, Optional
 
 from dynamo._core import DistributedRuntime
 
@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # TODO: make this using cli flag
 _DEFAULT_GRACE_PERIOD_SECS = 5.0
+_DEFAULT_DRAIN_TIMEOUT_SECS = 30.0
 _GRACE_PERIOD_ENV = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"
 _shutdown_started = asyncio.Event()
 
@@ -68,7 +69,23 @@ async def graceful_shutdown_with_discovery(
     endpoints: Iterable,
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
+    drain_callback: Optional[Callable[[], Coroutine]] = None,
 ) -> None:
+    """Perform graceful shutdown with endpoint unregistration and optional drain.
+
+    Args:
+        runtime: The distributed runtime to shut down.
+        endpoints: Endpoints to unregister from discovery before shutdown.
+        shutdown_event: Optional event to set before calling runtime.shutdown().
+        grace_period_s: Seconds to wait after unregistering before drain/shutdown.
+            Defaults to DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS env var or 5s.
+        drain_callback: Optional async callable awaited after the grace period
+            but *before* runtime.shutdown(). Use this on prefill workers to wait
+            for in-flight NIXL KV transfers to complete, preventing decode workers
+            from segfaulting due to use-after-free on freed GPU memory (#7319).
+            Any exception raised by drain_callback is logged and swallowed so that
+            shutdown still proceeds even if draining times out or fails.
+    """
     if _shutdown_started.is_set():
         return
     _shutdown_started.set()
@@ -83,6 +100,25 @@ async def graceful_shutdown_with_discovery(
         logger.info("Grace period %.2fs before stopping endpoints", grace_period_s)
         await asyncio.sleep(grace_period_s)
 
+    if drain_callback is not None:
+        logger.info(
+            "Draining in-flight transfers before shutdown (issue #7319 safeguard)"
+        )
+        try:
+            await asyncio.wait_for(
+                drain_callback(), timeout=_DEFAULT_DRAIN_TIMEOUT_SECS
+            )
+            logger.info("Drain complete")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Drain callback timed out after %.0fs, proceeding with shutdown",
+                _DEFAULT_DRAIN_TIMEOUT_SECS,
+            )
+        except Exception:
+            logger.exception(
+                "Drain callback raised an exception; proceeding with shutdown"
+            )
+
     if shutdown_event is not None:
         shutdown_event.set()
 
@@ -96,6 +132,7 @@ def install_signal_handlers(
     endpoints: Iterable,
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
+    drain_callback: Optional[Callable[[], Coroutine]] = None,
 ) -> None:
     shutdown_task: Optional[asyncio.Task[None]] = None
 
@@ -123,6 +160,7 @@ def install_signal_handlers(
                 endpoints,
                 shutdown_event=shutdown_event,
                 grace_period_s=grace_period_s,
+                drain_callback=drain_callback,
             )
         )
         shutdown_task.add_done_callback(_on_shutdown_done)

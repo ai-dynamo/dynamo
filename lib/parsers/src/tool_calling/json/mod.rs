@@ -52,12 +52,32 @@ pub fn find_tool_call_end_position_json(
 ) -> usize {
     match parser {
         "hermes" | "nemotron_deci" => {
+            let start_token = config.tool_call_start_tokens.first().map(|s| s.as_str());
             if let Some(end_token) = config.tool_call_end_tokens.first() {
-                if let Some(pos) = chunk.find(end_token) {
-                    pos + end_token.len()
-                } else {
-                    chunk.len()
+                let Some(first_end) = chunk.find(end_token.as_str()) else {
+                    return chunk.len();
+                };
+                let mut cursor = first_end + end_token.len();
+
+                // Advance past any additional consecutive start→end blocks
+                // so that parallel tool calls are captured as one jailed region.
+                if let Some(start_tok) = start_token {
+                    loop {
+                        let rest = &chunk[cursor..];
+                        let trimmed = rest.trim_start();
+                        if !trimmed.starts_with(start_tok) {
+                            break;
+                        }
+                        let trim_offset = rest.len() - trimmed.len();
+                        let search_from = cursor + trim_offset + start_tok.len();
+                        if let Some(end_pos) = chunk[search_from..].find(end_token.as_str()) {
+                            cursor = search_from + end_pos + end_token.len();
+                        } else {
+                            break;
+                        }
+                    }
                 }
+                cursor
             } else {
                 chunk.len()
             }
@@ -70,5 +90,63 @@ pub fn find_tool_call_end_position_json(
             }
         }
         _ => chunk.len(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for issue #6822: parallel tool calls in a single chunk must
+    /// all be captured by find_tool_call_end_position_json so that the jail passes the
+    /// entire group to the parser rather than emitting the second (and later) calls
+    /// as raw trailing text.
+    #[test]
+    fn test_find_tool_call_end_position_parallel_calls() {
+        let config = JsonParserConfig {
+            tool_call_start_tokens: vec!["<tool_call>".to_string()],
+            tool_call_end_tokens: vec!["</tool_call>".to_string()],
+            ..Default::default()
+        };
+
+        // Two parallel calls with no whitespace between them.
+        let two_calls = concat!(
+            "<tool_call>{\"name\": \"foo\", \"arguments\": {\"x\": 1}}</tool_call>",
+            "<tool_call>{\"name\": \"bar\", \"arguments\": {\"y\": 2}}</tool_call>",
+            "trailing"
+        );
+        let pos = find_tool_call_end_position_json(two_calls, "hermes", &config);
+        assert!(
+            two_calls[..pos].ends_with("</tool_call>"),
+            "should end at last </tool_call>, got: {:?}",
+            &two_calls[..pos]
+        );
+        assert_eq!(&two_calls[pos..], "trailing");
+
+        // Three parallel calls separated by whitespace / newlines.
+        let three_calls = concat!(
+            "<tool_call>{\"name\": \"a\"}</tool_call>\n",
+            "<tool_call>{\"name\": \"b\"}</tool_call>\n",
+            "<tool_call>{\"name\": \"c\"}</tool_call> done"
+        );
+        let pos3 = find_tool_call_end_position_json(three_calls, "hermes", &config);
+        assert!(
+            three_calls[..pos3].ends_with("</tool_call>"),
+            "should end at last </tool_call>, got: {:?}",
+            &three_calls[..pos3]
+        );
+        assert_eq!(three_calls[pos3..].trim(), "done");
+
+        // Incomplete second call — should stop after the first complete one.
+        let incomplete = concat!(
+            "<tool_call>{\"name\": \"a\"}</tool_call>",
+            "<tool_call>{\"name\": \"b\""
+        );
+        let pos_inc = find_tool_call_end_position_json(incomplete, "hermes", &config);
+        let first_end = "<tool_call>{\"name\": \"a\"}</tool_call>".len();
+        assert_eq!(
+            pos_inc, first_end,
+            "should stop at end of first complete call when second is incomplete"
+        );
     }
 }
