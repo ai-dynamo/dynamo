@@ -114,7 +114,6 @@ jobs:
 
       - name: Run CPU tests
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-        working-directory: /workspace
         run: |
           set +e
 
