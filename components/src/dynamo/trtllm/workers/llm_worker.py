@@ -386,6 +386,7 @@ async def init_llm_worker(
         engine_args,
         config.disaggregation_mode,
         component_gauges=component_gauges,
+        model_express_url=config.model_express_url,
     ) as engine:
         # Expose engine to the drain callback installed by main.py (#7319).
         # The callback uses this to poll active request count during shutdown.
