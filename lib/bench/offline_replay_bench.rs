@@ -5,6 +5,8 @@
 //!
 //! Useful for profiling replay itself without the Python CLI wrapper. This keeps
 //! the default mocker perf model unless CLI overrides are provided.
+//!
+//! Run with: cargo bench --package dynamo-bench --bench offline_replay_bench -- --help
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -84,6 +86,10 @@ struct Args {
     /// Number of times to rerun the same replay in-process
     #[arg(long, default_value_t = 1)]
     iterations: usize,
+
+    /// Ignored -- passed by cargo bench
+    #[arg(long, hide = true)]
+    bench: bool,
 }
 
 fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {

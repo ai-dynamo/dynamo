@@ -8,7 +8,7 @@
 //! first token) and total request latency per turn, with configurable inter-turn
 //! exponential delay.
 //!
-//! Run with: cargo run --package dynamo-bench --bin multiturn_bench -- --help
+//! Run with: cargo bench --package dynamo-bench --bench multiturn_bench -- --help
 
 use anyhow::{Context, Result};
 use clap::Parser;

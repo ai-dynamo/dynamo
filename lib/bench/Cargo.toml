@@ -11,9 +11,15 @@ homepage.workspace = true
 repository.workspace = true
 description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 
-[[bin]]
+[[bench]]
 name = "multiturn_bench"
-path = "src/bin/multiturn_bench.rs"
+path = "multiturn_bench.rs"
+harness = false
+
+[[bench]]
+name = "offline_replay_bench"
+path = "offline_replay_bench.rs"
+harness = false
 
 [[bench]]
 name = "kv_indexer_bench"
