@@ -340,6 +340,11 @@ func (in *DynamoCheckpointList) DeepCopyObject() runtime.Object {
 func (in *DynamoCheckpointSpec) DeepCopyInto(out *DynamoCheckpointSpec) {
 	*out = *in
 	in.Identity.DeepCopyInto(&out.Identity)
+	if in.GPUMemoryService != nil {
+		in, out := &in.GPUMemoryService, &out.GPUMemoryService
+		*out = new(GPUMemoryServiceSpec)
+		**out = **in
+	}
 	in.Job.DeepCopyInto(&out.Job)
 }
 
