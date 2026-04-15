@@ -102,7 +102,7 @@ pub struct NvExtResponse {
     pub worker_id: Option<WorkerIdInfo>,
 
     /// Per-request timing information
-    /// Populated when client requests `extra_fields: ["timing"]` or via `query_instance_id`
+    /// Populated when client requests `extra_fields: ["timing"]`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timing: Option<TimingInfo>,
 
@@ -120,8 +120,10 @@ pub struct NvExtResponse {
 ///
 /// The OpenAI-compatible API should only include `nvext` response fields when the
 /// client explicitly opts in via `nvext.extra_fields`, except for the GAIE
-/// `query_instance_id` flow which automatically returns `worker_id`, `timing`,
-/// and `token_ids`.
+/// `query_instance_id` flow which automatically returns `worker_id` and
+/// `token_ids`. Note: timing is NOT auto-enabled for `query_instance_id`
+/// because the query-only fast path returns no `finish_reason`, and timing
+/// is only emitted on the final response chunk.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NvExtResponseFieldSelection {
     pub worker_id: bool,
@@ -143,7 +145,7 @@ impl NvExtResponseFieldSelection {
 
         Self {
             worker_id: has_extra_field("worker_id") || query_instance_id,
-            timing: has_extra_field("timing") || query_instance_id,
+            timing: has_extra_field("timing"),
             token_ids: query_instance_id,
             routed_experts: has_extra_field("routed_experts"),
         }
@@ -320,11 +322,18 @@ impl NvExt {
         NvExtBuilder::default()
     }
 
+    /// Check for a `query_instance_id:<value>` annotation (GAIE Stage 1).
+    ///
+    /// Must match the exact `"query_instance_id:"` key prefix used by
+    /// `PreprocessedRequest::get_annotation_value` and the KvPushRouter
+    /// query-only detection, so that stray annotations like
+    /// `query_instance_id_extra:...` do not accidentally enable response
+    /// metadata.
     pub fn has_query_instance_id_annotation(&self) -> bool {
         self.annotations.as_ref().is_some_and(|annotations| {
             annotations
                 .iter()
-                .any(|annotation| annotation.starts_with("query_instance_id"))
+                .any(|annotation| annotation.starts_with("query_instance_id:"))
         })
     }
 }
@@ -497,9 +506,25 @@ mod tests {
         let selection = NvExtResponseFieldSelection::from_nvext(Some(&nvext));
 
         assert!(selection.worker_id);
-        assert!(selection.timing); // query_instance_id auto-enables timing
+        assert!(!selection.timing); // timing NOT auto-enabled: query-only fast path has no finish_reason
         assert!(selection.token_ids);
         assert!(!selection.routed_experts);
+    }
+
+    #[test]
+    fn test_nvext_response_field_selection_rejects_stray_annotation() {
+        // An annotation like "query_instance_id_extra:foo" must NOT trigger the
+        // query_instance_id exception — only the exact "query_instance_id:" key
+        // prefix should match, consistent with PreprocessedRequest::get_annotation_value.
+        let nvext = NvExt::builder()
+            .annotations(vec!["query_instance_id_extra:foo".to_string()])
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            NvExtResponseFieldSelection::from_nvext(Some(&nvext)),
+            NvExtResponseFieldSelection::default(),
+        );
     }
 
     #[test]
