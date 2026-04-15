@@ -24,7 +24,7 @@ import aiohttp.web
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import TargetReplica
+from dynamo.planner.config.defaults import ScalingMode, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
@@ -182,6 +182,9 @@ class NativePlannerBase:
         # Live dashboard runner (started in _async_init)
         self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
 
+        # Advisory mode: throttle log output
+        self._last_advisory_log_s: float = 0.0
+
         # State machine (created after WorkerInfo is resolved)
         self._state_machine: Optional[PlannerStateMachine] = None
 
@@ -270,6 +273,20 @@ class NativePlannerBase:
                 await self._init_fpm_subscriber("decode")
 
         await self._bootstrap_regression()
+
+        # Log operating mode at startup
+        mode = self.config.scaling_mode
+        if mode == ScalingMode.ADVISORY:
+            logger.info(
+                "[ADVISORY] Planner started in ADVISORY mode — "
+                "scaling decisions will be logged but NOT executed. "
+                "Switch to 'active' mode to enable auto-scaling."
+            )
+        else:
+            logger.info(
+                "Planner started in ACTIVE mode — "
+                "scaling decisions will be executed automatically."
+            )
 
         # Start live dashboard if configured
         if self.config.live_dashboard_port:
@@ -579,10 +596,78 @@ class NativePlannerBase:
     async def _apply_scaling_targets(
         self, targets: list[TargetReplica], blocking: bool = False
     ) -> None:
-        """Shared helper: send scaling targets to connector."""
-        if self.config.no_operation or not targets:
+        """Shared helper: send scaling targets to connector.
+
+        Skipped in advisory mode (decisions are logged but not executed)
+        and in no_operation mode (no connector available).
+        """
+        if (
+            self.config.no_operation
+            or self.config.scaling_mode == ScalingMode.ADVISORY
+            or not targets
+        ):
             return
         await self.connector.set_component_replicas(targets, blocking=blocking)
+
+    # ------------------------------------------------------------------
+    # Periodic decision summary
+    # ------------------------------------------------------------------
+
+    def _log_decision_summary(self, effects: PlannerEffects) -> None:
+        """Log a periodic one-line summary of the scaling decision.
+
+        Printed in both active and advisory modes.  Throttled by
+        ``advisory_log_interval`` so it serves as a digest alongside
+        the detailed per-engine logs that fire every tick.
+        """
+        now = time.time()
+        if now - self._last_advisory_log_s < self.config.advisory_log_interval:
+            return
+        self._last_advisory_log_s = now
+
+        decision = effects.scale_to
+        diag = effects.diagnostics
+
+        sm = self.state_machine
+        current_p = sm._num_p_workers
+        current_d = sm._num_d_workers
+
+        rec_p = decision.num_prefill if decision else None
+        rec_d = decision.num_decode if decision else None
+
+        delta_p = (rec_p - current_p) if rec_p is not None else 0
+        delta_d = (rec_d - current_d) if rec_d is not None else 0
+
+        if decision is None or (delta_p == 0 and delta_d == 0):
+            action = "hold"
+        elif (delta_p > 0 or delta_d > 0) and (delta_p < 0 or delta_d < 0):
+            action = "rebalance"
+        elif delta_p > 0 or delta_d > 0:
+            action = "scale_up"
+        else:
+            action = "scale_down"
+
+        mode_tag = (
+            "advisory" if self.config.scaling_mode == ScalingMode.ADVISORY else "active"
+        )
+        logger.info(
+            "[summary] %s (%s) | current: prefill=%d decode=%d | "
+            "recommended: prefill=%s decode=%s (delta: %+d / %+d) | "
+            "load_reason=%s throughput_reason=%s | "
+            "est_ttft=%.1fms est_itl=%.1fms",
+            action.upper(),
+            mode_tag,
+            current_p,
+            current_d,
+            rec_p if rec_p is not None else "-",
+            rec_d if rec_d is not None else "-",
+            delta_p,
+            delta_d,
+            diag.load_decision_reason or "n/a",
+            diag.throughput_decision_reason or "n/a",
+            diag.estimated_ttft_ms or 0,
+            diag.estimated_itl_ms or 0,
+        )
 
     # ------------------------------------------------------------------
     # Diagnostics reporting (shared across all adapters)
@@ -630,6 +715,7 @@ class NativePlannerBase:
                 effects = self.state_machine.on_tick(next_tick, tick_input)
                 await self._apply_effects(effects)
                 self._report_diagnostics(effects.diagnostics)
+                self._log_decision_summary(effects)
 
                 if self._recorder.enabled:
                     try:
