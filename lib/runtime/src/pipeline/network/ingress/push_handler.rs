@@ -65,7 +65,7 @@ impl WorkHandlerMetrics {
         // fast operations, extend well beyond the default 10s ceiling to capture
         // long-running generation requests that can last minutes.
         let request_duration_buckets = vec![
-            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0,
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0,
             300.0, 600.0,
         ];
         let request_duration = metrics.create_histogram(
