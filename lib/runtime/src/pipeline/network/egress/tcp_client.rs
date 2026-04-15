@@ -11,6 +11,9 @@
 //! syscall per drain, avoiding the fixed-size cap and double-copy of BufWriter.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::metrics::transport_metrics::{
+    TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
@@ -348,6 +351,9 @@ impl TcpConnection {
         healthy: Arc<AtomicBool>,
     ) -> Result<()> {
         let mut send_buf = BytesMut::with_capacity(WRITER_INITIAL_BUF_CAPACITY);
+        // Hoisted outside the loop to reuse allocations across drain cycles.
+        let mut encoded_batch: Vec<Bytes> = Vec::with_capacity(64);
+        let mut response_batch: Vec<oneshot::Sender<Result<Bytes>>> = Vec::with_capacity(64);
         let trace = latency_trace_enabled();
 
         // Latency instrumentation accumulators
@@ -373,11 +379,9 @@ impl TcpConnection {
                     std::hint::spin_loop();
                 }
 
-                // Drain all available requests
-                let mut encoded_batch: Vec<Bytes> = Vec::with_capacity(64);
-                let mut response_batch: Vec<oneshot::Sender<Result<Bytes>>> =
-                    Vec::with_capacity(64);
-
+                // Drain all available requests (reuse pre-allocated Vecs)
+                encoded_batch.clear();
+                response_batch.clear();
                 while let Some(req) = submit_queue.pop() {
                     encoded_batch.push(req.encoded_data);
                     response_batch.push(req.response_tx);
@@ -418,6 +422,7 @@ impl TcpConnection {
                     }
                     return Err(e.into());
                 }
+                TCP_BYTES_SENT_TOTAL.inc_by(send_buf.len() as f64);
                 send_buf.clear(); // reset length, keep allocation for next batch
 
                 // Phase 3: write_all succeeded — data is committed to the wire.
@@ -545,11 +550,6 @@ impl TcpConnection {
             .ok_or_else(|| anyhow::anyhow!("Missing x-endpoint-path header for TCP request"))?
             .to_string();
 
-        let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
-        let encoded_data = request_msg.encode()?;
-
-        let (response_tx, response_rx) = oneshot::channel();
-
         let trace = latency_trace_enabled();
         let e2e_start = if trace {
             Some(std::time::Instant::now())
@@ -562,11 +562,21 @@ impl TcpConnection {
         // whether the caller returns normally, errors out, or the enclosing
         // tokio::time::timeout drops this future mid-flight.
         // This prevents unbounded SegQueue growth and heap OOM under overload.
+        // encode() runs AFTER acquire so callers blocked on the semaphore do not
+        // hold a pre-allocated encoded frame, bounding peak memory to
+        // channel_buffer * frame_size per connection.
         let _permit = self
             .admission
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
+
+        // encode() called here — after admission is granted — so the frame is
+        // only allocated once we have capacity to process it.
+        let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
+        let encoded_data = request_msg.encode()?;
+
+        let (response_tx, response_rx) = oneshot::channel();
 
         // Re-check health: the connection may have gone unhealthy while we
         // were waiting for a permit.  Fail fast so the caller can retry on a
@@ -1257,11 +1267,13 @@ impl RequestPlaneClient for TcpRequestClient {
                 self.stats
                     .bytes_received
                     .fetch_add(response.len() as u64, Ordering::Relaxed);
+                TCP_BYTES_RECEIVED_TOTAL.inc_by(response.len() as f64);
                 // conn (Arc) dropped here -- connection stays in pool
                 Ok(response)
             }
             Ok(Err(e)) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
                 let cause = crate::error::DynamoError::from(
                     e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
@@ -1276,6 +1288,7 @@ impl RequestPlaneClient for TcpRequestClient {
             }
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request timeout to {}", addr);
                 Err(anyhow::anyhow!(
                     crate::error::DynamoError::builder()
