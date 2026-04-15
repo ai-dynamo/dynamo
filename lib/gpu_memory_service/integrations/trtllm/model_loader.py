@@ -258,10 +258,10 @@ def _move_untracked_params(
         for _name, tensor, tensor_type in _iter_module_tensors(model):
             if tensor_type != "parameter" or tensor is None or not tensor.is_cuda:
                 continue
-            obj_id = id(tensor)
-            if obj_id in seen:
+            storage_ptr = tensor.storage().data_ptr()
+            if storage_ptr in seen:
                 continue
-            seen.add(obj_id)
+            seen.add(storage_ptr)
 
             if _ptr_in_gms(gms_client, int(tensor.data_ptr())):
                 continue
@@ -289,6 +289,8 @@ def _storage_nbytes(tensor: torch.Tensor) -> int:
     if not shape:
         return element_size
     max_offset = sum(
-        int(s) * (int(d) - 1) for s, d in zip(stride, shape, strict=True) if int(d) > 1
+        abs(int(s)) * (int(d) - 1)
+        for s, d in zip(stride, shape, strict=True)
+        if int(d) > 1
     )
     return int((max_offset + 1) * element_size)

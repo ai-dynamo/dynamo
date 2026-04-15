@@ -259,7 +259,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
         # Sleep/wake state
-        self._sleep_wake_lock = asyncio.Lock()
+        self._quiesce_lock = asyncio.Lock()
         self._inflight_lock = asyncio.Lock()
         self._inflight_requests = 0
         self._no_inflight_requests = asyncio.Event()
@@ -321,16 +321,15 @@ class HandlerBase(BaseGenerativeHandler):
         body = body or {}
         tags = body.get("tags")
 
-        async with self._sleep_wake_lock:
+        async with self._quiesce_lock:
             if self._quiesce_controller.is_quiesced:
                 return {"status": "ok", "message": "Memory already released"}
 
-            await self._set_reject_new_requests(True)
-            endpoint_unregistered = False
             try:
+                await self._set_reject_new_requests(True)
+
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.unregister_endpoint_instance()
-                    endpoint_unregistered = True
 
                 timeout_s = float(body.get("timeout_s", 30.0))
                 await self._wait_for_inflight_requests(timeout_s)
@@ -339,14 +338,6 @@ class HandlerBase(BaseGenerativeHandler):
                 return {"status": "ok", "message": "Memory released"}
             except Exception as exc:
                 logger.error("release_memory_occupation failed: %s", exc)
-                if endpoint_unregistered and self.generate_endpoint is not None:
-                    try:
-                        await self.generate_endpoint.register_endpoint_instance()
-                    except Exception:
-                        logger.exception(
-                            "Failed to restore endpoint after release failure"
-                        )
-                await self._set_reject_new_requests(False)
                 return {"status": "error", "message": str(exc)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
@@ -354,7 +345,7 @@ class HandlerBase(BaseGenerativeHandler):
         body = body or {}
         tags = body.get("tags")
 
-        async with self._sleep_wake_lock:
+        async with self._quiesce_lock:
             if not self._quiesce_controller.is_quiesced:
                 return {"status": "ok", "message": "Memory already resumed"}
 

@@ -25,7 +25,6 @@ from tensorrt_llm.llmapi.llm import SamplingParams
 from tensorrt_llm.llmapi.llm_args import (
     TOKENIZER_ALIASES,
     KvCacheConnectorConfig,
-    LlmArgs,
     LoadFormat,
 )
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
@@ -153,41 +152,6 @@ def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
     )
 
 
-def _llm_arg_supported(arg_name: str) -> bool:
-    """Return True if the installed TRT-LLM LlmArgs supports *arg_name*."""
-    fields = getattr(LlmArgs, "model_fields", None)
-    return arg_name in fields if isinstance(fields, dict) else True
-
-
-def _is_load_format_supported(load_format: str) -> bool:
-    """Return True if the installed TRT-LLM LoadFormat enum has *load_format*."""
-    members = getattr(LoadFormat, "__members__", None)
-    if members is None:
-        return True
-    if load_format.upper() in members:
-        return True
-    return any(
-        str(getattr(m, "value", "")).lower() == load_format.lower()
-        for m in members.values()
-    )
-
-
-def _set_optional_arg(
-    arg_map: dict[str, object],
-    name: str,
-    value: object,
-    *,
-    warn_if_unsupported: bool = False,
-) -> None:
-    """Set *name* in arg_map if the installed TRT-LLM supports it."""
-    if _llm_arg_supported(name):
-        arg_map[name] = value
-    elif warn_if_unsupported:
-        logging.warning(
-            "Installed TensorRT-LLM does not support engine arg '%s'; skipping.", name
-        )
-
-
 def _register_memory_routes(runtime, handler) -> None:
     runtime.register_engine_route(
         "release_memory_occupation",
@@ -284,15 +248,18 @@ async def init_llm_worker(
             "TRT-LLM GMS integration enabled (extra=%s)", model_loader_extra_config
         )
 
-    # Resolve the load_format to pass to TRT-LLM.  If "gms" isn't recognised by
-    # the installed version, fall back to "auto" while keeping GMS patches active.
+    # Resolve load_format for engine args. GMS patches are active regardless;
+    # fall back to "auto" if TRT-LLM doesn't recognise "gms" as a LoadFormat.
     engine_load_format = config.load_format
-    if config.load_format == "gms" and not _is_load_format_supported("gms"):
-        logging.warning(
-            "Installed TensorRT-LLM does not support load_format='gms'; "
-            "using 'auto' for engine args while GMS patches remain active."
-        )
-        engine_load_format = "auto"
+    if config.load_format == "gms":
+        try:
+            LoadFormat(config.load_format)
+        except (ValueError, KeyError):
+            logging.warning(
+                "TensorRT-LLM does not recognise load_format='gms'; "
+                "using 'auto' while GMS patches remain active."
+            )
+            engine_load_format = "auto"
 
     arg_map = {
         "model": model_path,
@@ -316,25 +283,12 @@ async def init_llm_worker(
         "kv_connector_config": kv_connector_config,
     }
 
-    # GMS / sleep args (only set if the installed TRT-LLM supports them)
-    _set_optional_arg(
-        arg_map,
-        "load_format",
-        engine_load_format,
-        warn_if_unsupported=(config.load_format != "auto"),
-    )
+    arg_map["load_format"] = engine_load_format
     # Always enable sleep_config — cuMem VMM has zero overhead when unused
-    # and is required for GMS weight sharing and snapshot checkpoint/restore.
+    # and is required for GMS weight sharing.
     from tensorrt_llm.llmapi.llm_args import SleepConfig
 
     arg_map["sleep_config"] = SleepConfig()
-    if model_loader_extra_config:
-        _set_optional_arg(
-            arg_map,
-            "model_loader_extra_config",
-            model_loader_extra_config,
-            warn_if_unsupported=True,
-        )
 
     # Add guided decoding backend if specified
     if config.guided_decoding_backend is not None:

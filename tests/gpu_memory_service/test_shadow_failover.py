@@ -27,6 +27,7 @@ from tests.gpu_memory_service.flow_assertions import (
     quiesce_engine,
     wait_for_active_layout,
     wait_for_resumed_layout,
+    wait_for_weights_state,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
@@ -329,34 +330,6 @@ def test_gms_shadow_engine_failover_sglang(
 # ---------------------------------------------------------------------------
 
 
-def _wait_for_weights_state(
-    weights_gms,
-    expected_state,
-    *,
-    min_ro_sessions: int = 0,
-    expected_hash: str | None = None,
-    timeout: float = 30.0,
-):
-    """Poll until the weights GMS daemon reaches *expected_state*."""
-    deadline = time.monotonic() + timeout
-    while True:
-        ws = weights_gms.get_runtime_state()
-        if (
-            ws.state == expected_state
-            and ws.allocation_count > 0
-            and ws.memory_layout_hash
-            and ws.ro_session_count >= min_ro_sessions
-            and (expected_hash is None or ws.memory_layout_hash == expected_hash)
-        ):
-            return ws
-        if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"Weights: state={ws.state} (want {expected_state}), "
-                f"allocs={ws.allocation_count}, hash={ws.memory_layout_hash}"
-            )
-        time.sleep(0.1)
-
-
 def _trtllm_quiesce(
     weights_gms,
     engine,
@@ -365,7 +338,7 @@ def _trtllm_quiesce(
     expected_hash: str | None = None,
 ):
     """Quiesce a weights-only TRT-LLM engine and return state tuple."""
-    _wait_for_weights_state(
+    wait_for_weights_state(
         weights_gms,
         ServerState.RO,
         expected_hash=expected_hash,
@@ -383,7 +356,7 @@ def _trtllm_quiesce(
         released / (1 << 20),
     )
     assert released > 0
-    ws = _wait_for_weights_state(weights_gms, ServerState.COMMITTED)
+    ws = wait_for_weights_state(weights_gms, ServerState.COMMITTED)
     return ws, released, mem_after
 
 
@@ -445,7 +418,7 @@ def test_gms_shadow_engine_failover_trtllm(
             released_a,
             min_fraction=0.6,
         )
-        _wait_for_weights_state(
+        wait_for_weights_state(
             weights_gms,
             ServerState.RO,
             expected_hash=weights_hash,
@@ -465,7 +438,7 @@ def test_gms_shadow_engine_failover_trtllm(
             released_a,
             min_fraction=0.6,
         )
-        _wait_for_weights_state(
+        wait_for_weights_state(
             weights_gms,
             ServerState.RO,
             expected_hash=weights_hash,

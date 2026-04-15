@@ -23,6 +23,7 @@ from tests.gpu_memory_service.flow_assertions import (
     assert_weights_published_once,
     quiesce_engine,
     wait_for_resumed_layout,
+    wait_for_weights_state,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 
@@ -147,34 +148,6 @@ def test_gms_basic_quiesce_resume_sglang(
 # ---------------------------------------------------------------------------
 
 
-def _wait_for_weights_state(
-    weights_gms,
-    expected_state,
-    *,
-    min_ro_sessions: int = 0,
-    expected_hash: str | None = None,
-    timeout: float = 30.0,
-):
-    """Poll until the weights GMS daemon reaches *expected_state*."""
-    deadline = time.monotonic() + timeout
-    while True:
-        ws = weights_gms.get_runtime_state()
-        if (
-            ws.state == expected_state
-            and ws.allocation_count > 0
-            and ws.memory_layout_hash
-            and ws.ro_session_count >= min_ro_sessions
-            and (expected_hash is None or ws.memory_layout_hash == expected_hash)
-        ):
-            return ws
-        if time.monotonic() > deadline:
-            raise TimeoutError(
-                f"Weights: state={ws.state} (want {expected_state}), "
-                f"allocs={ws.allocation_count}, hash={ws.memory_layout_hash}"
-            )
-        time.sleep(0.1)
-
-
 @pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1
@@ -198,7 +171,7 @@ def test_gms_basic_quiesce_resume_trtllm(
             success_message="Initial inference OK",
         )
 
-        ws = _wait_for_weights_state(weights_gms, ServerState.RO, timeout=60.0)
+        ws = wait_for_weights_state(weights_gms, ServerState.RO, timeout=60.0)
         weights_hash = ws.memory_layout_hash
 
         mem_before = get_gpu_memory_used()
@@ -213,7 +186,7 @@ def test_gms_basic_quiesce_resume_trtllm(
         )
         assert released > 0
 
-        _wait_for_weights_state(
+        wait_for_weights_state(
             weights_gms, ServerState.COMMITTED, expected_hash=weights_hash
         )
         assert_weights_published_once(weights_gms.get_event_history().events)
@@ -228,7 +201,7 @@ def test_gms_basic_quiesce_resume_trtllm(
             min_fraction=0.6,
         )
 
-        _wait_for_weights_state(weights_gms, ServerState.RO, expected_hash=weights_hash)
+        wait_for_weights_state(weights_gms, ServerState.RO, expected_hash=weights_hash)
         assert_weights_published_once(weights_gms.get_event_history().events)
 
         assert_completion_ok(
@@ -257,11 +230,11 @@ def test_gms_read_only_import_trtllm(
         weights_gms = manager.weights_gms
 
         manager.start_engine("rw-engine")
-        ws = _wait_for_weights_state(weights_gms, ServerState.RO, timeout=60.0)
+        ws = wait_for_weights_state(weights_gms, ServerState.RO, timeout=60.0)
         weights_hash = ws.memory_layout_hash
 
         manager.start_engine("ro-engine", read_only_weights=True)
-        _wait_for_weights_state(
+        wait_for_weights_state(
             weights_gms,
             ServerState.RO,
             min_ro_sessions=1,

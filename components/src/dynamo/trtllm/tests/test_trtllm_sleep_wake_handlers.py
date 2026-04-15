@@ -47,7 +47,7 @@ def _make_handler() -> _ConcreteHandler:
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._sleep_wake_lock = asyncio.Lock()
+    handler._quiesce_lock = asyncio.Lock()
     handler._inflight_lock = asyncio.Lock()
     handler._inflight_requests = 0
     handler._no_inflight_requests = asyncio.Event()
