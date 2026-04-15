@@ -49,7 +49,7 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import DisaggregationMode, Modality
-from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
+from dynamo.trtllm.engine import Backend, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
@@ -61,45 +61,6 @@ from dynamo.trtllm.utils.trtllm_utils import deep_update
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
-
-
-async def get_engine_runtime_config(
-    engine: TensorRTLLMEngine,
-    config: Config,
-    engine_args: Optional[dict] = None,
-) -> ModelRuntimeConfig:
-    """Retrieve runtime configuration from TensorRT-LLM engine."""
-    runtime_config = ModelRuntimeConfig()
-
-    try:
-        # Extract total_kv_blocks from engine stats
-        stats = engine.llm.get_stats_async(timeout=5)
-        stat = await anext(stats)
-        runtime_config.total_kv_blocks = stat["kvCacheStats"]["maxNumBlocks"]
-        logging.info(
-            f"Set runtime config total_kv_blocks: {runtime_config.total_kv_blocks}"
-        )
-
-        # Extract max number of sequences
-        # Use engine_args when available so that --extra-engine-args /
-        # --override-engine-args overrides are respected.
-        runtime_config.max_num_seqs = (engine_args or {}).get(
-            "max_batch_size", config.max_batch_size
-        )
-        logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
-
-        # Get max_num_batched_tokens from resolved engine args
-        runtime_config.max_num_batched_tokens = (engine_args or {}).get(
-            "max_num_tokens", config.max_num_tokens
-        )
-        logging.info(
-            f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
-        )
-    except Exception as e:
-        logging.error(f"Failed to get runtime config from TensorRT-LLM engine: {e}")
-        # Keep default/None values if retrieval fails
-
-    return runtime_config
 
 
 def build_kv_connector_config(config: Config):
@@ -423,12 +384,11 @@ async def init_llm_worker(
         # - In vLLM: max_num_seqs = maximum concurrent requests (this is an unusual name due to vLLM's historic reasons)
         # - In TensorRT-LLM: max_batch_size = maximum concurrent requests (clearer name)
         # Both parameters control the same thing: how many requests can be processed simultaneously
-        runtime_config.max_num_seqs = engine_args.get(
-            "max_batch_size", config.max_batch_size
-        )
-        runtime_config.max_num_batched_tokens = engine_args.get(
-            "max_num_tokens", config.max_num_tokens
-        )
+
+        # Need to get max_num_seqs and max_num_batched_tokens from engine_args
+        # because they can be overridden by --extra-engine-args or --override-engine-args
+        runtime_config.max_num_seqs = engine_args["max_batch_size"]
+        runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
         runtime_config.exclude_tools_when_tool_choice_none = (
