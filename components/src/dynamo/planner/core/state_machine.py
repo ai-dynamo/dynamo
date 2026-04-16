@@ -63,6 +63,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     ) -> None:
         self._config = config
         self._capabilities = capabilities or WorkerCapabilities()
+
         self._is_agg = config.mode == "agg"
         self._has_prefill = config.mode in ("disagg", "prefill")
         self._has_decode = config.mode in ("disagg", "decode", "agg")
@@ -120,6 +121,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
+        """Replace the current worker capabilities."""
+        self._capabilities = capabilities
 
     def initial_tick(self, start_s: float) -> ScheduledTick:
         self._next_load_s = start_s + self._config.load_adjustment_interval

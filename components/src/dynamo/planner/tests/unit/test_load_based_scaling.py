@@ -447,3 +447,125 @@ class TestAggRegressionModel:
             itl_sla=50.0,
         )
         assert thpt == 0.0
+
+
+# ── Discovery backfill tests ────────────────────────────────────────
+
+
+class TestPopulateWorkerInfoFromDiscovery:
+    """Tests for NativePlannerBase._populate_worker_info_from_discovery."""
+
+    def _make_planner(self):
+        """Build a minimal NativePlannerBase with no_operation=True."""
+        from unittest.mock import Mock, patch
+
+        from dynamo.planner.config.planner_config import PlannerConfig
+        from dynamo.planner.core.base import NativePlannerBase
+        from dynamo.planner.monitoring.worker_info import WorkerInfo
+
+        with patch("dynamo.planner.monitoring.planner_metrics.Gauge") as mock_gauge:
+            mock_gauge.return_value = Mock()
+            config = PlannerConfig.model_construct(
+                throughput_adjustment_interval=60,
+                prefill_engine_num_gpu=1,
+                decode_engine_num_gpu=1,
+                min_endpoint=1,
+                max_gpu_budget=-1,
+                ttft=500.0,
+                itl=50.0,
+                backend="vllm",
+                no_operation=True,
+                metric_pulling_prometheus_endpoint="http://localhost:9090",
+                metric_reporting_prometheus_port=0,
+                load_predictor="constant",
+                environment="kubernetes",
+                namespace="test-namespace",
+                mode="agg",
+                enable_load_scaling=True,
+                enable_throughput_scaling=True,
+                load_adjustment_interval=5,
+                max_num_fpm_samples=50,
+                fpm_sample_bucket_size=16,
+                load_scaling_down_sensitivity=80,
+                load_metric_samples=10,
+                load_min_observations=5,
+            )
+            planner = NativePlannerBase(None, config)
+        planner.prefill_worker_info = WorkerInfo()
+        planner.decode_worker_info = WorkerInfo()
+        return planner
+
+    def test_backfill_from_discovery(self):
+        """max_num_batched_tokens is populated from discovery (min across workers)."""
+        from unittest.mock import Mock
+
+        planner = self._make_planner()
+        assert planner.decode_worker_info.max_num_batched_tokens is None
+
+        mock_sub = Mock()
+        mock_sub.get_max_num_batched_tokens.return_value = 8192
+        planner._decode_fpm_sub = mock_sub
+
+        planner._populate_worker_info_from_discovery()
+        assert planner.decode_worker_info.max_num_batched_tokens == 8192
+
+    def test_noop_when_already_set(self):
+        """Does not overwrite an existing max_num_batched_tokens value."""
+        from unittest.mock import Mock
+
+        from dynamo.planner.monitoring.worker_info import WorkerInfo
+
+        planner = self._make_planner()
+        planner.decode_worker_info = WorkerInfo(max_num_batched_tokens=2048)
+
+        mock_sub = Mock()
+        mock_sub.get_max_num_batched_tokens.return_value = 8192
+        planner._decode_fpm_sub = mock_sub
+
+        planner._populate_worker_info_from_discovery()
+        assert planner.decode_worker_info.max_num_batched_tokens == 2048
+
+    def test_noop_when_no_subscriber(self):
+        """Gracefully does nothing when there is no FPM subscriber."""
+        planner = self._make_planner()
+        # Both subscribers are None by default
+        planner._populate_worker_info_from_discovery()
+        assert planner.prefill_worker_info.max_num_batched_tokens is None
+        assert planner.decode_worker_info.max_num_batched_tokens is None
+
+    def test_noop_when_no_value_reported(self):
+        """Does nothing when no worker has reported max_num_batched_tokens."""
+        from unittest.mock import Mock
+
+        planner = self._make_planner()
+
+        mock_sub = Mock()
+        mock_sub.get_max_num_batched_tokens.return_value = None
+        planner._decode_fpm_sub = mock_sub
+
+        planner._populate_worker_info_from_discovery()
+        assert planner.decode_worker_info.max_num_batched_tokens is None
+
+    def test_updates_state_machine_capabilities(self):
+        """State machine capabilities are updated via update_capabilities()."""
+        from unittest.mock import Mock
+
+        planner = self._make_planner()
+        # Force state machine creation
+        _ = planner.state_machine
+        assert planner._state_machine is not None
+        assert (
+            planner._state_machine._capabilities.decode is None
+            or planner._state_machine._capabilities.decode.max_num_batched_tokens
+            is None
+        )
+
+        mock_sub = Mock()
+        mock_sub.get_max_num_batched_tokens.return_value = 4096
+        planner._decode_fpm_sub = mock_sub
+
+        planner._populate_worker_info_from_discovery()
+        assert planner.decode_worker_info.max_num_batched_tokens == 4096
+        assert (
+            planner._state_machine._capabilities.decode.max_num_batched_tokens == 4096
+        )
