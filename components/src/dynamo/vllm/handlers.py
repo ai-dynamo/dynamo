@@ -10,11 +10,10 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, Final, Generic, Optional, TypeVar
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -370,6 +369,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         use_vllm_tokenizer: bool = False,
@@ -387,6 +387,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
+        self.model_config = model_config
         self.enable_multimodal = enable_multimodal
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
@@ -1122,11 +1123,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"Prompt embeds must be base64 encoded string. Got {type(prompt_embeds_base64)}."
             )
 
-        # We don't know whether this is enabled on the server or not.
-        # We only get here if the users' request has set prompt_embeds, so trust them.
-        model_config = SimpleNamespace(enable_prompt_embeds=True)
+        if self.model_config is None:
+            raise ValueError("ModelConfig is unavailable for prompt_embeds validation.")
+
         try:
-            return safe_load_prompt_embeds(model_config, prompt_embeds_base64.encode())
+            return safe_load_prompt_embeds(
+                self.model_config, prompt_embeds_base64.encode()
+            )
         except Exception as e:
             logger.error(f"Failed to decode prompt_embeds: {e}")
             raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
@@ -1611,6 +1614,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         use_vllm_tokenizer: bool = False,
@@ -1623,13 +1627,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             engine,
             default_sampling_params,
-            model_max_len,
-            enable_multimodal,
-            generate_endpoint,
-            use_vllm_tokenizer,
-            shutdown_event,
-            enable_frontend_decoding,
-            encode_worker_client,
+            model_max_len=model_max_len,
+            model_config=model_config,
+            enable_multimodal=enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            use_vllm_tokenizer=use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=enable_frontend_decoding,
+            encode_worker_client=encode_worker_client,
         )
 
     async def generate(self, request, context):
@@ -1888,6 +1893,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine,
         default_sampling_params,
         model_max_len: int | None = None,
+        model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
         use_vllm_tokenizer: bool = False,
@@ -1900,13 +1906,14 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             config,
             engine,
             default_sampling_params,
-            model_max_len,
-            enable_multimodal,
-            generate_endpoint,
-            use_vllm_tokenizer,
-            shutdown_event,
-            enable_frontend_decoding,
-            encode_worker_client,
+            model_max_len=model_max_len,
+            model_config=model_config,
+            enable_multimodal=enable_multimodal,
+            generate_endpoint=generate_endpoint,
+            use_vllm_tokenizer=use_vllm_tokenizer,
+            shutdown_event=shutdown_event,
+            enable_frontend_decoding=enable_frontend_decoding,
+            encode_worker_client=encode_worker_client,
         )
 
         # Cache Qwen VL grid parameters for computing image_grid_thw from
