@@ -968,13 +968,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleFailedPhase(ctx context.C
 
 	// Re-sync the Succeeded condition so that operator upgrades that improve
 	// failure messages take effect on already-failed DGDRs.
-	setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseFailed)
-	if err := r.Status().Update(ctx, dgdr); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Re-sync the Succeeded condition so that operator upgrades that improve
-	// failure messages take effect on already-failed DGDRs.
 	if setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseFailed) {
 		if err := r.Status().Update(ctx, dgdr); err != nil {
 			return ctrl.Result{}, err
