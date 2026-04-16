@@ -239,14 +239,21 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
 /// assistant EasyMessage). Chat Completions represents an assistant turn as a
 /// single message carrying both `content` and `tool_calls`, so we coalesce
 /// adjacent assistant-side Responses input items before emitting.
+///
+/// `touched` records whether any assistant-side item was seen in the current
+/// run. Without it, a standalone assistant message with empty text (or only
+/// Refusal content parts that this converter currently strips) would be lost
+/// entirely — breaking turn boundaries the model relies on.
 #[derive(Default)]
 struct PendingAssistant {
     content: Option<String>,
     tool_calls: Vec<ChatCompletionMessageToolCall>,
+    touched: bool,
 }
 
 impl PendingAssistant {
     fn push_text(&mut self, text: &str) {
+        self.touched = true;
         if text.is_empty() {
             return;
         }
@@ -257,18 +264,28 @@ impl PendingAssistant {
     }
 
     fn push_tool_call(&mut self, call: ChatCompletionMessageToolCall) {
+        self.touched = true;
         self.tool_calls.push(call);
     }
 
     fn flush_into(self, out: &mut Vec<ChatCompletionRequestMessage>) {
-        if self.content.is_none() && self.tool_calls.is_empty() {
+        if !self.touched {
             return;
         }
+        // Preserve turn boundaries: when an assistant-side item was seen but
+        // produced no text (empty OutputMessage, refusal-only content) and no
+        // tool calls, still emit an empty assistant message so adjacent user
+        // turns are not silently merged.
+        let content = Some(
+            self.content
+                .map(ChatCompletionRequestAssistantMessageContent::Text)
+                .unwrap_or_else(|| {
+                    ChatCompletionRequestAssistantMessageContent::Text(String::new())
+                }),
+        );
         out.push(ChatCompletionRequestMessage::Assistant(
             ChatCompletionRequestAssistantMessage {
-                content: self
-                    .content
-                    .map(ChatCompletionRequestAssistantMessageContent::Text),
+                content,
                 reasoning_content: None,
                 refusal: None,
                 name: None,
@@ -1295,6 +1312,111 @@ mod tests {
             _ => panic!("expected merged assistant message"),
         }
         assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
+    }
+
+    #[test]
+    fn test_standalone_assistant_message_with_empty_content_preserves_turn() {
+        // A prior assistant turn that produced no text (empty content or
+        // refusal-only parts the converter strips) must still emit an assistant
+        // message. Otherwise adjacent user turns get silently merged, which
+        // breaks strict-alternation chat templates and distorts the context
+        // the model sees.
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "first question".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::Message(MessageItem::Output(InputOutputMessage {
+                        id: None,
+                        role: AssistantRole::Assistant,
+                        status: None,
+                        phase: None,
+                        content: vec![InputOutputMessageContent::OutputText(
+                            InputOutputTextContent {
+                                text: "".into(),
+                                annotations: vec![],
+                                logprobs: None,
+                            },
+                        )],
+                    }))),
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "second question".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        assert_eq!(
+            messages.len(),
+            3,
+            "empty assistant turn must not be silently dropped"
+        );
+        assert!(matches!(messages[0], ChatCompletionRequestMessage::User(_)));
+        match &messages[1] {
+            ChatCompletionRequestMessage::Assistant(a) => {
+                assert!(a.tool_calls.is_none());
+                match a.content.as_ref().expect("empty turn still emits content") {
+                    ChatCompletionRequestAssistantMessageContent::Text(t) => {
+                        assert_eq!(t, "");
+                    }
+                    _ => panic!("expected text content"),
+                }
+            }
+            _ => panic!("expected assistant turn boundary preserved"),
+        }
+        assert!(matches!(messages[2], ChatCompletionRequestMessage::User(_)));
+    }
+
+    #[test]
+    fn test_easy_assistant_message_with_empty_content_preserves_turn() {
+        // Same turn-boundary preservation applies to EasyInputMessage shape.
+        use dynamo_protocols::types::responses::{
+            EasyInputContent, EasyInputMessage, Role as ResponseRole,
+        };
+
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::User,
+                        content: EasyInputContent::Text("first".into()),
+                        ..Default::default()
+                    }),
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::Assistant,
+                        content: EasyInputContent::Text("".into()),
+                        ..Default::default()
+                    }),
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::User,
+                        content: EasyInputContent::Text("second".into()),
+                        ..Default::default()
+                    }),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[1], ChatCompletionRequestMessage::Assistant(_)));
     }
 
     #[test]
