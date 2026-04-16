@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:rc2
+          image: docker.io/lambda108/epp-inference-extension-dynamo:rc2-fresh
           imagePullPolicy: IfNotPresent
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
@@ -70,7 +70,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:rc2
+        image: docker.io/lambda108/dynamo:rc2-fresh
         args:
           - -m
           - dynamo.frontend
@@ -82,8 +82,16 @@ spec:
           - key: "nvidia.com/gpu"
             operator: "Exists"
             effect: "NoSchedule"
-        nodeSelector:
-          kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-bw4bt
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - worker
+              topologyKey: kubernetes.io/hostname
         mainContainer:
           env:
             - name: SERVED_MODEL_NAME
@@ -97,7 +105,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:rc2
+          image: docker.io/lambda108/dynamo:rc2-fresh
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
@@ -113,7 +121,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:rc2
+        image: docker.io/lambda108/dynamo:rc2-fresh
         args:
           - -m
           - dynamo.frontend
@@ -125,8 +133,16 @@ spec:
           - key: "nvidia.com/gpu"
             operator: "Exists"
             effect: "NoSchedule"
-        nodeSelector:
-          kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-bw4bt
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component-type
+                  operator: In
+                  values:
+                  - worker
+              topologyKey: kubernetes.io/hostname
         mainContainer:
           env:
             - name: SERVED_MODEL_NAME
@@ -140,7 +156,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:rc2
+          image: docker.io/lambda108/dynamo:rc2-fresh
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
