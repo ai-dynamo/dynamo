@@ -525,7 +525,6 @@ def test_vllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.xpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_vllm_kv_router_without_block_size_specified_in_vllm_args(
@@ -644,10 +643,8 @@ def test_router_decisions_vllm_disagg(
         },
     )
 
-
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.xpu_1
 @pytest.mark.timeout(150)  # ~3x average (~43s/test), rounded up
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
