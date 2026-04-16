@@ -175,10 +175,9 @@ impl ConnectorLeader {
         if let Some(existing) = self.g1_manager.get() {
             return Ok(existing.clone());
         }
-        let registry = self
-            .shared_registry
-            .get()
-            .ok_or_else(|| anyhow!("ConnectorLeader not yet initialized — call initialize_workers first"))?;
+        let registry = self.shared_registry.get().ok_or_else(|| {
+            anyhow!("ConnectorLeader not yet initialized — call initialize_workers first")
+        })?;
         let manager = Arc::new(
             BlockManager::<G1>::builder()
                 .block_count(block_count)

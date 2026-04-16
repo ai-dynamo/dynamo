@@ -28,7 +28,6 @@ v2 = [
     "kvbm-connector/static-kernels",
     "dep:kvbm-logical",
     "dep:kvbm-engine",
-    "dep:dynamo-tokens",
 ]
 kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell"]
 nccl = ["v1", "dynamo-llm/nccl", "cudarc/nccl"]
@@ -42,7 +41,6 @@ dynamo-runtime = { path = "../../runtime", optional = true }
 kvbm-connector = { path = "../../kvbm-connector", optional = true }
 kvbm-logical = { path = "../../kvbm-logical", optional = true }
 kvbm-engine = { path = "../../kvbm-engine", optional = true }
-dynamo-tokens = { path = "../../tokens", optional = true }
 
 # kernels deps (optional)
 kvbm-kernels = { path = "../../kvbm-kernels", optional = true }

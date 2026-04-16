@@ -41,7 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use dynamo_tokens::Token;
 
@@ -131,9 +131,7 @@ impl RustKvCacheManager {
             );
         }
         if !block_size.is_power_of_two() || !(1..=1024).contains(&block_size) {
-            bail!(
-                "block_size must be a power of two in [1, 1024], got {block_size}"
-            );
+            bail!("block_size must be a power of two in [1, 1024], got {block_size}");
         }
 
         let registry = BlockRegistry::builder()
@@ -261,10 +259,7 @@ impl RustKvCacheManager {
     /// [`RustKvCacheManager::create_slot`]. The returned block ids are
     /// also *pinned* in `pinned_cache_hits` so they stay alive through
     /// any subsequent `allocate_slots` round-trip.
-    pub fn get_computed_blocks(
-        &self,
-        request_id: &str,
-    ) -> Result<(Vec<BlockId>, usize)> {
+    pub fn get_computed_blocks(&self, request_id: &str) -> Result<(Vec<BlockId>, usize)> {
         let mut slots = self.slots.lock().unwrap();
         let slot = slots
             .get_mut(request_id)
@@ -292,12 +287,7 @@ impl RustKvCacheManager {
         let mut ids = Vec::with_capacity(matched);
         {
             let mut pinned = self.pinned_cache_hits.lock().unwrap();
-            for (block_id, immutable) in slot
-                .sequence
-                .assignments()
-                .assigned_iter()
-                .take(matched)
-            {
+            for (block_id, immutable) in slot.sequence.assignments().assigned_iter().take(matched) {
                 ids.push(*block_id);
                 pinned.insert((request_id.to_string(), *block_id), immutable.clone());
             }
@@ -353,8 +343,7 @@ impl RustKvCacheManager {
         // `num_blocks()` is the count of token-complete blocks; plus
         // one generation block if there's an in-progress tail.
         let total_complete = slot.sequence.num_blocks();
-        let need_generation_block =
-            slot.sequence.total_tokens() > total_complete * self.block_size;
+        let need_generation_block = slot.sequence.total_tokens() > total_complete * self.block_size;
         let target = total_complete + usize::from(need_generation_block);
         let currently_allocated = slot.sequence.assigned_blocks()
             + slot.sequence.staged_blocks()
