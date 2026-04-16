@@ -168,7 +168,9 @@ def _wait_for_frontend_healthy(
             resp = requests.get(
                 f"http://localhost:{frontend_port}/v1/models", timeout=2
             )
-            if resp.ok and any(m.get("id") == model for m in resp.json().get("data", [])):
+            if resp.ok and any(
+                m.get("id") == model for m in resp.json().get("data", [])
+            ):
                 return
         except requests.RequestException as e:
             last_err = e
