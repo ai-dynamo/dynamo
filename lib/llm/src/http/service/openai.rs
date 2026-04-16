@@ -2029,20 +2029,44 @@ async fn images(
     Ok(Json(response).into_response())
 }
 
-/// Create an Axum [`Router`] for the OpenAI API Images endpoint
-/// If not path is provided, the default path is `/v1/images/generations`
+/// Handler for `/v1/images/edits` (I2I). Requires `input_reference`.
+async fn images_edits(
+    state: State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateImageRequest>,
+) -> Result<Response, ErrorResponse> {
+    if request.input_reference.is_none() {
+        let code = StatusCode::BAD_REQUEST;
+        return Err((
+            code,
+            Json(ErrorMessage {
+                message: "input_reference is required for /v1/images/edits".to_string(),
+                error_type: map_error_code_to_error_type(code),
+                code: code.as_u16(),
+            }),
+        ));
+    }
+    images(state, headers, Json(request)).await
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Images endpoints.
+/// `/v1/images/generations` accepts optional `input_reference` (T2I or TI2I).
+/// `/v1/images/edits` requires `input_reference` (I2I).
 pub fn images_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/v1/images/generations".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let generations_path = path.unwrap_or("/v1/images/generations".to_string());
+    let edits_path = generations_path.replace("/generations", "/edits");
+    let doc = RouteDoc::new(axum::http::Method::POST, &generations_path);
+    let edits_doc = RouteDoc::new(axum::http::Method::POST, &edits_path);
     let router = Router::new()
-        .route(&path, post(images))
+        .route(&generations_path, post(images))
+        .route(&edits_path, post(images_edits))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
-    (vec![doc], router)
+    (vec![doc, edits_doc], router)
 }
 
 async fn videos(

@@ -94,6 +94,12 @@ documentation:
           - '**/*.md'
           - '**/*.rst'
 
+xpu:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/xpu/**'
+          - '**/*xpu*'
+
 multimodal:
   - changed-files:
       - any-glob-to-any-file:

@@ -31,17 +31,14 @@ use tracing::Instrument;
 use validator::Validate;
 
 pub mod indexer;
-mod jetstream;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
 pub mod scheduler;
 pub mod sequence;
-pub mod subscriber;
-pub mod worker_query;
 
-pub use indexer::Indexer;
+pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
 
@@ -117,6 +114,7 @@ where
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
     is_eagle: bool,
+    _served_indexer_handle: Option<ServedIndexerHandle>,
 }
 
 impl<Sel> KvRouter<Sel>
@@ -142,7 +140,13 @@ where
         let cancellation_token = component.drt().primary_token();
         let min_initial_workers = min_initial_workers_from_env()?;
 
-        let indexer = Indexer::new(component, &kv_router_config, block_size, model_name).await?;
+        let indexer = Indexer::new(
+            component,
+            &kv_router_config,
+            block_size,
+            model_name.as_deref(),
+        )
+        .await?;
 
         if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
             let mut startup_watch = workers_with_configs.clone();
@@ -168,12 +172,11 @@ where
         )
         .await?;
 
-        // Start KV event subscription if needed — skip when using a remote indexer
-        // (the standalone indexer handles its own event subscription).
-        if kv_router_config.remote_indexer_component.is_some() {
+        // Start KV event subscription if needed — skip when using a remote indexer.
+        if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            subscriber::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
+            indexer::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
                 .await?;
         } else {
             tracing::info!(
@@ -182,6 +185,23 @@ where
                 kv_router_config.overlap_score_weight,
             );
         }
+
+        let served_indexer_handle = if kv_router_config.serve_indexer {
+            let model_name = model_name.clone().ok_or_else(|| {
+                anyhow::anyhow!("model_name is required when serve_indexer is configured")
+            })?;
+            Some(
+                ensure_served_indexer_service(
+                    component.clone(),
+                    ServedIndexerMode::from_use_kv_events(kv_router_config.use_kv_events),
+                    model_name,
+                    indexer.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
@@ -193,6 +213,7 @@ where
             cancellation_token,
             client,
             is_eagle,
+            _served_indexer_handle: served_indexer_handle,
         })
     }
 

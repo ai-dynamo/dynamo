@@ -149,6 +149,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// must be narrower than or equal to the spec-level packDomain.
 	// +optional
 	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// Failover configures GMS (GPU Memory Service) failover for this service.
+	// When enabled, the operator creates a dedicated GMS weight server pod and
+	// multiple engine pods per rank that share GPUs via DRA resource claims.
+	// +optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
 type MultinodeSpec struct {
@@ -158,6 +164,21 @@ type MultinodeSpec struct {
 	// Must be greater than 1.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
+}
+
+// FailoverSpec configures GMS (GPU Memory Service) failover for a service.
+// When enabled, the operator creates a GMS weight server pod that pre-loads model
+// weights into shared GPU memory, plus NumShadows+1 engine pods per rank. At runtime,
+// one engine pod acquires the flock and becomes primary; the rest are shadows.
+type FailoverSpec struct {
+	// Enabled activates GMS failover for this service.
+	Enabled bool `json:"enabled"`
+	// NumShadows is the number of shadow (standby) engine pods per rank.
+	// Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	NumShadows int32 `json:"numShadows,omitempty"`
 }
 
 type IngressTLSSpec struct {
@@ -331,6 +352,24 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 		return s.Multinode.NodeCount
 	}
 	return 1
+}
+
+func (s *DynamoComponentDeploymentSharedSpec) IsGMSEnabled() bool {
+	return s.Failover != nil && s.Failover.Enabled
+}
+
+func (s *DynamoComponentDeploymentSharedSpec) GetNumShadows() int32 {
+	if !s.IsGMSEnabled() {
+		return 0
+	}
+	if s.Failover.NumShadows < 1 {
+		return 1
+	}
+	return s.Failover.NumShadows
+}
+
+func (s *DynamoComponentDeploymentSharedSpec) GetTotalEnginePods() int32 {
+	return s.GetNumShadows() + 1
 }
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {

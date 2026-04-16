@@ -16,8 +16,6 @@ use clap::Parser;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
-#[cfg(feature = "kv-indexer-runtime")]
-use dynamo_kv_router::standalone_indexer::RuntimeConfig;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::standalone_indexer::{self, IndexerConfig};
 use rs::pipeline::{AsyncEngine, SingleIn};
@@ -71,26 +69,6 @@ struct KvIndexerCli {
     /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
     #[arg(long)]
     peers: Option<String>,
-
-    /// Enable Dynamo runtime integration (discovery, event plane, request plane).
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long)]
-    dynamo_runtime: bool,
-
-    /// Dynamo namespace to register the indexer component under.
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long, default_value = "default")]
-    namespace: String,
-
-    /// Component name for this indexer in the Dynamo runtime.
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long, default_value = "kv-indexer")]
-    component_name: String,
-
-    /// Component name that workers register under.
-    #[cfg(feature = "kv-indexer-runtime")]
-    #[arg(long, default_value = "backend")]
-    worker_component: String,
 }
 
 pub fn run_kv_indexer_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -104,31 +82,6 @@ where
             std::iter::once(OsString::from("python -m dynamo.indexer"))
                 .chain(args.into_iter().map(Into::into)),
         )?;
-
-        #[cfg(feature = "kv-indexer-runtime")]
-        if cli.dynamo_runtime {
-            dynamo_runtime::logging::init();
-            let worker = dynamo_runtime::Worker::from_settings()?;
-            return worker.execute(move |runtime| {
-                standalone_indexer::run_with_runtime(
-                    runtime,
-                    IndexerConfig {
-                        block_size: cli.block_size,
-                        port: cli.port,
-                        threads: cli.threads,
-                        workers: cli.workers,
-                        model_name: cli.model_name,
-                        tenant_id: cli.tenant_id,
-                        peers: cli.peers,
-                    },
-                    RuntimeConfig {
-                        namespace: cli.namespace,
-                        component_name: cli.component_name,
-                        worker_component: cli.worker_component,
-                    },
-                )
-            });
-        }
 
         init_standalone_logging();
 
@@ -732,11 +685,11 @@ async fn create_kv_router_from_endpoint(
         llm_rs::discovery::WORKER_TYPE_DECODE
     };
 
-    // Query discovery once so we can derive both model_name (for remote indexer)
+    // Query discovery once so we can derive both model_name (for remote/served indexer)
     // and Eagle routing semantics from the model card.
     let needs_model_name = kv_router_config
         .as_ref()
-        .map(|cfg| cfg.remote_indexer_component.is_some())
+        .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
     let (model_name, enable_eagle) = {
         let discovery = endpoint.inner.component().drt().discovery();

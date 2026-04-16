@@ -1491,6 +1491,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 													},
@@ -1696,6 +1700,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -2092,6 +2100,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -2302,6 +2314,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -2488,6 +2504,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -2685,6 +2705,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -3103,6 +3127,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -3300,6 +3328,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
+													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -3486,6 +3518,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYN_HTTP_PORT",
 														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
@@ -3683,6 +3719,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													FailureThreshold: 720,
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "CONTAINER_NAME",
+														Value: commonconsts.MainContainerName,
+													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -4012,6 +4052,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -4170,6 +4211,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -4257,6 +4299,7 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -4282,6 +4325,7 @@ func TestExpandRolesForService(t *testing.T) {
 		serviceName     string
 		numberOfNodes   int32
 		serviceReplicas *int32
+		component       *v1alpha1.DynamoComponentDeploymentSharedSpec
 		expected        []ServiceRole
 	}{
 		{
@@ -4337,11 +4381,69 @@ func TestExpandRolesForService(t *testing.T) {
 				{Name: "test-service", Role: RoleMain, Replicas: 0},
 			},
 		},
+		{
+			name:          "single-node GMS with 1 shadow",
+			serviceName:   "svc",
+			numberOfNodes: 1,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Failover: &v1alpha1.FailoverSpec{Enabled: true, NumShadows: 1},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc", Role: RoleMain, Replicas: 2, Rank: 0},
+			},
+		},
+		{
+			name:          "single-node GMS with 3 shadows",
+			serviceName:   "svc",
+			numberOfNodes: 1,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Failover: &v1alpha1.FailoverSpec{Enabled: true, NumShadows: 3},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc", Role: RoleMain, Replicas: 4, Rank: 0},
+			},
+		},
+		{
+			name:          "multinode GMS 2 nodes 1 shadow",
+			serviceName:   "svc",
+			numberOfNodes: 2,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Failover: &v1alpha1.FailoverSpec{Enabled: true, NumShadows: 1},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc-ldr", Role: RoleLeader, Replicas: 2, Rank: 0},
+				{Name: "svc-gms-1", Role: RoleGMS, Replicas: 1, Rank: 1},
+				{Name: "svc-wkr-1", Role: RoleWorker, Replicas: 2, Rank: 1},
+			},
+		},
+		{
+			name:          "multinode GMS 3 nodes 2 shadows",
+			serviceName:   "svc",
+			numberOfNodes: 3,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Failover: &v1alpha1.FailoverSpec{Enabled: true, NumShadows: 2},
+			},
+			expected: []ServiceRole{
+				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
+				{Name: "svc-ldr", Role: RoleLeader, Replicas: 3, Rank: 0},
+				{Name: "svc-gms-1", Role: RoleGMS, Replicas: 1, Rank: 1},
+				{Name: "svc-wkr-1", Role: RoleWorker, Replicas: 3, Rank: 1},
+				{Name: "svc-gms-2", Role: RoleGMS, Replicas: 1, Rank: 2},
+				{Name: "svc-wkr-2", Role: RoleWorker, Replicas: 3, Rank: 2},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := expandRolesForService(tt.serviceName, tt.serviceReplicas, tt.numberOfNodes)
+			component := tt.component
+			if component == nil {
+				component = &v1alpha1.DynamoComponentDeploymentSharedSpec{}
+			}
+			result := expandRolesForService(tt.serviceName, tt.serviceReplicas, tt.numberOfNodes, component)
 			if !reflect.DeepEqual(result, tt.expected) {
 				t.Errorf("expandRolesForService() = %v, want %v", result, tt.expected)
 			}
@@ -4801,8 +4903,8 @@ func TestApplyCliqueStartupDependencies(t *testing.T) {
 				gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			}
 
-			// Apply dependencies
-			applyCliqueStartupDependencies(gangSet, tt.roles, tt.backendFramework, tt.numberOfNodes)
+			// Apply dependencies (non-GMS)
+			applyCliqueStartupDependencies(gangSet, tt.roles, tt.backendFramework, tt.numberOfNodes, false)
 
 			// Verify StartupType
 			if tt.expectStartupType {
@@ -4829,6 +4931,80 @@ func TestApplyCliqueStartupDependencies(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyCliqueStartupDependencies_GMS(t *testing.T) {
+	t.Run("gms_single_node_engine_starts_after_gms", func(t *testing.T) {
+		gmsRoles := []ServiceRole{
+			{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+			{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
+		}
+		gangSet := &grovev1alpha1.PodCliqueSet{
+			Spec: grovev1alpha1.PodCliqueSetSpec{
+				Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+						{Name: "svc-gms-0", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "svc-gms-0", Replicas: 1}},
+						{Name: "svc", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "svc", Replicas: 2}},
+					},
+				},
+			},
+		}
+
+		applyCliqueStartupDependencies(gangSet, gmsRoles, BackendFrameworkVLLM, 1, true)
+
+		if gangSet.Spec.Template.StartupType == nil || *gangSet.Spec.Template.StartupType != grovev1alpha1.CliqueStartupTypeExplicit {
+			t.Fatal("expected CliqueStartupTypeExplicit")
+		}
+		for _, c := range gangSet.Spec.Template.Cliques {
+			switch c.Name {
+			case "svc-gms-0":
+				if c.Spec.StartsAfter != nil {
+					t.Errorf("GMS clique should have no startsAfter, got %v", c.Spec.StartsAfter)
+				}
+			case "svc":
+				if !reflect.DeepEqual(c.Spec.StartsAfter, []string{"svc-gms-0"}) {
+					t.Errorf("engine clique startsAfter = %v, want [svc-gms-0]", c.Spec.StartsAfter)
+				}
+			}
+		}
+	})
+
+	t.Run("gms_does_not_leak_startsAfter_to_unrelated_cliques", func(t *testing.T) {
+		gmsRoles := []ServiceRole{
+			{Name: "engine-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+			{Name: "engine", Role: RoleMain, Rank: 0, Replicas: 2},
+		}
+		gangSet := &grovev1alpha1.PodCliqueSet{
+			Spec: grovev1alpha1.PodCliqueSetSpec{
+				Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+						{Name: "frontend", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "frontend", Replicas: 1}},
+						{Name: "engine-gms-0", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "engine-gms-0", Replicas: 1}},
+						{Name: "engine", Spec: grovev1alpha1.PodCliqueSpec{RoleName: "engine", Replicas: 2}},
+					},
+				},
+			},
+		}
+
+		applyCliqueStartupDependencies(gangSet, gmsRoles, BackendFrameworkVLLM, 1, true)
+
+		for _, c := range gangSet.Spec.Template.Cliques {
+			switch c.Name {
+			case "frontend":
+				if c.Spec.StartsAfter != nil {
+					t.Errorf("frontend clique should have no startsAfter, got %v", c.Spec.StartsAfter)
+				}
+			case "engine-gms-0":
+				if c.Spec.StartsAfter != nil {
+					t.Errorf("GMS clique should have no startsAfter, got %v", c.Spec.StartsAfter)
+				}
+			case "engine":
+				if !reflect.DeepEqual(c.Spec.StartsAfter, []string{"engine-gms-0"}) {
+					t.Errorf("engine clique startsAfter = %v, want [engine-gms-0]", c.Spec.StartsAfter)
+				}
+			}
+		}
+	})
 }
 
 func TestGetCliqueStartupDependencies(t *testing.T) {
@@ -5063,6 +5239,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if (err != nil) != tt.wantErr {
@@ -5139,6 +5316,7 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if err != nil {
@@ -5262,6 +5440,7 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if err != nil {
@@ -5368,6 +5547,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 			if !assert.NoError(t, err) {
 				return
@@ -5420,8 +5600,9 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 						Args:    []string{"-m", "dynamo.worker"},
 						Env: []corev1.EnvVar{
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
-							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
-							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
+						{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
+						{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
+						{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
@@ -5537,6 +5718,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if err != nil {
@@ -5634,6 +5816,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -5870,6 +6053,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -6082,6 +6266,7 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if tt.expectError {
@@ -6268,6 +6453,7 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
 				nil, // No checkpoint info in tests
+				nil, // Use default deployer
 			)
 
 			if err != nil {
@@ -7232,7 +7418,8 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,
+				nil, // checkpointInfo
+				nil, // deployerOverride
 			)
 
 			if (err != nil) != tt.wantErr {

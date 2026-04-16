@@ -619,13 +619,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 			continue
 		}
 
-		numberOfNodes := component.GetNumberOfNodes()
-		isMultinode := numberOfNodes > 1
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsGMSEnabled()
+		resourceName := fmt.Sprintf("%s-%d-%s", dynamoDeployment.Name, replicaIndex, strings.ToLower(serviceName))
 
-		if isMultinode {
-			// Scale PodCliqueScalingGroup for multinode services
-			// Grove naming pattern: {DGD.name}-{replicaIndex}-{serviceName}
-			resourceName := fmt.Sprintf("%s-%d-%s", dynamoDeployment.Name, replicaIndex, strings.ToLower(serviceName))
+		if usesPCSG {
 			err := r.scaleGroveResource(ctx,
 				resourceName,
 				dynamoDeployment.Namespace,
@@ -636,9 +633,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 				return fmt.Errorf("failed to scale PodCliqueScalingGroup %s: %w", resourceName, err)
 			}
 		} else {
-			// Scale individual PodClique for single-node services
-			// Grove naming pattern: {DGD.name}-{replicaIndex}-{serviceName}
-			resourceName := fmt.Sprintf("%s-%d-%s", dynamoDeployment.Name, replicaIndex, strings.ToLower(serviceName))
 			err := r.scaleGroveResource(ctx,
 				resourceName,
 				dynamoDeployment.Namespace,
@@ -1434,6 +1428,7 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		consts.MultinodeDeploymentTypeGrove, // Use Grove (single-node backends return early)
 		serviceName,
 		nil, // No checkpoint info for checkpoint creation jobs
+		nil, // Use default deployer
 	)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)

@@ -677,6 +677,15 @@ func registerControllers(
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 
+	if runtimeConfig.GroveEnabled {
+		if err = controller.NewFailoverCascadeReconciler(
+			mgr.GetClient(),
+			mgr.GetEventRecorderFor("gms-failover-cascade"),
+		).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("unable to create GMS FailoverCascade controller: %w", err)
+		}
+	}
+
 	setupLog.Info("Controllers registered successfully")
 	return nil
 }
@@ -712,7 +721,7 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
 	}
 
-	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal)
+	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal, runtimeConfig.GroveEnabled)
 	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
 	}

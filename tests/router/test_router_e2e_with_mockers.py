@@ -21,6 +21,7 @@ from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
     _test_python_router_bindings,
+    _test_remote_indexer_decisions,
     _test_router_basic,
     _test_router_decisions,
     _test_router_decisions_disagg,
@@ -1014,14 +1015,28 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events,zmq_kv_events",
+    "durable_kv_events,use_kv_events,zmq_kv_events,use_remote_indexer",
     [
-        (True, True, False),  # JetStream mode with KV events
-        (False, True, False),  # NATS Core mode with local indexer (default)
-        (False, False, False),  # Approximate mode (--no-kv-events) - no KV events
-        (False, True, True),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
+        (True, True, False, False),  # JetStream mode with KV events
+        (False, True, False, False),  # NATS Core mode with local indexer (default)
+        (False, True, False, True),  # NATS Core mode with a served remote indexer
+        (False, False, False, False),  # Approximate mode (--no-kv-events)
+        (
+            False,
+            False,
+            False,
+            True,
+        ),  # Approximate mode with a singleton served remote indexer
+        (False, True, True, False),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
     ],
-    ids=["jetstream", "nats_core", "no_kv_events", "zmq"],
+    ids=[
+        "jetstream",
+        "nats_core",
+        "nats_core_remote",
+        "no_kv_events",
+        "no_kv_events_remote",
+        "zmq",
+    ],
     indirect=["durable_kv_events"],
 )
 def test_router_decisions(
@@ -1032,18 +1047,24 @@ def test_router_decisions(
     use_kv_events,
     request_plane,
     zmq_kv_events,
+    use_remote_indexer,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
     Parameterized to test:
     - JetStream mode: KV events via NATS JetStream (durable)
     - NATS Core mode (default): KV events via NATS Core with local indexer on workers
+    - NATS Core mode with a served remote indexer
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
       based on routing decisions with TTL-based expiration and pruning
+    - Approximate mode with a singleton served remote indexer
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        f"Starting test router decisions: durable_kv_events={durable_kv_events}, use_kv_events={use_kv_events}"
+        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s",
+        durable_kv_events,
+        use_kv_events,
+        use_remote_indexer,
     )
 
     # Create mocker args dictionary with dp_size=4
@@ -1066,10 +1087,18 @@ def test_router_decisions(
     ) as mockers:
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
-        # Initialize mockers
-        # Get runtime and create endpoint
+        if use_remote_indexer:
+            _test_remote_indexer_decisions(
+                mockers,
+                MODEL_NAME,
+                block_size=8,
+                use_kv_events=use_kv_events,
+                test_dp_rank=True,
+                request_plane=request_plane,
+            )
+            return
+
         runtime = get_runtime(request_plane=request_plane)
-        # Use the namespace from the mockers
         endpoint = runtime.endpoint(f"{mockers.namespace}.mocker.generate")
 
         _test_router_decisions(

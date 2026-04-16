@@ -48,23 +48,26 @@ const (
 // DynamoGraphDeploymentValidator validates DynamoGraphDeployment resources.
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentValidator struct {
-	deployment *nvidiacomv1alpha1.DynamoGraphDeployment
-	mgr        ctrl.Manager // Optional: for API group detection via discovery client
+	deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
+	mgr          ctrl.Manager // Optional: for API group detection via discovery client
+	groveEnabled bool
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
-func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment) *DynamoGraphDeploymentValidator {
+// groveEnabled should reflect the operator's runtime config (global.grove.enabled).
+func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, groveEnabled bool) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
-		deployment: deployment,
-		mgr:        nil,
+		deployment:   deployment,
+		groveEnabled: groveEnabled,
 	}
 }
 
 // NewDynamoGraphDeploymentValidatorWithManager creates a validator with a manager for API group detection.
-func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
+func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager, groveEnabled bool) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
-		deployment: deployment,
-		mgr:        mgr,
+		deployment:   deployment,
+		mgr:          mgr,
+		groveEnabled: groveEnabled,
 	}
 }
 
@@ -166,6 +169,28 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 		if oldService.IsMultinode() != newService.IsMultinode() {
 			errs = append(errs, fmt.Errorf(
 				"spec.services[%s] cannot change node topology (between single-node and multi-node) after creation",
+				serviceName,
+			))
+		}
+	}
+
+	// Validate GMS failover immutability
+	for serviceName, newService := range v.deployment.Spec.Services {
+		oldService, exists := old.Spec.Services[serviceName]
+		if !exists {
+			continue
+		}
+		oldGMS := oldService.IsGMSEnabled()
+		newGMS := newService.IsGMSEnabled()
+		if oldGMS != newGMS {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s].failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
+				serviceName,
+			))
+		}
+		if oldGMS && newGMS && oldService.Failover.NumShadows != newService.Failover.NumShadows {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s].failover.numShadows is immutable; delete and recreate the DynamoGraphDeployment to change it",
 				serviceName,
 			))
 		}
@@ -274,6 +299,11 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 // validateService validates a single service configuration using SharedSpecValidator.
 // Returns warnings and error.
 func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
+	// GMS failover requires the Grove pathway
+	if service.IsGMSEnabled() && !v.isGrovePathway() {
+		return nil, fmt.Errorf("spec.services[%s]: GMS failover requires the Grove pathway (nvidia.com/enable-grove must not be \"false\")", serviceName)
+	}
+
 	// Validate service name length constraints for Grove PodCliqueSet naming
 	// Only validate when Grove pathway may be in use
 	if v.isGrovePathway() {
@@ -313,27 +343,37 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 	dgdName := v.deployment.Name
 	lowerServiceName := strings.ToLower(serviceName)
 
-	// Check if this is a multinode service
 	isMultinode := service.GetNumberOfNodes() > 1
+	isGMS := service.IsGMSEnabled()
 
-	if isMultinode {
-		// For multinode: PodCliqueSet name + PodCliqueScalingGroup name + PodClique name (with leader suffix)
-		// The PodClique name is serviceName + "-ldr" (using GroveRoleSuffixLeader)
-		leaderPodCliqueName := lowerServiceName + "-" + consts.GroveRoleSuffixLeader
-		combinedLength := len(dgdName) + len(lowerServiceName) + len(leaderPodCliqueName)
+	// Determine the longest PodClique name that will be generated.
+	// Grove validates: len(PCS name) + len(PCSG name) + len(PCLQ name) <= 45
+	var longestPCLQName string
+	var pcsgName string
 
-		if combinedLength > maxCombinedResourceNameLength {
-			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
-				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
-				"For multinode services, the combined length of DGD name + service name + service name with role suffix (e.g., '%s-ldr') must not exceed %d characters",
-				serviceName, combinedLength, maxCombinedResourceNameLength,
-				dgdName, len(dgdName), serviceName, len(serviceName),
-				lowerServiceName, maxCombinedResourceNameLength)
+	switch {
+	case isGMS:
+		// GMS services always get a PCSG named after the service.
+		// Longest PCLQ name is "serviceName-gms-0" (len + 6) or "serviceName-wkr-N".
+		pcsgName = lowerServiceName
+		gmsName := fmt.Sprintf("%s-%s-0", lowerServiceName, consts.GroveRoleSuffixGMS)
+		longestPCLQName = gmsName
+		if isMultinode {
+			// For high node counts, "svc-wkr-NN" can be longer than "svc-gms-0"
+			maxRank := service.GetNumberOfNodes() - 1
+			workerName := fmt.Sprintf("%s-%s-%d", lowerServiceName, consts.GroveRoleSuffixWorker, maxRank)
+			if len(workerName) > len(longestPCLQName) {
+				longestPCLQName = workerName
+			}
 		}
-	} else {
-		// For single-node: PodCliqueSet name + PodClique name
-		combinedLength := len(dgdName) + len(lowerServiceName)
 
+	case isMultinode:
+		pcsgName = lowerServiceName
+		longestPCLQName = lowerServiceName + "-" + consts.GroveRoleSuffixLeader
+
+	default:
+		// Single-node non-GMS: no PCSG, only PCS + PCLQ
+		combinedLength := len(dgdName) + len(lowerServiceName)
 		if combinedLength > maxCombinedResourceNameLength {
 			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
 				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
@@ -342,15 +382,30 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 				dgdName, len(dgdName), serviceName, len(serviceName),
 				maxCombinedResourceNameLength)
 		}
+		return nil
+	}
+
+	// For services with PCSG: PCS name + PCSG name + longest PCLQ name
+	combinedLength := len(dgdName) + len(pcsgName) + len(longestPCLQName)
+	if combinedLength > maxCombinedResourceNameLength {
+		return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
+			"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
+			"The combined length of DGD name + PCSG name + longest PodClique name ('%s') must not exceed %d characters",
+			serviceName, combinedLength, maxCombinedResourceNameLength,
+			dgdName, len(dgdName), serviceName, len(serviceName),
+			longestPCLQName, maxCombinedResourceNameLength)
 	}
 
 	return nil
 }
 
 // isGrovePathway determines if Grove pathway may be used for this deployment.
-// Grove is used when the nvidia.com/enable-grove annotation is NOT explicitly set to "false".
-// This is a conservative check - if Grove might be used, we validate the name length constraints.
+// Grove requires both operator-level enablement (global.grove.enabled) and the
+// per-DGD annotation not being explicitly set to "false".
 func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
+	if !v.groveEnabled {
+		return false
+	}
 	return v.deployment.Annotations == nil ||
 		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
 }

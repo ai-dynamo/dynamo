@@ -5,71 +5,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use futures::StreamExt;
-
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed, ThreadPoolIndexer,
     approx::PruneConfig,
     config::KvRouterConfig,
-    indexer::{
-        IndexerQueryRequest, IndexerQueryResponse, KV_INDEXER_QUERY_ENDPOINT, KvIndexer,
-        KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-    },
+    indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
     protocols::{
         LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
     },
 };
-use dynamo_runtime::{
-    component::Component,
-    pipeline::{ManyOut, RouterMode, SingleIn, network::egress::push_router::PushRouter},
-    traits::DistributedRuntimeProvider,
-};
+use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
+use dynamo_tokens::SequenceHash;
 use tokio::sync::oneshot;
 
-pub struct RemoteIndexer {
-    router: PushRouter<IndexerQueryRequest, IndexerQueryResponse>,
-    model_name: String,
-    namespace: String,
-}
+mod jetstream;
+pub mod remote;
+mod subscriber;
+mod worker_query;
 
-impl RemoteIndexer {
-    async fn new(
-        component: &Component,
-        indexer_component_name: &str,
-        model_name: String,
-    ) -> Result<Self> {
-        let namespace = component.namespace().name();
-        let indexer_ns = component.namespace();
-        let indexer_component = indexer_ns.component(indexer_component_name)?;
-        let endpoint = indexer_component.endpoint(KV_INDEXER_QUERY_ENDPOINT);
-        let client = endpoint.client().await?;
-        let router =
-            PushRouter::from_client_no_fault_detection(client, RouterMode::RoundRobin).await?;
-        Ok(Self {
-            router,
-            model_name,
-            namespace,
-        })
-    }
-
-    async fn find_matches(&self, block_hashes: Vec<LocalBlockHash>) -> Result<OverlapScores> {
-        let request = IndexerQueryRequest {
-            model_name: self.model_name.clone(),
-            namespace: self.namespace.clone(),
-            block_hashes,
-        };
-        let mut stream: ManyOut<IndexerQueryResponse> =
-            self.router.round_robin(SingleIn::new(request)).await?;
-
-        match stream.next().await {
-            Some(IndexerQueryResponse::Scores(scores)) => Ok(scores.into()),
-            Some(IndexerQueryResponse::Error(msg)) => {
-                Err(anyhow::anyhow!("Remote indexer error: {}", msg))
-            }
-            None => Err(anyhow::anyhow!("Remote indexer returned empty response")),
-        }
-    }
-}
+use self::remote::RemoteIndexer;
+pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
+pub(crate) use subscriber::start_subscriber;
+pub(crate) use worker_query::start_worker_kv_query_endpoint;
 
 #[derive(Clone)]
 pub enum Indexer {
@@ -84,24 +41,26 @@ impl Indexer {
         component: &Component,
         kv_router_config: &KvRouterConfig,
         block_size: u32,
-        model_name: Option<String>,
+        model_name: Option<&str>,
     ) -> Result<Self> {
         if kv_router_config.overlap_score_weight == 0.0 {
             return Ok(Self::None);
         }
 
-        if let Some(ref indexer_component_name) = kv_router_config.remote_indexer_component {
-            let model_name = model_name.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "model_name is required when remote_indexer_component is configured"
-                )
-            })?;
+        if kv_router_config.use_remote_indexer {
+            let model_name = model_name
+                .ok_or_else(|| {
+                    anyhow::anyhow!("model_name is required when use_remote_indexer is configured")
+                })?
+                .to_string();
+            let indexer_component_name = component.name();
             tracing::info!(
-                remote_indexer_component = %indexer_component_name,
+                indexer_component = %indexer_component_name,
                 model_name,
                 "Using remote KV indexer"
             );
-            let remote = RemoteIndexer::new(component, indexer_component_name, model_name).await?;
+            let remote =
+                RemoteIndexer::new(component, model_name, kv_router_config.use_kv_events).await?;
             return Ok(Self::Remote(Arc::new(remote)));
         }
 
@@ -149,11 +108,43 @@ impl Indexer {
         match self {
             Self::KvIndexer(indexer) => indexer.find_matches(sequence).await,
             Self::Concurrent(tpi) => tpi.find_matches(sequence).await,
-            Self::Remote(remote) => remote.find_matches(sequence).await.map_err(|e| {
-                tracing::warn!(error = %e, "Remote indexer query failed");
-                KvRouterError::IndexerOffline
-            }),
+            Self::Remote(remote) => match remote.find_matches(sequence).await {
+                Ok(scores) => Ok(scores),
+                Err(error) => {
+                    tracing::warn!(error = %error, "Remote indexer query failed");
+                    Ok(OverlapScores::new())
+                }
+            },
             Self::None => Ok(OverlapScores::new()),
+        }
+    }
+
+    pub(crate) async fn record_hashed_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        match self {
+            Self::KvIndexer(indexer) => {
+                indexer
+                    .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+                    .await
+            }
+            Self::Concurrent(_) => {
+                tracing::warn!(
+                    "Hashed routing-decision recording is unsupported for concurrent indexers"
+                );
+                Err(KvRouterError::IndexerDroppedRequest)
+            }
+            Self::Remote(remote) => remote
+                .record_hashed_routing_decision(worker, local_hashes, sequence_hashes)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(error = %error, "Remote indexer write failed");
+                    KvRouterError::IndexerDroppedRequest
+                }),
+            Self::None => Ok(()),
         }
     }
 
@@ -176,16 +167,17 @@ impl Indexer {
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
         match self {
-            Self::KvIndexer(indexer) => {
-                indexer
-                    .process_routing_decision_for_request(tokens_with_hashes, worker)
+            Self::KvIndexer(_) | Self::Remote(_) => {
+                let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
+                let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
+                self.record_hashed_routing_decision(worker, local_hashes, sequence_hashes)
                     .await
             }
             Self::Concurrent(tpi) => {
                 tpi.process_routing_decision_for_request(tokens_with_hashes, worker)
                     .await
             }
-            Self::Remote(_) | Self::None => Ok(()),
+            Self::None => Ok(()),
         }
     }
 

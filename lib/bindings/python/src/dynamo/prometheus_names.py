@@ -287,6 +287,10 @@ class router:
 
     # Total number of requests processed by the router
     REQUESTS_TOTAL = "router_requests_total"
+    # Total number of remote indexer overlap queries that failed
+    REMOTE_INDEXER_QUERY_FAILURES_TOTAL = "router_remote_indexer_query_failures_total"
+    # Total number of remote indexer routing-decision writes that failed
+    REMOTE_INDEXER_WRITE_FAILURES_TOTAL = "router_remote_indexer_write_failures_total"
     # Time to first token observed at the router (seconds)
     TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
     # Average inter-token latency observed at the router (seconds)

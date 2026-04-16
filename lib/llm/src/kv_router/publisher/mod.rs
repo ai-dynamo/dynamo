@@ -24,7 +24,7 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::{
-    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, worker_query::start_worker_kv_query_endpoint,
+    KV_EVENT_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE, indexer::start_worker_kv_query_endpoint,
 };
 
 mod event_processor;

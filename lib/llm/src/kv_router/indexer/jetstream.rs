@@ -18,8 +18,10 @@ use rand::Rng;
 use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
-    Indexer, KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE, router_discovery_query,
+    KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE, router_discovery_query,
 };
+
+use super::Indexer;
 
 /// Helper function to create a KV stream name from a component and subject.
 ///

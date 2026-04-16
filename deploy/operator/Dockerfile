@@ -22,6 +22,8 @@ WORKDIR /workspace
 # Copy go mod and sum files first for better layer caching
 COPY go.mod go.sum ./
 COPY --from=snapshot go.mod go.sum /snapshot/
+# Copy local module replacements (if present) before go mod download
+COPY _grove-api/ ./_grove-api/
 RUN go mod download
 
 # Copy source code

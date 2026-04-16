@@ -108,10 +108,29 @@ impl RetryManager {
         context: Arc<dyn AsyncEngineContext>,
         preprocessed_request: PreprocessedRequest,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>>,
-        retries_left: u32,
+        mut retries_left: u32,
         model_name: Arc<String>,
         metrics: Arc<Metrics>,
     ) -> Result<Self> {
+        // Disable migration for structured-output (guided-decoding) requests.
+        // Inference backends initialize the guided-decoding FSM (finite state machine) fresh
+        // for every new request and only advance it on newly-generated tokens, not on
+        // context/prompt tokens. Migrating a partial structured-output response would replay
+        // already-generated tokens as context, causing the FSM to restart from the schema
+        // root and producing duplicated or nested JSON. This applies to all backends
+        // (vLLM, SGLang, TRT-LLM) equally. Propagate the error cleanly instead.
+        if preprocessed_request
+            .sampling_options
+            .guided_decoding
+            .is_some()
+        {
+            if retries_left > 0 {
+                tracing::warn!(
+                    "Guided-decoding request: migration disabled — FSM state is not transferable (applies to all backends)"
+                );
+            }
+            retries_left = 0;
+        }
         let mut slf = Self {
             context,
             request: preprocessed_request,
@@ -211,7 +230,9 @@ impl RetryManager {
 mod tests {
     use super::*;
     use crate::http::service::metrics::Metrics;
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+    use crate::protocols::common::{
+        GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
+    };
     use dynamo_runtime::error::{DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;
@@ -889,5 +910,97 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    /// Test case 8: No migration for guided-decoding (structured-output) requests
+    ///
+    /// Bug (#7634): When a worker crashes mid-stream during a structured-output
+    /// (json_schema) request, migration appends already-generated token IDs back onto
+    /// token_ids and replays the request to a new worker. However, backends initialize
+    /// the guided-decoding FSM fresh for every new request and only advance it on newly-
+    /// generated tokens — not on context/prompt tokens. This causes the FSM to restart
+    /// from the schema root while treating already-generated tokens as context, producing
+    /// duplicated or nested JSON in the final response.
+    ///
+    /// Fix: Disable migration for structured-output requests by zeroing retries_left in
+    /// RetryManager::build() when guided_decoding is set, propagating the error cleanly.
+    ///
+    /// Expected behavior BEFORE fix: All 10 responses received (migration happened — wrong)
+    /// Expected behavior AFTER fix: 3 successful + 1 error (migration blocked — correct)
+    #[tokio::test]
+    async fn test_retry_manager_no_migration_for_guided_decoding() {
+        dynamo_runtime::logging::init();
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mut request = create_mock_request(10);
+        // Set guided decoding (json_schema structured output) on the request
+        request.sampling_options.guided_decoding = Some(GuidedDecodingOptions::new(
+            Some(serde_json::json!({"type": "object", "properties": {"name": {"type": "string"}}})),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
+
+        // MidStreamFail after 3 tokens: without the fix, migration would succeed and
+        // deliver all 10 responses; with the fix, migration is blocked and an error
+        // is returned after the 3 partial responses.
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::MidStreamFail { fail_after: 3 },
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            request,
+            next_generate,
+            3, // migration_limit=3 — should be ignored for guided-decoding requests
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(response) = retry_manager.next().await {
+            responses.push(response);
+        }
+
+        // Must receive 3 successful tokens + 1 Disconnected error, NOT all 10.
+        // Before the fix this assertion fails because migration proceeds and returns 10.
+        assert_eq!(
+            responses.len(),
+            4,
+            "Expected 3 successful + 1 error response (migration must be blocked for \
+             guided-decoding), but got {} responses",
+            responses.len()
+        );
+
+        // First 3 responses should be successful
+        for (i, response) in responses[0..3].iter().enumerate() {
+            assert!(
+                response.err().is_none(),
+                "Response {} should be successful",
+                i
+            );
+        }
+
+        // Last response must be the stream-disconnection error
+        let last = responses.last().unwrap();
+        let err = last
+            .err()
+            .expect("Last response should be a Disconnected error");
+        assert_eq!(
+            err.error_type(),
+            ErrorType::Disconnected,
+            "Error type should be Disconnected"
+        );
     }
 }

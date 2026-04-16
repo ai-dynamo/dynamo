@@ -13,6 +13,7 @@ use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::positional::PositionalIndexer;
 use super::*;
+use crate::indexer::pruning::PruneConfig;
 use crate::protocols::*;
 use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
@@ -1887,6 +1888,37 @@ fn make_tree_indexer_with_frequency(
         )),
         _ => panic!("Unknown variant: {}", variant),
     }
+}
+
+#[tokio::test]
+async fn test_sharded_routing_decision_assigns_first_seen_worker() {
+    let token = CancellationToken::new();
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    let index = KvIndexerSharded::new_with_frequency(
+        token,
+        4,
+        Some(Duration::from_secs(60)),
+        32,
+        metrics,
+        Some(PruneConfig::default()),
+    );
+    let worker = WorkerWithDpRank::new(42, 0);
+    let local_hashes = vec![LocalBlockHash(11), LocalBlockHash(22)];
+    let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+
+    index
+        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes)
+        .await
+        .unwrap();
+    flush_and_settle(&index).await;
+
+    assert_score(&index, &[11, 22], worker, 2).await;
+
+    index.remove_worker(worker.worker_id).await;
+    flush_and_settle(&index).await;
+
+    let scores = query_scores(&index, &[11, 22]).await;
+    assert!(!scores.scores.contains_key(&worker));
 }
 
 mod tree_specific_tests {
