@@ -23,7 +23,7 @@ use super::*;
 use crate::Endpoint;
 use crate::to_pyerr;
 use dynamo_runtime::component::Component;
-use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryQuery};
+use dynamo_runtime::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 
@@ -310,6 +310,11 @@ pub(crate) struct FpmEventSubscriber {
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
     // to filter out ghost entries without contending with Task 1's writes.
     known_workers: Arc<DashSet<String>>,
+    // max_num_batched_tokens per worker_id, extracted from the model
+    // deployment card's runtime_config on discovery Added events.
+    // Exposed via get_max_num_batched_tokens() so the planner can read
+    // the effective (minimum) value without a separate connector query.
+    worker_max_batched_tokens: Arc<DashMap<String, u64>>,
 }
 
 #[pymethods]
@@ -332,6 +337,7 @@ impl FpmEventSubscriber {
             tracking_started: Arc::new(AtomicBool::new(false)),
             latest_stats: Arc::new(DashMap::new()),
             known_workers: Arc::new(DashSet::new()),
+            worker_max_batched_tokens: Arc::new(DashMap::new()),
         })
     }
 
@@ -511,11 +517,13 @@ impl FpmEventSubscriber {
         // normal scale-down path.  Any ghost entries created by the race
         // condition (FPM arriving *after* the Removed event) are caught by the
         // known_workers filter in get_recent_stats().
+        let max_bt = self.worker_max_batched_tokens.clone();
         rt.spawn({
             let cancel = cancel.clone();
             let component = component.clone();
             let stats = stats.clone();
             let known = known.clone();
+            let max_bt = max_bt.clone();
             async move {
                 let discovery = component.drt().discovery();
                 let query = DiscoveryQuery::ComponentModels {
@@ -545,12 +553,23 @@ impl FpmEventSubscriber {
                             match event {
                                 Some(Ok(DiscoveryEvent::Added(instance))) => {
                                     let wid = instance.instance_id().to_string();
+                                    // Extract max_num_batched_tokens from the model card's runtime_config.
+                                    if let DiscoveryInstance::Model { ref card_json, .. } = instance
+                                        && let Some(val) = card_json
+                                            .get("runtime_config")
+                                            .and_then(|rc| rc.get("max_num_batched_tokens"))
+                                            .and_then(|v| v.as_u64())
+                                        && val > 0
+                                    {
+                                        max_bt.insert(wid.clone(), val);
+                                    }
                                     known.insert(wid.clone());
                                     tracing::debug!("FPM tracker: worker {wid} added to known set");
                                 }
                                 Some(Ok(DiscoveryEvent::Removed(id))) => {
                                     let removed_id = id.instance_id().to_string();
                                     known.remove(&removed_id);
+                                    max_bt.remove(&removed_id);
 
                                     // Eagerly prune latest_stats for the common case
                                     // (worker removed cleanly before any late FPMs arrive).
@@ -606,6 +625,31 @@ impl FpmEventSubscriber {
             .collect();
 
         Ok(snapshot)
+    }
+
+    /// Return the effective `max_num_batched_tokens` across all known workers.
+    ///
+    /// The value is the **minimum** observed across workers so the planner
+    /// uses the most constrained capacity, avoiding nondeterminism when
+    /// workers report different values during heterogeneous rollouts.
+    ///
+    /// Returns:
+    ///     The minimum `max_num_batched_tokens`, or `None` if no worker has reported one.
+    fn get_max_num_batched_tokens(&self) -> PyResult<Option<u64>> {
+        if !self.tracking_started.load(Ordering::SeqCst) {
+            return Err(PyRuntimeError::new_err(
+                "start_tracking() has not been called",
+            ));
+        }
+
+        let min_val = self
+            .worker_max_batched_tokens
+            .iter()
+            .filter(|entry| self.known_workers.contains(entry.key()))
+            .map(|entry| *entry.value())
+            .min();
+
+        Ok(min_val)
     }
 
     /// Shut down the subscriber (all background tasks).
