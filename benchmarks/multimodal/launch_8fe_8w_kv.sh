@@ -5,8 +5,13 @@
 # Launch 8 frontend replicas (KV routing) + 8 vllm workers on 8 GPUs.
 # A round-robin LB proxy on port 9000 distributes traffic across all frontends.
 #
-# Usage:
-#   bash benchmarks/multimodal/launch_8fe_8w_kv.sh
+# Run in a SEPARATE detached MCP window (not in the same shell as aiperf):
+#   run(command="cd /workspace && bash benchmarks/multimodal/launch_8fe_8w_kv.sh",
+#       name="topo", detach=true)
+#
+# Then run aiperf in another window. See bench_8fe_kv_multiturn.sh for the
+# multi-turn pinassistant workload, or run aiperf manually:
+#   aiperf profile --model "..." --url "http://localhost:9000" --endpoint-type chat ...
 
 set -e
 trap 'echo "Cleaning up..."; kill 0' EXIT
@@ -58,6 +63,7 @@ done
 echo "[workers] Starting $NUM_WORKERS vllm workers..."
 for i in $(seq 0 $((NUM_WORKERS - 1))); do
   DYN_SYSTEM_PORT=$((WORKER_SYS_BASE + i)) \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=$((5600 + i)) \
   CUDA_VISIBLE_DEVICES=$i \
   python3 -m dynamo.vllm \
     --model "$MODEL" \

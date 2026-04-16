@@ -89,7 +89,7 @@ def main() -> None:
     ports = [int(p.strip()) for p in args.backends.split(",")]
     print(f"LB proxy on :{args.listen_port} -> backends {ports}")
 
-    app = web.Application()
+    app = web.Application(client_max_size=50 * 1024 * 1024)  # 50MB for base64 images
     app["backend_cycle"] = _make_backend_cycle(ports)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
