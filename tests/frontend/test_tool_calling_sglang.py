@@ -43,7 +43,6 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.e2e,
     pytest.mark.gpu_1,
-    pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.model(MODEL_NAME),
     pytest.mark.timeout(300),
