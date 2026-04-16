@@ -115,14 +115,21 @@ class TRTLLMEngineQuiesceController:
 
         # Probe and cache the correct wakeup method name on the first call.
         # Some TRT-LLM versions use "wake_up" instead of "wakeup".
+        # Only cache a name after it succeeds; transient failures leave _wakeup_rpc_name
+        # as None so the probe retries on the next call.
         if self._wakeup_rpc_name is None:
             try:
                 rpc("wakeup", args=(rpc_tags,), kwargs={}, non_block=False)
                 self._wakeup_rpc_name = "wakeup"
                 return
-            except Exception as e:
-                logger.debug("'wakeup' RPC failed (%s); falling back to 'wake_up'", e)
+            except Exception as wakeup_exc:
+                try:
+                    rpc("wake_up", args=(rpc_tags,), kwargs={}, non_block=False)
+                except Exception:
+                    raise wakeup_exc
+                logger.debug("'wakeup' RPC unavailable; using 'wake_up'")
                 self._wakeup_rpc_name = "wake_up"
+                return
 
         rpc(self._wakeup_rpc_name, args=(rpc_tags,), kwargs={}, non_block=False)
 

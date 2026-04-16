@@ -20,7 +20,10 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+from dynamo.trtllm.request_handlers.handler_base import (
+    HandlerBase,
+    TRTLLMEngineQuiesceController,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -206,3 +209,61 @@ async def test_generate_locally_rejected_when_sleeping():
 
     assert len(chunks) == 1
     assert "error" in str(chunks[0].get("finish_reason", ""))
+
+
+# ---------------------------------------------------------------------------
+# TRTLLMEngineQuiesceController._collective_rpc wakeup probe-and-cache
+# ---------------------------------------------------------------------------
+
+
+def _make_controller(rpc_side_effects: dict) -> TRTLLMEngineQuiesceController:
+    """Create a controller with a mock engine whose _collective_rpc raises per method."""
+    engine = MagicMock()
+
+    def _rpc(method, **_kwargs):
+        exc = rpc_side_effects.get(method)
+        if exc is not None:
+            raise exc
+
+    engine.llm._collective_rpc = MagicMock(side_effect=_rpc)
+    ctrl = TRTLLMEngineQuiesceController(engine)
+    return ctrl
+
+
+def test_wakeup_probe_caches_wakeup_on_success():
+    ctrl = _make_controller({})
+    ctrl._collective_rpc("wakeup", ["kv_cache"])
+    assert ctrl._wakeup_rpc_name == "wakeup"
+    ctrl._collective_rpc("wakeup", ["kv_cache"])
+    # Second call should use cached name, no re-probing: rpc called exactly twice total
+    assert ctrl._engine.llm._collective_rpc.call_count == 2
+
+
+def test_wakeup_probe_falls_back_to_wake_up():
+    ctrl = _make_controller({"wakeup": AttributeError("no such method")})
+    ctrl._collective_rpc("wakeup", ["kv_cache"])
+    assert ctrl._wakeup_rpc_name == "wake_up"
+    ctrl._collective_rpc("wakeup", ["kv_cache"])
+    # Second call reuses "wake_up" directly; 3 rpc calls total (probe-wakeup, probe-wake_up, cached)
+    assert ctrl._engine.llm._collective_rpc.call_count == 3
+
+
+def test_wakeup_transient_failure_does_not_cache_wrong_name():
+    transient = RuntimeError("network error")
+    ctrl = _make_controller(
+        {"wakeup": transient, "wake_up": RuntimeError("also failed")}
+    )
+    with pytest.raises(RuntimeError, match="network error"):
+        ctrl._collective_rpc("wakeup", ["kv_cache"])
+    # Name must remain None so the probe retries on the next call
+    assert ctrl._wakeup_rpc_name is None
+
+
+def test_wakeup_cached_name_not_reprobed():
+    ctrl = _make_controller({})
+    ctrl._wakeup_rpc_name = "wakeup"
+    ctrl._collective_rpc("wakeup", ["kv_cache"])
+    # Cached path skips the probe entirely; rpc called exactly once
+    ctrl._engine.llm._collective_rpc.assert_called_once_with(
+        "wakeup", args=(["kv_cache"],), kwargs={}, non_block=False
+    )
