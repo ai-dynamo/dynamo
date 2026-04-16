@@ -119,26 +119,25 @@ class NativePlannerBase:
 
         # Connector
         self.connector: ConnectorType
-        if not config.no_operation:
-            if config.environment == "global-planner":
-                assert config.global_planner_namespace is not None
-                assert runtime is not None
-                self.connector = GlobalPlannerConnector(
-                    runtime,
-                    self.namespace,
-                    config.global_planner_namespace,
-                    "GlobalPlanner",
-                    config.model_name,
-                )
-            elif config.environment == "kubernetes":
-                self.connector = KubernetesConnector(self.namespace, config.model_name)
-            elif config.environment == "virtual":
-                assert runtime is not None
-                self.connector = VirtualConnector(
-                    runtime, self.namespace, config.model_name
-                )
-            else:
-                raise ValueError(f"Invalid environment: {config.environment}")
+        if config.environment == "global-planner":
+            assert config.global_planner_namespace is not None
+            assert runtime is not None
+            self.connector = GlobalPlannerConnector(
+                runtime,
+                self.namespace,
+                config.global_planner_namespace,
+                "GlobalPlanner",
+                config.model_name,
+            )
+        elif config.environment == "kubernetes":
+            self.connector = KubernetesConnector(self.namespace, config.model_name)
+        elif config.environment == "virtual":
+            assert runtime is not None
+            self.connector = VirtualConnector(
+                runtime, self.namespace, config.model_name
+            )
+        else:
+            raise ValueError(f"Invalid environment: {config.environment}")
 
         # Prometheus
         self.prometheus_traffic_client = PrometheusAPIClient(
@@ -235,31 +234,30 @@ class NativePlannerBase:
         if hasattr(self, "connector") and hasattr(self.connector, "_async_init"):
             await self.connector._async_init()
 
-        if not self.config.no_operation:
-            defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
-            logger.info("Validating deployment...")
-            await self.connector.validate_deployment(
-                prefill_component_name=(
-                    defaults.prefill_worker_k8s_name
-                    if self.require_prefill and defaults
-                    else None
-                ),
-                decode_component_name=(
-                    defaults.decode_worker_k8s_name
-                    if self.require_decode and defaults
-                    else None
-                ),
-                require_prefill=self.require_prefill,
-                require_decode=self.require_decode,
-            )
-            logger.info("Successfully validated the deployment")
-            _initialize_gpu_counts(
-                self.config,
-                self.connector,
-                require_prefill=self.require_prefill,
-                require_decode=self.require_decode,
-            )
-            await self.connector.wait_for_deployment_ready(include_planner=False)
+        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
+        logger.info("Validating deployment...")
+        await self.connector.validate_deployment(
+            prefill_component_name=(
+                defaults.prefill_worker_k8s_name
+                if self.require_prefill and defaults
+                else None
+            ),
+            decode_component_name=(
+                defaults.decode_worker_k8s_name
+                if self.require_decode and defaults
+                else None
+            ),
+            require_prefill=self.require_prefill,
+            require_decode=self.require_decode,
+        )
+        logger.info("Successfully validated the deployment")
+        _initialize_gpu_counts(
+            self.config,
+            self.connector,
+            require_prefill=self.require_prefill,
+            require_decode=self.require_decode,
+        )
+        await self.connector.wait_for_deployment_ready(include_planner=False)
 
         await self._init_worker_info()
 
@@ -270,6 +268,13 @@ class NativePlannerBase:
                 await self._init_fpm_subscriber("decode")
 
         await self._bootstrap_regression()
+
+        # Log operating mode at startup
+        if self.config.advisory:
+            logger.info(
+                "[ADVISORY] Planner started in advisory mode — "
+                "scaling decisions will be logged but NOT executed."
+            )
 
         # Start live dashboard if configured
         if self.config.live_dashboard_port:
@@ -288,7 +293,7 @@ class NativePlannerBase:
             require_decode=self.require_decode,
             connector=connector,
             config_model_name=getattr(self.config, "model_name", ""),
-            no_operation=self.config.no_operation,
+            no_operation=False,
         )
         self.model_name = (
             self.decode_worker_info.model_name or self.prefill_worker_info.model_name
@@ -579,10 +584,59 @@ class NativePlannerBase:
     async def _apply_scaling_targets(
         self, targets: list[TargetReplica], blocking: bool = False
     ) -> None:
-        """Shared helper: send scaling targets to connector."""
-        if self.config.no_operation or not targets:
+        """Shared helper: send scaling targets to connector.
+
+        Skipped in advisory mode (decisions are logged but not executed).
+        """
+        if self.config.advisory or not targets:
             return
         await self.connector.set_component_replicas(targets, blocking=blocking)
+
+    # ------------------------------------------------------------------
+    # Periodic decision summary
+    # ------------------------------------------------------------------
+
+    def _log_decision_summary(self, effects: PlannerEffects) -> None:
+        """Log a one-line summary of the scaling decision after each tick."""
+        decision = effects.scale_to
+        diag = effects.diagnostics
+
+        sm = self.state_machine
+        current_p = sm._num_p_workers
+        current_d = sm._num_d_workers
+
+        rec_p = decision.num_prefill if decision else None
+        rec_d = decision.num_decode if decision else None
+
+        delta_p = (rec_p - current_p) if rec_p is not None else 0
+        delta_d = (rec_d - current_d) if rec_d is not None else 0
+
+        if decision is None or (delta_p == 0 and delta_d == 0):
+            action = "hold"
+        elif (delta_p > 0 or delta_d > 0) and (delta_p < 0 or delta_d < 0):
+            action = "rebalance"
+        elif delta_p > 0 or delta_d > 0:
+            action = "scale_up"
+        else:
+            action = "scale_down"
+
+        logger.info(
+            "[summary] %s | current: prefill=%d decode=%d | "
+            "recommended: prefill=%s decode=%s (delta: %+d / %+d) | "
+            "load_reason=%s throughput_reason=%s | "
+            "est_ttft=%.1fms est_itl=%.1fms",
+            action.upper(),
+            current_p,
+            current_d,
+            rec_p if rec_p is not None else "-",
+            rec_d if rec_d is not None else "-",
+            delta_p,
+            delta_d,
+            diag.load_decision_reason or "n/a",
+            diag.throughput_decision_reason or "n/a",
+            diag.estimated_ttft_ms or 0,
+            diag.estimated_itl_ms or 0,
+        )
 
     # ------------------------------------------------------------------
     # Diagnostics reporting (shared across all adapters)
@@ -630,6 +684,7 @@ class NativePlannerBase:
                 effects = self.state_machine.on_tick(next_tick, tick_input)
                 await self._apply_effects(effects)
                 self._report_diagnostics(effects.diagnostics)
+                self._log_decision_summary(effects)
 
                 if self._recorder.enabled:
                     try:

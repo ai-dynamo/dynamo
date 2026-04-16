@@ -345,6 +345,9 @@ impl OpenAIPreprocessor {
             }));
         }
 
+        // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
+        builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
+
         Ok(builder)
     }
 
