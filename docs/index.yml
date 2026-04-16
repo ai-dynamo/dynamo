@@ -209,6 +209,8 @@ navigation:
             path: observability/tracing.md
           - page: Logging
             path: observability/logging.md
+          - page: Dynamo Local Resource Monitor
+            path: observability/resource-monitor.md
       - section: Fault Tolerance
         path: fault-tolerance/README.md
         contents:
