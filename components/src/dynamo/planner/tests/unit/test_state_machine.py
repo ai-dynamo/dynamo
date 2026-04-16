@@ -10,11 +10,14 @@ try:
 except ImportError:
     pytest.skip("msgspec required for FPM tests", allow_module_level=True)
 
-from dynamo.common.forward_pass_metrics import (
-    ForwardPassMetrics,
-    QueuedRequestMetrics,
-    ScheduledRequestMetrics,
-)
+try:
+    from dynamo.common.forward_pass_metrics import (
+        ForwardPassMetrics,
+        QueuedRequestMetrics,
+        ScheduledRequestMetrics,
+    )
+except ImportError:
+    pytest.skip("forward_pass_metrics not available", allow_module_level=True)
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.state_machine import PlannerStateMachine
 from dynamo.planner.core.types import (
@@ -85,6 +88,7 @@ def _make_fpm(
 def _make_config(**overrides) -> PlannerConfig:
     defaults = dict(
         mode="disagg",
+        optimization_target="sla",
         ttft=500.0,
         itl=50.0,
         min_endpoint=1,
@@ -98,7 +102,6 @@ def _make_config(**overrides) -> PlannerConfig:
         enable_load_scaling=True,
         enable_throughput_scaling=True,
         load_predictor="constant",
-        no_operation=True,
         backend="vllm",
         metric_pulling_prometheus_endpoint="http://localhost:9090",
         metric_reporting_prometheus_port=0,
@@ -260,6 +263,9 @@ class TestPrefillLoadScaling:
         assert effects.scale_to is not None
         assert effects.scale_to.num_prefill is not None
         assert effects.scale_to.num_prefill > 1
+        assert effects.diagnostics.estimated_ttft_ms is not None
+        assert effects.diagnostics.estimated_ttft_ms > 0
+        assert effects.diagnostics.load_decision_reason == "scale_up"
 
     def test_no_scaling_when_insufficient_data(self):
         core = _make_core(mode="prefill")
@@ -273,6 +279,7 @@ class TestPrefillLoadScaling:
         )
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is None
+        assert effects.diagnostics.load_decision_reason == "insufficient_data"
 
     def test_no_scaling_when_load_disabled(self):
         core = _make_core(mode="prefill", enable_load_scaling=False)
@@ -291,6 +298,7 @@ class TestPrefillLoadScaling:
         )
         effects = core.on_tick(_tick_for(tick), tick)
         assert effects.scale_to is None
+        assert effects.diagnostics.load_decision_reason == "disabled"
 
 
 # ── Load-based scaling (decode) ───────────────────────────────────────
@@ -317,6 +325,9 @@ class TestDecodeLoadScaling:
         assert effects.scale_to is not None
         assert effects.scale_to.num_decode is not None
         assert effects.scale_to.num_decode > 1
+        assert effects.diagnostics.estimated_itl_ms is not None
+        assert effects.diagnostics.estimated_itl_ms > 0
+        assert effects.diagnostics.load_decision_reason == "scale_up"
 
 
 # ── Disagg load scaling ───────────────────────────────────────────────
@@ -378,6 +389,9 @@ class TestThroughputScaling:
         assert effects.scale_to is not None
         assert effects.scale_to.num_prefill is not None
         assert effects.scale_to.num_prefill >= 1
+        assert effects.diagnostics.predicted_num_req is not None
+        assert effects.diagnostics.engine_rps_prefill is not None
+        assert effects.diagnostics.throughput_decision_reason == "scale"
 
     def test_throughput_sets_lower_bound_when_load_enabled(self):
         core = _make_core(enable_load_scaling=True, enable_throughput_scaling=True)
@@ -398,6 +412,7 @@ class TestThroughputScaling:
         assert effects.scale_to is None
         assert core._throughput_lower_bound_p >= 1
         assert core._throughput_lower_bound_d >= 1
+        assert effects.diagnostics.throughput_decision_reason == "set_lower_bound"
 
     def test_next_tick_scheduled_after_traffic(self):
         core = _make_core(mode="prefill")
@@ -443,6 +458,7 @@ class TestFpmReconciliation:
         effects = core.on_tick(_tick_for(tick), tick)
         # FPM reports 2 workers but ready count is 3 -> skip scaling
         assert effects.scale_to is None
+        assert effects.diagnostics.load_decision_reason == "worker_count_mismatch"
 
 
 # ── Agg planner core ──────────────────────────────────────────────────
@@ -509,3 +525,84 @@ class TestAggPlannerStateMachine:
         assert effects.scale_to is not None
         assert effects.scale_to.num_decode is not None
         assert effects.scale_to.num_decode >= 1
+
+
+# ── Diagnostics ──────────────────────────────────────────────────────
+
+
+class TestDiagnostics:
+    """Verify TickDiagnostics is populated correctly across tick types."""
+
+    def test_diagnostics_always_present(self):
+        core = _make_core(mode="prefill")
+        tick = TickInput(
+            now_s=5.0,
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.diagnostics is not None
+
+    def test_diagnostics_reset_each_tick(self):
+        core = _make_core(mode="prefill", ttft=5.0)
+        _train_prefill_regression(core)
+
+        fpm = _make_fpm(
+            queued_prefill_tokens=10000,
+            sum_prefill_tokens=500,
+            num_prefill_requests=1,
+            wall_time=0.5,
+        )
+        tick1 = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(prefill={("w1", 0): fpm}),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects1 = core.on_tick(_tick_for(tick1), tick1)
+        assert effects1.diagnostics.estimated_ttft_ms is not None
+
+        tick2 = TickInput(
+            now_s=10.0,
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        st2 = ScheduledTick(
+            at_s=10.0,
+            run_load_scaling=False,
+            run_throughput_scaling=False,
+            need_worker_states=True,
+        )
+        effects2 = core.on_tick(st2, tick2)
+        assert effects2.diagnostics.estimated_ttft_ms is None
+        assert effects2.diagnostics.load_decision_reason is None
+
+    def test_no_fpm_data_reason(self):
+        core = _make_core(mode="prefill")
+        _train_prefill_regression(core)
+        tick = TickInput(
+            now_s=5.0,
+            fpm_observations=FpmObservations(prefill=None),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        assert effects.diagnostics.load_decision_reason == "no_fpm_data"
+
+    def test_throughput_predicted_load_populated(self):
+        core = _make_core(
+            mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
+        )
+        _train_prefill_regression(core)
+        core._observe_traffic(
+            TrafficObservation(duration_s=60, num_req=100, isl=1000, osl=150)
+        )
+
+        tick = TickInput(
+            now_s=60.0,
+            traffic=TrafficObservation(duration_s=60, num_req=100, isl=1000, osl=150),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        diag = effects.diagnostics
+        assert diag.predicted_num_req is not None
+        assert diag.predicted_isl is not None
+        assert diag.predicted_osl is not None
+        assert diag.engine_rps_prefill is not None
+        assert diag.engine_rps_prefill > 0

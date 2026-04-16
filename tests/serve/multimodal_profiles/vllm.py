@@ -84,12 +84,15 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2-audio-7b",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[
+                    pytest.mark.post_merge,
+                ],
                 timeout_s=600,
                 env={"DYN_CHAT_PROCESSOR": "vllm"},
             ),
         },
         request_payloads=[make_audio_payload(["Hester", "Pynne"])],
+        extra_vllm_args=["--max-model-len", "7232"],
     ),
     MultimodalModelProfile(
         name="google/gemma-3-4b-it",
