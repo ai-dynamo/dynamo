@@ -5,7 +5,7 @@ use tokenizers::tokenizer::Tokenizer as HfTokenizer;
 
 use super::{
     Encoding, Error, Result, TokenIdType,
-    traits::{Decoder, Encoder, Tokenizer},
+    traits::{DecodeResult, Decoder, Encoder, Tokenizer},
 };
 
 pub struct HuggingFaceTokenizer {
@@ -60,14 +60,14 @@ impl Encoder for HuggingFaceTokenizer {
 }
 
 impl Decoder for HuggingFaceTokenizer {
-    fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<String> {
+    fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<DecodeResult> {
         // This calls into the library
         let text = self
             .tokenizer
             .decode(token_ids, skip_special_tokens)
             .map_err(|err| Error::msg(format!("Error de-tokenizing input: {err}")))?;
 
-        Ok(text)
+        Ok(text.into())
     }
 }
 

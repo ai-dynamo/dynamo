@@ -524,7 +524,14 @@ impl HttpServiceConfigBuilder {
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
                 config.drt_metrics,
             ),
-            super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
+            if env_is_truthy(env_llm::DYN_ENABLE_ANTHROPIC_API) {
+                super::anthropic::anthropic_models_router(
+                    state.clone(),
+                    var(HTTP_SVC_MODELS_PATH_ENV).ok(),
+                )
+            } else {
+                super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok())
+            },
             super::openai::tokenization_router(state.clone()),
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),

@@ -485,6 +485,10 @@ impl OAIChatLikeRequest for UnifiedRequest {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
         self.inner.media_io_kwargs.as_ref()
     }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        self.inner.inner.mm_processor_kwargs.as_ref()
+    }
 }
 
 impl UnifiedRequest {

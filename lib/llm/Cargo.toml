@@ -33,7 +33,11 @@ bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 
 [[bench]]
-name = "tokenizer"
+name = "tokenizer_simple"
+harness = false
+
+[[bench]]
+name = "tokenizer_dataset"
 harness = false
 
 [[bench]]

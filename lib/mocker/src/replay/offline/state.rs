@@ -19,22 +19,30 @@ pub(crate) struct AggRequestState {
     request: Option<DirectRequest>,
     pub(in crate::replay::offline) phase: AggRequestPhase,
     pub(in crate::replay::offline) prefill_completed: bool,
+    pub(in crate::replay::offline) input_tokens: usize,
+    pub(in crate::replay::offline) output_tokens: usize,
 }
 
 impl AggRequestState {
     pub(crate) fn new_queued(request: DirectRequest) -> Self {
+        let input_tokens = request.tokens.len();
+        let output_tokens = request.max_output_tokens;
         Self {
             request: Some(request),
             phase: AggRequestPhase::QueuedAtRouter,
             prefill_completed: false,
+            input_tokens,
+            output_tokens,
         }
     }
 
-    pub(crate) fn new_running() -> Self {
+    pub(crate) fn new_running(input_tokens: usize, output_tokens: usize) -> Self {
         Self {
             request: None,
             phase: AggRequestPhase::Running,
             prefill_completed: false,
+            input_tokens,
+            output_tokens,
         }
     }
 
