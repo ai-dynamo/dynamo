@@ -92,6 +92,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -1602,6 +1603,22 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	if err != nil {
 		logger.Error(err, "Failed to sync EPP InferencePool")
 		return fmt.Errorf("failed to sync EPP InferencePool: %w", err)
+	}
+
+	// 3. Reconcile service mesh resources (e.g., Istio DestinationRule)
+	if r.Config.ServiceMesh.IsEnabled() {
+		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
+		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
+			if !r.Config.ServiceMesh.IsEnabled() {
+				return destinationRule, true, nil
+			}
+			return destinationRule, false, nil
+		})
+		if err != nil {
+			logger.Error(err, "Failed to sync EPP DestinationRule")
+			return fmt.Errorf("failed to sync EPP DestinationRule: %w", err)
+		}
+		logger.Info("Synced EPP DestinationRule", "name", eppServiceName)
 	}
 
 	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())

@@ -26,12 +26,6 @@ import (
 	"sort"
 	"strings"
 
-	istioNetworking "istio.io/api/networking/v1beta1"
-
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
-
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
@@ -42,9 +36,14 @@ import (
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+	istioNetworking "istio.io/api/networking/v1beta1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -787,6 +786,48 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 		}
 	}
 	return vs
+}
+
+// GenerateEPPDestinationRule builds an Istio DestinationRule for an EPP service.
+// This tells the mesh sidecar how to connect to the EPP's gRPC endpoint,
+// avoiding double-TLS issues when the EPP serves TLS (SecureServing=true).
+func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig configv1alpha1.ServiceMeshConfiguration) *networkingv1beta1.DestinationRule {
+	dr := &networkingv1beta1.DestinationRule{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceName,
+			Namespace: namespace,
+		},
+	}
+
+	if !meshConfig.IsEnabled() || meshConfig.Provider != "istio" || meshConfig.Istio == nil {
+		return dr
+	}
+
+	tlsMode := istioNetworking.ClientTLSSettings_SIMPLE
+	switch meshConfig.Istio.TLSMode {
+	case "DISABLE":
+		tlsMode = istioNetworking.ClientTLSSettings_DISABLE
+	case "ISTIO_MUTUAL":
+		tlsMode = istioNetworking.ClientTLSSettings_ISTIO_MUTUAL
+	case "MUTUAL":
+		tlsMode = istioNetworking.ClientTLSSettings_MUTUAL
+	}
+
+	skipVerify := true
+	if meshConfig.Istio.InsecureSkipVerify != nil {
+		skipVerify = *meshConfig.Istio.InsecureSkipVerify
+	}
+
+	dr.Spec = istioNetworking.DestinationRule{
+		Host: fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, namespace),
+		TrafficPolicy: &istioNetworking.TrafficPolicy{
+			Tls: &istioNetworking.ClientTLSSettings{
+				Mode:               tlsMode,
+				InsecureSkipVerify: wrapperspb.Bool(skipVerify),
+			},
+		},
+	}
+	return dr
 }
 
 func GenerateDefaultIngressSpec(dynamoDeployment *v1alpha1.DynamoGraphDeployment, ingressConfig configv1alpha1.IngressConfiguration) v1alpha1.IngressSpec {
