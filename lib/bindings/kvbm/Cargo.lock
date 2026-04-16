@@ -4087,7 +4087,6 @@ dependencies = [
  "dlpark",
  "dynamo-llm",
  "dynamo-runtime",
- "dynamo-tokens",
  "kvbm-connector",
  "kvbm-engine",
  "kvbm-kernels",
