@@ -463,7 +463,15 @@ class EngineFactory:
                 mdc.runtime_config().get("runtime_data", {}).get("stream_interval")
             )
             if backend_interval is not None:
-                stream_interval = max(1, int(backend_interval))
+                try:
+                    stream_interval = max(1, int(backend_interval))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Invalid stream_interval=%r from backend runtime_config, "
+                        "using default=%d",
+                        backend_interval,
+                        stream_interval,
+                    )
 
         output_processor = OutputProcessor(
             tokenizer,
