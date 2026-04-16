@@ -44,6 +44,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.gpu_1,
     pytest.mark.integration,
+    pytest.mark.pre_merge,
     pytest.mark.model(MODEL_NAME),
     pytest.mark.timeout(300),
 ]
