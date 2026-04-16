@@ -3,7 +3,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
-use std::time::Duration;
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -124,7 +123,6 @@ impl RemoteIndexer {
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
-        ttl_override: Option<Duration>,
     ) -> Result<()> {
         self.validate_topology_if_ready().await.inspect_err(|_| {
             self.metrics.increment_write_failures();
@@ -139,7 +137,6 @@ impl RemoteIndexer {
             worker,
             local_hashes,
             sequence_hashes,
-            ttl_ms: ttl_override.map(|d| d.as_millis() as u64),
         };
         let mut stream: ManyOut<IndexerRecordRoutingDecisionResponse> = record_router
             .round_robin(SingleIn::new(request))
@@ -478,7 +475,6 @@ impl
                     request.worker,
                     request.local_hashes,
                     request.sequence_hashes,
-                    request.ttl_ms.map(Duration::from_millis),
                 )
                 .await
             {

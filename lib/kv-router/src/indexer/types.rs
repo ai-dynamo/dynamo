@@ -210,11 +210,6 @@ pub struct IndexerRecordRoutingDecisionRequest {
     pub local_hashes: Vec<LocalBlockHash>,
     /// Locally-computed rolling sequence hashes for the routed request.
     pub sequence_hashes: Vec<SequenceHash>,
-    /// Optional per-call TTL (in milliseconds) for the inserted blocks. When
-    /// `None`, the indexer's default TTL is used. Used by predict-on-route to
-    /// give speculative entries a shorter lifetime.
-    #[serde(default)]
-    pub ttl_ms: Option<u64>,
 }
 
 /// Response from a served approximate-mode routing-decision endpoint.
@@ -311,7 +306,4 @@ pub(super) struct RoutingDecisionRequest {
     pub(super) worker: WorkerWithDpRank,
     pub(super) local_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
-    /// Optional per-call TTL override for the inserted blocks. When `None`, the
-    /// indexer's default TTL is used.
-    pub(super) ttl_override: Option<std::time::Duration>,
 }

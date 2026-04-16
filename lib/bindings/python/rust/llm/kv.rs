@@ -1085,13 +1085,7 @@ impl KvRouter {
 
             if update_indexer {
                 let cfg = chooser.kv_router_config();
-                let record = !cfg.use_kv_events || cfg.router_predict_on_route;
-                if record {
-                    let ttl_override = if cfg.use_kv_events && cfg.router_predict_on_route {
-                        cfg.predicted_ttl()
-                    } else {
-                        None
-                    };
+                if !cfg.use_kv_events || cfg.router_predict_on_route {
                     let mut tokens_with_hashes =
                         TokensWithHashes::new(token_ids.clone(), chooser.block_size())
                             .with_is_eagle(chooser.is_eagle());
@@ -1102,7 +1096,7 @@ impl KvRouter {
                         tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
                     }
                     chooser
-                        .record_routing_decision(tokens_with_hashes, best_worker, ttl_override)
+                        .record_routing_decision(tokens_with_hashes, best_worker)
                         .await
                         .map_err(to_pyerr)?;
                 }
