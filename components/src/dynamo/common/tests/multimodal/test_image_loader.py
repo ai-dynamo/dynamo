@@ -277,9 +277,7 @@ async def test_blocked_private_ip_rejected(monkeypatch) -> None:
     )
 
     with pytest.raises(ValueError, match="blocked range"):
-        await strict_loader.load_image(
-            "https://169.254.169.254/latest/meta-data/"
-        )
+        await strict_loader.load_image("https://169.254.169.254/latest/meta-data/")
 
 
 # --- HTTP error contract ---

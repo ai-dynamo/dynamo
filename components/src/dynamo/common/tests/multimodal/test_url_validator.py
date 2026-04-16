@@ -181,7 +181,9 @@ def test_validate_url_rejects_blocked_hostname(host: str) -> None:
 
 def _fake_getaddrinfo(addrs: list[str]):
     def _impl(host: str, *_args: Any, **_kwargs: Any):
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, 0)) for addr in addrs]
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, 0)) for addr in addrs
+        ]
 
     return _impl
 
@@ -224,9 +226,7 @@ def test_validate_url_resolution_failure_raises() -> None:
 
 def test_validate_url_skips_resolution_when_private_allowed() -> None:
     # In developer mode we short-circuit DNS to keep tests deterministic.
-    with patch(
-        "dynamo.common.multimodal.url_validator.socket.getaddrinfo"
-    ) as resolver:
+    with patch("dynamo.common.multimodal.url_validator.socket.getaddrinfo") as resolver:
         validate_url("https://example.com/x.png", PERMISSIVE)
         resolver.assert_not_called()
 
@@ -288,12 +288,8 @@ def test_validate_local_path_missing_file(tmp_path) -> None:
 def test_validate_local_path_missing_prefix(tmp_path) -> None:
     target = tmp_path / "sample.png"
     target.write_bytes(b"x")
-    policy = UrlValidationPolicy(
-        allowed_local_path=str(tmp_path / "does-not-exist")
-    )
-    with pytest.raises(
-        UrlValidationError, match="allowed_local_path does not exist"
-    ):
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path / "does-not-exist"))
+    with pytest.raises(UrlValidationError, match="allowed_local_path does not exist"):
         validate_local_path(str(target), policy)
 
 
@@ -359,9 +355,7 @@ async def test_fetch_with_revalidation_returns_first_response() -> None:
     resp = _mock_response(status_code=200)
     client = _mock_client([resp])
 
-    result = await fetch_with_revalidation(
-        client, "https://example.com/x.png", policy
-    )
+    result = await fetch_with_revalidation(client, "https://example.com/x.png", policy)
     assert result is resp
     assert client.send.await_count == 1
 
@@ -377,9 +371,7 @@ async def test_fetch_with_revalidation_follows_safe_redirect() -> None:
     final = _mock_response(status_code=200, request_url="https://example.com/final.png")
     client = _mock_client([redirect, final])
 
-    result = await fetch_with_revalidation(
-        client, "https://example.com/x.png", policy
-    )
+    result = await fetch_with_revalidation(client, "https://example.com/x.png", policy)
     assert result is final
     assert client.send.await_count == 2
     redirect.aclose.assert_awaited()
@@ -411,12 +403,14 @@ async def test_fetch_with_revalidation_enforces_redirect_limit() -> None:
     def _hop(src: str, dst: str) -> MagicMock:
         return _mock_response(status_code=302, location=dst, request_url=src)
 
-    client = _mock_client([
-        _hop("https://example.com/a", "https://example.com/b"),
-        _hop("https://example.com/b", "https://example.com/c"),
-        _hop("https://example.com/c", "https://example.com/d"),
-        _hop("https://example.com/d", "https://example.com/e"),
-    ])
+    client = _mock_client(
+        [
+            _hop("https://example.com/a", "https://example.com/b"),
+            _hop("https://example.com/b", "https://example.com/c"),
+            _hop("https://example.com/c", "https://example.com/d"),
+            _hop("https://example.com/d", "https://example.com/e"),
+        ]
+    )
 
     with pytest.raises(UrlValidationError, match="Too many redirects"):
         await fetch_with_revalidation(client, "https://example.com/a", policy)

@@ -27,10 +27,7 @@ def test_normalize_video_url_converts_local_paths(tmp_path):
 
     policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
 
-    assert (
-        validate_media_url(str(video_path), policy)
-        == video_path.resolve().as_uri()
-    )
+    assert validate_media_url(str(video_path), policy) == video_path.resolve().as_uri()
 
 
 def test_normalize_video_url_preserves_data_urls():
@@ -55,9 +52,7 @@ def test_normalize_video_url_rejects_private_ip():
     policy = UrlValidationPolicy()
 
     with pytest.raises(UrlValidationError):
-        validate_media_url(
-            "https://169.254.169.254/video.mp4", policy
-        )
+        validate_media_url("https://169.254.169.254/video.mp4", policy)
 
 
 def test_normalize_video_url_accepts_file_uri_inside_prefix(tmp_path):
@@ -76,9 +71,7 @@ def test_normalize_video_url_rejects_file_uri_outside_prefix(tmp_path):
     other.write_bytes(b"video")
     policy = UrlValidationPolicy(allowed_local_path=str(allowed))
 
-    with pytest.raises(
-        UrlValidationError, match="outside the allowed directory"
-    ):
+    with pytest.raises(UrlValidationError, match="outside the allowed directory"):
         validate_media_url(other.resolve().as_uri(), policy)
 
 

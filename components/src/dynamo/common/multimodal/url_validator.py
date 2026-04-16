@@ -176,9 +176,7 @@ def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     for info in infos:
         addr = info[4][0]
         if is_blocked_ip(addr):
-            raise UrlValidationError(
-                f"Host '{host}' resolves to blocked IP '{addr}'"
-            )
+            raise UrlValidationError(f"Host '{host}' resolves to blocked IP '{addr}'")
     return url
 
 
@@ -192,8 +190,7 @@ def validate_local_path(path: str, policy: UrlValidationPolicy) -> Path:
     """
     if not policy.allowed_local_path:
         raise UrlValidationError(
-            "Local media paths are not permitted; set "
-            "DYN_MM_LOCAL_PATH to enable"
+            "Local media paths are not permitted; set " "DYN_MM_LOCAL_PATH to enable"
         )
 
     try:

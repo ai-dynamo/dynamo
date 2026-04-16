@@ -179,13 +179,12 @@ class ImageLoader:
                     image_data = BytesIO(image_bytes)
 
             elif parsed_url.scheme == "file":
+
                 def _read_local_file(p: str) -> bytes:
                     with open(p, "rb") as f:
                         return f.read()
 
-                image_bytes = await asyncio.to_thread(
-                    _read_local_file, parsed_url.path
-                )
+                image_bytes = await asyncio.to_thread(_read_local_file, parsed_url.path)
                 image_data = BytesIO(image_bytes)
             else:
                 raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
