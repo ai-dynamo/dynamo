@@ -193,6 +193,12 @@ class _BaseRegressionModel:
     # sum_decode_kv_tokens: total KV dominates wall time, so a small negative
     # batch-size coefficient is numerical noise, not "more requests → less
     # work").  Subclasses override via ``_relaxable_feature_indices``.
+    #
+    # Most features should stay non-negative: both AggRegressionModel and
+    # PrefillRegressionModel operate on token counts (sum_prefill_tokens,
+    # sum_decode_kv_tokens) that directly drive GPU compute and therefore
+    # must have positive coefficients.  Only DecodeRegressionModel relaxes
+    # index 0 (num_decode_requests), which is a weaker secondary feature.
     _relaxable_feature_indices: frozenset[int] = frozenset()
 
     def _fit(self) -> bool:

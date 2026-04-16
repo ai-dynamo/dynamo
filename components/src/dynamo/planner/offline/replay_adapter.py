@@ -420,18 +420,20 @@ class ReplayPlannerAdapter:
             t = self._bridge.drain_traffic()
             duration_s = t.get("duration_s", 0.0)
             if duration_s > 0:
+                num_req = float(t.get("num_req", 0))
                 traffic = TrafficObservation(
                     duration_s=duration_s,
-                    num_req=float(t.get("num_req", 0)),
+                    num_req=num_req,
                     isl=t.get("avg_isl", 0.0),
                     osl=t.get("avg_osl", 0.0),
                 )
-                # Stash observed TTFT/ITL for the diagnostics recorder
-                avg_ttft = t.get("avg_ttft_ms", 0.0)
-                avg_itl = t.get("avg_itl_ms", 0.0)
+                # Stash observed TTFT/ITL for the diagnostics recorder.
+                # When num_req == 0, the Rust accumulator returns 0 as a
+                # placeholder; only record latency values when we actually
+                # observed requests in this window.
                 self._last_traffic = Metrics(
-                    ttft=avg_ttft if avg_ttft > 0 else None,
-                    itl=avg_itl if avg_itl > 0 else None,
+                    ttft=t.get("avg_ttft_ms") if num_req > 0 else None,
+                    itl=t.get("avg_itl_ms") if num_req > 0 else None,
                     num_req=traffic.num_req,
                     isl=traffic.isl,
                     osl=traffic.osl,

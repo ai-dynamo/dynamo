@@ -544,6 +544,17 @@ class DiagnosticsRecorder:
         )
 
         # -- Row 6: Decision timelines -----------------------------------
+        #
+        # Layout adapts to scaling mode:
+        #   - Disagg (per-component reasons populated): two tracks per
+        #     subplot, prefill on y=2, decode on y=1, with "prefill" /
+        #     "decode" y-axis labels.
+        #   - Agg / easy mode (only aggregate reason populated): single
+        #     track at y=1 with "Load Decision" / "Throughput Decision"
+        #     labels.
+        # We detect the mode by whether any snapshot has a per-component
+        # reason set; switching mode mid-run would produce a mixed chart,
+        # but that doesn't happen because mode is fixed at planner init.
 
         _LOAD_COLORS = {
             "scale_up": "green",
@@ -686,11 +697,24 @@ class DiagnosticsRecorder:
 
         # -- Layout -------------------------------------------------------
 
-        num_scaling_events = sum(
-            1
-            for s in snaps
-            if s.scale_to_prefill is not None or s.scale_to_decode is not None
-        )
+        # Count actual replica transitions, not just ticks where a decision
+        # was recorded: two consecutive ticks with scale_to=5 aren't two
+        # scaling events.
+        num_scaling_events = 0
+        prev_p: Optional[int] = None
+        prev_d: Optional[int] = None
+        for s in snaps:
+            cur_p = s.num_prefill_replicas
+            cur_d = s.num_decode_replicas
+            if prev_p is not None and cur_p is not None and cur_p != prev_p:
+                num_scaling_events += 1
+            if prev_d is not None and cur_d is not None and cur_d != prev_d:
+                num_scaling_events += 1
+            if cur_p is not None:
+                prev_p = cur_p
+            if cur_d is not None:
+                prev_d = cur_d
+
         t0 = datetime.fromtimestamp(ts[0], tz=timezone.utc).strftime(
             "%Y-%m-%d %H:%M:%S UTC"
         )
@@ -700,7 +724,7 @@ class DiagnosticsRecorder:
         summary = (
             f"<b>Planner Diagnostics Report</b><br>"
             f"Time range: {t0} — {t1} ({len(snaps)} ticks)<br>"
-            f"Scaling events: {num_scaling_events} | "
+            f"Replica transitions: {num_scaling_events} | "
             f"GPU hours: {snaps[-1].gpu_hours:.2f}<br>"
             f"SLA targets: TTFT={self.config.ttft:.0f}ms, ITL={self.config.itl:.0f}ms"
         )

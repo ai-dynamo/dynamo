@@ -178,6 +178,11 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         # to the load scaling pass on a combined tick.  Otherwise load scaling
         # reads the stale bound, potentially deciding to scale below the new
         # floor set in this same tick.
+        #
+        # We always advance _next_throughput_s on a throughput tick, even if
+        # no traffic was available, so the planner keeps the throughput
+        # cadence stable rather than re-firing back-to-back ticks whenever
+        # traffic is temporarily absent.
         throughput_decision = None
         if tick.run_throughput_scaling:
             if tick_input.traffic is not None:

@@ -113,14 +113,20 @@ class PrefillRegressionModel(_BaseRegressionModel):
 
         # Chunk long prefills so we stay within the regression's training
         # domain: a single forward pass never processes more than
-        # max_num_batched_tokens tokens.
+        # max_num_batched_tokens tokens.  At the boundary isl ==
+        # max_num_batched_tokens, the `else` branch handles it as a single
+        # pass (no chunking needed); strict `>` inequality is deliberate.
         if (
             max_num_batched_tokens
             and max_num_batched_tokens > 0
             and isl > max_num_batched_tokens
         ):
             num_chunks = math.ceil(isl / max_num_batched_tokens)
+            # remainder is the size of the final (possibly partial) chunk,
+            # strictly in (0, max_num_batched_tokens] since isl is not an
+            # exact multiple only when math.ceil rounded up.
             remainder = isl - (num_chunks - 1) * max_num_batched_tokens
+            assert 0 < remainder <= max_num_batched_tokens
             wt = (num_chunks - 1) * self._predict_wall_time(
                 float(max_num_batched_tokens)
             ) + self._predict_wall_time(remainder)

@@ -134,14 +134,25 @@ class AggRegressionModel(_BaseRegressionModel):
         The upper bound for the batch-size sweep is the smallest of:
           1. KV cache capacity: ``max_kv_tokens / (isl + osl/2)``
           2. ``max_num_seqs`` (engine concurrency limit)
-          3. The prefill/decode balance point: for a batch of size ``x``,
-             each iteration spends ``x`` tokens on decode (one per request)
-             and ``max_num_batched_tokens - x`` on prefill.  To admit one
-             new request takes ``isl / (max_num_batched_tokens - x)`` iters,
-             while an in-flight request leaves after ``osl`` decode iters.
-             Balance: ``isl / (max_num_batched_tokens - x) <= osl``, giving
-             ``x <= osl * max_num_batched_tokens / (isl + osl)``.  Above
-             this, prefill becomes the bottleneck and TTFT grows unbounded.
+          3. The prefill/decode rate-balance point (steady state).  For a
+             batch of size ``x``:
+               - Decode egress rate: ``x / osl`` requests finish per iter
+                 (x concurrent streams, each taking osl decode iters).
+               - Prefill admission rate: ``(max_num_batched_tokens - x) / isl``
+                 requests admitted per iter (the budget left after decode
+                 takes one slot per in-flight request, divided by isl tokens
+                 per new request).
+             Steady state requires admission >= egress:
+               ``(max_num_batched_tokens - x) / isl >= x / osl``,
+             which simplifies to
+               ``isl / (max_num_batched_tokens - x) <= osl``
+             (the check implemented below), or equivalently
+               ``x <= osl * max_num_batched_tokens / (isl + osl)``.
+             Above this, prefill becomes the bottleneck and TTFT grows
+             unbounded.
+
+        The caller guarantees ``osl > 0`` and ``max_num_batched_tokens > 0``
+        via the early-return validation above.
         """
         if (
             not self._ensure_fitted()

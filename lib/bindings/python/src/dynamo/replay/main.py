@@ -275,7 +275,14 @@ def _run_planner_replay(
     if not adapter._sm._is_easy:
         ref_args = extra_engine_args or prefill_engine_args or MockEngineArgs()
         aic_backend = ref_args.aic_backend
-        if aic_backend is not None:
+        if aic_backend is None:
+            sys.stderr.write(
+                "Note: throughput-based scaling regression requires AIC perf model "
+                "(set aic_backend/aic_system/aic_model_path in --extra-engine-args). "
+                "Falling back to load-based scaling only.\n"
+            )
+        else:
+            # Create AIC session
             try:
                 from dynamo._internal.aic import create_session
 
@@ -286,26 +293,47 @@ def _run_planner_replay(
                     tp_size=ref_args.aic_tp_size or 1,
                     backend_version=ref_args.aic_backend_version,
                 )
-                prefill_fpms, decode_fpms = _generate_aic_benchmark_fpms(
-                    aic_session, ref_args, benchmark_granularity
+            except Exception as e:
+                sys.stderr.write(
+                    f"Warning: AIC session creation failed ({e}); "
+                    "throughput regression will not be bootstrapped.\n"
                 )
+                aic_session = None
+
+            # Generate benchmark FPMs and load into regression
+            if aic_session is not None:
+                try:
+                    prefill_fpms, decode_fpms = _generate_aic_benchmark_fpms(
+                        aic_session, ref_args, benchmark_granularity
+                    )
+                except Exception as e:
+                    sys.stderr.write(
+                        f"Warning: AIC benchmark generation failed ({e}); "
+                        "throughput regression will not be bootstrapped.\n"
+                    )
+                    prefill_fpms, decode_fpms = [], []
+
                 if planner_config.mode == "agg":
                     # Agg regression fits on (sum_prefill_tokens, sum_decode_kv_tokens);
                     # combine prefill-only and decode-only points so both features
                     # have variance.
-                    adapter._sm.load_benchmark_fpms(agg_fpms=prefill_fpms + decode_fpms)
+                    agg_fpms = prefill_fpms + decode_fpms
+                    if agg_fpms:
+                        adapter._sm.load_benchmark_fpms(agg_fpms=agg_fpms)
+                    else:
+                        sys.stderr.write(
+                            "Warning: AIC produced no agg benchmark FPMs\n"
+                        )
                 else:
-                    adapter._sm.load_benchmark_fpms(
-                        prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
-                    )
-            except Exception as e:
-                sys.stderr.write(f"Warning: AIC benchmark generation failed: {e}\n")
-        else:
-            sys.stderr.write(
-                "Note: throughput-based scaling regression requires AIC perf model "
-                "(set aic_backend/aic_system/aic_model_path in --extra-engine-args). "
-                "Falling back to load-based scaling only.\n"
-            )
+                    if prefill_fpms and decode_fpms:
+                        adapter._sm.load_benchmark_fpms(
+                            prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
+                        )
+                    else:
+                        sys.stderr.write(
+                            f"Warning: AIC produced empty benchmark FPMs "
+                            f"(prefill={len(prefill_fpms)}, decode={len(decode_fpms)})\n"
+                        )
 
     return adapter.run()
 
