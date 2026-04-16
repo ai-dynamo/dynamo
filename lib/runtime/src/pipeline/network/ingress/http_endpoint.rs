@@ -96,13 +96,7 @@ impl SharedHttpServer {
         let subject_clone = subject.clone();
         self.handlers.insert(subject, handler);
 
-        // Only set Ready eagerly when canary health checks are disabled.
-        // When canary is enabled, it is the sole authority on readiness.
-        if !system_health.lock().health_check_enabled() {
-            system_health
-                .lock()
-                .set_endpoint_health_status(&endpoint_name, HealthStatus::Ready);
-        }
+        system_health.lock().set_ready(&endpoint_name);
 
         tracing::debug!("Registered endpoint handler for subject: {subject_clone}");
         Ok(())

@@ -104,11 +104,19 @@ impl SystemHealth {
     }
 
     /// Returns true if active canary health checks are enabled.
-    /// When true, transport endpoints should NOT eagerly set Ready —
-    /// the canary is the sole authority on endpoint readiness.
     pub fn health_check_enabled(&self) -> bool {
         self.health_check_enabled
     }
+
+    /// Set endpoint to Ready if canary health checks are disabled.
+    /// When canary is enabled, it is the sole authority on readiness —
+    /// transport endpoints should call this instead of set_endpoint_health_status directly.
+    pub fn set_ready(&self, endpoint: &str) {
+        if !self.health_check_enabled {
+            self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
+        }
+    }
+
     pub fn set_health_status(&mut self, status: HealthStatus) {
         self.system_health = status;
     }

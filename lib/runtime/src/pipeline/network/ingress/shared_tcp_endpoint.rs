@@ -330,13 +330,7 @@ impl SharedTcpServer {
         // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
 
-        // Only set Ready eagerly when canary health checks are disabled.
-        // When canary is enabled, it is the sole authority on readiness.
-        if !system_health.lock().health_check_enabled() {
-            system_health
-                .lock()
-                .set_endpoint_health_status(&endpoint_name, crate::HealthStatus::Ready);
-        }
+        system_health.lock().set_ready(&endpoint_name);
 
         tracing::info!(
             "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
