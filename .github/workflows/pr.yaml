@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - "pull-request/[0-9]+"
-  workflow_dispatch:
 
 concurrency:
   # The group name is the ref_name, so that workflows on the same PR/branch have the same group name for cancelling.
