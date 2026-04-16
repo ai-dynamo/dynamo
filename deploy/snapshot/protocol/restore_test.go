@@ -187,6 +187,38 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 	}
 }
 
+func TestNewRestorePodTargetsFirstContainerWhenSidecarsPresent(t *testing.T) {
+	restorePod := NewRestorePod(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "worker", Image: "test:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+				{Name: "sidecar", Image: "sidecar:latest", Command: []string{"sidecar"}, Args: []string{"run"}},
+			},
+		},
+	}, PodOptions{
+		Namespace:       "test-ns",
+		CheckpointID:    "hash",
+		ArtifactVersion: "2",
+		Storage: Storage{
+			Type:     StorageTypePVC,
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		},
+		SeccompProfile: DefaultSeccompLocalhostProfile,
+	})
+
+	if got := restorePod.Spec.Containers[0].Command; len(got) != 2 || got[0] != "sleep" || got[1] != "infinity" {
+		t.Fatalf("expected first container placeholder command, got %#v", got)
+	}
+	if restorePod.Spec.Containers[0].Args != nil {
+		t.Fatalf("expected first container args to be cleared: %#v", restorePod.Spec.Containers[0].Args)
+	}
+	if got := restorePod.Spec.Containers[1].Command; len(got) != 1 || got[0] != "sidecar" {
+		t.Fatalf("expected sidecar command to remain unchanged, got %#v", got)
+	}
+}
+
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T) {
 	podSpec := corev1.PodSpec{}
 	readinessProbe := &corev1.Probe{
@@ -279,7 +311,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	}
 }
 
-func TestValidateRestorePodSpecRequiresExactlyOneContainer(t *testing.T) {
+func TestValidateRestorePodSpecAcceptsFirstContainerAsWorker(t *testing.T) {
 	profile := DefaultSeccompLocalhostProfile
 	podSpec := &corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{
@@ -314,8 +346,49 @@ func TestValidateRestorePodSpecRequiresExactlyOneContainer(t *testing.T) {
 		BasePath: "/checkpoints",
 	}
 
-	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err == nil || err.Error() != "restore target must have exactly one container, got 2" {
-		t.Fatalf("expected multi-container restore target to be rejected, got %v", err)
+	// Containers[0] is always the worker, regardless of name
+	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err != nil {
+		t.Fatalf("expected validation to pass for first container as worker, got %v", err)
+	}
+}
+
+func TestValidateRestorePodSpecAllowsWorkerWithSidecars(t *testing.T) {
+	profile := DefaultSeccompLocalhostProfile
+	podSpec := &corev1.PodSpec{
+		SecurityContext: &corev1.PodSecurityContext{
+			SeccompProfile: &corev1.SeccompProfile{
+				Type:             corev1.SeccompProfileTypeLocalhost,
+				LocalhostProfile: &profile,
+			},
+		},
+		Volumes: []corev1.Volume{{
+			Name: CheckpointVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: "snapshot-pvc",
+				},
+			},
+		}},
+		Containers: []corev1.Container{
+			{
+				Name: "worker",
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:      CheckpointVolumeName,
+					MountPath: "/checkpoints",
+				}},
+			},
+			{Name: "sidecar"},
+		},
+	}
+
+	storage := Storage{
+		Type:     StorageTypePVC,
+		PVCName:  "snapshot-pvc",
+		BasePath: "/checkpoints",
+	}
+
+	if err := ValidateRestorePodSpec(podSpec, storage, DefaultSeccompLocalhostProfile); err != nil {
+		t.Fatalf("expected worker with sidecars to validate, got %v", err)
 	}
 }
 

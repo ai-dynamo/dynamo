@@ -203,29 +203,22 @@ async def test_retry_after_failure(loader: ImageLoader) -> None:
 # --- Error contract preserved for non-HTTP ---
 
 
-async def test_blocked_scheme_rejected() -> None:
-    """With the default deny policy, file:// access should be rejected."""
-    default_loader = ImageLoader(
-        cache_size=4,
-        http_timeout=30.0,
-        url_policy=UrlValidationPolicy(),  # default: deny file://
-    )
-    with pytest.raises(ValueError, match="Local media paths are not permitted"):
-        await default_loader.load_image("file:///etc/passwd")
+async def test_file_url_is_rejected(loader: ImageLoader) -> None:
+    """file:// inputs should be rejected before any local file read is attempted."""
+    with pytest.raises(ValueError, match="Invalid image source scheme"):
+        await loader.load_image("file:///nonexistent/path/img.png")
 
 
-async def test_file_allowed_when_path_configured(tmp_path) -> None:
-    """When allowed_local_path is set, a file inside it should load."""
-    target = tmp_path / "img.png"
-    target.write_bytes(PNG_BYTES)
+@pytest.mark.parametrize("url_factory", [lambda p: p.as_uri(), lambda p: str(p)])
+async def test_local_file_inputs_are_rejected(
+    loader: ImageLoader, tmp_path, url_factory
+) -> None:
+    """Local filesystem image inputs must be rejected for both file:// and bare paths."""
+    image_path = tmp_path / "secret.png"
+    Image.new("RGB", (1, 1), color="red").save(image_path, format="PNG")
 
-    permissive = ImageLoader(
-        cache_size=4,
-        http_timeout=30.0,
-        url_policy=_permissive_policy(allowed_local_path=str(tmp_path)),
-    )
-    result = await permissive.load_image(f"file://{target}")
-    assert isinstance(result, Image.Image)
+    with pytest.raises(ValueError, match="Invalid image source scheme"):
+        await loader.load_image(url_factory(image_path))
 
 
 async def test_data_url_invalid_base64_normalized(loader: ImageLoader) -> None:

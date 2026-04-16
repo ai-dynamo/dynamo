@@ -67,7 +67,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{SyncIndexer, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
 use crate::protocols::*;
 
 macro_rules! read_lock {
@@ -1197,14 +1197,24 @@ impl ConcurrentRadixTreeCompressed {
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTreeCompressed {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
+        let counters = metrics.as_ref().map(|m| m.prebind());
 
         while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
-                    if let Err(e) = self.apply_event(&mut lookup, event) {
-                        tracing::warn!("Failed to apply event: {:?}", e);
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut lookup, event);
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {

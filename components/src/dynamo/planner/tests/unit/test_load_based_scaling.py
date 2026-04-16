@@ -16,11 +16,14 @@ try:
 except ImportError:
     pytest.skip("msgspec required for FPM tests", allow_module_level=True)
 
-from dynamo.common.forward_pass_metrics import (
-    ForwardPassMetrics,
-    QueuedRequestMetrics,
-    ScheduledRequestMetrics,
-)
+try:
+    from dynamo.common.forward_pass_metrics import (
+        ForwardPassMetrics,
+        QueuedRequestMetrics,
+        ScheduledRequestMetrics,
+    )
+except ImportError:
+    pytest.skip("forward_pass_metrics not available", allow_module_level=True)
 from dynamo.planner.core.perf_model import (
     AggRegressionModel,
     DecodeRegressionModel,
