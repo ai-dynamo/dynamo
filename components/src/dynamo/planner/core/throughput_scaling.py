@@ -29,6 +29,8 @@ class ThroughputScalingMixin:
     _diag_engine_rps_prefill: Optional[float]
     _diag_engine_rps_decode: Optional[float]
     _diag_throughput_reason: Optional[str]
+    _diag_throughput_reason_prefill: Optional[str]
+    _diag_throughput_reason_decode: Optional[str]
 
     def _advance_throughput(
         self, traffic: TrafficObservation

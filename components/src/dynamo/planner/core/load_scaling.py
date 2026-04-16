@@ -41,6 +41,8 @@ class LoadScalingMixin:
     _diag_estimated_ttft_ms: Optional[float]
     _diag_estimated_itl_ms: Optional[float]
     _diag_load_reason: Optional[str]
+    _diag_load_reason_prefill: Optional[str]
+    _diag_load_reason_decode: Optional[str]
 
     def _advance_load(self, obs: FpmObservations) -> Optional[ScalingDecision]:
         if not self._config.enable_load_scaling:
