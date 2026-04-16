@@ -317,6 +317,39 @@ jobs:
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
+  # Non-gating frontend API-surface compliance check — validates Dynamo's HTTP
+  # surface (Responses wire shape, tool-call routing) via the upstream
+  # OpenResponses bun harness + a codex exec smoke against a live sglang
+  # worker. Intentionally *not* listed in `backend-status-check.needs` below;
+  # failures show up on the PR but don't block merge. Promote by adding
+  # `frontend-api-surface-compliance-check` to that list when the signal is
+  # trustworthy.
+  frontend-api-surface-compliance-check:
+    name: frontend-api-surface-compliance-check
+    needs: [changed-files, sglang-build]
+    # Narrower than sibling sglang-* jobs: this validates Dynamo's frontend
+    # HTTP surface, not sglang specifically. Fire on any filter that can move
+    # that surface:
+    #   core     -> lib/**, tests/**, container/** (wire-shape fix lands here)
+    #   frontend -> components/src/dynamo/frontend/**
+    #   sglang   -> backend vehicle — backend changes can shift real traffic
+    # sglang-build stays in `needs` because the test spins up sglang as the
+    # traffic source; no sglang runtime image means the test can't run, so
+    # the natural skip cascade via `needs` is the behaviour we want.
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.sglang == 'true'
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: frontend-api-surface-compliance
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: frontend_api_surface_compliance and gpu_1
+      gpu_test_timeout_minutes: 20
+    secrets: inherit
+
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]

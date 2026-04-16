@@ -1,14 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""OpenResponses compliance suite against a live Dynamo frontend.
+"""Frontend API-surface compliance suite against a live Dynamo frontend.
 
-Spins up an aggregated sglang worker behind a frontend, then runs the
-upstream OpenResponses compliance-test.ts suite (a bun/TypeScript harness
-that validates the response wire shape against zod schemas generated from
-the OpenAPI spec) plus a codex exec smoke test. The suite is pre-cloned
-and `bun install`ed into `/opt/openresponses` by `container/Dockerfile.test`
-at a pinned SHA; bumps go through that file in lockstep.
+Subject under test is Dynamo's HTTP surface (`/v1/responses` wire shape,
+Hermes-style tool-call routing through the Responses API, etc.); sglang
+is just the backend vehicle for producing real traffic. Runs the upstream
+OpenResponses compliance-test.ts harness (a bun/TypeScript validator
+against zod schemas generated from the OpenAPI spec) plus a `codex exec`
+smoke test that forces the shell tool-call path.
+
+The OpenResponses suite is pre-cloned and `bun install`ed into
+`/opt/openresponses` by `container/Dockerfile.test` at a pinned SHA;
+bumps go through that file in lockstep.
+
+Non-gating by design: carries the `frontend_api_surface_compliance`
+marker which routes to a dedicated CI job kept out of
+`backend-status-check.needs` until the signal is trustworthy.
 """
 
 import logging
@@ -45,8 +53,13 @@ COMPLIANCE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 # inter-suite health check + codex exec (up to 180s) + teardown. 600s
 # leaves headroom for CI variance without masking real hangs.
 @pytest.mark.timeout(600)
-@pytest.mark.pre_merge
-def test_responses_openresponses_compliance(
+# Routed to the dedicated `frontend-api-surface-compliance-check` CI job,
+# deliberately *not* listed in `backend-status-check.needs` — failures
+# surface on the PR but don't block merge. Promote by adding the job to
+# that list once the suite's signal is trustworthy. Marker is outside
+# `pre_merge` so the main sglang gate job's filter doesn't pick it up.
+@pytest.mark.frontend_api_surface_compliance
+def test_frontend_api_surface_compliance(
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
