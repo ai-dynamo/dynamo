@@ -19,6 +19,8 @@ use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(any(test, feature = "bench"))]
+use super::prompt_membership_trie::lookup_live_hashes;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
@@ -179,6 +181,23 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         assert!(
             self.prompt_registry.is_block_index_empty(),
             "expected reverse block index to be empty after drain",
+        );
+
+        let trie_lookup_live_hashes: Vec<_> = {
+            let table = self.workers.read();
+            table
+                .slots
+                .iter()
+                .filter_map(|slot| {
+                    let live_hashes = lookup_live_hashes(&slot.trie_lookup);
+                    (!live_hashes.is_empty()).then_some((slot.worker, live_hashes))
+                })
+                .collect()
+        };
+        assert!(
+            trie_lookup_live_hashes.is_empty(),
+            "expected all worker trie lookups to reference only dead nodes after drain, found {:?}",
+            trie_lookup_live_hashes,
         );
     }
 

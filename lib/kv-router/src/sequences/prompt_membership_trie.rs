@@ -656,6 +656,15 @@ impl PromptMembershipTrie {
     }
 }
 
+#[cfg(any(test, feature = "bench"))]
+pub(super) fn lookup_live_hashes(lookup: &Arc<RwLock<WorkerLookup>>) -> Vec<SequenceHash> {
+    let worker_lookup = lookup.read();
+    worker_lookup
+        .iter()
+        .filter_map(|(&hash, node)| node.read().has_any_workers().then_some(hash))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
