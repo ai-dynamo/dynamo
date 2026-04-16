@@ -580,12 +580,19 @@ class SglangStreamingPostProcessor:
                                 tool_call_parser=self._tool_call_parser_name,
                             )
                             _, final_calls = fcp.parse_non_stream(full_text)
-                        except Exception as e:
-                            # Fallback path: model-native tool-call text is
-                            # malformed. Log and return no tool calls rather
-                            # than crashing the whole response — the primary
-                            # JSON-array path has already failed, and the
-                            # normal text is still usable.
+                        except (
+                            ValueError,  # includes json.JSONDecodeError
+                            KeyError,
+                            IndexError,
+                            TypeError,
+                            AttributeError,
+                            SyntaxError,  # pythonic detector uses ast.literal_eval
+                        ) as e:
+                            # Best-effort fallback: model emitted malformed
+                            # tool-call text. Drop to no tool calls rather
+                            # than crash — the primary JSON-array parse has
+                            # already failed and the normal text is still
+                            # usable.
                             logger.warning(
                                 "Native tool-call fallback parse failed (parser=%r): %s",
                                 self._tool_call_parser_name,
