@@ -1372,6 +1372,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) getProfilingJobErrorDetails(ctx
 	return ""
 }
 
+// computeDGDName returns the Kubernetes name to use for the DGD that a DGDR owns.
+// If the user supplied an explicit name via spec.overrides.dgd.metadata.name that
+// value is returned as-is; otherwise the DGDR's own name is used with a "-dgd"
+// suffix, guaranteeing uniqueness even when two DGDRs have identical specs (which
+// would otherwise both produce the same profiler-generated name, e.g. "vllm-agg").
+func computeDGDName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
+	if dgdr.Spec.Overrides != nil && dgdr.Spec.Overrides.DGD != nil && len(dgdr.Spec.Overrides.DGD.Raw) > 0 {
+		var meta struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if err := json.Unmarshal(dgdr.Spec.Overrides.DGD.Raw, &meta); err == nil && meta.Metadata.Name != "" {
+			return meta.Metadata.Name
+		}
+	}
+	return dgdr.Name + "-dgd"
+}
+
 // generateDGDSpec reads profiling output from the sidecar ConfigMap, extracts the
 // DynamoGraphDeployment spec and pareto configs, stores the spec in an annotation via
 // r.Update, and returns the ProfilingResultsStatus and DGD name.
@@ -1412,7 +1431,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		return nil, "", fmt.Errorf("failed to extract DGD from %s: %w", outputFile, err)
 	}
 
-	logger.Info("Parsed profiling output", "dgdName", dgd.Name, "additionalResources", len(additionalResources))
+	// Override the profiler-generated name with a DGDR-scoped unique name.
+	// The profiler emits a static topology-derived name (e.g. "vllm-agg") which
+	// collides when multiple DGDRs share identical specs. Derive the name from
+	// DGDR identity instead, respecting an explicit override if the user set one.
+	dgd.Name = computeDGDName(dgdr)
+
+	logger.Info("Parsed profiling output", "profilerDGDName", dgd.Name, "additionalResources", len(additionalResources))
 
 	if len(additionalResources) > 0 {
 		if err := r.storeAdditionalResources(ctx, dgdr, additionalResources); err != nil {
