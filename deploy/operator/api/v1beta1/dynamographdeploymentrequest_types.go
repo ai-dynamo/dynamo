@@ -175,7 +175,7 @@ const (
 )
 
 // GPUSKUType is the AIC hardware system identifier for a supported GPU.
-// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
+// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s;gb10
 type GPUSKUType string
 
 const (
@@ -185,6 +185,7 @@ const (
 	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
 	GPUSKUTypeA100SXM  GPUSKUType = "a100_sxm"
 	GPUSKUTypeL40S     GPUSKUType = "l40s"
+	GPUSKUTypeGB10     GPUSKUType = "gb10"
 )
 
 // BackendType specifies the inference backend.
@@ -324,7 +325,7 @@ type HardwareSpec struct {
 	// GPUSKU is the AIC hardware system identifier for the GPU.
 	// When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
 	// +optional
-	// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
+	// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s;gb10
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.

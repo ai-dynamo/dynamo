@@ -64,6 +64,7 @@ class GPUSKUType(str, Enum):
     B200SXM = "b200_sxm"
     A100SXM = "a100_sxm"
     L40S = "l40s"
+    GB10 = "gb10"
 
 
 class BackendType(str, Enum):
