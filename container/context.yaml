@@ -16,7 +16,7 @@ dynamo:
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-  epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.1
+  epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
   planner_build_image: python
   planner_build_image_tag: 3.12-slim

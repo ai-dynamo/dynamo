@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:main-token
+          image: docker.io/lambda108/epp-inference-extension-dynamo:rc2
           imagePullPolicy: IfNotPresent
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
@@ -70,7 +70,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:main-token
+        image: docker.io/lambda108/dynamo:rc2
         args:
           - -m
           - dynamo.frontend
@@ -82,30 +82,22 @@ spec:
           - key: "nvidia.com/gpu"
             operator: "Exists"
             effect: "NoSchedule"
-        affinity:
-          podAffinity:
-            preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchExpressions:
-                  - key: nvidia.com/dynamo-component-type
-                    operator: In
-                    values:
-                    - worker
-                topologyKey: kubernetes.io/hostname
+        nodeSelector:
+          kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-bw4bt
         mainContainer:
           env:
             - name: SERVED_MODEL_NAME
               value: "Qwen/Qwen3-0.6B"
             - name: MODEL_PATH
               value: "Qwen/Qwen3-0.6B"
+            - name: UCX_TLS
+              value: "tcp,cuda_copy,cuda_ipc,self"
           args:
           - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode prefill --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --enable-prefix-caching --block-size 16 --kv-events-config '{\"enable_kv_cache_events\":true}'"
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:main-token
+          image: docker.io/lambda108/dynamo:rc2
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
@@ -121,7 +113,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:main-token
+        image: docker.io/lambda108/dynamo:rc2
         args:
           - -m
           - dynamo.frontend
@@ -133,30 +125,22 @@ spec:
           - key: "nvidia.com/gpu"
             operator: "Exists"
             effect: "NoSchedule"
-        affinity:
-          podAffinity:
-            preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchExpressions:
-                  - key: nvidia.com/dynamo-component-type
-                    operator: In
-                    values:
-                    - worker
-                topologyKey: kubernetes.io/hostname
+        nodeSelector:
+          kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-bw4bt
         mainContainer:
           env:
             - name: SERVED_MODEL_NAME
               value: "Qwen/Qwen3-0.6B"
             - name: MODEL_PATH
               value: "Qwen/Qwen3-0.6B"
+            - name: UCX_TLS
+              value: "tcp,cuda_copy,cuda_ipc,self"
           args:
           - "python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --tensor-parallel-size 1 --data-parallel-size 1 --disaggregation-mode decode --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' --gpu-memory-utilization 0.90 --block-size 16"
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:main-token
+          image: docker.io/lambda108/dynamo:rc2
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1

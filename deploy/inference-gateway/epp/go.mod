@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/go-logr/logr v1.4.3
 	sigs.k8s.io/controller-runtime v0.23.3
-	sigs.k8s.io/gateway-api-inference-extension v1.5.0-rc.1
+	sigs.k8s.io/gateway-api-inference-extension v1.5.0-rc.2
 )
 
 require (
@@ -113,5 +113,5 @@ require (
 )
 
 // NOTE: For local development, uncomment the replace directive below.
-// For Docker builds, keep it commented out to use the published v1.5.0-rc.1 release.
-// replace sigs.k8s.io/gateway-api-inference-extension => ../../../gaie_latest/gateway-api-inference-extension
+// For Docker builds, keep it commented out to use the published release.
+// replace sigs.k8s.io/gateway-api-inference-extension => ../../../gaie/gateway-api-inference-extension
