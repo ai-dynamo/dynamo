@@ -32,8 +32,7 @@ use super::{DEFAULT_MAX_BATCH_BLOCKS, kv_publisher_metrics};
 /// - **Cleared**: resets refcounts for all ranks.
 pub(super) struct EventDedupFilter {
     /// Per-(dp_rank, storage_tier) refcounts.
-    per_rank_tier:
-        HashMap<(u32, StorageTier), HashMap<ExternalSequenceBlockHash, usize>>,
+    per_rank_tier: HashMap<(u32, StorageTier), HashMap<ExternalSequenceBlockHash, usize>>,
 }
 
 impl EventDedupFilter {
@@ -52,7 +51,10 @@ impl EventDedupFilter {
         storage_tier: StorageTier,
         data: &KvCacheStoreData,
     ) {
-        let refcounts = self.per_rank_tier.entry((dp_rank, storage_tier)).or_default();
+        let refcounts = self
+            .per_rank_tier
+            .entry((dp_rank, storage_tier))
+            .or_default();
         for block in &data.blocks {
             *refcounts.entry(block.block_hash).or_insert(0) += 1;
         }
@@ -67,7 +69,10 @@ impl EventDedupFilter {
         storage_tier: StorageTier,
         mut data: KvCacheRemoveData,
     ) -> Option<KvCacheRemoveData> {
-        let refcounts = self.per_rank_tier.entry((dp_rank, storage_tier)).or_default();
+        let refcounts = self
+            .per_rank_tier
+            .entry((dp_rank, storage_tier))
+            .or_default();
         data.block_hashes.retain(|hash| {
             match refcounts.entry(*hash) {
                 Entry::Occupied(mut entry) => {

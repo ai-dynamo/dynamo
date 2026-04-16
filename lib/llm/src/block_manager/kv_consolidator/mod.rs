@@ -10,9 +10,12 @@ pub mod publisher;
 pub mod subscriber;
 pub mod tracker;
 
-pub use config::KvEventConsolidatorConfig;
+pub use config::{KvEventConsolidationMode, KvEventConsolidatorConfig};
 pub use publisher::KvEventConsolidatorPublisher;
-pub use tracker::{CacheStatusTracker, EventSource, StorageTier};
+pub use tracker::{
+    CacheStatusTracker, DedupCacheStatusTracker, EventSource, PassthroughCacheStatusTracker,
+    StorageTier,
+};
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -21,11 +24,14 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use subscriber::start_simple_zmq_listener;
+use tracker::{RemoveEventInput, StoreEventInput};
+
+pub type SharedCacheStatusTracker = Arc<RwLock<Box<dyn CacheStatusTracker>>>;
 
 /// Handle for KVBM to send G2/G3 events directly to the KV Event Consolidator
 #[derive(Clone, Debug)]
 pub struct KvEventConsolidatorHandle {
-    pub(crate) tracker: Arc<RwLock<CacheStatusTracker>>,
+    pub(crate) tracker: SharedCacheStatusTracker,
 }
 
 impl KvEventConsolidatorHandle {
@@ -45,7 +51,7 @@ impl KvEventConsolidatorHandle {
         data_parallel_rank: Option<i32>,
     ) {
         let mut tracker = self.tracker.write().await;
-        tracker.handle_store(
+        tracker.handle_store(StoreEventInput {
             block_hash,
             source,
             token_ids,
@@ -54,7 +60,7 @@ impl KvEventConsolidatorHandle {
             lora_name,
             tier,
             data_parallel_rank,
-        );
+        });
     }
 
     /// Send a block remove event to the KV Event Consolidator
@@ -67,7 +73,11 @@ impl KvEventConsolidatorHandle {
         tier: Option<StorageTier>,
     ) {
         let mut tracker = self.tracker.write().await;
-        tracker.handle_remove(block_hash, source, tier);
+        tracker.handle_remove(RemoveEventInput {
+            block_hash: block_hash.to_string(),
+            source,
+            tier,
+        });
     }
 
     /// Clear all blocks from the KV Event Consolidator
@@ -82,7 +92,7 @@ impl KvEventConsolidatorHandle {
 /// The main KV Event Consolidator that manages the event flow
 pub struct KvEventConsolidator {
     config: KvEventConsolidatorConfig,
-    tracker: Arc<RwLock<CacheStatusTracker>>,
+    tracker: SharedCacheStatusTracker,
     subscriber_handle: Option<JoinHandle<()>>,
     cancellation_token: CancellationToken,
     publisher: Option<KvEventConsolidatorPublisher>,
@@ -91,7 +101,11 @@ pub struct KvEventConsolidator {
 impl KvEventConsolidator {
     /// Create a new KV Event Consolidator
     pub fn new(config: KvEventConsolidatorConfig) -> Result<Self> {
-        let tracker = Arc::new(RwLock::new(CacheStatusTracker::new()));
+        let tracker: Box<dyn CacheStatusTracker> = match config.mode {
+            KvEventConsolidationMode::Dedup => Box::new(DedupCacheStatusTracker::new()),
+            KvEventConsolidationMode::Passthrough => Box::new(PassthroughCacheStatusTracker::new()),
+        };
+        let tracker = Arc::new(RwLock::new(tracker));
         let cancellation_token = CancellationToken::new();
 
         Ok(Self {
@@ -106,7 +120,8 @@ impl KvEventConsolidator {
     /// Start the KV Event Consolidator
     pub async fn start(&mut self) -> Result<()> {
         tracing::info!(
-            "Starting KV Event Consolidator: subscribe from {}, publish to ZMQ at {}",
+            "Starting KV Event Consolidator in {} mode: subscribe from {}, publish to ZMQ at {}",
+            self.config.mode.as_str(),
             self.config.engine_event_endpoint,
             self.config.consolidated_event_endpoint
         );
@@ -157,7 +172,7 @@ impl KvEventConsolidator {
     }
 
     /// Get a reference to the cache status tracker (for debugging/metrics)
-    pub fn tracker(&self) -> Arc<RwLock<CacheStatusTracker>> {
+    pub fn tracker(&self) -> SharedCacheStatusTracker {
         self.tracker.clone()
     }
 

@@ -32,7 +32,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{EventKind, KvIndexerMetrics, MatchDetails, SyncIndexer, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::*;
 
@@ -164,19 +164,15 @@ impl ConcurrentRadixTree {
     ///
     /// An `OverlapScores` representing the match scores.
     /// Note: `frequencies` field will be empty since frequency tracking is not supported.
-    pub fn find_match_details_impl(
+    pub fn find_matches_impl(
         &self,
         sequence: &[LocalBlockHash],
         early_exit: bool,
-    ) -> MatchDetails {
-        let mut details = MatchDetails::new();
-        let MatchDetails {
-            overlap_scores: scores,
-            last_matched_hashes,
-        } = &mut details;
+    ) -> OverlapScores {
+        let mut scores = OverlapScores::new();
 
         if sequence.is_empty() {
-            return details;
+            return scores;
         }
 
         // Get first child from root.
@@ -186,7 +182,7 @@ impl ConcurrentRadixTree {
         };
 
         let Some(first_child) = first_child else {
-            return details;
+            return scores;
         };
 
         // Initialize active worker set from first child.
@@ -196,18 +192,12 @@ impl ConcurrentRadixTree {
         };
 
         if active.is_empty() {
-            return details;
+            return scores;
         }
-
-        let mut current_hash = first_child
-            .read()
-            .block_hash
-            .expect("matched radix node must have a block hash");
 
         if early_exit && active_count == 1 {
             for worker in &active {
                 scores.scores.insert(*worker, 1);
-                last_matched_hashes.insert(*worker, current_hash);
             }
             for worker in scores.scores.keys() {
                 if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
@@ -216,7 +206,7 @@ impl ConcurrentRadixTree {
                         .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
                 }
             }
-            return details;
+            return scores;
         }
 
         let mut current = first_child;
@@ -249,7 +239,6 @@ impl ConcurrentRadixTree {
                 if child_count != active_count {
                     reconcile_active_workers(&mut active, &guard.workers, |worker| {
                         scores.scores.insert(worker, matched_depth);
-                        last_matched_hashes.insert(worker, current_hash);
                     });
                     active_count = active.len();
 
@@ -264,18 +253,10 @@ impl ConcurrentRadixTree {
 
                 if early_exit && active_count == 1 {
                     matched_depth = (idx + 1) as u32;
-                    current_hash = block
-                        .read()
-                        .block_hash
-                        .expect("matched radix node must have a block hash");
                     break;
                 }
             }
 
-            current_hash = block
-                .read()
-                .block_hash
-                .expect("matched radix node must have a block hash");
             current = block;
             matched_depth = (idx + 1) as u32;
         }
@@ -283,7 +264,6 @@ impl ConcurrentRadixTree {
         // Record scores for workers that survived through the deepest matched level.
         for worker in &active {
             scores.scores.insert(*worker, matched_depth);
-            last_matched_hashes.insert(*worker, current_hash);
         }
 
         // Get tree sizes from lookup.
@@ -295,16 +275,7 @@ impl ConcurrentRadixTree {
             }
         }
 
-        details
-    }
-
-    pub fn find_matches_impl(
-        &self,
-        sequence: &[LocalBlockHash],
-        early_exit: bool,
-    ) -> OverlapScores {
-        self.find_match_details_impl(sequence, early_exit)
-            .overlap_scores
+        scores
     }
 
     /// Apply a [`RouterEvent`] to the radix tree.

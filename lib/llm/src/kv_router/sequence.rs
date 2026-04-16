@@ -187,9 +187,10 @@ mod tests {
         .await?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let decay_now = Instant::now();
 
-        seq_manager_1
-            .add_request(SequenceRequest {
+        seq_manager_1.add_request(
+            SequenceRequest {
                 request_id: "request_0".to_string(),
                 token_sequence: Some(vec![0, 1, 2]),
                 isl: 12,
@@ -199,11 +200,12 @@ mod tests {
                 prefill_load_hint: None,
                 worker: WorkerWithDpRank::new(0, 0),
                 lora_name: None,
-            })
-            .await?;
+            },
+            decay_now,
+        )?;
 
-        seq_manager_1
-            .add_request(SequenceRequest {
+        seq_manager_1.add_request(
+            SequenceRequest {
                 request_id: "request_1".to_string(),
                 token_sequence: Some(vec![3, 4]),
                 isl: 8,
@@ -213,11 +215,12 @@ mod tests {
                 prefill_load_hint: None,
                 worker: WorkerWithDpRank::new(0, 1),
                 lora_name: None,
-            })
-            .await?;
+            },
+            decay_now,
+        )?;
 
-        seq_manager_2
-            .add_request(SequenceRequest {
+        seq_manager_2.add_request(
+            SequenceRequest {
                 request_id: "request_2".to_string(),
                 token_sequence: Some(vec![0, 1, 2, 3]),
                 isl: 16,
@@ -227,8 +230,9 @@ mod tests {
                 prefill_load_hint: None,
                 worker: WorkerWithDpRank::new(1, 0),
                 lora_name: None,
-            })
-            .await?;
+            },
+            decay_now,
+        )?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
@@ -343,9 +347,10 @@ mod tests {
         .await?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        let decay_now = Instant::now();
 
-        seq_manager_1
-            .add_request(SequenceRequest {
+        seq_manager_1.add_request(
+            SequenceRequest {
                 request_id: "request_0".to_string(),
                 token_sequence: None,
                 isl: 12,
@@ -355,11 +360,12 @@ mod tests {
                 prefill_load_hint: None,
                 worker: WorkerWithDpRank::from_worker_id(0),
                 lora_name: None,
-            })
-            .await?;
+            },
+            decay_now,
+        )?;
 
-        seq_manager_1
-            .add_request(SequenceRequest {
+        seq_manager_1.add_request(
+            SequenceRequest {
                 request_id: "request_1".to_string(),
                 token_sequence: None,
                 isl: 8,
@@ -369,11 +375,12 @@ mod tests {
                 prefill_load_hint: None,
                 worker: WorkerWithDpRank::from_worker_id(1),
                 lora_name: None,
-            })
-            .await?;
+            },
+            decay_now,
+        )?;
 
-        seq_manager_2
-            .add_request(SequenceRequest {
+        seq_manager_2.add_request(
+            SequenceRequest {
                 request_id: "request_2".to_string(),
                 token_sequence: None,
                 isl: 16,
@@ -383,8 +390,9 @@ mod tests {
                 prefill_load_hint: None,
                 worker: WorkerWithDpRank::from_worker_id(2),
                 lora_name: None,
-            })
-            .await?;
+            },
+            decay_now,
+        )?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 

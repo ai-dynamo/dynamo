@@ -51,6 +51,7 @@ impl PrefillLoadSnapshot {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn added_prefill_tokens(block_size: usize, isl: usize, overlap: u32) -> usize {
     let cached_tokens = (overlap as usize) * block_size;
     isl.checked_sub(cached_tokens).unwrap_or_else(|| {

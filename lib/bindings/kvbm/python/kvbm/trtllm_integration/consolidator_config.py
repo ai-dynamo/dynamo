@@ -25,6 +25,24 @@ def is_truthy(val: str) -> bool:
     return val.lower() in ("1", "true", "on", "yes")
 
 
+def get_consolidator_mode() -> str:
+    """
+    Get the KV event consolidator mode from the environment.
+
+    Returns:
+        "dedup" or "passthrough". Invalid or unset values fall back to "dedup".
+    """
+    mode = os.getenv("DYN_KVBM_KV_EVENTS_CONSOLIDATOR_MODE", "dedup").strip().lower()
+    if mode in ("dedup", "passthrough"):
+        return mode
+
+    logger.warning(
+        "Invalid DYN_KVBM_KV_EVENTS_CONSOLIDATOR_MODE=%r. Falling back to 'dedup'.",
+        mode,
+    )
+    return "dedup"
+
+
 def _get_connector_module(kv_connector_config) -> str | None:
     """Extract connector_module from either a dict or a TRT-LLM config object."""
     if kv_connector_config is None:

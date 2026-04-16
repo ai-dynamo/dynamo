@@ -379,11 +379,7 @@ async fn apply_entry(
             isl,
             output_length,
         } => {
-            let _ = multi.potential_blocks_and_tokens(
-                Some(&block_hashes),
-                isl,
-                HashMap::new(),
-            );
+            let _ = multi.potential_blocks_and_tokens(Some(&block_hashes), isl, HashMap::new());
             let _ = multi
                 .add_request(SequenceRequest {
                     request_id,

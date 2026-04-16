@@ -95,6 +95,7 @@ impl PromptRegistry {
     }
 
     #[expect(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
     fn project_loads_from_overlap(
         &self,
         query_len: usize,
@@ -133,6 +134,7 @@ impl PromptRegistry {
         (potential_blocks, potential_tokens)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn potential_blocks_and_tokens_with_prefill_tracking(
         &self,
         token_sequence: Option<&[SequenceHash]>,

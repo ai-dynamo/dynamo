@@ -11,7 +11,6 @@ use anyhow::Result;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
-    scheduling::TierOverlapBlocks,
     indexer::KvRouterError,
     protocols::KV_EVENT_SUBJECT,
     protocols::{
@@ -19,6 +18,7 @@ use dynamo_kv_router::{
         RouterRequest, RouterResponse, TokensWithHashes, WorkerId, WorkerWithDpRank,
         compute_block_hash_for_seq,
     },
+    scheduling::TierOverlapBlocks,
 };
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -160,7 +160,10 @@ fn cache_hit_estimates_from_tiered_matches(
     let cached_tokens = effective_overlap_blocks
         .iter()
         .map(|(worker, overlap)| {
-            (*worker, cached_tokens_from_effective_overlap(block_size, *overlap))
+            (
+                *worker,
+                cached_tokens_from_effective_overlap(block_size, *overlap),
+            )
         })
         .collect();
 
@@ -209,9 +212,12 @@ fn tier_overlap_blocks_from_tiered_matches(
         .lower_tier
         .get(&dynamo_kv_router::protocols::StorageTier::Disk)
     {
-        tier_overlap_blocks
-            .disk
-            .extend(disk_matches.hits.iter().map(|(worker, hits)| (*worker, *hits)));
+        tier_overlap_blocks.disk.extend(
+            disk_matches
+                .hits
+                .iter()
+                .map(|(worker, hits)| (*worker, *hits)),
+        );
     }
 
     tier_overlap_blocks
@@ -406,7 +412,11 @@ where
         &self,
         tiered_matches: &indexer::TieredMatchDetails,
     ) -> CacheHitEstimates {
-        cache_hit_estimates_from_tiered_matches(&self.kv_router_config, self.block_size, tiered_matches)
+        cache_hit_estimates_from_tiered_matches(
+            &self.kv_router_config,
+            self.block_size,
+            tiered_matches,
+        )
     }
 
     fn cache_hit_for_worker(
@@ -855,11 +865,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use dynamo_kv_router::{
         indexer::{LowerTierMatchDetails, MatchDetails},
         protocols::{OverlapScores, StorageTier},
     };
+    use std::collections::HashMap;
 
     #[test]
     fn weighted_cache_hit_estimates_include_lower_tiers() {
@@ -884,12 +894,21 @@ mod tests {
             ]),
         };
 
-        let estimates =
-            cache_hit_estimates_from_tiered_matches(&KvRouterConfig::default(), 16, &tiered_matches);
+        let estimates = cache_hit_estimates_from_tiered_matches(
+            &KvRouterConfig::default(),
+            16,
+            &tiered_matches,
+        );
 
-        assert_eq!(estimates.effective_overlap_blocks.get(&worker_1), Some(&3.25));
+        assert_eq!(
+            estimates.effective_overlap_blocks.get(&worker_1),
+            Some(&3.25)
+        );
         assert_eq!(estimates.cached_tokens.get(&worker_1), Some(&52));
-        assert_eq!(estimates.effective_overlap_blocks.get(&worker_2), Some(&0.75));
+        assert_eq!(
+            estimates.effective_overlap_blocks.get(&worker_2),
+            Some(&0.75)
+        );
         assert_eq!(estimates.cached_tokens.get(&worker_2), Some(&12));
     }
 }

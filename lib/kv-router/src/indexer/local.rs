@@ -724,7 +724,10 @@ impl KvIndexerInterface for LocalKvIndexer {
         // host-pinned / disk block information during recovery.
         let lower_tiers: Vec<(StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>)> = {
             let indexers = self.lower_tier_indexers.lock().unwrap();
-            indexers.iter().map(|(&tier, idx)| (tier, idx.clone())).collect()
+            indexers
+                .iter()
+                .map(|(&tier, idx)| (tier, idx.clone()))
+                .collect()
         };
         for (tier, indexer) in lower_tiers {
             if let Ok(tier_events) = indexer.dump_events().await {

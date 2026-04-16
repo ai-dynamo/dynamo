@@ -217,14 +217,13 @@ where
         effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
-        self.inner
-            .get_potential_loads(
-                token_seq,
-                isl_tokens,
-                overlaps,
-                effective_cached_tokens,
-                track_prefill_tokens,
-            )
+        self.inner.get_potential_loads(
+            token_seq,
+            isl_tokens,
+            overlaps,
+            effective_cached_tokens,
+            track_prefill_tokens,
+        )
     }
 
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {

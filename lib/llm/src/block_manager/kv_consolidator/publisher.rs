@@ -12,10 +12,10 @@ use rmp_serde::Serializer;
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use super::tracker::{CacheStatusTracker, ConsolidatedEvent};
+use super::SharedCacheStatusTracker;
+use super::tracker::ConsolidatedEvent;
 use crate::utils::zmq::{bind_pub_socket, send_multipart};
 
 /// Event batch structure matching vLLM's format (array_like=True)
@@ -133,14 +133,14 @@ impl Event {
 /// ZMQ Publisher for consolidated events
 pub struct KvEventConsolidatorPublisher {
     endpoint: String,
-    tracker: Arc<RwLock<CacheStatusTracker>>,
+    tracker: SharedCacheStatusTracker,
     sequence: Arc<AtomicU64>,
     task_handle: Option<JoinHandle<()>>,
 }
 
 impl KvEventConsolidatorPublisher {
     /// Create a new publisher
-    pub fn new(endpoint: &str, tracker: Arc<RwLock<CacheStatusTracker>>) -> Result<Self> {
+    pub fn new(endpoint: &str, tracker: SharedCacheStatusTracker) -> Result<Self> {
         let endpoint = endpoint.to_string();
         let sequence = Arc::new(AtomicU64::new(0));
 
@@ -179,7 +179,7 @@ impl KvEventConsolidatorPublisher {
     /// Main publisher loop
     async fn run_publisher_loop(
         endpoint: String,
-        tracker: Arc<RwLock<CacheStatusTracker>>,
+        tracker: SharedCacheStatusTracker,
         sequence: Arc<AtomicU64>,
     ) -> Result<()> {
         tracing::info!("Starting consolidated event publisher on {}", endpoint);
@@ -216,11 +216,11 @@ impl KvEventConsolidatorPublisher {
             let vllm_events: Vec<Event> = events
                 .into_iter()
                 .filter_map(|event| match Event::from_consolidated(event) {
-                        Ok(e) => Some(e),
-                        Err(err) => {
-                            tracing::error!("Failed to convert consolidated event, skipping: {}", err);
-                            None
-                        }
+                    Ok(e) => Some(e),
+                    Err(err) => {
+                        tracing::error!("Failed to convert consolidated event, skipping: {}", err);
+                        None
+                    }
                 })
                 .collect();
 

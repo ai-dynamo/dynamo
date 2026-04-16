@@ -107,7 +107,6 @@ pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
-    block_size: usize,
     last_expiry_check_time: Instant,
 }
 
@@ -120,7 +119,6 @@ impl ActiveSequences {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
             blocks: BlockTracker::default(),
-            block_size,
             last_expiry_check_time: Instant::now(),
         }
     }

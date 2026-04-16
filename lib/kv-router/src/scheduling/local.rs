@@ -514,7 +514,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true);
+        let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
         let worker = WorkerWithDpRank::new(0, 0);
 
         let response = scheduler
@@ -532,6 +532,7 @@ mod tests {
                 0.0,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -540,7 +541,7 @@ mod tests {
         assert_eq!(response.cached_tokens, 48);
         assert_eq!(response.overlap_blocks, 1);
         assert_eq!(
-            slots.active_tokens().get(&worker).copied(),
+            slots.active_tokens(Instant::now()).get(&worker).copied(),
             Some(16),
             "weighted cached tokens should reduce tracked prefill load",
         );
@@ -634,6 +635,9 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 None,
@@ -654,6 +658,9 @@ mod tests {
                         64,
                         Some(vec![5, 6, 7, 8]),
                         OverlapScores::default(),
+                        TierOverlapBlocks::default(),
+                        HashMap::new(),
+                        HashMap::new(),
                         None,
                         true,
                         None,
@@ -709,6 +716,9 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 None,
@@ -729,6 +739,9 @@ mod tests {
                         64,
                         Some(vec![5, 6, 7, 8]),
                         OverlapScores::default(),
+                        TierOverlapBlocks::default(),
+                        HashMap::new(),
+                        HashMap::new(),
                         None,
                         true,
                         None,
@@ -783,6 +796,9 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 None,
@@ -803,6 +819,9 @@ mod tests {
                         64,
                         Some(vec![5, 6, 7, 8]),
                         OverlapScores::default(),
+                        TierOverlapBlocks::default(),
+                        HashMap::new(),
+                        HashMap::new(),
                         None,
                         true,
                         None,
@@ -957,6 +976,9 @@ mod tests {
                 100,
                 Some(vec![1, 2, 3, 4]),
                 OverlapScores::default(),
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
                 None,
                 true,
                 None,
@@ -970,7 +992,8 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(6)).await;
 
-        let loads = scheduler.get_potential_loads(None, 0, OverlapScores::default(), true);
+        let loads =
+            scheduler.get_potential_loads(None, 0, OverlapScores::default(), HashMap::new(), true);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 40);
 
@@ -1001,13 +1024,7 @@ mod tests {
 
         assert_eq!(
             scheduler
-                .get_potential_loads(
-                    None,
-                    64,
-                    OverlapScores::default(),
-                    HashMap::new(),
-                    true,
-                )
+                .get_potential_loads(None, 64, OverlapScores::default(), HashMap::new(), true,)
                 .len(),
             1
         );
@@ -1026,13 +1043,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if scheduler
-                    .get_potential_loads(
-                        None,
-                        64,
-                        OverlapScores::default(),
-                        HashMap::new(),
-                        true,
-                    )
+                    .get_potential_loads(None, 64, OverlapScores::default(), HashMap::new(), true)
                     .len()
                     == 3
                 {

@@ -76,12 +76,23 @@ impl SchedulingPolicy for WsptPolicy {
 
     fn enqueue_key(&self, _arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
         let weight = 1.0 + request.priority_jump.max(0.0);
-        let cached_tokens = request
-            .effective_cached_tokens
-            .values()
-            .copied()
-            .max()
-            .unwrap_or(0);
+        let cached_tokens = request.pinned_worker.map_or_else(
+            || {
+                request
+                    .effective_cached_tokens
+                    .values()
+                    .copied()
+                    .max()
+                    .unwrap_or(0)
+            },
+            |worker| {
+                request
+                    .effective_cached_tokens
+                    .get(&worker)
+                    .copied()
+                    .unwrap_or(0)
+            },
+        );
         let new_tokens = request.isl_tokens.saturating_sub(cached_tokens).max(1);
         OrderedFloat(weight / new_tokens as f64)
     }

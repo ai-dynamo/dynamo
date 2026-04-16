@@ -1011,6 +1011,7 @@ mod tests {
         FxHashMap<WorkerWithDpRank, usize>,
         FxHashMap<WorkerWithDpRank, usize>,
     ) {
+        let cached_tokens = cached_tokens_from_overlap_scores(overlaps, sequences.block_size);
         let table = sequences.workers.read();
         let mut potential_blocks = FxHashMap::default();
         let mut potential_tokens = FxHashMap::default();
@@ -1025,9 +1026,9 @@ mod tests {
             });
             let new_blocks =
                 token_sequence.map_or(0, |query| query.len().saturating_sub(overlap_depth));
-            let overlap = *overlaps.scores.get(&slot.worker).unwrap_or(&0);
+            let worker_cached_tokens = *cached_tokens.get(&slot.worker).unwrap_or(&0);
             let added_tokens = if track_prefill_tokens {
-                seq.new_tokens(isl, overlap)
+                seq.new_tokens(isl, worker_cached_tokens)
             } else {
                 0
             };
@@ -1035,6 +1036,17 @@ mod tests {
             potential_tokens.insert(slot.worker, seq.active_tokens(decay_now) + added_tokens);
         }
         (potential_blocks, potential_tokens)
+    }
+
+    fn cached_tokens_from_overlap_scores(
+        overlaps: &OverlapScores,
+        block_size: usize,
+    ) -> HashMap<WorkerWithDpRank, usize> {
+        overlaps
+            .scores
+            .iter()
+            .map(|(worker, overlap_blocks)| (*worker, (*overlap_blocks as usize) * block_size))
+            .collect()
     }
 
     fn seq_hashes_for_tokens(tokens: &[u32], lora_name: Option<&str>) -> Vec<SequenceHash> {
@@ -1068,18 +1080,20 @@ mod tests {
         let decay_now = Instant::now();
 
         sequences
-            .add_request(SequenceRequest {
-                request_id: "req-1".to_string(),
-                token_sequence: Some(vec![1, 2, 3]),
-                isl: 12,
-                cached_tokens: 0,
-                track_prefill_tokens: false,
-                expected_output_tokens: None,
-                prefill_load_hint: None,
-                worker,
-                lora_name: None,
-            })
-            .await
+            .add_request(
+                SequenceRequest {
+                    request_id: "req-1".to_string(),
+                    token_sequence: Some(vec![1, 2, 3]),
+                    isl: 12,
+                    cached_tokens: 0,
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                decay_now,
+            )
             .unwrap();
 
         assert_eq!(
@@ -1101,7 +1115,7 @@ mod tests {
                     request_id: "req-a".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
                     isl: 12,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1124,7 +1138,7 @@ mod tests {
                     request_id: "req-b".to_string(),
                     token_sequence: Some(vec![1, 2, 4]),
                     isl: 12,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1154,7 +1168,7 @@ mod tests {
         let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             Some(&prompt),
             16,
-            actual_overlaps,
+            cached_tokens_from_overlap_scores(&actual_overlaps, sequences.block_size),
             true,
             decay_now,
         );
@@ -1181,7 +1195,7 @@ mod tests {
                     request_id: "base".to_string(),
                     token_sequence: Some(base_prompt.clone()),
                     isl: 8,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1197,7 +1211,7 @@ mod tests {
                     request_id: "lora".to_string(),
                     token_sequence: Some(lora_prompt),
                     isl: 8,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1219,7 +1233,7 @@ mod tests {
         let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             Some(&base_prompt),
             8,
-            OverlapScores::default(),
+            HashMap::new(),
             false,
             decay_now,
         );
@@ -1245,7 +1259,7 @@ mod tests {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
                     isl: 12,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1275,7 +1289,7 @@ mod tests {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
                     isl: 12,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1294,7 +1308,7 @@ mod tests {
                     request_id: "req-2".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
                     isl: 12,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1319,7 +1333,7 @@ mod tests {
         let actual = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             Some(&[1, 2, 3]),
             12,
-            OverlapScores::default(),
+            HashMap::new(),
             false,
             Instant::now(),
         );
@@ -1345,7 +1359,7 @@ mod tests {
                     data: ActiveSequenceEventData::AddRequest {
                         token_sequence: Some(vec![1, 2, 3]),
                         isl: 12,
-                        overlap: 0,
+                        cached_tokens: 0,
                         track_prefill_tokens: true,
                         expected_output_tokens: None,
                         prefill_load_hint: None,
@@ -1391,7 +1405,7 @@ mod tests {
                 data: ActiveSequenceEventData::AddRequest {
                     token_sequence: Some(vec![1, 2, 3]),
                     isl: 12,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1427,7 +1441,7 @@ mod tests {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
                     isl: 12,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1461,7 +1475,7 @@ mod tests {
                     request_id: request_id.clone(),
                     token_sequence: Some(vec![1, 2, 3]),
                     isl: 12,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: false,
                     expected_output_tokens: None,
                     prefill_load_hint: None,
@@ -1513,7 +1527,7 @@ mod tests {
                     request_id: "req-1".to_string(),
                     token_sequence: Some(vec![1, 2, 3]),
                     isl: 100,
-                    overlap: 0,
+                    cached_tokens: 0,
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: Some(PrefillLoadHint {
@@ -1534,7 +1548,7 @@ mod tests {
         let (_, potential_tokens) = sequences.potential_blocks_and_tokens_with_prefill_tracking(
             None,
             0,
-            OverlapScores::default(),
+            HashMap::new(),
             false,
             decay_now,
         );

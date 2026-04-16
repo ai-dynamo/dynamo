@@ -7,7 +7,7 @@ use rand::Rng;
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
-use super::types::{KvSchedulerError, SchedulingRequest};
+use super::types::{KvSchedulerError, SchedulingRequest, pinned_worker_config};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// A trait that users can implement to define custom selection logic.
@@ -175,8 +175,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let isl = request.isl_tokens;
         let request_blocks = isl.div_ceil(block_size as usize);
-        let decode_blocks = &request.decode_blocks;
-        let prefill_tokens = &request.prefill_tokens;
 
         let overlap_weight = request
             .router_config_override
@@ -184,11 +182,53 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .and_then(|cfg| cfg.overlap_score_weight)
             .unwrap_or(self.kv_router_config.overlap_score_weight);
 
+        if let Some(worker) = pinned_worker {
+            pinned_worker_config(workers, worker)?;
+
+            let score = self.worker_score(
+                request,
+                worker,
+                block_size,
+                overlap_weight,
+                "Pinned formula",
+            );
+            let effective_overlap_blocks = request
+                .effective_overlap_blocks
+                .get(&worker)
+                .copied()
+                .unwrap_or(0.0);
+            let cached_tokens = request
+                .effective_cached_tokens
+                .get(&worker)
+                .copied()
+                .unwrap_or(0);
+
+            tracing::info!(
+                "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, raw overlap blocks: {}, effective cached blocks: {:.2}",
+                self.worker_type,
+                worker.worker_id,
+                worker.dp_rank,
+                score.logit,
+                score.overlap_blocks,
+                effective_overlap_blocks,
+            );
+
+            return Ok(WorkerSelectionResult {
+                worker,
+                required_blocks: request_blocks as u64,
+                overlap_blocks: effective_overlap_blocks.round() as u32,
+                effective_overlap_blocks,
+                cached_tokens,
+            });
+        }
+
         let temperature = request
             .router_config_override
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.kv_router_config.router_temperature);
+        let decode_blocks = &request.decode_blocks;
+        let prefill_tokens = &request.prefill_tokens;
 
         let get_score = |worker: WorkerWithDpRank| -> f64 {
             let effective_overlap_blocks = *request

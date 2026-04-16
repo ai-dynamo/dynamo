@@ -277,6 +277,12 @@ impl<
             return;
         };
 
+        let prefill_load_hint = self.prefill_load_hint_for(
+            request.isl_tokens,
+            selection.cached_tokens,
+            request.track_prefill_tokens,
+        );
+
         if let Err(e) = self.slots.add_request(
             SequenceRequest {
                 request_id: request_id.clone(),
@@ -285,7 +291,7 @@ impl<
                 cached_tokens: selection.cached_tokens,
                 track_prefill_tokens: request.track_prefill_tokens,
                 expected_output_tokens: request.expected_output_tokens,
-                prefill_load_hint: None,
+                prefill_load_hint,
                 worker: selection.worker,
                 lora_name: request.lora_name.clone(),
             },
@@ -298,14 +304,14 @@ impl<
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        overlap_blocks: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
-        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let prefix = cached_tokens.min(isl_tokens);
         let effective_isl = isl_tokens.saturating_sub(prefix);
         if effective_isl == 0 {
             return None;
@@ -497,6 +503,16 @@ mod tests {
                 worker,
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
                 overlap_blocks: request.overlaps.scores.get(&worker).copied().unwrap_or(0),
+                effective_overlap_blocks: request
+                    .effective_overlap_blocks
+                    .get(&worker)
+                    .copied()
+                    .unwrap_or(0.0),
+                cached_tokens: request
+                    .effective_cached_tokens
+                    .get(&worker)
+                    .copied()
+                    .unwrap_or(0),
             })
         }
     }

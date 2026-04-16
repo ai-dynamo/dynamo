@@ -13,12 +13,12 @@ use dynamo_kv_router::{
     approx::PruneConfig,
     config::KvRouterConfig,
     indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
-        LowerTierContinuation, LowerTierMatchDetails, MatchDetails,
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierContinuation,
+        LowerTierMatchDetails, MatchDetails,
     },
     protocols::{
-        DpRank, LocalBlockHash, OverlapScores, RouterEvent, StorageTier, TokensWithHashes, WorkerId,
-        WorkerWithDpRank,
+        DpRank, LocalBlockHash, OverlapScores, RouterEvent, StorageTier, TokensWithHashes,
+        WorkerId, WorkerWithDpRank,
     },
 };
 use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
@@ -112,14 +112,9 @@ fn query_lower_tiers(
             continue;
         };
 
-        let continuations_before = continuations.len();
         if let Some(&first_hash) = sequence.first() {
             let root_workers: Vec<_> = indexer.backend().root_workers(first_hash);
-            let mut new_roots = 0usize;
             for worker in root_workers.iter() {
-                if !continuations.contains_key(worker) {
-                    new_roots += 1;
-                }
                 continuations
                     .entry(*worker)
                     .or_insert_with(|| LowerTierContinuation::from_root(0));
@@ -510,7 +505,11 @@ mod tests {
 
     fn make_test_concurrent_indexer() -> Indexer {
         Indexer::Concurrent {
-            primary: Arc::new(ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 4)),
+            primary: Arc::new(ThreadPoolIndexer::new(
+                ConcurrentRadixTreeCompressed::new(),
+                2,
+                4,
+            )),
             lower_tier: LowerTierIndexers::new(2, 4),
         }
     }
@@ -845,7 +844,14 @@ mod tests {
 
         // Worker has the same blocks in both device and host-pinned storage.
         indexer
-            .apply_event(store_event(7, 0, 1, &[], &[11, 12, 13], StorageTier::Device))
+            .apply_event(store_event(
+                7,
+                0,
+                1,
+                &[],
+                &[11, 12, 13],
+                StorageTier::Device,
+            ))
             .await;
         indexer
             .apply_event(store_event(

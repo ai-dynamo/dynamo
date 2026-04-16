@@ -15,11 +15,12 @@
 //! event is ignored.
 
 use std::hash::BuildHasher;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use super::{SyncIndexer, WorkerTask};
+use super::{KvIndexerMetrics, SyncIndexer, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
@@ -492,7 +493,11 @@ impl Default for LowerTierIndexer {
 }
 
 impl SyncIndexer for LowerTierIndexer {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        _metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut worker_blocks = WorkerBlockIndex::default();
 
         while let Ok(task) = event_receiver.recv() {
@@ -1487,7 +1492,12 @@ mod tests {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
-                50, 0, 0, None, &[1, 2, 3, 4, 5], &[101, 102, 103, 104, 105],
+                50,
+                0,
+                0,
+                None,
+                &[1, 2, 3, 4, 5],
+                &[101, 102, 103, 104, 105],
             ))
             .unwrap();
 
@@ -1497,11 +1507,12 @@ mod tests {
             LowerTierContinuation::from_root(0),
         );
 
-        let details =
-            index.query_match_details(&local_hashes(&[1, 2, 3, 4, 5]), &continuations);
+        let details = index.query_match_details(&local_hashes(&[1, 2, 3, 4, 5]), &continuations);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(50, 0)), Some(&5));
         assert_eq!(
-            details.next_continuations.get(&WorkerWithDpRank::new(50, 0)),
+            details
+                .next_continuations
+                .get(&WorkerWithDpRank::new(50, 0)),
             Some(&LowerTierContinuation::new(
                 5,
                 ExternalSequenceBlockHash(105),
@@ -1543,11 +1554,12 @@ mod tests {
             LowerTierContinuation::from_root(0),
         );
 
-        let details =
-            index.query_match_details(&local_hashes(&[1, 2, 3]), &continuations);
+        let details = index.query_match_details(&local_hashes(&[1, 2, 3]), &continuations);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(52, 0)), Some(&2));
         assert_eq!(
-            details.next_continuations.get(&WorkerWithDpRank::new(52, 0)),
+            details
+                .next_continuations
+                .get(&WorkerWithDpRank::new(52, 0)),
             Some(&LowerTierContinuation::new(
                 2,
                 ExternalSequenceBlockHash(102),
@@ -1576,8 +1588,7 @@ mod tests {
             LowerTierContinuation::from_root(0),
         );
 
-        let details =
-            index.query_match_details(&local_hashes(&[1, 2, 3]), &continuations);
+        let details = index.query_match_details(&local_hashes(&[1, 2, 3]), &continuations);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(60, 0)), Some(&3));
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(61, 0)), Some(&0));
     }
@@ -1610,8 +1621,7 @@ mod tests {
             LowerTierContinuation::from_root(0),
         );
 
-        let details =
-            index.query_match_details(&local_hashes(&[1, 2]), &continuations);
+        let details = index.query_match_details(&local_hashes(&[1, 2]), &continuations);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(70, 0)), Some(&2));
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(71, 0)), Some(&2));
     }
@@ -1624,7 +1634,12 @@ mod tests {
         // Worker 80 owns [1,2,3,4], worker 81 owns only [1,2].
         index
             .apply_event(store_event(
-                80, 0, 0, None, &[1, 2, 3, 4], &[101, 102, 103, 104],
+                80,
+                0,
+                0,
+                None,
+                &[1, 2, 3, 4],
+                &[101, 102, 103, 104],
             ))
             .unwrap();
         index
@@ -1641,19 +1656,22 @@ mod tests {
             LowerTierContinuation::from_root(0),
         );
 
-        let details =
-            index.query_match_details(&local_hashes(&[1, 2, 3, 4]), &continuations);
+        let details = index.query_match_details(&local_hashes(&[1, 2, 3, 4]), &continuations);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(80, 0)), Some(&4));
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(81, 0)), Some(&2));
         assert_eq!(
-            details.next_continuations.get(&WorkerWithDpRank::new(80, 0)),
+            details
+                .next_continuations
+                .get(&WorkerWithDpRank::new(80, 0)),
             Some(&LowerTierContinuation::new(
                 4,
                 ExternalSequenceBlockHash(104),
             )),
         );
         assert_eq!(
-            details.next_continuations.get(&WorkerWithDpRank::new(81, 0)),
+            details
+                .next_continuations
+                .get(&WorkerWithDpRank::new(81, 0)),
             Some(&LowerTierContinuation::new(
                 2,
                 ExternalSequenceBlockHash(102),
@@ -1680,8 +1698,7 @@ mod tests {
             LowerTierContinuation::from_root(0),
         );
 
-        let details =
-            index.query_match_details(&local_hashes(&[1, 2]), &continuations);
+        let details = index.query_match_details(&local_hashes(&[1, 2]), &continuations);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(91, 0)), Some(&0));
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(92, 0)), Some(&0));
     }
@@ -1695,7 +1712,12 @@ mod tests {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
-                95, 0, 0, None, &[1, 2, 3, 4], &[101, 102, 103, 104],
+                95,
+                0,
+                0,
+                None,
+                &[1, 2, 3, 4],
+                &[101, 102, 103, 104],
             ))
             .unwrap();
         index
@@ -1712,8 +1734,7 @@ mod tests {
             LowerTierContinuation::new(2, ExternalSequenceBlockHash(102)),
         );
 
-        let details =
-            index.query_match_details(&local_hashes(&[1, 2, 3, 4]), &continuations);
+        let details = index.query_match_details(&local_hashes(&[1, 2, 3, 4]), &continuations);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(95, 0)), Some(&4));
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(96, 0)), Some(&2));
     }
@@ -1740,24 +1761,11 @@ mod tests {
             );
         }
 
-        let details =
-            index.query_match_details(&local_hashes(&[1]), &continuations);
-        assert_eq!(
-            details.hits.get(&WorkerWithDpRank::new(100, 0)),
-            Some(&1),
-        );
-        assert_eq!(
-            details.hits.get(&WorkerWithDpRank::new(101, 0)),
-            Some(&1),
-        );
-        assert_eq!(
-            details.hits.get(&WorkerWithDpRank::new(102, 0)),
-            Some(&0),
-        );
-        assert_eq!(
-            details.hits.get(&WorkerWithDpRank::new(103, 0)),
-            Some(&0),
-        );
+        let details = index.query_match_details(&local_hashes(&[1]), &continuations);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(100, 0)), Some(&1),);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(101, 0)), Some(&1),);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(102, 0)), Some(&0),);
+        assert_eq!(details.hits.get(&WorkerWithDpRank::new(103, 0)), Some(&0),);
     }
 
     /// Empty continuations map — should return empty results without panicking.
@@ -1771,8 +1779,7 @@ mod tests {
         let continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation> =
             FxHashMap::default();
 
-        let details =
-            index.query_match_details(&local_hashes(&[1, 2]), &continuations);
+        let details = index.query_match_details(&local_hashes(&[1, 2]), &continuations);
         assert!(details.hits.is_empty());
         assert!(details.next_continuations.is_empty());
     }
@@ -1816,9 +1823,7 @@ mod tests {
     fn dump_round_trip_single_chain() {
         let mut index = TestLowerTierIndex::new();
         index
-            .apply_event(store_event(
-                7, 0, 0, None, &[11, 12, 13], &[101, 102, 103],
-            ))
+            .apply_event(store_event(7, 0, 0, None, &[11, 12, 13], &[101, 102, 103]))
             .unwrap();
 
         let events = index.dump_events();
@@ -1915,18 +1920,18 @@ mod tests {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(
-                5, 0, 0, Some(800), &[31, 32, 33], &[301, 302, 303],
+                5,
+                0,
+                0,
+                Some(800),
+                &[31, 32, 33],
+                &[301, 302, 303],
             ))
             .unwrap();
 
         // Remove the middle block.
         index
-            .apply_event(remove_event(
-                5,
-                1,
-                0,
-                vec![ExternalSequenceBlockHash(302)],
-            ))
+            .apply_event(remove_event(5, 1, 0, vec![ExternalSequenceBlockHash(302)]))
             .unwrap();
 
         let events = index.dump_events();
@@ -2009,14 +2014,12 @@ mod tests {
         let mut continuations = FxHashMap::default();
         continuations.insert(worker, LowerTierContinuation::from_root(0));
 
-        let original =
-            index
-                .backend()
-                .query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
-        let replayed =
-            restored
-                .backend()
-                .query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
+        let original = index
+            .backend()
+            .query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
+        let replayed = restored
+            .backend()
+            .query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
         assert_eq!(original, replayed);
         assert_eq!(replayed.get(&worker), Some(&3));
     }
