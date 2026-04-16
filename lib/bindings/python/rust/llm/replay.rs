@@ -1345,7 +1345,18 @@ impl PlannerReplayBridge {
 
     /// Drain accumulated traffic metrics since the last drain.
     ///
-    /// Returns a dict with `duration_s`, `num_req`, `avg_isl`, `avg_osl`.
+    /// Returns a dict with:
+    ///   - `duration_s`   (f64): window length in seconds
+    ///   - `num_req`      (usize): completed requests in the window
+    ///   - `avg_isl`      (f64): mean input sequence length (tokens)
+    ///   - `avg_osl`      (f64): mean output sequence length (tokens)
+    ///   - `avg_ttft_ms`  (f64): mean time-to-first-token in milliseconds,
+    ///                          averaged only over requests that reported
+    ///                          a TTFT sample (0.0 when no samples)
+    ///   - `avg_itl_ms`   (f64): mean inter-token latency in milliseconds,
+    ///                          averaged only over requests that generated
+    ///                          at least one token gap (0.0 when no samples)
+    ///
     /// Call this only on throughput-scaling ticks so the observation window
     /// covers the full `throughput_adjustment_interval`.
     fn drain_traffic(&mut self, py: Python<'_>) -> PyResult<PyObject> {

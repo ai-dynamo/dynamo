@@ -83,6 +83,13 @@ pub struct TrafficStats {
 
 /// Accumulates traffic statistics between planner ticks for deriving
 /// `TrafficObservation` (num_req, avg ISL, avg OSL over a window).
+///
+/// Latency samples are tracked independently of request counts: a request
+/// only contributes to ``total_ttft_ms`` / ``ttft_count`` if a positive TTFT
+/// was recorded, and similarly for ITL.  This means ``avg_ttft_ms`` and
+/// ``avg_itl_ms`` reflect only requests that actually produced the sample,
+/// rather than silently underestimating when some requests lack latency
+/// data (e.g. requests that fail before emitting a token).
 #[derive(Debug)]
 pub(in crate::replay::offline) struct TrafficAccumulator {
     window_start_ms: f64,
@@ -91,6 +98,7 @@ pub(in crate::replay::offline) struct TrafficAccumulator {
     total_osl: usize,
     total_ttft_ms: f64,
     total_itl_ms: f64,
+    ttft_count: usize,
     itl_count: usize,
 }
 
@@ -103,6 +111,7 @@ impl TrafficAccumulator {
             total_osl: 0,
             total_ttft_ms: 0.0,
             total_itl_ms: 0.0,
+            ttft_count: 0,
             itl_count: 0,
         }
     }
@@ -118,7 +127,10 @@ impl TrafficAccumulator {
         self.total_isl += input_tokens;
         self.total_osl += output_tokens;
         if let Some((ttft_ms, mean_itl_ms)) = latencies {
-            self.total_ttft_ms += ttft_ms;
+            if ttft_ms > 0.0 {
+                self.total_ttft_ms += ttft_ms;
+                self.ttft_count += 1;
+            }
             if mean_itl_ms > 0.0 {
                 self.total_itl_ms += mean_itl_ms;
                 self.itl_count += 1;
@@ -140,8 +152,8 @@ impl TrafficAccumulator {
         } else {
             0.0
         };
-        let avg_ttft_ms = if num_req > 0 {
-            self.total_ttft_ms / num_req as f64
+        let avg_ttft_ms = if self.ttft_count > 0 {
+            self.total_ttft_ms / self.ttft_count as f64
         } else {
             0.0
         };
@@ -156,6 +168,7 @@ impl TrafficAccumulator {
         self.total_osl = 0;
         self.total_ttft_ms = 0.0;
         self.total_itl_ms = 0.0;
+        self.ttft_count = 0;
         self.itl_count = 0;
         TrafficStats {
             duration_s,

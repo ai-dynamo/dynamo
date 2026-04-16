@@ -122,16 +122,22 @@ class LoadScalingMixin:
         if not p_stats and not d_stats:
             logger.warning("No FPM data for either prefill or decode, skipping")
             self._diag_load_reason = "no_fpm_data"
+            self._diag_load_reason_prefill = "no_fpm_data"
+            self._diag_load_reason_decode = "no_fpm_data"
             return None
         if p_stats and not self._reconcile_fpm_worker_count(
             p_stats, self._num_p_workers, "prefill"
         ):
             self._diag_load_reason = "worker_count_mismatch"
+            self._diag_load_reason_prefill = "worker_count_mismatch"
+            self._diag_load_reason_decode = "worker_count_mismatch"
             return None
         if d_stats and not self._reconcile_fpm_worker_count(
             d_stats, self._num_d_workers, "decode"
         ):
             self._diag_load_reason = "worker_count_mismatch"
+            self._diag_load_reason_prefill = "worker_count_mismatch"
+            self._diag_load_reason_decode = "worker_count_mismatch"
             return None
 
         easy = self._config.optimization_target != "sla"
@@ -163,17 +169,25 @@ class LoadScalingMixin:
         # stay below a throughput-scaling lower bound that was raised on
         # a previous (or same) tick.
         original_p, original_d = final_p, final_d
+        # Apply throughput floor first and track the post-floor value so we
+        # can attribute later lifts to their real source -- throughput
+        # capping is a distinct diagnostic from min_endpoint / global-budget
+        # lifts, which should not be labelled "scale_down_capped_by_throughput".
         if self._config.enable_throughput_scaling:
             final_p = max(final_p, self._throughput_lower_bound_p)
             final_d = max(final_d, self._throughput_lower_bound_d)
+        post_floor_p, post_floor_d = final_p, final_d
 
         final_p = max(final_p, self._config.min_endpoint)
         final_d = max(final_d, self._config.min_endpoint)
         final_p, final_d = self._apply_global_budget(final_p, final_d)
 
         # Per-component reasons
-        def _reason(final: int, original: int, current: int) -> str:
-            floor_capped = final > original and original < current
+        def _reason(final: int, original: int, post_floor: int, current: int) -> str:
+            # Only classify as throughput-capped when the throughput floor
+            # itself lifted the load decision; later min_endpoint / budget
+            # adjustments don't count.
+            floor_capped = post_floor > original and original < current
             if final > current:
                 return "scale_up"
             if final < current:
@@ -183,10 +197,10 @@ class LoadScalingMixin:
             return "scale_down_capped_by_throughput" if floor_capped else "no_change"
 
         self._diag_load_reason_prefill = _reason(
-            final_p, original_p, self._num_p_workers
+            final_p, original_p, post_floor_p, self._num_p_workers
         )
         self._diag_load_reason_decode = _reason(
-            final_d, original_d, self._num_d_workers
+            final_d, original_d, post_floor_d, self._num_d_workers
         )
 
         # Aggregate reason: prioritise "most interesting" across components.
@@ -316,14 +330,11 @@ class LoadScalingMixin:
             return None
 
         if desired < num_workers:
-            if floor_capped:
-                self._diag_load_reason = "scale_down_capped_by_throughput"
-            else:
-                self._diag_load_reason = "scale_down"
-        elif desired > num_workers:
+            self._diag_load_reason = (
+                "scale_down_capped_by_throughput" if floor_capped else "scale_down"
+            )
+        else:  # desired > num_workers (equality returned above)
             self._diag_load_reason = "scale_up"
-        else:
-            self._diag_load_reason = "no_change"
 
         logger.info(f"Agg load-based scaling: {num_workers} -> {desired}")
         return ScalingDecision(num_decode=desired)

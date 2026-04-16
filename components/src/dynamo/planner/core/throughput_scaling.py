@@ -105,14 +105,17 @@ class ThroughputScalingMixin:
         num_p = self._compute_prefill_replicas(demand_rps, isl, osl)
         num_d = self._compute_decode_replicas(demand_rps, isl, osl)
         # _compute_* sets _diag_throughput_reason = "model_not_ready" when
-        # the regression isn't fit yet; record per-component reasons.
-        self._diag_throughput_reason_prefill = (
-            "model_not_ready" if num_p is None else None
-        )
-        self._diag_throughput_reason_decode = (
-            "model_not_ready" if num_d is None else None
-        )
+        # the regression isn't fit yet.  If one side is not ready, the other
+        # side's computation was still valid but its decision is blocked,
+        # so we label it "partner_not_ready" to keep per-component
+        # diagnostics consistent with the aggregate reason.
         if num_p is None or num_d is None:
+            self._diag_throughput_reason_prefill = (
+                "model_not_ready" if num_p is None else "partner_not_ready"
+            )
+            self._diag_throughput_reason_decode = (
+                "model_not_ready" if num_d is None else "partner_not_ready"
+            )
             return None
 
         reason = "set_lower_bound" if self._config.enable_load_scaling else "scale"

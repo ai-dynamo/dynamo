@@ -574,6 +574,7 @@ class DiagnosticsRecorder:
             "no_traffic_data": "yellow",
             "predict_failed": "red",
             "model_not_ready": "orange",
+            "partner_not_ready": "pink",
         }
 
         # Detect disagg mode: if any per-component reason is populated,

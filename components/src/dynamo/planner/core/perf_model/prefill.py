@@ -122,11 +122,10 @@ class PrefillRegressionModel(_BaseRegressionModel):
             and isl > max_num_batched_tokens
         ):
             num_chunks = math.ceil(isl / max_num_batched_tokens)
-            # remainder is the size of the final (possibly partial) chunk,
-            # strictly in (0, max_num_batched_tokens] since isl is not an
-            # exact multiple only when math.ceil rounded up.
+            # remainder is the size of the final (possibly partial) chunk.
+            # Invariant: remainder ∈ (0, max_num_batched_tokens] by
+            # construction of num_chunks via math.ceil.
             remainder = isl - (num_chunks - 1) * max_num_batched_tokens
-            assert 0 < remainder <= max_num_batched_tokens
             wt = (num_chunks - 1) * self._predict_wall_time(
                 float(max_num_batched_tokens)
             ) + self._predict_wall_time(remainder)

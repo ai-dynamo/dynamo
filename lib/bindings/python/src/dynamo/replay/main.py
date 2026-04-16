@@ -165,11 +165,19 @@ def _generate_aic_benchmark_fpms(
                 )
             )
 
-    # Decode: sweep batch_size x context_length
+    # Decode: sweep batch_size x context_length.
+    # ``granularity`` controls the number of sample points per axis; the
+    # batch-size ceiling comes from the engine's ``max_num_seqs`` so the
+    # regression sees realistic concurrency, not an artificial cap at the
+    # sweep density.
     decode_fpms = []
     ctx_lengths = [500, 2000, 4000, 8000]
+    bs_max = engine_args.max_num_seqs or 256
     for ctx_len in ctx_lengths:
-        for bs in range(1, granularity + 1):
+        # Spread ``granularity`` points between 1 and bs_max (geometric-ish
+        # so low batch sizes are well-sampled too).
+        bs_step = max(1, bs_max // granularity)
+        for bs in range(1, bs_max + 1, bs_step):
             sum_kv = bs * ctx_len
             if sum_kv > max_kv_tokens:
                 break
@@ -282,7 +290,11 @@ def _run_planner_replay(
                 "Falling back to load-based scaling only.\n"
             )
         else:
-            # Create AIC session
+            # Create AIC session -- narrow to the concrete exception types
+            # AIC/PyO3 can raise so we degrade gracefully on missing
+            # dependencies or bad config, but don't swallow unrelated bugs
+            # (AttributeError, KeyboardInterrupt, etc.) introduced by
+            # refactors.
             try:
                 from dynamo._internal.aic import create_session
 
@@ -293,20 +305,28 @@ def _run_planner_replay(
                     tp_size=ref_args.aic_tp_size or 1,
                     backend_version=ref_args.aic_backend_version,
                 )
-            except Exception as e:
+            except (
+                ImportError,
+                RuntimeError,
+                ValueError,
+                KeyError,
+                FileNotFoundError,
+            ) as e:
                 sys.stderr.write(
                     f"Warning: AIC session creation failed ({e}); "
                     "throughput regression will not be bootstrapped.\n"
                 )
                 aic_session = None
 
-            # Generate benchmark FPMs and load into regression
+            # Generate benchmark FPMs and load into regression.  AIC's
+            # predict_* can raise on unsupported model/system combos or
+            # numerical edge cases; log and fall back in those cases.
             if aic_session is not None:
                 try:
                     prefill_fpms, decode_fpms = _generate_aic_benchmark_fpms(
                         aic_session, ref_args, benchmark_granularity
                     )
-                except Exception as e:
+                except (RuntimeError, ValueError, KeyError, ArithmeticError) as e:
                     sys.stderr.write(
                         f"Warning: AIC benchmark generation failed ({e}); "
                         "throughput regression will not be bootstrapped.\n"

@@ -201,6 +201,13 @@ class _BaseRegressionModel:
     # index 0 (num_decode_requests), which is a weaker secondary feature.
     _relaxable_feature_indices: frozenset[int] = frozenset()
 
+    # Coefficients within this band of 0 are treated as numerical noise
+    # when a feature is marked relaxable.  Anything more negative than this
+    # implies the regression is learning an inverted relationship and is
+    # rejected (or clipped, for relaxable features) so the planner does not
+    # scale on physically impossible predictions.
+    _RELAXABLE_NEG_TOLERANCE = 1e-6
+
     def _fit(self) -> bool:
         observations = self._gather_observations()
         if len(observations) < self.min_observations:
@@ -215,22 +222,36 @@ class _BaseRegressionModel:
         # is physically impossible.  Reject the fit so callers see the model
         # as not ready rather than making inverted scaling decisions.
         # Exception: features in ``_relaxable_feature_indices`` may go
-        # slightly negative; the overall prediction remains monotone in the
-        # dominant feature, so we accept the fit as-is.
-        neg_mask = self._model.coef_ < 0
+        # slightly negative due to multicollinearity / noise; accept tiny
+        # (within-tolerance) negatives as-is, and clamp larger relaxable
+        # negatives to 0 so predictions remain monotone in that feature.
+        coef = self._model.coef_
+        neg_mask = coef < 0
         if np.any(neg_mask):
             non_relaxable_negs = [
                 i
-                for i in range(len(self._model.coef_))
+                for i in range(len(coef))
                 if neg_mask[i] and i not in self._relaxable_feature_indices
             ]
             if non_relaxable_negs:
                 logger.warning(
-                    f"Regression produced negative coefficients {self._model.coef_.tolist()}, "
+                    f"Regression produced negative coefficients {coef.tolist()}, "
                     "model rejected — scaling will be skipped until more data arrives"
                 )
                 self._is_fitted = False
                 return False
+            # Any negatives remaining here are on relaxable features.  Clamp
+            # those that exceed the noise tolerance so the model never
+            # predicts lower wall time for higher values of that feature.
+            large_negs = neg_mask & (coef < -self._RELAXABLE_NEG_TOLERANCE)
+            if np.any(large_negs):
+                logger.debug(
+                    "Clamped large negative relaxable coefficients at indices "
+                    "%s from %s to 0",
+                    [i for i in range(len(coef)) if large_negs[i]],
+                    coef.tolist(),
+                )
+                coef[large_negs] = 0.0
 
         self._is_fitted = True
         return True
