@@ -10,6 +10,10 @@ from typing import Any, TypeAlias
 
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
+from sglang.srt.entrypoints.openai.protocol import ToolChoice as SglangToolChoice
+from sglang.srt.entrypoints.openai.protocol import (
+    ToolChoiceFuncName as SglangToolChoiceFuncName,
+)
 from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
@@ -143,11 +147,23 @@ def build_tool_call_guided_decoding(
     constraint: Any = None
 
     if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        # get_json_schema_constraint branches on isinstance(tool_choice,
+        # ToolChoice) for the named-function case — passing our raw dict
+        # would silently fall through and return None, disabling guided
+        # decoding and letting the model omit required fields.
+        sglang_tool_choice: Any = tool_choice
+        if _is_named_tool_choice(tool_choice):
+            sglang_tool_choice = SglangToolChoice(
+                type="function",
+                function=SglangToolChoiceFuncName(
+                    name=tool_choice["function"]["name"],
+                ),
+            )
         constraint = (
             "json_schema",
             get_json_schema_constraint(
                 sglang_tools,
-                tool_choice,
+                sglang_tool_choice,
                 parallel_tool_calls=parallel_tool_calls,
             ),
         )
