@@ -26,6 +26,7 @@ marker which routes to a dedicated CI job kept out of
 
 import logging
 import os
+import shlex
 import subprocess
 import time
 
@@ -153,6 +154,53 @@ def test_frontend_api_surface_compliance(
         _run_claude_exec_smoke(claude_home, agent_cwd, marker_filename, frontend_port)
 
 
+def _attach_subprocess_log(
+    name: str,
+    cmd: list[str],
+    result: subprocess.CompletedProcess,
+    extra_env: dict[str, str] | None = None,
+    cwd: str | None = None,
+) -> None:
+    """Attach a reproducible transcript of `cmd` to the Allure report.
+
+    Lands in `test-results/allure-results/<uuid>-attachment.txt`, which the
+    CI workflow uploads as an artifact on every run (pass or fail). Contents
+    are a cut-and-paste-able shell invocation plus the raw stdout + stderr
+    so a failing CI run can be reproduced locally from the artifact alone.
+
+    Only explicitly listed env vars (`extra_env`) are recorded — not the
+    inherited `os.environ` — to avoid leaking runner secrets into the
+    artifact. CI runners keep HF tokens and cloud creds in env vars the
+    subprocess inherits; we don't need those in the log to reproduce.
+    """
+    # Local import: `allure` is only available inside the test image (via
+    # allure-pytest). Pre-commit's collection-only pytest runs in a clean
+    # uvx env without it, so a module-level import would fail collection.
+    import allure
+
+    lines: list[str] = []
+    if cwd:
+        lines.append(f"$ cd {shlex.quote(cwd)}")
+    if extra_env:
+        for k, v in sorted(extra_env.items()):
+            lines.append(f"$ export {k}={shlex.quote(v)}")
+    lines.append("$ " + " ".join(shlex.quote(c) for c in cmd))
+    lines.append("")
+    lines.append(f"exit: {result.returncode}")
+    lines.append("")
+    lines.append("=== stdout ===")
+    lines.append(result.stdout or "(empty)")
+    lines.append("")
+    lines.append("=== stderr ===")
+    lines.append(result.stderr or "(empty)")
+
+    allure.attach(
+        "\n".join(lines),
+        name=name,
+        attachment_type=allure.attachment_type.TEXT,
+    )
+
+
 def _wait_for_frontend_healthy(
     frontend_port: int, timeout_s: float = 15.0, model: str = COMPLIANCE_MODEL
 ) -> None:
@@ -190,27 +238,32 @@ def _run_bun_compliance(frontend_port: int) -> None:
     base_url = f"http://localhost:{frontend_port}/v1"
     logger.info("Running OpenResponses compliance suite against %s", base_url)
 
+    cmd = [
+        "bun",
+        "run",
+        "bin/compliance-test.ts",
+        "--base-url",
+        base_url,
+        "--api-key",
+        "sk-compliance-dummy",
+        "--model",
+        COMPLIANCE_MODEL,
+        "--verbose",
+    ]
     result = subprocess.run(
-        [
-            "bun",
-            "run",
-            "bin/compliance-test.ts",
-            "--base-url",
-            base_url,
-            "--api-key",
-            "sk-compliance-dummy",
-            "--model",
-            COMPLIANCE_MODEL,
-            "--verbose",
-        ],
+        cmd,
         cwd=OPENRESPONSES_DIR,
         capture_output=True,
         text=True,
         timeout=180,
     )
 
-    # Surface the suite output whether it passed or failed so CI logs are
-    # self-contained; pytest will attach these to the failure diff.
+    _attach_subprocess_log(
+        name="bun_compliance_suite.log",
+        cmd=cmd,
+        result=result,
+        cwd=OPENRESPONSES_DIR,
+    )
     if result.stdout:
         logger.info("compliance stdout:\n%s", result.stdout)
     if result.stderr:
@@ -254,23 +307,24 @@ def _run_codex_exec_smoke(codex_home, cwd, marker_filename: str) -> None:
     """
     logger.info("Running codex exec smoke test against CODEX_HOME=%s", codex_home)
 
-    env = {
-        **os.environ,
+    extra_env = {
         "CODEX_HOME": str(codex_home),
         "LOCAL_API_KEY": "sk-none",
     }
+    env = {**os.environ, **extra_env}
 
+    cmd = [
+        "codex",
+        "-m",
+        COMPLIANCE_MODEL,
+        "-c",
+        "model_provider=local",
+        "exec",
+        "Run `ls` in the current directory and tell me the filenames.",
+        "--dangerously-bypass-approvals-and-sandbox",
+    ]
     result = subprocess.run(
-        [
-            "codex",
-            "-m",
-            COMPLIANCE_MODEL,
-            "-c",
-            "model_provider=local",
-            "exec",
-            "Run `ls` in the current directory and tell me the filenames.",
-            "--dangerously-bypass-approvals-and-sandbox",
-        ],
+        cmd,
         cwd=str(cwd),
         env=env,
         capture_output=True,
@@ -278,6 +332,13 @@ def _run_codex_exec_smoke(codex_home, cwd, marker_filename: str) -> None:
         timeout=180,
     )
 
+    _attach_subprocess_log(
+        name="codex_exec_smoke.log",
+        cmd=cmd,
+        result=result,
+        extra_env=extra_env,
+        cwd=str(cwd),
+    )
     if result.stdout:
         logger.info("codex stdout:\n%s", result.stdout)
     if result.stderr:
@@ -316,22 +377,23 @@ def _run_claude_exec_smoke(
     base_url = f"http://localhost:{frontend_port}"
     logger.info("Running claude exec smoke test against %s", base_url)
 
-    env = {
-        **os.environ,
+    extra_env = {
         "HOME": str(claude_home),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
     }
+    env = {**os.environ, **extra_env}
 
+    cmd = [
+        "claude",
+        "--model",
+        COMPLIANCE_MODEL,
+        "--dangerously-skip-permissions",
+        "-p",
+        "Run `ls` in the current directory and tell me the filenames.",
+    ]
     result = subprocess.run(
-        [
-            "claude",
-            "--model",
-            COMPLIANCE_MODEL,
-            "--dangerously-skip-permissions",
-            "-p",
-            "Run `ls` in the current directory and tell me the filenames.",
-        ],
+        cmd,
         cwd=str(cwd),
         env=env,
         capture_output=True,
@@ -339,6 +401,13 @@ def _run_claude_exec_smoke(
         timeout=180,
     )
 
+    _attach_subprocess_log(
+        name="claude_exec_smoke.log",
+        cmd=cmd,
+        result=result,
+        extra_env=extra_env,
+        cwd=str(cwd),
+    )
     if result.stdout:
         logger.info("claude stdout:\n%s", result.stdout)
     if result.stderr:
