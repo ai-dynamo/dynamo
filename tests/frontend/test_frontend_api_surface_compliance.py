@@ -59,12 +59,16 @@ COMPLIANCE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 # health checks + teardown. 750s leaves headroom for CI variance
 # without masking real hangs.
 @pytest.mark.timeout(750)
-# Routed to the dedicated `frontend-api-surface-compliance-check` CI job,
-# deliberately *not* listed in `backend-status-check.needs` — failures
-# surface on the PR but don't block merge. Promote by adding the job to
-# that list once the suite's signal is trustworthy. Marker is outside
-# `pre_merge` so the main sglang gate job's filter doesn't pick it up.
+# Routed to the dedicated `frontend-api-surface-compliance-check` CI job
+# on PRs, deliberately *not* listed in `backend-status-check.needs` —
+# failures surface on the PR but don't block merge. Promote by adding
+# the job to that list once the suite's signal is trustworthy. Marker
+# is outside `pre_merge` so the main sglang gate job's filter doesn't
+# pick it up; `post_merge` satisfies the repo's required Lifecycle
+# marker check and runs the suite on main after merge for trailing
+# signal via post-merge-ci.yml.
 @pytest.mark.frontend_api_surface_compliance
+@pytest.mark.post_merge
 def test_frontend_api_surface_compliance(
     request,
     runtime_services_dynamic_ports,
