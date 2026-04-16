@@ -610,8 +610,11 @@ spec:
                             - mi200
                             - mi300
                       description: |-
-                        GPUSKU is the AIC hardware system identifier for the GPU.
-                        When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
+                        GPUSKU selects the GPU type to target.
+                        When omitted, auto-detected by selecting the GPU with the highest
+                        node count, then highest VRAM. In mixed-GPU clusters, set this to
+                        choose which GPU type to use. Discovery and totalGpus are then
+                        restricted to nodes matching this SKU.
                       type: string
                     interconnect:
                       description: |-
@@ -619,18 +622,28 @@ spec:
                         Examples: "pcie", "nvlink", "infiniband".
                       type: string
                     numGpusPerNode:
-                      description: NumGPUsPerNode is the number of GPUs per node.
+                      description: |-
+                        NumGPUsPerNode is the number of GPUs per node.
+                        When omitted, auto-detected from cluster GPU nodes.
                       format: int32
                       type: integer
                     rdma:
                       description: RDMA indicates whether RDMA is available on the cluster.
                       type: boolean
                     totalGpus:
-                      description: TotalGPUs is the total number of GPUs available in the cluster.
+                      description: |-
+                        TotalGPUs is the GPU budget for profiling and deployment.
+                        The profiler uses this to determine parallelism and replica count.
+                        When omitted, computed by counting GPUs on discovered nodes
+                        (filtered by gpuSku when set), temporarily capped at 32 to
+                        limit profiler search space. This cap may be removed in a future
+                        release. Set this field explicitly to override.
                       format: int32
                       type: integer
                     vramMb:
-                      description: VRAMMB is the VRAM per GPU in MiB.
+                      description: |-
+                        VRAMMB is the VRAM per GPU in MiB.
+                        When omitted, auto-detected from cluster GPU nodes.
                       type: number
                   type: object
                 image:
