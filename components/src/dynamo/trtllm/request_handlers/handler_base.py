@@ -789,14 +789,6 @@ class HandlerBase(BaseGenerativeHandler):
             # disaggregated_params is already set above (lines 460-468)
             # Don't overwrite it here as it may contain multimodal_embedding_handles from encoder
 
-        if (
-            self.disaggregation_mode == DisaggregationMode.DECODE
-            and disaggregated_params is None
-        ):
-            logging.error("DECODE: disaggregated_params is None but required!")
-            logging.error(f"DECODE: Request keys: {list(request.keys())}")
-            raise ValueError("Disaggregated params are required for decode mode")
-
         num_output_tokens_so_far = 0
 
         sampling_params = self._override_sampling_params(
@@ -896,11 +888,12 @@ class HandlerBase(BaseGenerativeHandler):
                 scheduling_params=scheduling_params,
             )
 
-            # In disagg decode mode, wrap abort() to defer until first token
-            # (KV transfer complete).
+            # In disagg decode mode with remote prefill, wrap abort() to defer
+            # until the first token is received (KV transfer complete).
             abort_guard = (
                 _DeferredAbort(generation_result)
                 if self.disaggregation_mode == DisaggregationMode.DECODE
+                and disaggregated_params is not None
                 else None
             )
 

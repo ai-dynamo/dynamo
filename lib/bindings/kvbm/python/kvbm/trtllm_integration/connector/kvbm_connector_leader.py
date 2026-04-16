@@ -12,6 +12,7 @@ from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 from kvbm.utils import is_dyn_runtime_enabled, nvtx_annotate
+from tensorrt_llm._torch.pyexecutor import kv_cache_connector
 from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
     KvCacheConnectorScheduler,
     SchedulerOutput,
@@ -21,12 +22,66 @@ from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 
 logger = logging.getLogger(__name__)
 
+
+def _install_generation_only_connector_shim() -> None:
+    """Let opt-in TRT-LLM connector schedulers handle generation-only requests."""
+    manager_cls = kv_cache_connector.KvCacheConnectorManager
+    if getattr(manager_cls, "_dynamo_kvbm_generation_only_shim", False):
+        return
+
+    original_get_num_new_matched_tokens = manager_cls.get_num_new_matched_tokens
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        if not request.is_generation_only_request:
+            return original_get_num_new_matched_tokens(
+                self, request, num_computed_tokens
+            )
+
+        supports_generation_only_requests = self._run_on_leader(
+            lambda: bool(
+                getattr(self.scheduler, "supports_generation_only_requests", False)
+            )
+        )
+        if not supports_generation_only_requests:
+            raise RuntimeError(
+                "Connector API is not supported for generation-only requests!"
+            )
+
+        num_tokens, load_kv_async = self._run_on_leader(
+            lambda: self.scheduler.get_num_new_matched_tokens(
+                request, num_computed_tokens
+            )
+        )
+
+        if num_tokens == 0 and load_kv_async:
+            raise RuntimeError("load_kv_async must be False when num_tokens is 0!")
+
+        if load_kv_async:
+            self.new_async_requests.loading[request.request_id] = request
+
+        self.scheduler_output_manager.record_new_matched_tokens(request, num_tokens)
+        request.py_num_connector_matched_tokens = num_tokens
+
+        return num_tokens
+
+    manager_cls.get_num_new_matched_tokens = get_num_new_matched_tokens
+    manager_cls._dynamo_kvbm_generation_only_shim = True
+    manager_cls._dynamo_kvbm_generation_only_shim_original = (
+        original_get_num_new_matched_tokens
+    )
+    logger.info("Installed Dynamo KVBM TensorRT-LLM generation-only connector shim.")
+
+
+_install_generation_only_connector_shim()
+
 DistributedRuntime = None
 if is_dyn_runtime_enabled():
     from dynamo.runtime import DistributedRuntime
 
 
 class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
+    supports_generation_only_requests = True
+
     def __init__(
         self,
         llm_args: TorchLlmArgs,
@@ -170,6 +225,13 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             Whether the tokens will be loaded asynchronously.
         """
         self._create_slot(request)
+        if request.is_generation_only_request:
+            logger.debug(
+                "Skipping KVBM prefix matching for generation-only request %s",
+                request.request_id,
+            )
+            return 0, False
+
         return self._connector.get_num_new_matched_tokens(
             str(request.request_id),
             len(request.get_tokens(0)),

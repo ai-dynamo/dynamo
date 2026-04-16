@@ -133,6 +133,16 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
 
         return callback
 
+    @staticmethod
+    def _use_forward_pass_callable() -> bool:
+        return os.environ.get(
+            "DYN_KVBM_TRTLLM_USE_FORWARD_PASS_CALLABLE", "false"
+        ).lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+
     def __init__(self, llm_args: TorchLlmArgs):
         super().__init__(llm_args)
 
@@ -205,7 +215,9 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         )
         self.event = torch.cuda.Event()
 
-        # Default to old way of processing offload
+        # Default to the layer hook path. The end-of-forward callable is faster,
+        # but some TRT-LLM disaggregated decode steps can bind the next connector
+        # metadata before that callable drains staged offload operations.
         self.use_forward_pass_callable = False
 
     @nvtx_annotate(category="worker")
@@ -214,6 +226,12 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
         Register a callable object which will be called at the
         end of the forward pass.
         """
+        if not self._use_forward_pass_callable():
+            logger.info(
+                "KVBM TRTLLM forward-pass callable disabled; using layer hooks for offload"
+            )
+            return None
+
         self.use_forward_pass_callable = True
         return self._callable_object()
 

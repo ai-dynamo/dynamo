@@ -330,17 +330,23 @@ impl Worker for KvConnectorWorker {
             }
         }
 
-        debug_assert!(
-            self.onboarding_operations.is_empty(),
-            "onboarding operations should be empty"
-        );
-        self.onboarding_operations = onboarding_operations;
+        if !self.onboarding_operations.is_empty() {
+            tracing::warn!(
+                pending = self.onboarding_operations.len(),
+                incoming = onboarding_operations.len(),
+                "carrying staged onboarding operations across connector metadata bind"
+            );
+        }
+        self.onboarding_operations.extend(onboarding_operations);
 
-        debug_assert!(
-            self.offloading_operations.is_empty(),
-            "offloading operations should be empty"
-        );
-        self.offloading_operations = offloading_operations;
+        if !self.offloading_operations.is_empty() {
+            tracing::warn!(
+                pending = self.offloading_operations.len(),
+                incoming = offloading_operations.len(),
+                "carrying staged offload operations across connector metadata bind"
+            );
+        }
+        self.offloading_operations.extend(offloading_operations);
 
         Ok(())
     }
@@ -369,7 +375,7 @@ impl Worker for KvConnectorWorker {
     }
 
     fn start_load_kv(&mut self) -> anyhow::Result<()> {
-        let onboarding_operations = self.onboarding_operations.clone();
+        let onboarding_operations = std::mem::take(&mut self.onboarding_operations);
         for operation in onboarding_operations {
             let request_id = operation.request_id.clone();
             self.connector.enqueue_request(operation);
