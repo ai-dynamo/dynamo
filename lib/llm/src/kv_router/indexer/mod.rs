@@ -156,12 +156,7 @@ impl Indexer {
                 Err(KvRouterError::IndexerDroppedRequest)
             }
             Self::Remote(remote) => remote
-                .record_hashed_routing_decision(
-                    worker,
-                    local_hashes,
-                    sequence_hashes,
-                    ttl_override,
-                )
+                .record_hashed_routing_decision(worker, local_hashes, sequence_hashes, ttl_override)
                 .await
                 .map_err(|error| {
                     tracing::warn!(error = %error, "Remote indexer write failed");
