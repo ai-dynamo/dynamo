@@ -123,13 +123,16 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
     )
 
 
-def _generate_synthetic_benchmark_fpms(
+def _generate_aic_benchmark_fpms(
+    aic_session,
     engine_args: MockEngineArgs,
     granularity: int = 8,
 ) -> tuple[list, list]:
-    """Generate synthetic FPMs by sweeping the mocker's polynomial perf model.
+    """Generate benchmark FPMs using AIC predictions.
 
-    Returns (prefill_fpms, decode_fpms) consistent with the mocker's timing.
+    Returns (prefill_fpms, decode_fpms) with accurate batch-size-aware timing
+    from the AI Configurator SDK. Works correctly with both agg and disagg
+    regression models.
     """
     from dynamo.common.forward_pass_metrics import (
         ForwardPassMetrics,
@@ -137,47 +140,50 @@ def _generate_synthetic_benchmark_fpms(
     )
 
     max_kv_tokens = engine_args.num_gpu_blocks * engine_args.block_size
-    max_context = max_kv_tokens if max_kv_tokens > 0 else 16384
+    if max_kv_tokens <= 0:
+        max_kv_tokens = 16384 * 16
 
-    # Prefill: sweep ISL with batch_size=1, prefix=0
-    # Polynomial: 4.209989e-07 * tokens^2 + 1.518344e-02 * tokens + 1.650142e+01
+    # Prefill regression operates on sum_prefill_tokens observed in a single
+    # forward pass, so the sweep should not exceed max_num_batched_tokens --
+    # one pass physically cannot process more than that.  For longer ISL, the
+    # caller uses chunked TTFT estimation.
+    prefill_max = engine_args.max_num_batched_tokens or 8192
+    prefill_step = max(1, (prefill_max - 100) // granularity)
+
+    # Prefill: sweep ISL at batch_size=1 within the per-pass token budget
     prefill_fpms = []
-    step = max(1, (max_context - 100) // granularity)
-    for isl in range(100, max_context, step):
-        tokens = float(isl)
-        ttft_ms = 4.209989e-07 * tokens**2 + 1.518344e-02 * tokens + 1.650142e01
-        prefill_fpms.append(
-            ForwardPassMetrics(
-                wall_time=ttft_ms / 1000.0,
-                scheduled_requests=ScheduledRequestMetrics(
-                    num_prefill_requests=1,
-                    sum_prefill_tokens=isl,
-                ),
-            )
-        )
-
-    # Decode: sweep KV utilization with varying batch sizes
-    # Polynomial: -25.74 * pct^2 + 54.01 * pct + 5.74
-    decode_fpms = []
-    for i in range(1, granularity + 1):
-        kv_pct = i / (granularity + 1)
-        active_kv = int(kv_pct * max_kv_tokens)
-        itl_ms = -25.74 * kv_pct**2 + 54.01 * kv_pct + 5.74
-        # Vary batch size to give the regression more signal
-        for ctx_len in [500, 2000, 8000]:
-            batch_size = max(1, active_kv // ctx_len) if ctx_len > 0 else 1
-            sum_decode_kv = batch_size * ctx_len
-            if sum_decode_kv > max_kv_tokens:
-                continue
-            decode_fpms.append(
+    for isl in range(100, prefill_max + 1, prefill_step):
+        ttft_ms = aic_session.predict_prefill(1, isl, 0)
+        if ttft_ms > 0:
+            prefill_fpms.append(
                 ForwardPassMetrics(
-                    wall_time=itl_ms / 1000.0,
+                    wall_time=ttft_ms / 1000.0,
                     scheduled_requests=ScheduledRequestMetrics(
-                        num_decode_requests=batch_size,
-                        sum_decode_kv_tokens=sum_decode_kv,
+                        num_prefill_requests=1,
+                        sum_prefill_tokens=isl,
                     ),
                 )
             )
+
+    # Decode: sweep batch_size x context_length
+    decode_fpms = []
+    ctx_lengths = [500, 2000, 4000, 8000]
+    for ctx_len in ctx_lengths:
+        for bs in range(1, granularity + 1):
+            sum_kv = bs * ctx_len
+            if sum_kv > max_kv_tokens:
+                break
+            itl_ms = aic_session.predict_decode(bs, ctx_len, 2)
+            if itl_ms > 0:
+                decode_fpms.append(
+                    ForwardPassMetrics(
+                        wall_time=itl_ms / 1000.0,
+                        scheduled_requests=ScheduledRequestMetrics(
+                            num_decode_requests=bs,
+                            sum_decode_kv_tokens=sum_kv,
+                        ),
+                    )
+                )
 
     return prefill_fpms, decode_fpms
 
@@ -262,26 +268,40 @@ def _run_planner_replay(
     )
 
     # Bootstrap regression models from mocker's perf model.
-    # Always use synthetic data from the polynomial model so the planner's
-    # capacity estimates are consistent with the simulated engine timing.
+    # AIC provides accurate batch-size-aware timing that works with the
+    # planner's linear regression. The default polynomial model cannot
+    # feed the throughput regression (its decode formula is quadratic in
+    # utilization ratio, causing negative regression coefficients).
     if not adapter._sm._is_easy:
-        if (
-            planner_config.profile_results_dir
-            and planner_config.profile_results_dir != "profiling_results"
-        ):
-            sys.stderr.write(
-                "Warning: ignoring profile_results_dir in replay mode; "
-                "using mocker's polynomial perf model for benchmark data\n"
-            )
         ref_args = extra_engine_args or prefill_engine_args or MockEngineArgs()
-        prefill_fpms, decode_fpms = _generate_synthetic_benchmark_fpms(
-            ref_args, benchmark_granularity
-        )
-        if planner_config.mode == "agg":
-            adapter._sm.load_benchmark_fpms(agg_fpms=decode_fpms)
+        aic_backend = ref_args.aic_backend
+        if aic_backend is not None:
+            try:
+                from dynamo._internal.aic import create_session
+
+                aic_session = create_session(
+                    backend_name=aic_backend,
+                    system=ref_args.aic_system,
+                    model_path=ref_args.aic_model_path,
+                    tp_size=ref_args.aic_tp_size or 1,
+                    backend_version=ref_args.aic_backend_version,
+                )
+                prefill_fpms, decode_fpms = _generate_aic_benchmark_fpms(
+                    aic_session, ref_args, benchmark_granularity
+                )
+                if planner_config.mode == "agg":
+                    adapter._sm.load_benchmark_fpms(agg_fpms=decode_fpms)
+                else:
+                    adapter._sm.load_benchmark_fpms(
+                        prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
+                    )
+            except Exception as e:
+                sys.stderr.write(f"Warning: AIC benchmark generation failed: {e}\n")
         else:
-            adapter._sm.load_benchmark_fpms(
-                prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
+            sys.stderr.write(
+                "Note: throughput-based scaling regression requires AIC perf model "
+                "(set aic_backend/aic_system/aic_model_path in --extra-engine-args). "
+                "Falling back to load-based scaling only.\n"
             )
 
     return adapter.run()

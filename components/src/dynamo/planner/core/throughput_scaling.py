@@ -173,8 +173,11 @@ class ThroughputScalingMixin:
     def _compute_prefill_replicas(
         self, demand_rps: float, isl: float, osl: float
     ) -> Optional[int]:
+        p_caps = self._capabilities.prefill
         engine_rps, ttft_ms = self._prefill_regression.find_best_engine_prefill_rps(
-            ttft_sla=self._config.ttft, isl=isl
+            ttft_sla=self._config.ttft,
+            isl=isl,
+            max_num_batched_tokens=p_caps.max_num_batched_tokens if p_caps else None,
         )
         if engine_rps <= 0:
             logger.warning("Prefill perf model not ready, skipping throughput scaling")
@@ -196,10 +199,13 @@ class ThroughputScalingMixin:
     def _compute_decode_replicas(
         self, demand_rps: float, isl: float, osl: float
     ) -> Optional[int]:
+        d_caps = self._capabilities.decode
         engine_rps, itl_ms = self._decode_regression.find_best_engine_decode_rps(
             itl=self._config.itl,
             context_length=isl + osl / 2,
             osl=osl,
+            max_kv_tokens=d_caps.max_kv_tokens if d_caps else None,
+            max_num_seqs=d_caps.max_num_seqs if d_caps else None,
         )
         if engine_rps <= 0:
             logger.warning("Decode perf model not ready, skipping throughput scaling")
