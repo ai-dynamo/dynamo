@@ -143,9 +143,14 @@ pub enum InputOutputMessageContent {
 }
 
 /// An assistant message echoed back as input for a subsequent turn. Relaxed
-/// compared to upstream `OutputMessage`: `id` and `status` are optional.
+/// compared to upstream `OutputMessage`: `id`, `status`, and `content` are all
+/// optional. Some clients send a bare assistant shell (`{"type":"message",
+/// "role":"assistant"}`) with no `content` at all, usually on pure tool-call
+/// turns; treat absent `content` as an empty vec, same way we treat a missing
+/// `id`/`status`.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct InputOutputMessage {
+    #[serde(default)]
     pub content: Vec<InputOutputMessageContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -199,7 +204,14 @@ pub struct InputMessage {
 // Input-side Item / Message / InputItem / InputParam (shadow upstream)
 // ---------------------------------------------------------------------------
 
-/// Message item within `Item`. Untagged; disambiguated by the `role` field.
+/// Message item within `Item`. Untagged; disambiguated by the `role` field:
+/// the `Output` variant requires `role: "assistant"` (via `AssistantRole`,
+/// which is a single-variant enum) and `Input` requires `role` in
+/// `"user" | "system" | "developer"` (via `InputRole`). A payload with an
+/// unknown role (e.g. `"tool"`) or a missing `role` produces the generic
+/// untagged-enum error — callers are expected to send a valid role. If you
+/// see the "data did not match any variant of untagged enum" failure on this
+/// type, it is almost always a role mismatch.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum MessageItem {
@@ -371,6 +383,27 @@ mod tests {
         match content {
             InputContent::InputImage(img) => assert_eq!(img.detail, ImageDetail::Auto),
             other => panic!("expected InputImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_message_without_content_field_deserializes() {
+        // Bare assistant shell — no `content` field at all. Seen in real
+        // Codex/Agents-SDK traffic on pure tool-call turns. `#[serde(default)]`
+        // on `content` must accept omission and yield an empty vec.
+        let json = serde_json::json!({
+            "type": "message",
+            "role": "assistant"
+        });
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        match item {
+            InputItem::Item(Item::Message(MessageItem::Output(out))) => {
+                assert_eq!(out.role, AssistantRole::Assistant);
+                assert!(out.content.is_empty());
+                assert!(out.id.is_none());
+                assert!(out.status.is_none());
+            }
+            other => panic!("expected Item::Message(Output), got {other:?}"),
         }
     }
 
