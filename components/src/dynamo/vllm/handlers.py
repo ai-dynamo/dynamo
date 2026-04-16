@@ -27,6 +27,7 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
@@ -52,15 +53,20 @@ from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .args import Config
-from .constants import EmbeddingTransferMode
+from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
+from .multimodal_utils.models.qwen import (
+    build_qwen_embedding_params,
+    load_qwen_grid_params,
+)
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
 VIDEO_URL_KEY: Final = "video_url"
+AUDIO_URL_KEY: Final = "audio_url"
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
 
@@ -185,7 +191,8 @@ def build_sampling_params(
     sampling_params.detokenize = False
 
     # Handle guided_decoding - convert to StructuredOutputsParams
-    guided_decoding = request["sampling_options"].get("guided_decoding")
+    sampling_options = request.get("sampling_options", {})
+    guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         sampling_params.structured_outputs = StructuredOutputsParams(
             json=guided_decoding.get("json"),
@@ -196,7 +203,7 @@ def build_sampling_params(
         )
 
     # Apply remaining sampling_options
-    for key, value in request["sampling_options"].items():
+    for key, value in sampling_options.items():
         # Skip guided_decoding - already handled above
         if key == "guided_decoding":
             continue
@@ -204,7 +211,7 @@ def build_sampling_params(
             setattr(sampling_params, key, value)
 
     # Apply stop_conditions
-    for key, value in request["stop_conditions"].items():
+    for key, value in request.get("stop_conditions", {}).items():
         if value is not None and hasattr(sampling_params, key):
             # Do not add stop key to sampling params - dynamo handles stop conditions directly
             if key == "stop":
@@ -392,6 +399,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
+        self.audio_loader = AudioLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
         self.video_loader = VideoLoader(
             enable_frontend_decoding=enable_frontend_decoding
         )
@@ -419,6 +429,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Without encode worker, the embedding will be generated internally by vLLM.
         if encode_worker_client is None:
             return None
+        logger.warning(
+            "Separate multimodal encode-worker routing only applies to image_url "
+            "inputs. video_url inputs are not sent to the encode worker and will "
+            "be processed on the prefill/PD worker instead."
+        )
         # Embedding loader consist of two main components:
         # 1) An remote encode worker client and matching embedding receiver,
         #    which can request remote encode and handle the transfer of embeddings
@@ -1164,8 +1179,28 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         return prompt, sequence_length, embeddings_tensor
 
+    @staticmethod
+    def _get_mm_processor_kwargs(
+        request: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        """Extract mm_processor_kwargs from a request dict.
+
+        Checks the top-level key (client router / Rust preprocessor path)
+        and falls back to ``extra_args`` (KV router path).
+        """
+        mm_processor_kwargs = request.get("mm_processor_kwargs")
+        if mm_processor_kwargs is None:
+            req_extra_args = request.get("extra_args")
+            if isinstance(req_extra_args, dict):
+                mm_processor_kwargs = req_extra_args.get("mm_processor_kwargs")
+        return mm_processor_kwargs
+
     async def _extract_multimodal_data(
-        self, request: Dict[str, Any], request_id: str, context
+        self,
+        request: Dict[str, Any],
+        request_id: str,
+        context,
+        mm_processor_kwargs: Dict[str, Any] | None = None,
     ) -> Dict[str, Any] | None:
         """
         Extract and decode multimodal data from PreprocessedRequest.
@@ -1229,6 +1264,64 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"Extracted {len(videos)} video(s) for multimodal processing"
                 )
 
+        # Handle audio_url entries
+        audio_mm_items = mm_map.get(AUDIO_URL_KEY, [])
+        if audio_mm_items:
+            audios = await self.audio_loader.load_audio_batch(audio_mm_items)
+            if audios:
+                vllm_mm_data["audio"] = audios[0] if len(audios) == 1 else audios
+                logger.debug(
+                    f"Extracted {len(audios)} audio item(s) for multimodal processing"
+                )
+
+        # Extract audio from video URLs when use_audio_in_video is set.
+        # Models expect 1:1 audio/video pairing in the same order.
+        # We load per-video sequentially to preserve ordering; a video
+        # without an audio track raises immediately to avoid corrupting
+        # the alignment.
+        if (
+            video_mm_items
+            and mm_processor_kwargs
+            and mm_processor_kwargs.get("use_audio_in_video", False)
+        ):
+            video_audios: list = []
+            for item in video_mm_items:
+                url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
+                if not url:
+                    raise ValueError(
+                        "use_audio_in_video requires all video items to be "
+                        "URL-based. Got a non-URL video item (e.g. frontend-"
+                        "decoded). Audio extraction from decoded video data "
+                        "is not yet supported."
+                    )
+                try:
+                    audio = await self.audio_loader.load_audio(url)
+                    video_audios.append(audio)
+                except Exception:
+                    logger.error(
+                        "Failed to extract audio from video %s. "
+                        "use_audio_in_video requires every video to "
+                        "contain an audio stream.",
+                        url[:80],
+                    )
+                    raise
+            if video_audios:
+                existing = vllm_mm_data.get("audio")
+                if existing is not None:
+                    all_audios = (
+                        existing if isinstance(existing, list) else [existing]
+                    ) + video_audios
+                else:
+                    all_audios = video_audios
+                vllm_mm_data["audio"] = (
+                    all_audios[0] if len(all_audios) == 1 else all_audios
+                )
+                logger.debug(
+                    "Extracted %d audio track(s) from video URL(s) "
+                    "(use_audio_in_video=True)",
+                    len(video_audios),
+                )
+
         return vllm_mm_data if vllm_mm_data else None
 
     def _build_prompt_from_request(
@@ -1237,6 +1330,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         request_id: str,
         multi_modal_data: Dict[str, Any] | None,
         log_prefix: str = "",
+        mm_processor_kwargs: Dict[str, Any] | None = None,
     ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
         """
         Build a prompt from request, handling both prompt_embeds and token_ids.
@@ -1246,6 +1340,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             request_id: Request ID for logging
             multi_modal_data: Optional multimodal data to attach to TokensPrompt
             log_prefix: Prefix for log messages (e.g., "Prefill " for prefill requests)
+            mm_processor_kwargs: Optional multimodal processor kwargs (e.g.
+                use_audio_in_video) forwarded to the vLLM engine.
 
         Returns:
             Tuple of (prompt, embedding_sequence_length, error_dict) where:
@@ -1288,6 +1384,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         if mm_uuids is not None:
             prompt_kwargs["multi_modal_uuids"] = mm_uuids
+        if mm_processor_kwargs is not None:
+            prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
 
         prompt = TokensPrompt(**prompt_kwargs)
         return prompt, embedding_sequence_length, None
@@ -1586,24 +1684,67 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             kv_params = None
             embedding_params = None
 
+        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        has_mm_data = (
+            "multi_modal_data" in request and request["multi_modal_data"] is not None
+        )
+
+        mm_processor_kwargs = self._get_mm_processor_kwargs(request)
+
         multi_modal_data = None
-        # The decode worker is handling disaggregated requests, the mm embedding will be synthetic
-        if prefill_result is not None and embedding_params is not None:
+        if is_decode_only:
+            # Decode mode: branch on model, not data.
             if is_qwen_vl_model(self.config.model):
-                multi_modal_data = construct_qwen_decode_mm_data(
-                    embedding_params["image_grid_thw"],
-                    embedding_params["embeddings_shape"],
-                    request_id,
-                )
+                # Qwen VL needs embedding_params for mRoPE initialization.
+                if embedding_params is not None:
+                    multi_modal_data = construct_qwen_decode_mm_data(
+                        embedding_params["image_grid_thw"],
+                        embedding_params["embeddings_shape"],
+                        request_id,
+                    )
+                elif has_mm_data and request["multi_modal_data"].get(IMAGE_URL_KEY):
+                    # Guard is on IMAGE_URL_KEY (not just has_mm_data) so
+                    # text-only requests pass through and video/audio fall
+                    # through to re-download below (TODO: proper support).
+                    msg = (
+                        "Decode worker received multimodal request without "
+                        "prefill result"
+                        if prefill_result is None
+                        else "Prefill did not produce required multimodal "
+                        "embedding metadata (image_grid_thw) for Qwen VL "
+                        "decode. Use --route-to-encoder or the P/D launcher "
+                        "with grid_thw computation support"
+                    )
+                    logger.error("Request %s: %s", request_id, msg)
+                    yield {"status": "error", "message": msg}
+                    return
+            # TODO(DIS-1661): video/audio re-downloaded on decode.
+            # TODO(DIS-1664): mixed image+video in disagg decode is not
+            # supported — synthetic image data would be overwritten.
+            if multi_modal_data is None and has_mm_data:
+                mm = request["multi_modal_data"]
+                if mm.get(VIDEO_URL_KEY) or mm.get(AUDIO_URL_KEY):
+                    multi_modal_data = await self._extract_multimodal_data(
+                        request,
+                        request_id,
+                        context,
+                        mm_processor_kwargs=mm_processor_kwargs,
+                    )
         else:
-            # Extract and decode multimodal data if present
+            # Aggregated mode: load images normally
             multi_modal_data = await self._extract_multimodal_data(
-                request, request_id, context
+                request,
+                request_id,
+                context,
+                mm_processor_kwargs=mm_processor_kwargs,
             )
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request, request_id, multi_modal_data
+            request,
+            request_id,
+            multi_modal_data,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         if error is not None:
             yield error
@@ -1784,6 +1925,20 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             encode_worker_client,
         )
 
+        # Cache Qwen VL grid parameters for computing image_grid_thw from
+        # PIL images in the P/D path (no separate encode worker).
+        if is_qwen_vl_model(config.model):
+            self._qwen_grid_params = load_qwen_grid_params(config.model)
+            if self._qwen_grid_params is None and self.embedding_loader is None:
+                logger.error(
+                    "Qwen VL grid params failed to load and no encode worker "
+                    "is configured. P/D multimodal requests will fail because "
+                    "prefill cannot produce embedding_params for decode. "
+                    "Use --route-to-encoder or ensure the model is cached."
+                )
+        else:
+            self._qwen_grid_params = None
+
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
@@ -1796,15 +1951,24 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        mm_processor_kwargs = self._get_mm_processor_kwargs(request)
+
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(
-            request, request_id, context
+            request,
+            request_id,
+            context,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         embedding_params = self._build_embedding_params(multi_modal_data or {})
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request, request_id, multi_modal_data, log_prefix="Prefill "
+            request,
+            request_id,
+            multi_modal_data,
+            log_prefix="Prefill ",
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         if error is not None:
             # Prefill errors need disaggregated_params field
@@ -1914,25 +2078,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     def _build_embedding_params(
         self, multi_modal_data: dict[str, Any]
     ) -> Dict[str, Any] | None:
-        """
-        Helper function to build mm embedding parameters to be consumed by the decode worker, typically
-        decode worker doesn't require any metadata for mm embedding as the content has been consumed by
-        prefill. However, especially found for Qwen models, vLLM's processor will try to expand image
-        tokens in the prompt which requires such a metadata to pass through the processor.
-        """
-        embedding_params = {}
-        if is_qwen_vl_model(self.config.model) and isinstance(
-            multi_modal_data.get("image"), dict
-        ):
-            image_data = multi_modal_data["image"]
-            image_grid_thw = image_data.get("image_grid_thw")
-            image_embeds = image_data.get("image_embeds")
-            if image_grid_thw is not None:
-                embedding_params["image_grid_thw"] = (
-                    image_grid_thw.tolist()
-                    if isinstance(image_grid_thw, torch.Tensor)
-                    else image_grid_thw
-                )
-            if image_embeds is not None:
-                embedding_params["embeddings_shape"] = list(image_embeds.shape)
-        return embedding_params if embedding_params else None
+        if not is_qwen_vl_model(self.config.model):
+            return None
+        return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)

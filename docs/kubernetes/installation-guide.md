@@ -14,7 +14,6 @@ Determine your cluster environment:
 - CRDs already installed cluster-wide - skip CRD installation step
 - A cluster-wide Dynamo operator is likely already running
 - **Do NOT install another operator** - use the existing cluster-wide operator
-- Only install a namespace-restricted operator if you specifically need to prevent the cluster-wide operator from managing your namespace (e.g., testing operator features you're developing)
 
 **Dedicated Cluster** (full cluster admin access):
 - You install CRDs yourself
@@ -147,20 +146,7 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace 
 
 **For Shared/Multi-Tenant Clusters:**
 
-If your cluster has namespace-restricted Dynamo operators, you MUST add namespace restriction to your installation:
-
-```bash
-# Add this flag to the helm install command above
---set dynamo-operator.namespaceRestriction.enabled=true
-```
-
-Note: Use the full path `dynamo-operator.namespaceRestriction.enabled=true` (not just `namespaceRestriction.enabled=true`).
-
-If you see this validation error, you need namespace restriction:
-```
-VALIDATION ERROR: Cannot install cluster-wide Dynamo operator.
-Found existing namespace-restricted Dynamo operators in namespaces: ...
-```
+> **DEPRECATED:** Namespace-restricted mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. New deployments should use the default cluster-wide mode. If you are currently using namespace-restricted mode, plan to migrate to cluster-wide mode.
 
 > [!TIP]
 > For multinode deployments, you need to install multinode orchestration components:
@@ -207,17 +193,13 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 --set "dynamo-operator.modelExpressURL=http://model-express-server.model-express.svc.cluster.local:8080"
 ```
 
-> [!TIP]
-> By default, Dynamo Operator is installed cluster-wide and will monitor all namespaces.
-> If you wish to restrict the operator to monitor only a specific namespace (the helm release namespace by default), you can set the namespaceRestriction.enabled to true.
-> You can also change the restricted namespace by setting the targetNamespace property.
+> [!WARNING]
+> **DEPRECATED:** Namespace-restricted mode is deprecated and will be removed in a future release.
+> By default, Dynamo Operator is installed cluster-wide and will monitor all namespaces. This is the recommended and only supported mode going forward.
 
-```bash
---set "dynamo-operator.namespaceRestriction.enabled=true"
---set "dynamo-operator.namespaceRestriction.targetNamespace=dynamo-namespace" # optional
-```
+### GPU Discovery for DynamoGraphDeploymentRequests (Deprecated Namespace-Scoped Mode)
 
-### GPU Discovery for DynamoGraphDeploymentRequests with Namespace-Scoped Operators
+> **DEPRECATED:** This section applies only to the deprecated namespace-restricted mode. New deployments should use cluster-wide mode, which has GPU discovery by default.
 
 GPU discovery is **enabled by default** for namespace-scoped operators. The Helm chart automatically provisions a ClusterRole/ClusterRoleBinding granting the operator read-only access to node GPU labels.
 
@@ -281,15 +263,13 @@ cd deploy/helm/charts
 # 4. Install Platform (CRDs are automatically installed by the chart)
 helm dep build ./platform/
 
-# To install cluster-wide instead, set NS_RESTRICT_FLAGS="" (empty) or omit that line entirely.
+# NOTE: Namespace-restricted mode is DEPRECATED. Use cluster-wide mode (the default).
 
-NS_RESTRICT_FLAGS="--set dynamo-operator.namespaceRestriction.enabled=true"
 helm install dynamo-platform ./platform/ \
   --namespace "${NAMESPACE}" \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/kubernetes-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret" \
-  ${NS_RESTRICT_FLAGS}
+  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
 
 ```
 
@@ -338,12 +318,7 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 
 Cause: Attempting cluster-wide install on a shared cluster with existing namespace-restricted operators.
 
-Solution: Add namespace restriction to your installation:
-```bash
---set dynamo-operator.namespaceRestriction.enabled=true
-```
-
-Note: Use the full path `dynamo-operator.namespaceRestriction.enabled=true` (not just `namespaceRestriction.enabled=true`).
+Solution: Migrate the existing namespace-restricted operators to cluster-wide mode. Namespace-restricted mode is deprecated and should no longer be used.
 
 **CRDs already exist**
 

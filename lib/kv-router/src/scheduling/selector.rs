@@ -4,9 +4,10 @@
 use std::collections::HashMap;
 
 use rand::Rng;
+use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
-use super::types::{KvSchedulerError, SchedulingRequest};
+use super::types::{KvSchedulerError, SchedulingRequest, pinned_worker_config};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// A trait that users can implement to define custom selection logic.
@@ -24,7 +25,7 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
 /// Helper function for softmax sampling.
 /// Returns the selected worker and its logit.
 fn softmax_sample(
-    logits: &HashMap<WorkerWithDpRank, f64>,
+    logits: &FxHashMap<WorkerWithDpRank, f64>,
     temperature: f64,
 ) -> (WorkerWithDpRank, f64) {
     let mut rng = rand::rng();
@@ -32,7 +33,7 @@ fn softmax_sample(
 }
 
 fn softmax_sample_with_sample(
-    logits: &HashMap<WorkerWithDpRank, f64>,
+    logits: &FxHashMap<WorkerWithDpRank, f64>,
     temperature: f64,
     sample: f64,
 ) -> (WorkerWithDpRank, f64) {
@@ -98,11 +99,55 @@ pub struct DefaultWorkerSelector {
     pub worker_type: &'static str,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WorkerScore {
+    overlap_blocks: u32,
+    logit: f64,
+}
+
 impl DefaultWorkerSelector {
     pub fn new(kv_router_config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
         Self {
             kv_router_config: kv_router_config.unwrap_or_default(),
             worker_type,
+        }
+    }
+
+    fn worker_score(
+        &self,
+        request: &SchedulingRequest,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+        overlap_weight: f64,
+        formula_name: &'static str,
+    ) -> WorkerScore {
+        let isl = request.isl_tokens;
+        let overlap_blocks = request.overlaps.scores.get(&worker).copied().unwrap_or(0);
+        let default_prefill_token = if request.track_prefill_tokens { isl } else { 0 };
+        let prefill_token = request
+            .prefill_tokens
+            .get(&worker)
+            .copied()
+            .unwrap_or(default_prefill_token);
+        let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
+        let decode_block = request
+            .decode_blocks
+            .get(&worker)
+            .copied()
+            .unwrap_or(potential_prefill_block.floor() as usize) as f64;
+        let logit = overlap_weight * potential_prefill_block + decode_block;
+
+        tracing::debug!(
+            "{formula_name} for worker_id={} dp_rank={:?} with {overlap_blocks} cached blocks: {logit:.3} \
+             = {overlap_weight:.1} * prefill_blocks + decode_blocks \
+             = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
+            worker.worker_id,
+            worker.dp_rank
+        );
+
+        WorkerScore {
+            overlap_blocks,
+            logit,
         }
     }
 }
@@ -115,12 +160,16 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
+        request.validate_worker_constraints()?;
 
         let allowed_ids = request.allowed_worker_ids.as_ref();
+        let pinned_worker = request.pinned_worker;
 
-        if allowed_ids.map_or(workers.is_empty(), |ids| {
-            !workers.keys().any(|wid| ids.contains(wid))
-        }) {
+        if pinned_worker.is_none()
+            && allowed_ids.map_or(workers.is_empty(), |ids| {
+                !workers.keys().any(|wid| ids.contains(wid))
+            })
+        {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
@@ -128,8 +177,28 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let request_blocks = isl.div_ceil(block_size as usize);
         let overlaps = &request.overlaps.scores;
 
-        let decode_blocks = &request.decode_blocks;
-        let prefill_tokens = &request.prefill_tokens;
+        if let Some(worker) = pinned_worker {
+            pinned_worker_config(workers, worker)?;
+
+            let overlap_weight = request
+                .router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.overlap_score_weight)
+                .unwrap_or(self.kv_router_config.overlap_score_weight);
+            let score = self.worker_score(
+                request,
+                worker,
+                block_size,
+                overlap_weight,
+                "Pinned formula",
+            );
+
+            return Ok(WorkerSelectionResult {
+                worker,
+                required_blocks: request_blocks as u64,
+                overlap_blocks: score.overlap_blocks,
+            });
+        }
 
         let overlap_weight = request
             .router_config_override
@@ -144,25 +213,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or(self.kv_router_config.router_temperature);
 
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            let overlap = *overlaps.get(&worker).unwrap_or(&0);
-            let prefill_token = *prefill_tokens.get(&worker).unwrap_or(&isl);
-            let potential_prefill_block = (prefill_token as f64) / (block_size as f64);
-            let decode_block = *decode_blocks
-                .get(&worker)
-                .unwrap_or(&(potential_prefill_block.floor() as usize))
-                as f64;
-
-            let logit = overlap_weight * potential_prefill_block + decode_block;
-
-            tracing::debug!(
-                "Formula for worker_id={} dp_rank={:?} with {overlap} cached blocks: {logit:.3} \
-                 = {overlap_weight:.1} * prefill_blocks + decode_blocks \
-                 = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}",
-                worker.worker_id,
-                worker.dp_rank
-            );
-
-            logit
+            self.worker_score(request, worker, block_size, overlap_weight, "Formula")
+                .logit
         };
 
         let worker_iter = workers
@@ -209,7 +261,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 (min_workers[0], min_score)
             }
         } else {
-            let mut worker_logits = HashMap::new();
+            let mut worker_logits = FxHashMap::default();
             for worker in worker_iter {
                 let score = get_score(worker);
                 worker_logits.insert(worker, score);
@@ -273,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_softmax_sample_single_key() {
-        let mut logits = HashMap::new();
+        let mut logits = FxHashMap::default();
         let worker = WorkerWithDpRank::from_worker_id(42);
         for (logit, temperature) in [
             (0.5, 0.1),
@@ -295,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_softmax_sample_zero_temperature() {
-        let mut logits = HashMap::new();
+        let mut logits = FxHashMap::default();
         let worker1 = WorkerWithDpRank::from_worker_id(1);
         let worker2 = WorkerWithDpRank::from_worker_id(2);
         let worker3 = WorkerWithDpRank::from_worker_id(3);
@@ -352,7 +404,7 @@ mod tests {
         let worker2 = WorkerWithDpRank::from_worker_id(2);
         let worker3 = WorkerWithDpRank::from_worker_id(3);
 
-        let logits = HashMap::from([(worker1, 0.0), (worker2, 3.0), (worker3, 9.0)]);
+        let logits = FxHashMap::from_iter([(worker1, 0.0), (worker2, 3.0), (worker3, 9.0)]);
         let entries: Vec<_> = logits
             .iter()
             .map(|(worker, logit)| (*worker, *logit))

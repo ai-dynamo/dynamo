@@ -6,12 +6,15 @@ mod collector;
 mod entrypoints;
 pub(crate) mod offline;
 mod online;
-mod router;
+mod planner_handle;
+mod router_shared;
 mod validate;
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use dynamo_kv_router::PrefillLoadEstimator;
 
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
@@ -34,6 +37,8 @@ pub enum ReplayArgsMode {
     Aggregated,
     Disagg,
 }
+
+pub type ReplayPrefillLoadEstimator = Arc<dyn PrefillLoadEstimator>;
 
 #[derive(Clone, Debug)]
 pub struct OfflineDisaggReplayConfig {
@@ -72,6 +77,7 @@ pub use entrypoints::{
     simulate_trace_requests_with_router_mode, simulate_trace_workload,
     simulate_trace_workload_disagg_with_router_mode, simulate_trace_workload_with_router_mode,
 };
+pub use planner_handle::{PlannerReplayHandle, PlannerTickData};
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(

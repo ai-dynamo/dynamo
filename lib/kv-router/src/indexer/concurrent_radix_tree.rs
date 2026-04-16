@@ -32,7 +32,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{SyncIndexer, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use crate::active_set::reconcile_active_workers;
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Block.
@@ -70,6 +71,14 @@ impl Block {
             children: FxHashMap::default(),
             workers: FxHashSet::default(),
             block_hash: Some(block_hash),
+        }
+    }
+
+    #[inline]
+    fn drop_worker(&mut self, worker: WorkerWithDpRank) {
+        self.workers.remove(&worker);
+        if self.workers.is_empty() {
+            self.children.clear();
         }
     }
 }
@@ -228,16 +237,8 @@ impl ConcurrentRadixTree {
                 let child_count = guard.workers.len();
 
                 if child_count != active_count {
-                    // Workers changed: either dropped out (child < active) or
-                    // stale entries exist (child > active). In both cases,
-                    // retain only workers present in the child, scoring dropouts.
-                    active.retain(|w| {
-                        if guard.workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, matched_depth);
-                            false
-                        }
+                    reconcile_active_workers(&mut active, &guard.workers, |worker| {
+                        scores.scores.insert(worker, matched_depth);
                     });
                     active_count = active.len();
 
@@ -458,11 +459,7 @@ impl ConcurrentRadixTree {
                 continue;
             };
 
-            let mut guard = block.write();
-            guard.workers.remove(&worker);
-            if guard.workers.is_empty() {
-                guard.children.clear();
-            }
+            block.write().drop_worker(worker);
 
             num_removed += 1;
         }
@@ -498,11 +495,7 @@ impl ConcurrentRadixTree {
         for worker in workers {
             if let Some(worker_lookup) = lookup.remove(&worker) {
                 for (_, block) in worker_lookup.into_iter() {
-                    let mut guard = block.write();
-                    guard.workers.remove(&worker);
-                    if guard.workers.is_empty() {
-                        guard.children.clear();
-                    }
+                    block.write().drop_worker(worker);
                 }
 
                 if keep_worker {
@@ -530,11 +523,7 @@ impl ConcurrentRadixTree {
         let key = WorkerWithDpRank { worker_id, dp_rank };
         if let Some(worker_lookup) = lookup.remove(&key) {
             for (_, block) in worker_lookup.into_iter() {
-                let mut guard = block.write();
-                guard.workers.remove(&key);
-                if guard.workers.is_empty() {
-                    guard.children.clear();
-                }
+                block.write().drop_worker(key);
             }
             self.tree_sizes.remove(&key);
         }
@@ -628,14 +617,24 @@ impl ConcurrentRadixTree {
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTree {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
+        let counters = metrics.as_ref().map(|m| m.prebind());
 
         while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
-                    if let Err(e) = self.apply_event(&mut lookup, event) {
-                        tracing::warn!("Failed to apply event: {:?}", e);
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut lookup, event);
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {

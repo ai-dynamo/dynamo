@@ -18,6 +18,7 @@ import pytest
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
     run_basic_router_test,
+    run_disagg_router_decisions_test,
     run_indexers_sync_test,
     run_router_decisions_test,
 )
@@ -81,6 +82,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
         request_plane: str = "tcp",
         store_backend: str = "etcd",
         durable_kv_events: bool = False,
+        namespace: Optional[str] = None,
+        gpu_start_index: int = 0,
+        disaggregation_mode: Optional[str] = None,
         standalone_indexer: bool = False,
         zmq_replay: bool = False,
     ):
@@ -103,8 +107,10 @@ class VLLMProcess(ManagedEngineProcessMixin):
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
-        self.namespace = f"test-namespace-{namespace_suffix}"
-        self.component_name = "backend"
+        self.namespace = namespace or f"test-namespace-{namespace_suffix}"
+        self.component_name = (
+            "prefill" if disaggregation_mode == "prefill" else "backend"
+        )
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
         self.data_parallel_size = data_parallel_size
@@ -170,10 +176,10 @@ class VLLMProcess(ManagedEngineProcessMixin):
             # Calculate GPU device for this process
             if single_gpu:
                 # Force all processes to GPU 0 (for single-GPU testing)
-                gpu_device = "0"
+                gpu_device = str(gpu_start_index)
             elif data_parallel_size is not None:
                 # Worker sees dp_rank GPUs (each DP rank gets its own GPU)
-                worker_start_gpu = worker_idx * data_parallel_size
+                worker_start_gpu = gpu_start_index + worker_idx * data_parallel_size
                 gpu_device = ",".join(
                     str(i)
                     for i in range(
@@ -182,12 +188,21 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 )
             else:
                 # No DP; worker sees one GPU
-                gpu_device = str(worker_idx)
+                gpu_device = str(gpu_start_index + worker_idx)
 
             command = ["python3", "-m", "dynamo.vllm", "--model", model]
 
             if "block_size" in vllm_args:
                 command.extend(["--block-size", str(vllm_args["block_size"])])
+
+            if disaggregation_mode is not None:
+                command.extend(["--disaggregation-mode", disaggregation_mode])
+                command.extend(
+                    [
+                        "--kv-transfer-config",
+                        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    ]
+                )
 
             # Disable CUDA graphs for faster startup & lower memory
             if enforce_eager:
@@ -570,6 +585,40 @@ def test_router_decisions_vllm_dp(
         single_gpu=False,
         test_dp_rank=True,
         extra_process_kwargs={"data_parallel_size": 2},
+    )
+
+
+@pytest.mark.gpu_2
+@pytest.mark.nightly
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
+def test_router_decisions_vllm_disagg(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    run_disagg_router_decisions_test(
+        engine_process_cls=VLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=VLLM_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=MODEL_NAME,
+        block_size=BLOCK_SIZE,
+        num_prefill_workers=2,
+        num_decode_workers=1,
+        prefill_process_kwargs={
+            "single_gpu": True,
+            "gpu_start_index": 0,
+            "disaggregation_mode": "prefill",
+        },
+        decode_process_kwargs={
+            "single_gpu": True,
+            "gpu_start_index": 1,
+            "disaggregation_mode": "decode",
+        },
     )
 
 

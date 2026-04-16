@@ -88,6 +88,7 @@ Note that the default pip wheel built is not compatible with CUDA 13 at the mome
 | `DYN_KVBM_METRICS_PORT` | Metrics port | `6880` |
 | `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` | Disable disk offload filtering to remove SSD lifespan protection | `false` |
 | `DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY` | Minimum priority (0-100) for CPU offload with contiguous (prefix) semantics: offloading stops at the first block below threshold, and all subsequent blocks are also skipped. Used for priority-based filtering. | `0` (no filtering) |
+| `DYN_KVBM_NCCL_MLA_MODE` | Enable NCCL replicated mode for MLA (Multi-Layer Attention) models (e.g., DeepSeek). When set to `true`, rank 0 loads KV blocks from G2/G3 storage and broadcasts to all GPUs via NCCL instead of each GPU loading independently. Requires MPI and optional `nccl` feature for optimal behavior. | `false` |
 
 #### Disk Storage Configuration
 

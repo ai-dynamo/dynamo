@@ -24,7 +24,7 @@ pub use dynamo_runtime::{
 use super::context::{Context, callable_accepts_kwarg};
 use super::errors::py_exception_to_backend_error;
 
-/// Add bingings from this crate to the provided module
+/// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PythonAsyncEngine>()?;
     Ok(())

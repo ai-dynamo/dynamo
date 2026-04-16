@@ -31,14 +31,10 @@ func main() {
 		CgroupRoot:     *cgroupRoot,
 	}
 
-	restoredPID, err := executor.RestoreInNamespace(context.Background(), opts, log)
+	result, err := executor.RestoreInNamespace(context.Background(), opts, log)
 	if err != nil {
 		fatal(log, err, "restore failed")
 	}
-
-	result := struct {
-		RestoredPID int `json:"restoredPID"`
-	}{RestoredPID: restoredPID}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		fatal(log, err, "Failed to write restore result")
 	}

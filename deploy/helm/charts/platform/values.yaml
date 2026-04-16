@@ -69,24 +69,22 @@ dynamo-operator:
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
-  # -- Namespace access controls for the operator
+  # -- DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments.
   namespaceRestriction:
-    # -- Whether to restrict operator to specific namespaces. By default, the operator will run with cluster-wide permissions. Only 1 instance of the operator should be deployed in the cluster. If you want to deploy multiple operator instances, you can set this to true and specify the target namespace (by default, the target namespace is the helm release namespace).
+    # -- DEPRECATED: Do not enable for new deployments. Namespace-restricted mode is deprecated.
     enabled: false
-    # -- Target namespace for operator deployment (leave empty for current namespace)
+    # -- DEPRECATED: Only used in namespace-restricted mode, which is deprecated.
     targetNamespace:
-    # Namespace scope marker lease configuration (used to prevent conflicts when running both cluster-wide and namespace-restricted operators)
+    # -- DEPRECATED: Only used in namespace-restricted mode, which is deprecated.
     lease:
-      # Duration before the namespace scope marker lease expires if not renewed (namespace-restricted mode only). When a namespace-restricted operator is running, it creates a lease in its namespace. The cluster-wide operator detects this lease and excludes that namespace from processing. If the namespace operator stops renewing the lease (e.g., crashes), the lease expires and the cluster-wide operator automatically resumes processing that namespace.
+      # -- DEPRECATED: Lease duration for namespace-restricted mode, which is deprecated.
       duration: 30s
-      # Interval for renewing the namespace scope marker lease (namespace-restricted mode only). The namespace-restricted operator renews its lease at this interval to signal it's still running.
+      # -- DEPRECATED: Lease renew interval for namespace-restricted mode, which is deprecated.
       renewInterval: 10s
 
-  # -- GPU discovery configuration (only applies when namespaceRestriction.enabled=true)
+  # -- DEPRECATED: GPU discovery for namespace-scoped operators is deprecated along with namespace-restricted mode.
   gpuDiscovery:
-    # -- Whether to provision a ClusterRole for the namespace-scoped operator to read GPU node labels.
-    # When true (default), Helm creates a ClusterRole/ClusterRoleBinding granting node read access.
-    # Set to false if your installer lacks ClusterRole creation permissions.
+    # -- DEPRECATED: Only relevant when namespaceRestriction is enabled, which is deprecated.
     enabled: true
 
   # -- The Dynamo discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery. --

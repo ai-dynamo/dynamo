@@ -67,6 +67,7 @@ pub async fn run(
         EngineConfig::Dynamic {
             ref model,
             ref chat_engine_factory,
+            ref prefill_load_estimator,
         } => {
             // Pass the discovery client so the /health endpoint can query active instances
             http_service_builder =
@@ -75,6 +76,7 @@ pub async fn run(
 
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
+            let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service
             // Create namespace filter from model configuration
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
@@ -86,10 +88,12 @@ pub async fn run(
                 http_service.state().manager_clone(),
                 router_config.clone(),
                 migration_limit,
+                migration_max_seq_len,
                 namespace_filter,
                 Arc::new(http_service.clone()),
                 http_service.state().metrics_clone(),
                 chat_engine_factory.clone(),
+                prefill_load_estimator.clone(),
             )
             .await?;
             http_service
@@ -163,17 +167,21 @@ async fn run_watcher(
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
     http_service: Arc<HttpService>,
     metrics: Arc<crate::http::service::metrics::Metrics>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
+    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
 ) -> anyhow::Result<()> {
     let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,
         router_config,
         migration_limit,
+        migration_max_seq_len,
         chat_engine_factory,
+        prefill_load_estimator,
         metrics.clone(),
     );
     tracing::debug!("Waiting for remote model");
@@ -188,6 +196,7 @@ async fn run_watcher(
     // Create a channel to receive model type updates
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
     watch_obj.set_notify_on_model_update(tx);
+    let watch_obj = Arc::new(watch_obj);
 
     // Spawn a task to watch for model type changes and update HTTP service endpoints and metrics
     let _endpoint_enabler_task = tokio::spawn(async move {

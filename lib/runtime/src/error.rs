@@ -51,8 +51,12 @@ pub enum ErrorType {
     Disconnected,
     /// A connection or request timed out.
     ConnectionTimeout,
+    /// The backend accepted the request but stopped responding (stream inactivity timeout).
+    ResponseTimeout,
     /// The request was cancelled (e.g., client disconnected).
     Cancelled,
+    /// The system does not have enough resources to handle the request.
+    ResourceExhausted,
     /// Error originating from a backend engine.
     Backend(BackendError),
 }
@@ -65,7 +69,9 @@ impl fmt::Display for ErrorType {
             ErrorType::CannotConnect => write!(f, "CannotConnect"),
             ErrorType::Disconnected => write!(f, "Disconnected"),
             ErrorType::ConnectionTimeout => write!(f, "ConnectionTimeout"),
+            ErrorType::ResponseTimeout => write!(f, "ResponseTimeout"),
             ErrorType::Cancelled => write!(f, "Cancelled"),
+            ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
             ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
         }
     }
@@ -88,6 +94,8 @@ pub enum BackendError {
     Disconnected,
     /// A connection or request timed out.
     ConnectionTimeout,
+    /// The backend accepted the request but stopped responding (stream inactivity timeout).
+    ResponseTimeout,
     /// The request was cancelled (e.g., client disconnected).
     Cancelled,
     /// The engine process has shut down or crashed.
@@ -104,6 +112,7 @@ impl fmt::Display for BackendError {
             BackendError::CannotConnect => write!(f, "CannotConnect"),
             BackendError::Disconnected => write!(f, "Disconnected"),
             BackendError::ConnectionTimeout => write!(f, "ConnectionTimeout"),
+            BackendError::ResponseTimeout => write!(f, "ResponseTimeout"),
             BackendError::Cancelled => write!(f, "Cancelled"),
             BackendError::EngineShutdown => write!(f, "EngineShutdown"),
             BackendError::StreamIncomplete => write!(f, "StreamIncomplete"),
@@ -458,6 +467,7 @@ mod tests {
             ErrorType::ConnectionTimeout.to_string(),
             "ConnectionTimeout"
         );
+        assert_eq!(ErrorType::ResponseTimeout.to_string(), "ResponseTimeout");
         assert_eq!(ErrorType::Cancelled.to_string(), "Cancelled");
         assert_eq!(
             ErrorType::Backend(BackendError::Unknown).to_string(),
@@ -490,6 +500,10 @@ mod tests {
         assert_eq!(
             ErrorType::Backend(BackendError::StreamIncomplete).to_string(),
             "BackendStreamIncomplete"
+        );
+        assert_eq!(
+            ErrorType::Backend(BackendError::ResponseTimeout).to_string(),
+            "BackendResponseTimeout"
         );
     }
 }

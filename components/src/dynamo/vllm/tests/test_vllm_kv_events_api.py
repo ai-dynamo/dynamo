@@ -194,3 +194,27 @@ class TestVllmKvEventsApi:
         assert decoded[6] == "GPU", f"medium at wrong position: {decoded[6]}"
         assert decoded[7] is None, f"lora_name at wrong position: {decoded[7]}"
         assert decoded[8] is None, f"extra_keys at wrong position: {decoded[8]}"
+
+    def test_block_stored_tuple_extra_keys_serialization_format(self):
+        """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
+        import msgspec
+
+        mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+        event = BlockStored(
+            block_hashes=[123],
+            parent_block_hash=None,
+            token_ids=[1, 2, 3, 4],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+            extra_keys=[((mm_hash, 7),)],
+        )
+
+        decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+
+        assert decoded[0] == "BlockStored"
+        assert decoded[8] == [[[mm_hash, 7]]], (
+            "vLLM multimodal extra_keys no longer serialize as nested tuple/list "
+            f"payloads. Decoded: {decoded[8]!r}"
+        )

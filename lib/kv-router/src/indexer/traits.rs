@@ -3,7 +3,9 @@
 
 use async_trait::async_trait;
 
-use super::{KvRouterError, WorkerTask};
+use std::sync::Arc;
+
+use super::{KvIndexerMetrics, KvRouterError, WorkerTask};
 use crate::protocols::*;
 
 #[async_trait]
@@ -107,7 +109,11 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()>;
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()>;
 
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;

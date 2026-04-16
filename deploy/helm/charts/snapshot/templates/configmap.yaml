@@ -24,7 +24,7 @@ data:
 
     restore:
       nsRestorePath: {{ .Values.config.restore.nsRestorePath | quote }}
-      restoreReadyTimeoutSeconds: {{ .Values.config.restore.restoreReadyTimeoutSeconds }}
+      restoreTimeoutSeconds: {{ .Values.config.restore.restoreTimeoutSeconds }}
 
     criu:
       binaryPath: {{ .Values.config.criu.binaryPath | quote }}

@@ -38,6 +38,8 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -895,12 +897,12 @@ type MultinodeDeployer interface {
 }
 
 // BackendFactory creates backend instances based on the framework type
-func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1alpha1.OperatorConfiguration) Backend {
+func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1alpha1.OperatorConfiguration, parentGraphDeploymentName string) Backend {
 	switch backendFramework {
 	case BackendFrameworkSGLang:
 		return &SGLangBackend{}
 	case BackendFrameworkVLLM:
-		return &VLLMBackend{}
+		return &VLLMBackend{ParentGraphDeploymentName: parentGraphDeploymentName}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
 			MpiRunSecretName: operatorConfig.MPI.SSHSecretName,
@@ -1002,7 +1004,7 @@ func GenerateBasePodSpec(
 	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
-	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, component.Annotations))
+	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, component.Annotations))
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
@@ -1121,7 +1123,7 @@ func GenerateBasePodSpec(
 	if multinodeDeployer == nil {
 		return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 	}
-	backend := BackendFactory(backendFramework, operatorConfig)
+	backend := BackendFactory(backendFramework, operatorConfig, parentGraphDeploymentName)
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
@@ -1182,6 +1184,23 @@ func GenerateBasePodSpec(
 		}
 	}
 
+	// GMS: replace nvidia.com/gpu with a shared DRA claim and add the server sidecar.
+	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
+		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
+			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
+		}
+		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+	}
+
+	// Clone main container into two engine containers (active + standby) for failover.
+	// Runs after GMS so the main container already has DRA claims and shared volume.
+	if isFailoverEnabled(component) {
+		if err := buildFailoverPod(&podSpec, numberOfNodes, backendFramework); err != nil {
+			return nil, fmt.Errorf("failed to build failover pod: %w", err)
+		}
+	}
+
 	return &podSpec, nil
 }
 
@@ -1196,7 +1215,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend configv1alpha1.DiscoveryBackend) ComponentContext {
+func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext) ComponentContext {
 	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	if IsWorkerComponent(component.ComponentType) && component.Labels[commonconsts.KubeLabelDynamoWorkerHash] != "" {
@@ -1208,7 +1227,7 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
-		DiscoveryBackend:               discoveryBackend,
+		Discovery:                      discovery,
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
@@ -1230,7 +1249,7 @@ func generateFrontendSidecar(
 		ComponentType:                  commonconsts.ComponentTypeFrontend,
 		ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
-		DiscoveryBackend:               parentContext.DiscoveryBackend,
+		Discovery:                      parentContext.Discovery,
 		DynamoNamespace:                parentContext.DynamoNamespace,
 	}
 
@@ -1297,6 +1316,7 @@ func GeneratePodSpecForComponent(
 var dgdPropagatedAnnotationKeys = []string{
 	commonconsts.KubeAnnotationEnableMetrics,
 	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
+	commonconsts.KubeAnnotationDynamoKubeDiscoveryMode,
 	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
 	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
 }
@@ -1379,6 +1399,7 @@ func GenerateGrovePodCliqueSet(
 	}
 
 	discoveryBackend := controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
+	discoveryContext := NewDiscoveryContext(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations)
 
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
@@ -1424,6 +1445,7 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
 			}
+
 			if operatorConfig.Checkpoint.Enabled {
 				if err := checkpoint.InjectCheckpointIntoPodSpec(
 					ctx,
@@ -1436,12 +1458,17 @@ func GenerateGrovePodCliqueSet(
 				}
 			}
 
+			minAvailable := int32(1)
+			if isMultinode {
+				minAvailable = r.Replicas
+			}
+
 			clique := &grovev1alpha1.PodCliqueTemplateSpec{
 				Name: strings.ToLower(r.Name),
 				Spec: grovev1alpha1.PodCliqueSpec{
 					RoleName:     strings.ToLower(r.Name),
 					Replicas:     r.Replicas,
-					MinAvailable: ptr.To(int32(1)),
+					MinAvailable: ptr.To(minAvailable),
 					PodSpec:      *podSpec,
 				},
 			}
@@ -1452,7 +1479,7 @@ func GenerateGrovePodCliqueSet(
 			if !isMultinode {
 				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
 			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName)
+			labels, err := generateLabels(component, dynamoDeployment, serviceName, discoveryContext)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate labels: %w", err)
 			}
@@ -1512,6 +1539,7 @@ func generateLabels(
 	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	componentName string,
+	discovery DiscoveryContext,
 ) (map[string]string, error) {
 	labels := make(map[string]string)
 	labels[commonconsts.KubeLabelDynamoSelector] = GetDCDResourceName(dynamoDeployment, componentName, "")
@@ -1540,6 +1568,7 @@ func generateLabels(
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
 	}
+	// Re-apply system labels after user merge to prevent override
 	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dynamoDeployment.Name
 	if component.ComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
@@ -1549,6 +1578,11 @@ func generateLabels(
 	}
 	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+	// Discovery labels on pod template — needed for Pod reflector filtering in container mode
+	if discovery.Backend == configv1alpha1.DiscoveryBackendKubernetes {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 	return labels, nil
 }

@@ -5,15 +5,16 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::time::Instant;
 
 use tokio::sync::Mutex;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use super::policy::{FcfsPolicy, SchedulingPolicy};
+use super::prefill_load::PrefillLoadEstimator;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
-use super::types::{SchedulingRequest, SchedulingResponse};
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use super::types::{SchedulingRequest, SchedulingResponse, pinned_worker_config};
+use crate::protocols::{PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -56,9 +57,14 @@ pub struct SchedulerQueue<
     Sel: WorkerSelector<C> = DefaultWorkerSelector,
 > {
     pending: Mutex<BinaryHeap<QueueEntry<S::Key>>>,
+    /// Serializes admission so worker selection always sees prior bookings.
+    admission_gate: Mutex<()>,
     /// Number of requests currently parked in the pending queue.
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
     pending_count: AtomicUsize,
+    /// Sum of `isl_tokens` for requests currently parked in the pending queue.
+    /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
+    pending_isl_tokens: AtomicUsize,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     /// Cached threshold fraction; None means queueing is disabled.
@@ -68,6 +74,7 @@ pub struct SchedulerQueue<
     block_size: u32,
     selector: Sel,
     policy: S,
+    prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
 }
 
 impl<
@@ -84,13 +91,16 @@ impl<
         block_size: u32,
         selector: Sel,
         policy: S,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> Self {
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
         }
         Self {
             pending: Mutex::new(BinaryHeap::new()),
+            admission_gate: Mutex::new(()),
             pending_count: AtomicUsize::new(0),
+            pending_isl_tokens: AtomicUsize::new(0),
             slots,
             workers_with_configs,
             threshold_frac,
@@ -98,6 +108,7 @@ impl<
             block_size,
             selector,
             policy,
+            prefill_load_estimator,
         }
     }
 
@@ -129,27 +140,43 @@ impl<
     /// If queueing is disabled or workers have capacity, schedule immediately.
     /// Otherwise park in the pending heap.
     ///
-    /// When `allowed_worker_ids` is set on the request (external routing), the
-    /// capacity check is skipped.
-    pub async fn enqueue(&self, request: SchedulingRequest) {
-        let Some(threshold) = self.threshold_frac else {
-            self.schedule(request).await;
-            return;
-        };
-
-        if request.allowed_worker_ids.is_some() {
-            self.schedule(request).await;
+    /// When `allowed_worker_ids` is set on the request without an exact pin
+    /// (external routing), the capacity check is skipped.
+    pub async fn enqueue(&self, mut request: SchedulingRequest) {
+        if let Err(error) = request.validate_worker_constraints() {
+            request.respond(Err(error));
             return;
         }
 
-        if self.all_workers_busy(threshold, request.allowed_worker_ids.as_ref()) {
+        let _admission = self.admission_gate.lock().await;
+        let decay_now = Instant::now();
+
+        let Some(threshold) = self.threshold_frac else {
+            self.admit_one(request, decay_now).await;
+            return;
+        };
+
+        if request.bypass_capacity_check() {
+            self.admit_one(request, decay_now).await;
+            return;
+        }
+
+        if self.all_workers_busy(
+            threshold,
+            request.allowed_worker_ids.as_ref(),
+            request.pinned_worker,
+            decay_now,
+        ) {
             tracing::debug!("all workers busy, queueing request");
             let arrival_offset = self.start_time.elapsed();
             let key = self.policy.enqueue_key(arrival_offset, &request);
+            let isl_tokens = request.isl_tokens;
             self.pending.lock().await.push(QueueEntry { key, request });
             self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
+            self.pending_isl_tokens
+                .fetch_add(isl_tokens, AtomicOrdering::Relaxed);
         } else {
-            self.schedule(request).await;
+            self.admit_one(request, decay_now).await;
         }
     }
 
@@ -176,21 +203,37 @@ impl<
         }
 
         loop {
-            if self.all_workers_busy(threshold, None) {
-                break;
-            }
-            let Some(entry) = self.pending.lock().await.pop() else {
+            let _admission = self.admission_gate.lock().await;
+            let decay_now = Instant::now();
+            let mut heap = self.pending.lock().await;
+            let Some(front) = heap.peek() else {
                 break;
             };
+            // TODO: This preserves head-of-line blocking for now to keep queue
+            // drain overhead bounded to the heap front. A blocked pinned or
+            // otherwise constrained request can temporarily stall later
+            // schedulable entries until we adopt a cheaper non-HOL strategy.
+            if self.all_workers_busy(
+                threshold,
+                front.request.allowed_worker_ids.as_ref(),
+                front.request.pinned_worker,
+                decay_now,
+            ) {
+                break;
+            }
+            let entry = heap.pop().expect("heap front vanished before pop");
+            drop(heap);
             self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
+            self.pending_isl_tokens
+                .fetch_sub(entry.request.isl_tokens, AtomicOrdering::Relaxed);
             tracing::debug!("scheduling request from pending queue");
-            self.schedule(entry.request).await;
+            self.admit_one(entry.request, decay_now).await;
         }
     }
 
     /// Run the full scheduling pipeline for a single request:
     /// compute potential load -> select worker -> respond -> book via add_request.
-    async fn schedule(&self, mut request: SchedulingRequest) {
+    async fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
         let (decode_blocks, prefill_tokens) = self
             .slots
             .potential_blocks_and_tokens_with_prefill_tracking(
@@ -198,6 +241,7 @@ impl<
                 request.isl_tokens,
                 request.overlaps.clone(),
                 request.track_prefill_tokens,
+                decay_now,
             );
         request.decode_blocks = decode_blocks;
         request.prefill_tokens = prefill_tokens;
@@ -231,17 +275,63 @@ impl<
             return;
         };
 
-        if let Err(e) = self.slots.add_request(SequenceRequest {
-            request_id: request_id.clone(),
-            token_sequence: request.token_seq,
-            isl: request.isl_tokens,
-            overlap: selection.overlap_blocks,
-            track_prefill_tokens: request.track_prefill_tokens,
-            expected_output_tokens: request.expected_output_tokens,
-            worker: selection.worker,
-            lora_name: request.lora_name.clone(),
-        }) {
+        let prefill_load_hint = self.prefill_load_hint_for(
+            request.isl_tokens,
+            selection.overlap_blocks,
+            request.track_prefill_tokens,
+        );
+
+        if let Err(e) = self.slots.add_request(
+            SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: request.token_seq,
+                isl: request.isl_tokens,
+                overlap: selection.overlap_blocks,
+                track_prefill_tokens: request.track_prefill_tokens,
+                expected_output_tokens: request.expected_output_tokens,
+                prefill_load_hint,
+                worker: selection.worker,
+                lora_name: request.lora_name.clone(),
+            },
+            decay_now,
+        ) {
             tracing::warn!("Failed to add request {request_id}: {e}");
+        }
+    }
+
+    fn prefill_load_hint_for(
+        &self,
+        isl_tokens: usize,
+        overlap_blocks: u32,
+        track_prefill_tokens: bool,
+    ) -> Option<PrefillLoadHint> {
+        if !track_prefill_tokens {
+            return None;
+        }
+
+        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let effective_isl = isl_tokens.saturating_sub(prefix);
+        if effective_isl == 0 {
+            return None;
+        }
+
+        let Some(estimator) = &self.prefill_load_estimator else {
+            return None;
+        };
+
+        match estimator.predict_prefill_duration(1, effective_isl, prefix) {
+            Ok(expected_prefill_duration) => Some(PrefillLoadHint {
+                initial_effective_prefill_tokens: effective_isl,
+                expected_prefill_duration: Some(expected_prefill_duration),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    effective_isl,
+                    prefix,
+                    "failed to predict prefill duration for active load tracking: {error}"
+                );
+                None
+            }
         }
     }
 
@@ -250,14 +340,38 @@ impl<
         self.pending_count.load(AtomicOrdering::Relaxed)
     }
 
+    /// Sum of `isl_tokens` for requests currently parked in the pending queue (lock-free).
+    pub fn pending_isl_tokens(&self) -> usize {
+        self.pending_isl_tokens.load(AtomicOrdering::Relaxed)
+    }
+
     /// Check if all eligible workers are busy based on threshold.
-    /// When `allowed` is `Some`, only those worker IDs are considered;
+    /// When `pinned_worker` is `Some`, only that exact worker/rank is considered.
+    /// Otherwise when `allowed` is `Some`, only those worker IDs are considered;
     /// otherwise all registered workers are checked.
     /// Returns false when no eligible workers exist so the request falls
     /// through to `schedule`, which returns a proper `NoEndpoints` error.
-    fn all_workers_busy(&self, threshold: f64, allowed: Option<&HashSet<WorkerId>>) -> bool {
-        let active_tokens = self.slots.active_tokens();
+    fn all_workers_busy(
+        &self,
+        threshold: f64,
+        allowed: Option<&HashSet<WorkerId>>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        decay_now: Instant,
+    ) -> bool {
+        let active_tokens = self.slots.active_tokens(decay_now);
         let configs = self.workers_with_configs.borrow();
+
+        if let Some(worker) = pinned_worker {
+            let Ok(config) = pinned_worker_config::<C>(&*configs, worker) else {
+                return false;
+            };
+
+            let max_batched = config
+                .max_num_batched_tokens()
+                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+            return (tokens as f64) > threshold * (max_batched as f64);
+        }
 
         let mut checked_any = false;
         for (&worker_id, config) in configs.iter() {
@@ -288,15 +402,108 @@ impl<
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Condvar, Mutex as StdMutex};
+    use std::time::Duration;
 
-    use tokio::sync::watch;
+    use rustc_hash::FxHashMap;
+    use tokio::sync::{Barrier, watch};
 
     use super::*;
-    use crate::protocols::OverlapScores;
-    use crate::selector::DefaultWorkerSelector;
+    use crate::protocols::{OverlapScores, WorkerSelectionResult, WorkerWithDpRank};
+    use crate::scheduling::types::KvSchedulerError;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
+    use crate::{DefaultWorkerSelector, WorkerSelector};
+
+    fn decay_now() -> Instant {
+        Instant::now()
+    }
+
+    struct FixedPrefillLoadEstimator {
+        duration: Duration,
+    }
+
+    impl PrefillLoadEstimator for FixedPrefillLoadEstimator {
+        fn predict_prefill_duration(
+            &self,
+            _batch_size: usize,
+            _effective_isl: usize,
+            _prefix: usize,
+        ) -> anyhow::Result<Duration> {
+            Ok(self.duration)
+        }
+    }
+
+    #[derive(Default)]
+    struct SelectorRendezvous {
+        arrivals: StdMutex<usize>,
+        cv: Condvar,
+    }
+
+    impl SelectorRendezvous {
+        fn wait_for_peer(&self) {
+            let mut arrivals = self.arrivals.lock().unwrap();
+            *arrivals += 1;
+
+            if *arrivals == 1 {
+                let _ = self
+                    .cv
+                    .wait_timeout(arrivals, Duration::from_millis(100))
+                    .unwrap();
+                return;
+            }
+
+            self.cv.notify_all();
+        }
+    }
+
+    #[derive(Clone)]
+    struct MinDecodeSelector {
+        rendezvous: Option<Arc<SelectorRendezvous>>,
+    }
+
+    impl WorkerSelector<SimpleWorkerConfig> for MinDecodeSelector {
+        fn select_worker(
+            &self,
+            workers: &HashMap<WorkerId, SimpleWorkerConfig>,
+            request: &SchedulingRequest,
+            block_size: u32,
+        ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+            if let Some(rendezvous) = &self.rendezvous {
+                rendezvous.wait_for_peer();
+            }
+
+            let Some(worker) = workers
+                .iter()
+                .flat_map(|(worker_id, config)| {
+                    let dp_start = config.data_parallel_start_rank();
+                    let dp_end = dp_start + config.data_parallel_size();
+                    (dp_start..dp_end)
+                        .map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
+                })
+                .min_by_key(|worker| {
+                    (
+                        request
+                            .prefill_tokens
+                            .get(worker)
+                            .copied()
+                            .unwrap_or(request.isl_tokens),
+                        request.decode_blocks.get(worker).copied().unwrap_or(0),
+                        worker.worker_id,
+                        worker.dp_rank,
+                    )
+                })
+            else {
+                return Err(KvSchedulerError::NoEndpoints);
+            };
+
+            Ok(WorkerSelectionResult {
+                worker,
+                required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
+                overlap_blocks: request.overlaps.scores.get(&worker).copied().unwrap_or(0),
+            })
+        }
+    }
 
     fn make_queue(
         num_workers: usize,
@@ -308,7 +515,54 @@ mod tests {
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
         let (queue, slots, _tx) =
-            make_queue_with_sender(num_workers, block_size, isl, threshold_frac);
+            make_queue_with_sender(num_workers, block_size, isl, threshold_frac, None);
+        (queue, slots)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_queue_with_custom_selector<Sel: WorkerSelector<SimpleWorkerConfig>>(
+        num_workers: usize,
+        block_size: u32,
+        isl: usize,
+        threshold_frac: Option<f64>,
+        selector: Sel,
+    ) -> (
+        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, FcfsPolicy, Sel>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+    ) {
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            block_size as usize,
+            dp_range,
+            false,
+            0,
+            "test",
+        ));
+
+        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
+        for id in 0..num_workers as u64 {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
+        let (_cfg_tx, cfg_rx) = watch::channel(configs);
+
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            threshold_frac,
+            block_size,
+            selector,
+            FcfsPolicy,
+            None,
+        ));
+
         (queue, slots)
     }
 
@@ -318,6 +572,7 @@ mod tests {
         block_size: u32,
         isl: usize,
         threshold_frac: Option<f64>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
@@ -354,6 +609,7 @@ mod tests {
             block_size,
             selector,
             FcfsPolicy,
+            prefill_load_estimator,
         ));
 
         (queue, slots, cfg_tx)
@@ -374,14 +630,15 @@ mod tests {
             token_seq: None,
             isl_tokens,
             overlaps: OverlapScores::default(),
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
             expected_output_tokens: None,
+            pinned_worker: None,
             allowed_worker_ids: None,
             resp_tx: Some(tx),
         };
@@ -409,8 +666,8 @@ mod tests {
                 let resp = resp.expect("scheduling failed");
                 assert!(resp.best_worker.worker_id < num_workers as u64);
 
-                slots.mark_prefill_completed(&req_id).unwrap();
-                slots.free(&req_id).unwrap();
+                slots.mark_prefill_completed(&req_id, decay_now()).unwrap();
+                slots.free(&req_id, decay_now()).unwrap();
                 queue.update().await;
             }));
         }
@@ -419,12 +676,55 @@ mod tests {
             h.await.expect("task panicked");
         }
 
-        let active = slots.active_tokens();
+        let active = slots.active_tokens(decay_now());
         for (worker, tokens) in &active {
             assert_eq!(
                 *tokens, 0,
                 "worker {worker:?} still has {tokens} active tokens"
             );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_concurrent_immediate_admissions_see_prior_booking() {
+        let selector = MinDecodeSelector {
+            rendezvous: Some(Arc::new(SelectorRendezvous::default())),
+        };
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 512, None, selector);
+        let barrier = Arc::new(Barrier::new(3));
+
+        let (req1, rx1) = make_request("req-1", 512);
+        let queue1 = Arc::clone(&queue);
+        let barrier1 = Arc::clone(&barrier);
+        let handle1 = tokio::spawn(async move {
+            barrier1.wait().await;
+            queue1.enqueue(req1).await;
+        });
+
+        let (req2, rx2) = make_request("req-2", 512);
+        let queue2 = Arc::clone(&queue);
+        let barrier2 = Arc::clone(&barrier);
+        let handle2 = tokio::spawn(async move {
+            barrier2.wait().await;
+            queue2.enqueue(req2).await;
+        });
+
+        barrier.wait().await;
+        handle1.await.unwrap();
+        handle2.await.unwrap();
+
+        let resp1 = rx1.await.unwrap().unwrap();
+        let resp2 = rx2.await.unwrap().unwrap();
+        assert_ne!(
+            resp1.best_worker, resp2.best_worker,
+            "second admission should see the first booking and choose the other idle worker"
+        );
+
+        for request_id in ["req-1", "req-2"] {
+            slots
+                .mark_prefill_completed(&request_id.to_string(), decay_now())
+                .unwrap();
+            slots.free(&request_id.to_string(), decay_now()).unwrap();
         }
     }
 
@@ -453,8 +753,8 @@ mod tests {
         for _ in 0..num_requests {
             queue.update().await;
             for rid in &req_ids {
-                let _ = slots.mark_prefill_completed(rid);
-                let _ = slots.free(rid);
+                let _ = slots.mark_prefill_completed(rid, decay_now());
+                let _ = slots.free(rid, decay_now());
             }
         }
         queue.update().await;
@@ -495,8 +795,10 @@ mod tests {
         assert_eq!(queue.pending_count(), 2);
 
         // Free the first request and update — should drain one from pending
-        slots.mark_prefill_completed(&"req-1".to_string()).unwrap();
-        slots.free(&"req-1".to_string()).unwrap();
+        slots
+            .mark_prefill_completed(&"req-1".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"req-1".to_string(), decay_now()).unwrap();
         queue.update().await;
 
         // After update, one pending request should have been scheduled
@@ -507,14 +809,41 @@ mod tests {
         );
 
         // Free req-2 and update to drain remaining
-        let _ = slots.mark_prefill_completed(&"req-2".to_string());
-        let _ = slots.free(&"req-2".to_string());
+        let _ = slots.mark_prefill_completed(&"req-2".to_string(), decay_now());
+        let _ = slots.free(&"req-2".to_string(), decay_now());
         queue.update().await;
-        let _ = slots.mark_prefill_completed(&"req-3".to_string());
-        let _ = slots.free(&"req-3".to_string());
+        let _ = slots.mark_prefill_completed(&"req-3".to_string(), decay_now());
+        let _ = slots.free(&"req-3".to_string(), decay_now());
         queue.update().await;
 
         assert_eq!(queue.pending_count(), 0, "all requests should be drained");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_queue_update_uses_decayed_oldest_prefill_load() {
+        let estimator: Arc<dyn PrefillLoadEstimator> = Arc::new(FixedPrefillLoadEstimator {
+            duration: Duration::from_secs(10),
+        });
+        let (queue, _slots, _cfg_tx) =
+            make_queue_with_sender(1, 16, 100, Some(0.5), Some(estimator));
+
+        let (req1, rx1) = make_request("req-1", 100);
+        queue.enqueue(req1).await;
+        let _ = rx1.await.unwrap().unwrap();
+
+        let (req2, mut rx2) = make_request("req-2", 100);
+        queue.enqueue(req2).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        tokio::time::advance(Duration::from_secs(6)).await;
+        queue.update().await;
+
+        let scheduled = rx2
+            .try_recv()
+            .expect("queued request should have been scheduled");
+        let response = scheduled.expect("scheduling returned error");
+        assert_eq!(response.best_worker.worker_id, 0);
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test]
@@ -542,7 +871,7 @@ mod tests {
         let isl = 512;
 
         // Start with zero workers (mimics skip_initial_worker_wait=true)
-        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None);
+        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Routing with no workers must fail
         let (req_fail, rx_fail) = make_request("before-register", isl);
@@ -590,9 +919,11 @@ mod tests {
 
         // Clean up
         slots
-            .mark_prefill_completed(&"after-register".to_string())
+            .mark_prefill_completed(&"after-register".to_string(), decay_now())
             .unwrap();
-        slots.free(&"after-register".to_string()).unwrap();
+        slots
+            .free(&"after-register".to_string(), decay_now())
+            .unwrap();
     }
 
     /// Register_workers is additive: calling with a new set does NOT remove old workers.
@@ -601,7 +932,7 @@ mod tests {
         let block_size = 16;
         let isl = 256;
 
-        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None);
+        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Register worker 10 in slots and config
         let mut dp1 = std::collections::HashMap::new();
@@ -643,8 +974,8 @@ mod tests {
                 .expect("oneshot dropped")
                 .expect("scheduling failed");
             seen.insert(resp.best_worker.worker_id);
-            slots.mark_prefill_completed(&req_id).unwrap();
-            slots.free(&req_id).unwrap();
+            slots.mark_prefill_completed(&req_id, decay_now()).unwrap();
+            slots.free(&req_id, decay_now()).unwrap();
         }
 
         assert!(
@@ -659,7 +990,7 @@ mod tests {
         let block_size = 16;
         let isl = 256;
 
-        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None);
+        let (queue, slots, cfg_tx) = make_queue_with_sender(0, block_size, isl, None, None);
 
         // Register three workers
         let mut dp = std::collections::HashMap::new();
@@ -690,14 +1021,15 @@ mod tests {
             token_seq: None,
             isl_tokens: isl,
             overlaps: OverlapScores::default(),
-            decode_blocks: HashMap::new(),
-            prefill_tokens: HashMap::new(),
+            decode_blocks: FxHashMap::default(),
+            prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
             update_states: true,
             lora_name: None,
             priority_jump: 0.0,
             expected_output_tokens: None,
+            pinned_worker: None,
             allowed_worker_ids: Some(allowed),
             resp_tx: Some(tx),
         };
@@ -712,9 +1044,89 @@ mod tests {
             resp.best_worker.worker_id
         );
         slots
-            .mark_prefill_completed(&"filter-0".to_string())
+            .mark_prefill_completed(&"filter-0".to_string(), decay_now())
             .unwrap();
-        slots.free(&"filter-0".to_string()).unwrap();
+        slots.free(&"filter-0".to_string(), decay_now()).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pinned_worker_conflict_with_allowed_ids_fails_early() {
+        let (queue, _slots) = make_queue(1, 16, 256, Some(0.0));
+        let (mut req, rx) = make_request("conflict", 256);
+        req.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
+        req.allowed_worker_ids = Some(HashSet::from([1]));
+
+        queue.enqueue(req).await;
+
+        let resp = rx.await.expect("oneshot dropped");
+        assert!(matches!(
+            resp,
+            Err(KvSchedulerError::PinnedWorkerNotAllowed { worker_id: 0 })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pinned_request_head_of_line_blocks_other_worker_capacity() {
+        let (queue, slots) = make_queue(2, 16, 256, Some(0.0));
+
+        let (mut first, first_rx) = make_request("pinned-1", 256);
+        first.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        queue.enqueue(first).await;
+        let first_resp = first_rx.await.unwrap().unwrap();
+        assert_eq!(first_resp.best_worker, WorkerWithDpRank::new(1, 0));
+
+        let (mut second, mut second_rx) = make_request("pinned-2", 256);
+        second.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        queue.enqueue(second).await;
+        assert_eq!(queue.pending_count(), 1);
+        assert!(
+            second_rx.try_recv().is_err(),
+            "request should remain queued"
+        );
+
+        let (occupy_other, occupy_other_rx) = make_request("worker-0", 256);
+        queue.enqueue(occupy_other).await;
+        let occupy_other_resp = occupy_other_rx.await.unwrap().unwrap();
+        assert_eq!(occupy_other_resp.best_worker, WorkerWithDpRank::new(0, 0));
+
+        let (unpinned, mut unpinned_rx) = make_request("unpinned", 256);
+        queue.enqueue(unpinned).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        slots
+            .mark_prefill_completed(&"worker-0".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"worker-0".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        assert_eq!(queue.pending_count(), 2);
+        assert!(
+            unpinned_rx.try_recv().is_err(),
+            "unpinned request should remain queued behind the pinned head"
+        );
+        assert!(
+            second_rx.try_recv().is_err(),
+            "pinned request should still be queued"
+        );
+
+        slots
+            .mark_prefill_completed(&"pinned-1".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"pinned-1".to_string(), decay_now()).unwrap();
+        queue.update().await;
+
+        let second_resp = second_rx
+            .try_recv()
+            .expect("pinned request should have been scheduled");
+        let second_resp = second_resp.expect("scheduling returned error");
+        assert_eq!(second_resp.best_worker, WorkerWithDpRank::new(1, 0));
+
+        let unpinned_resp = unpinned_rx
+            .try_recv()
+            .expect("unpinned request should have been scheduled");
+        let unpinned_resp = unpinned_resp.expect("scheduling returned error");
+        assert_eq!(unpinned_resp.best_worker, WorkerWithDpRank::new(0, 0));
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -727,7 +1139,7 @@ mod tests {
         let _resp1 = rx1.await.unwrap().unwrap();
         assert_eq!(
             slots
-                .active_tokens()
+                .active_tokens(decay_now())
                 .get(&WorkerWithDpRank::new(0, 0))
                 .copied(),
             Some(0)
@@ -738,9 +1150,9 @@ mod tests {
         let _resp2 = rx2.await.unwrap().unwrap();
         assert_eq!(queue.pending_count(), 0);
 
-        let _ = slots.mark_prefill_completed(&"req-1".to_string());
-        let _ = slots.free(&"req-1".to_string());
-        let _ = slots.mark_prefill_completed(&"req-2".to_string());
-        let _ = slots.free(&"req-2".to_string());
+        let _ = slots.mark_prefill_completed(&"req-1".to_string(), decay_now());
+        let _ = slots.free(&"req-1".to_string(), decay_now());
+        let _ = slots.mark_prefill_completed(&"req-2".to_string(), decay_now());
+        let _ = slots.free(&"req-2".to_string(), decay_now());
     }
 }

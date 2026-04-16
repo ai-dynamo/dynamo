@@ -152,12 +152,24 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         librdmacm-devel \
         numactl-devel \
         # Libfabric support
-        hwloc \
-        hwloc-devel \
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
         zlib-devel
+
+# Build hwloc >= 2.3 from source (RHEL8 ships 2.2 which lacks hwloc_location API
+# required by nixl v1.0.x libfabric topology code)
+ARG HWLOC_VERSION=2.12.0
+RUN HWLOC_SERIES="$(echo "${HWLOC_VERSION}" | cut -d. -f1-2)" && \
+    cd /tmp && \
+    curl --retry 3 -LO "https://download.open-mpi.org/release/hwloc/v${HWLOC_SERIES}/hwloc-${HWLOC_VERSION}.tar.gz" && \
+    tar xf hwloc-${HWLOC_VERSION}.tar.gz && \
+    cd hwloc-${HWLOC_VERSION} && \
+    ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/hwloc-*
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -439,9 +451,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,kv-indexer-runtime" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg,kv-indexer" --out /opt/dynamo/dist; \
     else \
-        maturin build --release --features "kv-indexer,kv-indexer-runtime" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer" --out /opt/dynamo/dist; \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
@@ -584,7 +596,9 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     source ${VIRTUAL_ENV}/bin/activate && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
-        maturin build --release --out target/wheels && \
+        KVBM_FEATURES=""; \
+        if [ "$DEVICE" = "cuda" ]; then KVBM_FEATURES="--features nccl"; fi && \
+        maturin build --release ${KVBM_FEATURES} --out target/wheels && \
         if [ "$DEVICE" = "cuda" ]; then \
             auditwheel repair \
                 --exclude libnixl.so \

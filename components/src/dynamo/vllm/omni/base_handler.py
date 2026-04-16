@@ -4,6 +4,7 @@
 """Base handler for vLLM-Omni multi-stage pipelines."""
 
 import asyncio
+import dataclasses
 import logging
 import time
 from typing import Any, AsyncGenerator, Dict
@@ -17,6 +18,8 @@ except ImportError:
     DiffusionParallelConfig = None  # type: ignore[assignment, misc]
 
 from dynamo._core import Context
+from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
+from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
 logger = logging.getLogger(__name__)
@@ -72,31 +75,17 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if config.stage_configs_path:
             omni_kwargs["stage_configs_path"] = config.stage_configs_path
 
-        # Diffusion engine-level params — read directly from config namespace
-        diffusion_fields = [
-            "enable_layerwise_offload",
-            "layerwise_num_gpu_layers",
-            "vae_use_slicing",
-            "vae_use_tiling",
-            "boundary_ratio",
-            "flow_shift",
-            "cache_backend",
-            "cache_config",
-            "enable_cache_dit_summary",
-            "enable_cpu_offload",
-            "enforce_eager",
-        ]
-        for field in diffusion_fields:
-            value = getattr(config, field, None)
+        for field, value in dataclasses.asdict(config.diffusion).items():
             if value is not None:
                 omni_kwargs[field] = value
 
-        # Build DiffusionParallelConfig if available
+        # tensor_parallel_size comes from engine_args (vLLM's --tensor-parallel-size)
         if DiffusionParallelConfig is not None:
             parallel_config = DiffusionParallelConfig(
-                ulysses_degree=getattr(config, "ulysses_degree", 1),
-                ring_degree=getattr(config, "ring_degree", 1),
-                cfg_parallel_size=getattr(config, "cfg_parallel_size", 1),
+                tensor_parallel_size=getattr(
+                    config.engine_args, "tensor_parallel_size", 1
+                ),
+                **dataclasses.asdict(config.parallel),
             )
             omni_kwargs["parallel_config"] = parallel_config
         else:
@@ -170,11 +159,7 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         For AUDIO_GENERATION returns NvAudioSpeechResponse format.
         For all other types returns OpenAI chat.completion.chunk format.
         """
-        from dynamo.common.utils.output_modalities import RequestType
-
         if request_type == RequestType.AUDIO_GENERATION:
-            from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
-
             return NvAudioSpeechResponse(
                 id=request_id,
                 model=self.config.served_model_name or self.config.model,

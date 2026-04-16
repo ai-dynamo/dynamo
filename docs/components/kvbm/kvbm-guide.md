@@ -235,6 +235,23 @@ To disable disk offload filtering:
 export DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER=true
 ```
 
+### NCCL Replicated Mode for MLA Models
+
+For MLA (Multi-Layer Attention) models such as DeepSeek, KVBM can use **NCCL replicated mode** so that only rank 0 loads KV blocks from G2/G3 storage and then broadcasts them to all GPUs via NCCL. This avoids redundant loads and can improve performance when multiple GPUs share the same replicated KV cache.
+
+**Enable NCCL MLA mode:**
+
+```bash
+export DYN_KVBM_NCCL_MLA_MODE=true
+```
+
+**Requirements:**
+
+- MPI must be initialized (e.g., when launching with `mpirun` or equivalent) so that rank and world size are available for NCCL.
+- For optimal broadcast-based replication, build KVBM with the NCCL feature: `cargo build -p kvbm --features nccl`. Without it, the connector falls back to worker-level replication (each GPU loads independently).
+
+When disabled (default), each GPU loads KV blocks independently. Set `DYN_KVBM_NCCL_MLA_MODE=true` when running MLA models with KVBM to use the NCCL broadcast optimization.
+
 ## Enable and View KVBM Metrics
 
 ### Setup Monitoring Stack
