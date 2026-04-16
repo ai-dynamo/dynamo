@@ -228,6 +228,10 @@ struct TcpConnection {
     reader_handle: Arc<JoinHandle<()>>,
     /// Health status (false if tasks have failed)
     healthy: Arc<AtomicBool>,
+    /// Closed for new submissions once the writer begins its terminal drain path.
+    /// This closes the race where a request can enqueue after the final drain pass
+    /// and then wait until the outer request timeout.
+    closed: Arc<AtomicBool>,
     /// Number of in-flight requests (for capacity heuristic)
     inflight: Arc<AtomicU64>,
     /// Max inflight for capacity heuristic (matches channel_buffer)
@@ -239,6 +243,8 @@ struct TcpConnection {
     /// Permit is held for the lifetime of the call and released on drop
     /// (success, error via `?`, or timeout/cancel future drop).
     admission: Arc<tokio::sync::Semaphore>,
+    #[cfg(test)]
+    post_enqueue_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 
 impl TcpConnection {
@@ -257,6 +263,7 @@ impl TcpConnection {
         let response_queue = Arc::new(SegQueue::new());
         let writer_notify = Arc::new(tokio::sync::Notify::new());
         let healthy = Arc::new(AtomicBool::new(true));
+        let closed = Arc::new(AtomicBool::new(false));
         let inflight = Arc::new(AtomicU64::new(0));
         let admission = Arc::new(tokio::sync::Semaphore::new(channel_buffer));
 
@@ -266,14 +273,24 @@ impl TcpConnection {
             let response_q = response_queue.clone();
             let notify = writer_notify.clone();
             let healthy = healthy.clone();
+            let closed = closed.clone();
             let admission = admission.clone();
             tokio::spawn(async move {
-                if let Err(e) =
-                    Self::writer_task(write_half, submit_q, response_q, notify, healthy.clone())
-                        .await
+                if let Err(e) = Self::writer_task(
+                    write_half,
+                    submit_q,
+                    response_q,
+                    notify,
+                    healthy.clone(),
+                    closed.clone(),
+                )
+                .await
                 {
                     tracing::debug!("Writer task failed for {}: {}", addr, e);
+                    // healthy and closed are already set inside writer_task before
+                    // drain_pending; these are idempotent backstops.
                     healthy.store(false, Ordering::Relaxed);
+                    closed.store(true, Ordering::Release);
                     // Unblock any callers currently waiting to acquire a permit
                     // so they fail fast via the post-acquire health re-check.
                     admission.close();
@@ -307,9 +324,12 @@ impl TcpConnection {
             writer_handle: Arc::new(writer_handle),
             reader_handle: Arc::new(reader_handle),
             healthy,
+            closed,
             inflight,
             channel_buffer,
             admission,
+            #[cfg(test)]
+            post_enqueue_barrier: None,
         })
     }
 
@@ -378,6 +398,18 @@ impl TcpConnection {
         }
     }
 
+    /// Drain committed response waiters when the reader determines that no more
+    /// responses can ever arrive on this connection.
+    fn drain_response_waiters(
+        response_queue: &SegQueue<oneshot::Sender<Result<Bytes>>>,
+        err_msg: impl Into<String>,
+    ) {
+        let err_msg = err_msg.into();
+        while let Some(tx) = response_queue.pop() {
+            let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+        }
+    }
+
     /// Writer task: drains SegQueue into a reusable BytesMut, then issues a single
     /// write_all() per drain cycle — one syscall regardless of batch size.
     ///
@@ -405,6 +437,7 @@ impl TcpConnection {
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         notify: Arc<tokio::sync::Notify>,
         healthy: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
     ) -> Result<()> {
         let mut send_buf = BytesMut::with_capacity(WRITER_INITIAL_BUF_CAPACITY);
         // Hoisted outside the loop to reuse allocations across drain cycles.
@@ -537,6 +570,12 @@ impl TcpConnection {
         // may still deliver their responses. If it can't, the oneshot senders
         // drop when TcpConnection is cleaned up and callers get RecvError.
         healthy.store(false, Ordering::Relaxed);
+        // Signal closed BEFORE drain so any concurrent sender that enqueues
+        // between this drain and the end of the function will see closed=true
+        // in its post-enqueue double-check and call drain_pending itself.
+        // Without this, the window between drain_pending and the error handler's
+        // closed.store(true) in the spawned wrapper leaves late enqueues stranded.
+        closed.store(true, Ordering::Release);
         Self::drain_pending(&submit_queue);
 
         result
@@ -576,8 +615,13 @@ impl TcpConnection {
                     let _ = tx.send(Ok(response_msg.data));
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(anyhow::anyhow!("Failed to decode response: {}", e)));
+                    let err_msg = format!("Failed to decode response: {}", e);
+                    let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
                     healthy.store(false, Ordering::Relaxed);
+                    Self::drain_response_waiters(
+                        &response_queue,
+                        format!("Connection closed after decode failure: {}", e),
+                    );
                     // Wake writer so it can detect unhealthy and exit
                     writer_notify.notify_one();
                     return Err(anyhow::anyhow!("Failed to decode response"));
@@ -588,6 +632,10 @@ impl TcpConnection {
         // Connection closed by peer — mark unhealthy so the writer task
         // detects reader death and drains pending callers.
         healthy.store(false, Ordering::Relaxed);
+        Self::drain_response_waiters(
+            &response_queue,
+            "Connection closed before response was received",
+        );
         // Wake writer from Notify.await so it can check healthy and exit
         writer_notify.notify_one();
         Ok(())
@@ -599,6 +647,9 @@ impl TcpConnection {
 
         if !self.healthy.load(Ordering::Relaxed) {
             anyhow::bail!("Connection unhealthy (tasks failed)");
+        }
+        if self.closed.load(Ordering::Acquire) {
+            anyhow::bail!("Connection closed (writer exited)");
         }
 
         let endpoint_path = headers
@@ -640,6 +691,9 @@ impl TcpConnection {
         if !self.healthy.load(Ordering::Relaxed) {
             anyhow::bail!("Connection unhealthy (tasks failed)");
         }
+        if self.closed.load(Ordering::Acquire) {
+            anyhow::bail!("Connection closed (writer exited)");
+        }
 
         // Increment inflight and attach a RAII guard that decrements it on ALL
         // exit paths: normal return, `?` propagation, tokio::time::timeout
@@ -657,8 +711,25 @@ impl TcpConnection {
             response_tx,
         });
 
-        // Wake writer if it was sleeping
-        self.writer_notify.notify_one();
+        #[cfg(test)]
+        if let Some(barrier) = &self.post_enqueue_barrier {
+            barrier.wait().await;
+            barrier.wait().await;
+        }
+
+        // If the writer has already entered terminal cleanup, fail the just-enqueued request
+        // promptly instead of waiting for the outer request timeout.
+        if self.closed.load(Ordering::Acquire) {
+            Self::drain_pending(&self.submit_queue);
+        } else {
+            // Wake writer if it was sleeping
+            self.writer_notify.notify_one();
+            // The writer may close between the first check and notify. Drain once more so
+            // late enqueues do not get stranded past the final writer drain pass.
+            if self.closed.load(Ordering::Acquire) {
+                Self::drain_pending(&self.submit_queue);
+            }
+        }
 
         // Await response. On timeout the enclosing future is dropped here:
         // `_inflight_guard` drops → fetch_sub(Release) runs automatically.
@@ -2327,11 +2398,26 @@ mod tests {
         if let Ok(conn) = result {
             let mut headers = Headers::new();
             headers.insert("x-endpoint-path".to_string(), "test".to_string());
-            let _ = conn.send_request(Bytes::from("test"), &headers).await;
+            let result = tokio::time::timeout(
+                Duration::from_millis(250),
+                conn.send_request(Bytes::from("test"), &headers),
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "send_request should fail promptly when the peer closes cleanly"
+            );
+            assert!(
+                result.unwrap().is_err(),
+                "clean peer close should surface as a request error"
+            );
 
             // Connection should become unhealthy after server drops it
             tokio::time::sleep(Duration::from_millis(50)).await;
-            // Connection health depends on timing, but it should not panic
+            assert!(
+                !conn.is_healthy(),
+                "Connection should become unhealthy after peer closes it"
+            );
         }
     }
 
@@ -2392,6 +2478,49 @@ mod tests {
         );
 
         cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_closed_connection_after_enqueue_fails_promptly() {
+        let (addr, _conn_count) = spawn_echo_server().await;
+
+        let mut conn = TcpConnection::connect(addr, Duration::from_secs(5), 10)
+            .await
+            .unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        conn.post_enqueue_barrier = Some(barrier.clone());
+        let conn = Arc::new(conn);
+
+        let request = {
+            let conn = conn.clone();
+            tokio::spawn(async move {
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                tokio::time::timeout(
+                    Duration::from_millis(200),
+                    conn.send_request(Bytes::from("queued_after_close"), &headers),
+                )
+                .await
+            })
+        };
+
+        // Wait until the request is enqueued, then simulate the writer entering
+        // its terminal cleanup path before it can process the new item.
+        barrier.wait().await;
+        conn.closed.store(true, Ordering::Release);
+        conn.healthy.store(false, Ordering::Relaxed);
+        barrier.wait().await;
+
+        let result = request.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "send_request should fail promptly instead of waiting for request_timeout"
+        );
+        let inner = result.unwrap();
+        assert!(inner.is_err(), "closed connection should return an error");
+
+        conn.writer_handle.abort();
+        conn.reader_handle.abort();
     }
 
     #[tokio::test]
