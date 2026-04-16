@@ -343,7 +343,7 @@ jobs:
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v1
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
       gpu_test_markers: frontend_api_surface_compliance and gpu_1
