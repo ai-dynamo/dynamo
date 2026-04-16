@@ -1352,7 +1352,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         if "prompt_embeds" in request and request["prompt_embeds"]:
             if not self.config.engine_args.enable_prompt_embeds:
-                msg = "Operator must set `--enable-prompt-embeds` to allow `prompt_embeds` in request."
+                msg = (
+                    "Set `--enable-prompt-embeds` to allow `prompt_embeds` in request."
+                )
                 logger.error(
                     f"Rejected prompt_embeds for {log_prefix.lower().strip() or 'request'} "
                     f"{request_id}: {msg}"
