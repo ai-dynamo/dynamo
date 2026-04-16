@@ -165,7 +165,13 @@ def build_tool_call_guided_decoding(
         if constraint[0] == "json_schema":
             return {"json": constraint[1]}
         if constraint[0] == "structural_tag":
-            return {"structural_tag": constraint[1]}
+            tag_value = constraint[1]
+            # SGLang returns a Pydantic model (LegacyStructuralTagResponseFormat)
+            # here.  Convert to a plain dict before it hits the RPC layer —
+            # msgpack/serde_json cannot serialize BaseModel instances.
+            if hasattr(tag_value, "model_dump"):
+                tag_value = tag_value.model_dump()
+            return {"structural_tag": tag_value}
 
     return None
 

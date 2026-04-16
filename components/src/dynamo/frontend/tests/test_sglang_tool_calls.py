@@ -15,6 +15,7 @@ import pytest
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
 from sglang.srt.entrypoints.openai.protocol import Tool as SglangTool
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
+from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
@@ -402,3 +403,79 @@ class TestSingleChunkFallback:
         choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
         assert choice is not None
         assert choice["finish_reason"] == "tool_calls"
+
+
+# ---------------------------------------------------------------------------
+# JsonArrayParser path (tool_choice="required" / named function)
+# ---------------------------------------------------------------------------
+
+
+class TestJsonArrayParserReparse:
+    """Exercise the JsonArrayParser branch of the finish-time re-parse.
+
+    Under ``tool_choice="required"`` or a named function, guided decoding
+    constrains the model to emit a raw JSON array and
+    SglangStreamingPostProcessor is constructed with a JsonArrayParser
+    instead of a FunctionCallParser. The re-parse path uses
+    ``has_tool_call`` on the parser as a cheap gate and
+    ``_parse_json_array_buffer`` for recovery — this class locks in that
+    API surface so a SGLang upgrade can't silently break it.
+    """
+
+    def test_single_call_reparse(self, tokenizer):
+        """Full JSON array arriving in one chunk triggers the re-parse."""
+        text = '[{"name": "get_weather", "parameters": {"city": "NYC"}}]'
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+        )
+        token_ids = tokenizer.encode(text)
+        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
+        assert choice is not None
+        tc = choice.get("delta", {}).get("tool_calls", [])
+        assert len(tc) == 1
+        assert tc[0]["function"]["name"] == "get_weather"
+        assert json.loads(tc[0]["function"]["arguments"]) == {"city": "NYC"}
+        assert choice["finish_reason"] == "tool_calls"
+
+    def test_multiple_calls_reparse(self, tokenizer):
+        """Multiple calls in one chunk; re-parse must recover all."""
+        text = (
+            '[{"name": "search_gutenberg_books", '
+            '"parameters": {"search_terms": ["Joyce"]}}, '
+            '{"name": "get_weather", "parameters": {"city": "London"}}]'
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+        )
+        token_ids = tokenizer.encode(text)
+        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
+        assert choice is not None
+        tc = choice.get("delta", {}).get("tool_calls", [])
+        assert len(tc) == 2
+        names = {t["function"]["name"] for t in tc}
+        assert names == {"search_gutenberg_books", "get_weather"}
+
+    def test_plain_text_skips_reparse(self, tokenizer):
+        """Plain text with no JSON markers must not crash the re-parse path.
+
+        Locks in that the ``has_tool_call`` gate on JsonArrayParser returns
+        False for text without '[' or '{', so ``_parse_json_array_buffer``
+        and the secondary FunctionCallParser fallback are never reached.
+        """
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+        )
+        token_ids = tokenizer.encode("Hello, world!")
+        choice = post.process_output({"token_ids": token_ids, "finish_reason": "stop"})
+        # No tool calls, plain content preserved, no crash.
+        tc = (choice or {}).get("delta", {}).get("tool_calls", [])
+        assert tc == []
