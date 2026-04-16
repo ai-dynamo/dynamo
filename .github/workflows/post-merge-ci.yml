@@ -214,7 +214,7 @@ jobs:
     with:
       framework: dynamo
       target: frontend
-      cuda_version: '["12.9"]'
+      cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 45
@@ -435,7 +435,7 @@ jobs:
       framework: dynamo
       target: frontend
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]'
+      cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
     secrets: inherit
 
@@ -498,7 +498,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]'
+      cuda_version: '[""]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
