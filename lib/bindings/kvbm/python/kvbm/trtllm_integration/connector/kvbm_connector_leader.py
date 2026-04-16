@@ -17,6 +17,7 @@ from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
     KvCacheConnectorScheduler,
     SchedulerOutput,
 )
+from tensorrt_llm._torch.pyexecutor.llm_request import get_draft_token_length
 from tensorrt_llm.bindings.internal.batch_manager import LlmRequest
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 
@@ -72,7 +73,63 @@ def _install_generation_only_connector_shim() -> None:
     logger.info("Installed Dynamo KVBM TensorRT-LLM generation-only connector shim.")
 
 
+def _install_speculative_scheduled_token_guard() -> None:
+    """Avoid KVBM offloading speculative draft KV before sampler acceptance."""
+    output_request_cls = getattr(
+        kv_cache_connector, "KvCacheConnectorSchedulerOutputRequest", None
+    )
+    if output_request_cls is None:
+        logger.warning(
+            "TensorRT-LLM KvCacheConnectorSchedulerOutputRequest not found; "
+            "Dynamo KVBM speculative scheduling guard was not installed."
+        )
+        return
+
+    if getattr(output_request_cls, "_dynamo_kvbm_spec_decode_guard", False):
+        return
+
+    original_update_and_build_data = output_request_cls.update_and_build_data
+
+    def update_and_build_data(self, req, kv_cache_manager):
+        data = original_update_and_build_data(self, req, kv_cache_manager)
+        draft_token_length = get_draft_token_length(req)
+        if draft_token_length <= 0 or data.num_scheduled_tokens <= 1:
+            return data
+
+        # WARNING/TODO: conservative speculative-decoding guard.
+        #
+        # TRT-LLM connector metadata is built before the sampler reports how
+        # many Eagle/speculative draft tokens were accepted. TRT-LLM can report
+        # target + draft tokens as scheduled, but rejected drafts are later
+        # rewound. KVBM must not advance/offload against KV that may be
+        # discarded, so clamp speculative decode scheduling to the single
+        # sampled target token that is guaranteed to survive.
+        #
+        # Accepted draft tokens intentionally become visible to KVBM on the
+        # next scheduler iteration through new_tokens/num_computed_tokens, so
+        # offload can lag by a few tokens. The real fix is a post-sampler
+        # connector/KVBM commit path that receives the actual accepted draft
+        # count after sampler acceptance and KV rewind.
+        logger.debug(
+            "Clamping TRT-LLM KVBM speculative scheduled tokens for request %s "
+            "from %s to 1; draft_token_length=%s",
+            data.request_id,
+            data.num_scheduled_tokens,
+            draft_token_length,
+        )
+        data.num_scheduled_tokens = 1
+        return data
+
+    output_request_cls.update_and_build_data = update_and_build_data
+    output_request_cls._dynamo_kvbm_spec_decode_guard = True
+    output_request_cls._dynamo_kvbm_spec_decode_guard_original = (
+        original_update_and_build_data
+    )
+    logger.info("Installed Dynamo KVBM TensorRT-LLM speculative scheduling guard.")
+
+
 _install_generation_only_connector_shim()
+_install_speculative_scheduled_token_guard()
 
 DistributedRuntime = None
 if is_dyn_runtime_enabled():
