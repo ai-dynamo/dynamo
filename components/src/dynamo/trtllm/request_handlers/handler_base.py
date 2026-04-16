@@ -198,6 +198,38 @@ class _DeferredAbort:
         logging.debug("Deferred abort: background task completed, abort fired")
 
 
+# Fatal CUDA error patterns that indicate unrecoverable hardware/driver state.
+# When these appear inside a TRT-LLM RequestError, the error must be escalated
+# to trigger worker shutdown rather than being treated as a per-request failure.
+# Without this, a single cudaErrorNvlinkUncorrectable (or similar) would be
+# caught as a per-request WARN and the worker would keep accepting traffic in
+# a broken state instead of restarting.
+#
+# OOM (cudaErrorMemoryAllocation) is intentionally NOT listed: TRT-LLM aborts
+# the offending request and frees the KV cache, so the engine stays healthy.
+#
+# TEMPORARY: this string-matching escalation is a workaround. Once TRT-LLM
+# exposes a first-class health-check API in LLM-API (NVIDIA/TensorRT-LLM#4513),
+# the worker should query that instead of scraping error messages, and this
+# block can be reverted.
+FATAL_CUDA_ERROR_PATTERNS = re.compile(
+    "|".join(
+        [
+            r"cudaErrorNvlinkUncorrectable",  # XID 74: NVLink hardware failure
+            r"cudaErrorNoDevice",  # XID 79: GPU fell off bus
+            r"cudaErrorECCUncorrectable",  # XID 48/94: uncorrectable ECC
+            r"cudaErrorIllegalAddress",  # corrupted GPU memory state
+            r"cudaErrorAssert",  # device-side assertion
+            r"cudaErrorUnknown",  # XID 95: uncontained error
+            r"cudaErrorLaunchTimeout",  # XID 43: GPU hung
+            r"cudaErrorMisalignedAddress",  # fatal memory error
+            r"cudaErrorHardwareStackError",  # hardware stack corruption
+        ]
+    ),
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class RequestHandlerConfig:
     """
@@ -905,6 +937,29 @@ class HandlerBase(BaseGenerativeHandler):
             logging.critical("Forcing process exit for restart")
             os._exit(1)
 
+    async def _handle_per_request_error(
+        self, error: RequestError, request_id: str
+    ) -> AsyncGenerator[dict, None]:
+        """Emit the error chunk for a TRT-LLM RequestError, escalating to
+        worker shutdown if the message matches FATAL_CUDA_ERROR_PATTERNS.
+        """
+        error_msg = str(error)
+        fatal = FATAL_CUDA_ERROR_PATTERNS.search(error_msg) is not None
+        if fatal:
+            logging.error(
+                f"Fatal CUDA error in request {request_id} "
+                f"(caught as RequestError): {error_msg}",
+                exc_info=True,
+            )
+        else:
+            logging.warning(f"Request {request_id} error: {error_msg}")
+        try:
+            yield {"finish_reason": {"error": error_msg}, "token_ids": []}
+        except Exception:
+            pass  # Best effort
+        if fatal:
+            await self._initiate_shutdown(error)
+
     async def generate_locally(
         self,
         request: dict,
@@ -1264,13 +1319,11 @@ class HandlerBase(BaseGenerativeHandler):
             return  # Just stop, no error response
 
         # 2. Per-request errors - send to client, don't shutdown
+        #    UNLESS the error indicates fatal/unrecoverable CUDA state (e.g.
+        #    cudaErrorNvlinkUncorrectable), in which case escalate to shutdown.
         except RequestError as e:
-            error_msg = str(e)
-            logging.warning(f"Request {request_id} error: {error_msg}")
-            yield {
-                "finish_reason": {"error": error_msg},
-                "token_ids": [],
-            }
+            async for chunk in self._handle_per_request_error(e, request_id):
+                yield chunk
 
         # 3. EngineShutdown - let it propagate to the Rust bridge
         except EngineShutdown:

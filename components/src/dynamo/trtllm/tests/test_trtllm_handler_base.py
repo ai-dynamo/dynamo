@@ -19,7 +19,10 @@ if not torch.cuda.is_available():
     )
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+from dynamo.trtllm.request_handlers.handler_base import (
+    FATAL_CUDA_ERROR_PATTERNS,
+    HandlerBase,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -651,3 +654,95 @@ class TestDisaggRequestId:
             request={}, ep_disaggregated_params=None
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id
+
+
+class TestFatalCudaErrorPatterns:
+    """Tests that FATAL_CUDA_ERROR_PATTERNS correctly matches unrecoverable CUDA errors.
+
+    These errors must be escalated from per-request WARN to fatal shutdown;
+    otherwise the worker keeps accepting traffic in a broken state.
+    """
+
+    @pytest.mark.parametrize(
+        "error_msg",
+        [
+            "CUDA error: cudaErrorNvlinkUncorrectable",
+            "Request failed: cudaErrorNoDevice",
+            "cudaErrorECCUncorrectable during generation",
+            "cudaErrorIllegalAddress: an illegal memory access",
+            "cudaErrorAssert triggered on device",
+            "cudaErrorUnknown (driver 999)",
+            "cudaErrorLaunchTimeout: GPU stopped responding",
+            "cudaErrorMisalignedAddress at 0xdead",
+            "cudaErrorHardwareStackError",
+        ],
+    )
+    def test_matches_fatal_cuda_errors(self, error_msg):
+        assert FATAL_CUDA_ERROR_PATTERNS.search(error_msg) is not None
+
+    @pytest.mark.parametrize(
+        "error_msg",
+        [
+            "Input length exceeds maximum context window",
+            "Invalid sampling parameter: temperature must be >= 0",
+            "Request timed out after 30s",
+            "cudaErrorMemoryAllocation: out of memory",
+            "",
+        ],
+    )
+    def test_does_not_match_recoverable_errors(self, error_msg):
+        assert FATAL_CUDA_ERROR_PATTERNS.search(error_msg) is None
+
+
+class TestHandlePerRequestError:
+    """Tests the handler-level branch that escalates fatal RequestErrors.
+
+    The except-RequestError branch must call _initiate_shutdown() for fatal
+    CUDA errors and leave recoverable per-request errors alone.
+    """
+
+    def _make_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        handler = _ConcreteHandler(config)
+        handler._initiate_shutdown = mock.AsyncMock()
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_fatal_cuda_error_triggers_shutdown(self):
+        from tensorrt_llm.executor.utils import RequestError
+
+        handler = self._make_handler()
+        err = RequestError("CUDA error: cudaErrorNvlinkUncorrectable")
+        chunks = [c async for c in handler._handle_per_request_error(err, "req-1")]
+
+        assert len(chunks) == 1
+        assert "cudaErrorNvlinkUncorrectable" in chunks[0]["finish_reason"]["error"]
+        assert chunks[0]["token_ids"] == []
+        handler._initiate_shutdown.assert_awaited_once_with(err)
+
+    @pytest.mark.asyncio
+    async def test_benign_error_does_not_trigger_shutdown(self):
+        from tensorrt_llm.executor.utils import RequestError
+
+        handler = self._make_handler()
+        err = RequestError("Input length exceeds maximum context window")
+        chunks = [c async for c in handler._handle_per_request_error(err, "req-2")]
+
+        assert len(chunks) == 1
+        assert "exceeds maximum context" in chunks[0]["finish_reason"]["error"]
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_oom_is_treated_as_recoverable(self):
+        """cudaErrorMemoryAllocation must NOT trigger shutdown: TRT-LLM aborts
+        the offending request and frees KV cache, so the engine stays healthy.
+        Revisit if we observe OOM wedging the engine in production."""
+        from tensorrt_llm.executor.utils import RequestError
+
+        handler = self._make_handler()
+        err = RequestError("cudaErrorMemoryAllocation: out of memory")
+        chunks = [c async for c in handler._handle_per_request_error(err, "req-3")]
+
+        assert len(chunks) == 1
+        handler._initiate_shutdown.assert_not_awaited()
