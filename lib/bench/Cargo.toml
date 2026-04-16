@@ -11,9 +11,15 @@ homepage.workspace = true
 repository.workspace = true
 description = "Lightweight HTTP benchmarks for Dynamo endpoints"
 
-[[bin]]
+[[bench]]
 name = "multiturn_bench"
-path = "src/bin/multiturn_bench.rs"
+path = "multiturn_bench.rs"
+harness = false
+
+[[bench]]
+name = "offline_replay_bench"
+path = "offline_replay_bench.rs"
+harness = false
 
 [[bench]]
 name = "kv_indexer_bench"
@@ -50,4 +56,5 @@ minstant = "0.1.7"
 plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series", "point_series", "full_palette"] }
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 tokio-util = { workspace = true }
+tracing-subscriber = { workspace = true }
 uuid = { workspace = true }

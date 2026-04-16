@@ -12,11 +12,12 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-var failoverLockFile = filepath.Join(gmsSharedMountPath, "failover.lock")
+var failoverLockFile = filepath.Join(gmsruntime.SharedMountPath, "failover.lock")
 
 const (
 	failoverEngineCount = 2
