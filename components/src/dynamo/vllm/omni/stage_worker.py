@@ -116,8 +116,29 @@ class OmniStageWorker:
                 if isinstance(prompt, list) and len(prompt) == 1:
                     prompt = prompt[0]
             else:
-                # No processor: use the most recent fetched stage output directly.
-                prompt = stage_list[-1].engine_outputs[0]
+                # No processor: extract token IDs from the upstream engine output
+                # and build an OmniEngineCoreRequest directly.  This mirrors what
+                # the native orchestrator does via build_engine_core_request_from_tokens.
+                # Building an EngineCoreRequest bypasses InputProcessor.process_inputs()
+                # which would fail for non-autoregressive stages (worker_type: generation)
+                # with "This model does not support generation".
+                from vllm_omni.engine.orchestrator import (
+                    build_engine_core_request_from_tokens,
+                )
+                from vllm_omni.inputs.data import OmniTokensPrompt
+
+                upstream = stage_list[-1].engine_outputs[0]
+                token_ids = upstream.outputs[0].token_ids
+                tokens_prompt = OmniTokensPrompt(prompt_token_ids=list(token_ids))
+                sp_list = _build_sampling_params(
+                    self.stage_config, sampling_params_list_override
+                )
+                params = sp_list[0] if sp_list else None
+                prompt = build_engine_core_request_from_tokens(
+                    request_id=request_id,
+                    prompt=tokens_prompt,
+                    params=params,
+                )
         elif req.request_id is not None:
             # Stage 0 via router: raw request forwarded with request_id — parse it.
             parsed = parse_omni_request(
@@ -126,16 +147,25 @@ class OmniStageWorker:
             prompt = parsed["engine_inputs"]
             original_prompt = parsed["original_prompt"]
             sampling_params_list_override = parsed["sampling_params_list"]
+            # For chat requests, apply the chat template so the thinker
+            # receives the same prompt as native vllm serve --omni.
+            # parse_omni_request returns raw user text; the native OpenAI
+            # API server applies the template before the engine sees it.
+            messages = request.get("messages")
+            if messages and isinstance(prompt, str):
+                try:
+                    tokenizer = await self.engine.get_tokenizer()
+                    prompt = tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                except Exception:
+                    logger.debug(
+                        "Stage %d: chat template not available, using raw text",
+                        self.stage_id,
+                    )
         else:
             # Direct frontend → stage (single-stage, no router).
             prompt = request
-
-        logger.debug(
-            "Stage %d: engine.generate for %s — prompt type=%s",
-            self.stage_id,
-            request_id,
-            type(prompt).__name__,
-        )
 
         sp = _build_sampling_params(self.stage_config, sampling_params_list_override)
         last_result = None

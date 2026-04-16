@@ -70,9 +70,9 @@ CUDA_VISIBLE_DEVICES=1 DYN_SYSTEM_PORT=8082 \
     "${EXTRA_ARGS[@]}" &
 sleep 30
 
-# Stage 2: code2wav (GPU 0) — audio generation
+# Stage 2: code2wav (GPU 1) — audio generation
 echo "Starting Stage 2 (code2wav)..."
-CUDA_VISIBLE_DEVICES=0 DYN_SYSTEM_PORT=8083 \
+CUDA_VISIBLE_DEVICES=1 DYN_SYSTEM_PORT=8083 \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \
     --stage-id 2 \
