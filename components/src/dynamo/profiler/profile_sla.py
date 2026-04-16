@@ -27,6 +27,7 @@ from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
 from dynamo.profiler.rapid import run_rapid
 from dynamo.profiler.thorough import run_thorough
+from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
@@ -35,8 +36,10 @@ from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import assemble_final_config
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     BackendType,
+    DeviceType,
     DynamoGraphDeploymentRequestSpec,
     ProfilingPhase,
+    XPUSKUType,
 )
 from dynamo.profiler.utils.dgdr_validate import (
     valid_dgdr_spec,
@@ -85,7 +88,11 @@ def _extract_profiler_params(dgdr: DynamoGraphDeploymentRequestSpec) -> tuple:
     """Pull all profiler parameters from dgdr and log them."""
     model = dgdr.model
     backend = BackendType(dgdr.backend).value.lower()
-    system = dgdr.hardware.gpuSku.lower()
+    sku = dgdr.hardware.gpuSku
+    if isinstance(sku, XPUSKUType):
+        system = sku.aic_system
+    else:
+        system = sku.lower()
     total_gpus = dgdr.hardware.totalGpus
     isl = dgdr.workload.isl
     osl = dgdr.workload.osl
@@ -259,9 +266,21 @@ def _write_final_output(ops: ProfilerOperationalConfig, final_config: Any) -> bo
     else:
         with open(output_file, "w") as f:
             if isinstance(final_config, list):
-                yaml.safe_dump_all(final_config, f, sort_keys=False)
+                # Extract any _xpu_resource_claim_template embedded in DGD docs
+                docs: list = []
+                for doc in final_config:
+                    if isinstance(doc, dict) and "_xpu_resource_claim_template" in doc:
+                        docs.append(doc.pop("_xpu_resource_claim_template"))
+                    docs.append(doc)
+                yaml.safe_dump_all(docs, f, sort_keys=False)
             else:
-                yaml.safe_dump(final_config, f, sort_keys=False)
+                xpu_rct = None
+                if isinstance(final_config, dict):
+                    xpu_rct = final_config.pop("_xpu_resource_claim_template", None)
+                if xpu_rct:
+                    yaml.safe_dump_all([xpu_rct, final_config], f, sort_keys=False)
+                else:
+                    yaml.safe_dump(final_config, f, sort_keys=False)
         logger.info("Final DGD config saved to %s", output_file)
 
     write_profiler_status(
@@ -317,6 +336,15 @@ async def run_profile(
             search_strategy,
             picking_mode,
         ) = _extract_profiler_params(dgdr)
+
+        # Propagate device_type from DGDR spec into ops so downstream consumers
+        # (webui labels, config modifiers) can detect the device family.
+        ops.device_type = (
+            dgdr.hardware.deviceType
+            if dgdr.hardware and dgdr.hardware.deviceType
+            else DeviceType.Cuda
+        )
+
         if backend == "auto":
             aic_supported = _check_auto_backend_support(model, system)
         else:
@@ -358,6 +386,22 @@ async def run_profile(
 
         dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
         resolved_backend = pick_result.get("resolved_backend", backend)
+
+        # Inject device-specific env vars (e.g. VLLM_TARGET_DEVICE=xpu) into
+        # the final picked DGD config so the generated deployment YAML is
+        # immediately usable on the target hardware.
+        if dgd_config and ops.device_type != DeviceType.Cuda:
+            _modifier = CONFIG_MODIFIERS.get(resolved_backend)
+            if _modifier and hasattr(_modifier, "set_device_type"):
+                try:
+                    dgd_config = _modifier.set_device_type(dgd_config, ops.device_type)
+                    logger.info(
+                        "Injected device_type='%s' into final DGD config.",
+                        ops.device_type,
+                    )
+                except Exception as _e:
+                    logger.error("Could not inject device_type into DGD config: %s", _e)
+                    raise
 
         if dgd_config and dgdr.overrides and dgdr.overrides.dgd:
             dgd_config = apply_dgd_overrides(dgd_config, dgdr.overrides.dgd)

@@ -22,7 +22,7 @@ DO NOT EDIT MANUALLY - regenerate using the script.
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -57,6 +57,11 @@ class SearchStrategy(str, Enum):
     Thorough = "thorough"
 
 
+class DeviceType(str, Enum):
+    Cuda = "cuda"
+    Xpu = "xpu"
+
+
 class GPUSKUType(str, Enum):
     GB200SXM = "gb200_sxm"
     H200SXM = "h200_sxm"
@@ -64,6 +69,15 @@ class GPUSKUType(str, Enum):
     B200SXM = "b200_sxm"
     A100SXM = "a100_sxm"
     L40S = "l40s"
+
+
+class XPUSKUType(str, Enum):
+    IntelArcProB60 = "b60"
+
+    @property
+    def aic_system(self) -> str:
+        """Return the AIC system identifier (enum value is already the AIC name)."""
+        return self.value
 
 
 class BackendType(str, Enum):
@@ -196,9 +210,17 @@ class FeaturesSpec(BaseModel):
 class HardwareSpec(BaseModel):
     """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
 
-    gpuSku: Optional[GPUSKUType] = Field(
+    deviceType: DeviceType = Field(
+        default="cuda",
+        description="DeviceType is the accelerator device category. Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel XPU). Defaults to 'cuda'.",
+    )
+    gpuSku: Optional[Union[GPUSKUType, XPUSKUType]] = Field(
         default=None,
         description="GPUSKU is the AIC hardware system identifier for the GPU. When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.",
+    )
+    xpuSku: Optional[XPUSKUType] = Field(
+        default=None,
+        description="XPU SKU is the AIC hardware system identifier for the Intel XPU. When omitted, the operator auto-detects this via cluster XPU node labels.",
     )
     vramMb: Optional[float] = Field(
         default=None, description="VRAMMB is the VRAM per GPU in MiB."
@@ -210,6 +232,26 @@ class HardwareSpec(BaseModel):
     numGpusPerNode: Optional[int] = Field(
         default=None, description="NumGPUsPerNode is the number of GPUs per node."
     )
+
+    @model_validator(mode="after")
+    def _derive_device_type_from_sku(self) -> "HardwareSpec":
+        """Auto-derive deviceType from gpuSku when not explicitly set.
+
+        If gpuSku identifies an Intel XPU accelerator and deviceType was not
+        explicitly provided by the user, set deviceType to 'xpu'.  This
+        prevents the silent misconfiguration where a user specifies an Intel
+        SKU but the default 'cuda' deviceType bypasses all XPU-specific logic.
+        """
+        if isinstance(self.gpuSku, XPUSKUType):
+            if "deviceType" not in self.model_fields_set:
+                # Not explicitly provided — auto-derive from XPU SKU.
+                self.deviceType = DeviceType.Xpu
+            elif self.deviceType != DeviceType.Xpu:
+                raise ValueError(
+                    f"gpuSku '{self.gpuSku}' is an Intel XPU accelerator but deviceType is "
+                    f"'{self.deviceType}'. Set deviceType to 'xpu' or omit it to auto-derive."
+                )
+        return self
 
 
 class DynamoGraphDeploymentRequestSpec(BaseModel):

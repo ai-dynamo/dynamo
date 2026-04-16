@@ -41,6 +41,7 @@ from dynamo.profiler.utils.config import Config, get_service_name_by_type
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DeviceType,
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
     ProfilingPhase,
@@ -85,8 +86,17 @@ async def _benchmark_prefill_candidates(
         os.makedirs(work_dir, exist_ok=True)
 
         config_fn = f"{work_dir}/config.yaml"
+        dgd = candidate.dgd_config
+        xpu_rct = (
+            dgd.pop("_xpu_resource_claim_template", None)
+            if isinstance(dgd, dict)
+            else None
+        )
         with open(config_fn, "w") as f:
-            yaml.dump(candidate.dgd_config, f)
+            if xpu_rct:
+                yaml.safe_dump_all([xpu_rct, dgd], f, sort_keys=False)
+            else:
+                yaml.dump(dgd, f)
 
         model_name, model_path = config_modifier.get_model_name(candidate.dgd_config)
         frontend_port = config_modifier.get_port(candidate.dgd_config)
@@ -187,8 +197,17 @@ async def _benchmark_decode_candidates(
         os.makedirs(work_dir, exist_ok=True)
 
         config_fn = f"{work_dir}/config.yaml"
+        dgd = candidate.dgd_config
+        xpu_rct = (
+            dgd.pop("_xpu_resource_claim_template", None)
+            if isinstance(dgd, dict)
+            else None
+        )
         with open(config_fn, "w") as f:
-            yaml.dump(candidate.dgd_config, f)
+            if xpu_rct:
+                yaml.safe_dump_all([xpu_rct, dgd], f, sort_keys=False)
+            else:
+                yaml.dump(dgd, f)
 
         model_name, model_path = config_modifier.get_model_name(candidate.dgd_config)
         frontend_port = config_modifier.get_port(candidate.dgd_config)
@@ -399,6 +418,27 @@ async def run_thorough(
             len(prefill_candidates),
             len(decode_candidates),
         )
+
+    # Propagate device_type (e.g. "xpu") into all candidate DGD configs so
+    # that workers are deployed with the correct VLLM_TARGET_DEVICE env var.
+    device_type = getattr(ops, "device_type", DeviceType.Cuda)
+    if device_type != DeviceType.Cuda:
+        _modifier_cls = CONFIG_MODIFIERS.get(backend)
+        if _modifier_cls and hasattr(_modifier_cls, "set_device_type"):
+            for candidate in prefill_candidates:
+                candidate.dgd_config = _modifier_cls.set_device_type(
+                    candidate.dgd_config, device_type
+                )
+            for candidate in decode_candidates:
+                candidate.dgd_config = _modifier_cls.set_device_type(
+                    candidate.dgd_config, device_type
+                )
+            logger.info(
+                "Injected device_type='%s' into %d prefill + %d decode candidates.",
+                device_type,
+                len(prefill_candidates),
+                len(decode_candidates),
+            )
 
     config_modifier = CONFIG_MODIFIERS[backend]
 

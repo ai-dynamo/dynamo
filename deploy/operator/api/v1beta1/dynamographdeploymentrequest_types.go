@@ -174,6 +174,15 @@ const (
 	SearchStrategyThorough SearchStrategy = "thorough"
 )
 
+// DeviceType is the accelerator device category.
+// +kubebuilder:validation:Enum=cuda;xpu
+type DeviceType string
+
+const (
+	DeviceTypeCuda DeviceType = "cuda"
+	DeviceTypeXpu  DeviceType = "xpu"
+)
+
 // GPUSKUType is the AIC hardware system identifier for a supported GPU.
 // +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
 type GPUSKUType string
@@ -185,6 +194,14 @@ const (
 	GPUSKUTypeB200SXM  GPUSKUType = "b200_sxm"
 	GPUSKUTypeA100SXM  GPUSKUType = "a100_sxm"
 	GPUSKUTypeL40S     GPUSKUType = "l40s"
+)
+
+// XPUSKUType is the AIC hardware system identifier for a supported Intel XPU.
+// +kubebuilder:validation:Enum=b60
+type XPUSKUType string
+
+const (
+	XPUSKUTypeIntelArcProB60 XPUSKUType = "b60"
 )
 
 // BackendType specifies the inference backend.
@@ -321,11 +338,23 @@ type FeaturesSpec struct {
 // HardwareSpec describes the hardware resources available for profiling and deployment.
 // These fields are typically auto-filled by the operator from cluster discovery.
 type HardwareSpec struct {
+	// DeviceType is the accelerator device category.
+	// Supported values: 'cuda' (NVIDIA GPU), 'xpu' (Intel XPU). Defaults to 'cuda'.
+	// +optional
+	// +kubebuilder:default="cuda"
+	DeviceType DeviceType `json:"deviceType,omitempty"`
+
 	// GPUSKU is the AIC hardware system identifier for the GPU.
 	// When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels.
 	// +optional
 	// +kubebuilder:validation:Enum=gb200_sxm;h200_sxm;h100_sxm;b200_sxm;a100_sxm;l40s
 	GPUSKU GPUSKUType `json:"gpuSku,omitempty"`
+
+	// XPU SKU is the AIC hardware system identifier for the Intel XPU.
+	// When omitted, the operator auto-detects this via cluster XPU node labels.
+	// +optional
+	// +kubebuilder:validation:Enum=b60
+	XPUSKU XPUSKUType `json:"xpuSku,omitempty"`
 
 	// VRAMMB is the VRAM per GPU in MiB.
 	// +optional
