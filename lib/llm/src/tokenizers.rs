@@ -137,7 +137,10 @@ pub mod traits {
         fn convert_ids_to_tokens(&self, token_ids: &[TokenIdType]) -> Result<Vec<String>> {
             token_ids
                 .iter()
-                .map(|id| self.decode(std::slice::from_ref(id), false))
+                .map(|id| {
+                    self.decode(std::slice::from_ref(id), false)
+                        .map(String::from)
+                })
                 .collect()
         }
     }

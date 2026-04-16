@@ -653,11 +653,7 @@ impl ModelWatcher {
     /// If an existing card for the same model has already-downloaded local files,
     /// point this card's URL-backed files at the same local directory. This avoids
     /// re-downloading config files for every worker that joins an existing WorkerSet.
-    fn resolve_card_local_files(
-        &self,
-        model_name: &str,
-        card: &mut ModelDeploymentCard,
-    ) {
+    fn resolve_card_local_files(&self, model_name: &str, card: &mut ModelDeploymentCard) {
         let local_dir = self
             .manager
             .get_model_cards()
