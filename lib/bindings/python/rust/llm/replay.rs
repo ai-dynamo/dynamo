@@ -1317,6 +1317,8 @@ impl PlannerReplayBridge {
     /// Advance the simulation to `until_ms` simulated time.
     ///
     /// Returns a dict with separate prefill/decode worker counts and FPM snapshots.
+    /// Traffic metrics are NOT included — call `drain_traffic()` explicitly on
+    /// throughput-scaling ticks only.
     fn advance_to(&mut self, py: Python<'_>, until_ms: f64) -> PyResult<PyObject> {
         let handle = self
             .handle
@@ -1324,23 +1326,41 @@ impl PlannerReplayBridge {
             .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
 
         let tick_data = handle.advance_to(until_ms).map_err(to_pyerr)?;
-        let (duration_s, num_req, avg_isl, avg_osl) = tick_data.traffic;
 
         let result = json!({
             "now_ms": tick_data.now_ms,
             "is_done": tick_data.is_done,
             "prefill_fpm_snapshots": fpm_snapshots_to_json(tick_data.prefill_fpm_snapshots),
             "decode_fpm_snapshots": fpm_snapshots_to_json(tick_data.decode_fpm_snapshots),
-            "traffic": {
-                "duration_s": duration_s,
-                "num_req": num_req,
-                "avg_isl": avg_isl,
-                "avg_osl": avg_osl,
-            },
             "active_prefill_count": tick_data.active_prefill_count,
             "active_decode_count": tick_data.active_decode_count,
             "total_prefill_count": tick_data.total_prefill_count,
             "total_decode_count": tick_data.total_decode_count,
+        });
+
+        pythonize(py, &result)
+            .map_err(to_pyerr)
+            .map(|obj| obj.unbind())
+    }
+
+    /// Drain accumulated traffic metrics since the last drain.
+    ///
+    /// Returns a dict with `duration_s`, `num_req`, `avg_isl`, `avg_osl`.
+    /// Call this only on throughput-scaling ticks so the observation window
+    /// covers the full `throughput_adjustment_interval`.
+    fn drain_traffic(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+        let handle = self
+            .handle
+            .as_mut()
+            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
+
+        let (duration_s, num_req, avg_isl, avg_osl) = handle.drain_traffic();
+
+        let result = json!({
+            "duration_s": duration_s,
+            "num_req": num_req,
+            "avg_isl": avg_isl,
+            "avg_osl": avg_osl,
         });
 
         pythonize(py, &result)

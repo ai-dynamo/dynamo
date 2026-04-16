@@ -10,10 +10,6 @@ LMCache is a high-performance KV cache layer that supercharges LLM serving by en
 
 This document describes how LMCache is integrated into Dynamo's vLLM backend to provide enhanced performance and memory efficiency.
 
-## Platform Support
-
-**Important Note**: LMCache integration currently only supports x86 architecture. ARM64 is not supported at this time.
-
 ## Aggregated Serving
 
 ### Configuration

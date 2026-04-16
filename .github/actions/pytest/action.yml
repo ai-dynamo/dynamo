@@ -177,6 +177,7 @@ runs:
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
           --network host \
+          --memory=6g \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \

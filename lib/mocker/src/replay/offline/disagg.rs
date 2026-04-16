@@ -791,23 +791,32 @@ impl DisaggRuntime {
         target_decode: usize,
     ) -> Result<()> {
         let (added, newly_marked) = self.prefill_engine.apply_target_count(target_prefill);
-        if let Some(router) = self.prefill_router.as_mut() {
+        let prefill_admissions = if let Some(router) = self.prefill_router.as_mut() {
             for id in added {
                 router.add_worker(id)?;
             }
             for id in newly_marked {
                 router.remove_worker(id)?;
             }
-        }
+            router.on_topology_changed(self.now_ms)?.admissions
+        } else {
+            Vec::new()
+        };
         let (added, newly_marked) = self.decode_engine.apply_target_count(target_decode);
-        if let Some(router) = self.decode_router.as_mut() {
+        let decode_admissions = if let Some(router) = self.decode_router.as_mut() {
             for id in added {
                 router.add_worker(id)?;
             }
             for id in newly_marked {
                 router.remove_worker(id)?;
             }
-        }
+            router.on_topology_changed(self.now_ms)?.admissions
+        } else {
+            Vec::new()
+        };
+        self.record_router_pending();
+        self.dispatch_prefill_admissions(prefill_admissions)?;
+        self.dispatch_decode_admissions(decode_admissions)?;
         Ok(())
     }
 
@@ -872,6 +881,8 @@ fn derive_decode_router_config(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::super::entrypoints::{
         run_concurrency_collect, run_concurrency_workload_collect, run_trace_collect,
         run_trace_workload_collect,
@@ -940,9 +951,40 @@ mod tests {
         config
     }
 
+    fn scaling_test_args(worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(64)
+            .num_gpu_blocks(512)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(8))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1.0)
+            .decode_speedup_ratio(1.0)
+            .worker_type(worker_type)
+            .build()
+            .unwrap()
+    }
+
+    fn scaling_test_disagg_config() -> OfflineDisaggReplayConfig {
+        OfflineDisaggReplayConfig {
+            prefill_args: scaling_test_args(WorkerType::Prefill),
+            decode_args: scaling_test_args(WorkerType::Decode),
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        }
+    }
+
     fn router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_queue_threshold: Some(1.25),
+            ..KvRouterConfig::default()
+        }
+    }
+
+    fn planner_router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            router_queue_threshold: Some(0.5),
             ..KvRouterConfig::default()
         }
     }
@@ -1233,6 +1275,34 @@ mod tests {
         );
         assert!(queued_idx < enqueued_idx);
         assert!(delayed_stats.handoff_ms[&uuid] >= 120.0);
+    }
+
+    #[test]
+    fn test_apply_scaling_drains_prefill_router_pending_immediately() {
+        let config = scaling_test_disagg_config();
+        let mut runtime = DisaggRuntime::new(
+            &config,
+            Some(planner_router_config()),
+            None,
+            VecDeque::from([request(1, 64, 8, 0.0), request(2, 64, 8, 0.0)]),
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap();
+
+        runtime.advance_to(0.0).unwrap();
+        assert_eq!(
+            runtime.state(Uuid::from_u128(2)).unwrap().phase,
+            DisaggPhase::QueuedPrefill
+        );
+
+        runtime.apply_scaling(2, 1).unwrap();
+
+        assert_eq!(
+            runtime.state(Uuid::from_u128(2)).unwrap().phase,
+            DisaggPhase::RunningPrefill
+        );
+        assert_eq!(runtime.stats.prefill_assignments[&Uuid::from_u128(2)], 1);
     }
 
     #[test]
