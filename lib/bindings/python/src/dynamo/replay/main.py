@@ -290,7 +290,10 @@ def _run_planner_replay(
                     aic_session, ref_args, benchmark_granularity
                 )
                 if planner_config.mode == "agg":
-                    adapter._sm.load_benchmark_fpms(agg_fpms=decode_fpms)
+                    # Agg regression fits on (sum_prefill_tokens, sum_decode_kv_tokens);
+                    # combine prefill-only and decode-only points so both features
+                    # have variance.
+                    adapter._sm.load_benchmark_fpms(agg_fpms=prefill_fpms + decode_fpms)
                 else:
                     adapter._sm.load_benchmark_fpms(
                         prefill_fpms=prefill_fpms, decode_fpms=decode_fpms

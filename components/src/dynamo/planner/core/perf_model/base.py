@@ -186,6 +186,15 @@ class _BaseRegressionModel:
     def _gather_observations(self) -> list[tuple[Union[float, list[float]], float]]:
         return [obs for bucket in self._buckets.values() for obs in bucket]
 
+    # Feature indices whose coefficients can be clipped to 0 if negative
+    # rather than rejecting the whole fit.  Used when a feature has weak
+    # signal and can flip sign under multicollinearity without violating
+    # physical monotonicity (e.g. num_decode_requests vs sum_decode_kv_tokens:
+    # total KV dominates, so a small negative batch-size coefficient is
+    # numerical noise rather than "more requests → less work").  Subclasses
+    # override via ``_clippable_feature_indices``.
+    _clippable_feature_indices: frozenset[int] = frozenset()
+
     def _fit(self) -> bool:
         observations = self._gather_observations()
         if len(observations) < self.min_observations:
@@ -199,13 +208,29 @@ class _BaseRegressionModel:
         # Negative coefficients mean "more load → less compute time", which
         # is physically impossible.  Reject the fit so callers see the model
         # as not ready rather than making inverted scaling decisions.
-        if np.any(self._model.coef_ < 0):
-            logger.warning(
-                f"Regression produced negative coefficients {self._model.coef_.tolist()}, "
-                "model rejected — scaling will be skipped until more data arrives"
+        # Exception: features in ``_clippable_feature_indices`` are allowed
+        # to go slightly negative under noisy fits; clip them to 0 so the
+        # model stays usable.
+        neg_mask = self._model.coef_ < 0
+        if np.any(neg_mask):
+            non_clippable_negs = [
+                i
+                for i in range(len(self._model.coef_))
+                if neg_mask[i] and i not in self._clippable_feature_indices
+            ]
+            if non_clippable_negs:
+                logger.warning(
+                    f"Regression produced negative coefficients {self._model.coef_.tolist()}, "
+                    "model rejected — scaling will be skipped until more data arrives"
+                )
+                self._is_fitted = False
+                return False
+            # Clip relaxable negative coefficients to 0
+            self._model.coef_ = np.where(neg_mask, 0.0, self._model.coef_)
+            logger.debug(
+                f"Clipped negative coefficients at indices "
+                f"{[i for i in range(len(neg_mask)) if neg_mask[i]]} to 0"
             )
-            self._is_fitted = False
-            return False
 
         self._is_fitted = True
         return True
