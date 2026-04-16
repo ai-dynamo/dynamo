@@ -7,6 +7,11 @@ import numpy as np
 import pytest
 
 import dynamo.common.multimodal.video_loader as video_loader_module
+from dynamo.common.multimodal.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
 from dynamo.common.multimodal.video_loader import VideoLoader
 
 pytestmark = [
@@ -20,21 +25,78 @@ def test_normalize_video_url_converts_local_paths(tmp_path):
     video_path = tmp_path / "sample.webm"
     video_path.write_bytes(b"video")
 
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
     assert (
-        VideoLoader._normalize_video_url(str(video_path))
+        validate_media_url(str(video_path), policy)
         == video_path.resolve().as_uri()
     )
 
 
 def test_normalize_video_url_preserves_data_urls():
     data_url = "data:video/webm;base64,Zm9v"
+    policy = UrlValidationPolicy()
 
-    assert VideoLoader._normalize_video_url(data_url) == data_url
+    assert validate_media_url(data_url, policy) == data_url
+
+
+def test_normalize_video_url_rejects_bare_path_by_default(tmp_path):
+    video_path = tmp_path / "sample.webm"
+    video_path.write_bytes(b"video")
+
+    # Default policy has no allowed_local_path -> local paths rejected.
+    policy = UrlValidationPolicy()
+
+    with pytest.raises(UrlValidationError, match="Local media paths are not permitted"):
+        validate_media_url(str(video_path), policy)
+
+
+def test_normalize_video_url_rejects_private_ip():
+    policy = UrlValidationPolicy()
+
+    with pytest.raises(UrlValidationError):
+        validate_media_url(
+            "https://169.254.169.254/video.mp4", policy
+        )
+
+
+def test_normalize_video_url_accepts_file_uri_inside_prefix(tmp_path):
+    video_path = tmp_path / "sample.webm"
+    video_path.write_bytes(b"video")
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    file_uri = video_path.resolve().as_uri()
+    assert validate_media_url(file_uri, policy) == file_uri
+
+
+def test_normalize_video_url_rejects_file_uri_outside_prefix(tmp_path):
+    allowed = tmp_path / "media"
+    allowed.mkdir()
+    other = tmp_path / "secret.webm"
+    other.write_bytes(b"video")
+    policy = UrlValidationPolicy(allowed_local_path=str(allowed))
+
+    with pytest.raises(
+        UrlValidationError, match="outside the allowed directory"
+    ):
+        validate_media_url(other.resolve().as_uri(), policy)
+
+
+@pytest.mark.asyncio
+async def test_load_video_rejects_http_by_default():
+    # Default env policy: http is disabled, so validation should reject this
+    # before any fetch is attempted.
+    loader = VideoLoader(url_policy=UrlValidationPolicy())
+
+    with pytest.raises(ValueError, match="not allowed"):
+        await loader.load_video("http://example.com/x.mp4")
 
 
 @pytest.mark.asyncio
 async def test_load_video_uses_vllm_media_connector():
     loader = VideoLoader()
+    # data: scheme is in the default allowlist regardless of env flags.
+    loader._url_policy = UrlValidationPolicy()
     frames = np.arange(24, dtype=np.uint8).reshape(1, 2, 4, 3)[:, :, ::-1, :]
     metadata = {"fps": 4.0, "frames_indices": [0], "total_num_frames": 1}
     loader._load_video_with_vllm = AsyncMock(  # type: ignore[method-assign]

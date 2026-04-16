@@ -25,6 +25,7 @@ import pytest
 from PIL import Image
 
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.url_validator import UrlValidationPolicy
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -45,29 +46,42 @@ def _make_png_bytes() -> bytes:
 PNG_BYTES = _make_png_bytes()
 
 
+def _permissive_policy(
+    allowed_local_path: str | None = None,
+) -> UrlValidationPolicy:
+    """Return a policy that permits the schemes used by tests without DNS hits."""
+    return UrlValidationPolicy(
+        allow_http=True,
+        allow_private_ips=True,
+        allowed_local_path=allowed_local_path,
+    )
+
+
 def _mock_http_client(
     content: bytes = PNG_BYTES,
     status_code: int = 200,
     delay: float = 0.0,
     side_effect: Exception | None = None,
 ) -> AsyncMock:
-    """Return a mock httpx.AsyncClient whose .get() returns a fake response.
+    """Return a mock httpx.AsyncClient compatible with fetch_with_revalidation.
+
+    ``fetch_with_revalidation`` uses ``client.build_request(...)`` then
+    ``client.send(request, follow_redirects=False)``. We stub both and also
+    keep ``client.get`` behaviour for any legacy callers.
 
     Args:
         content: Raw bytes returned as the HTTP response body.
         status_code: HTTP status code; >=400 triggers raise_for_status().
         delay: Seconds to sleep before responding (simulates network latency).
-        side_effect: If set, .get() raises this exception instead of returning.
+        side_effect: If set, .send()/.get() raises this exception instead.
     """
 
-    async def _get(url: str) -> Any:
-        if delay > 0:
-            await asyncio.sleep(delay)
-        if side_effect is not None:
-            raise side_effect
+    def _build_response() -> Any:
         resp = MagicMock(spec=httpx.Response)
         resp.status_code = status_code
         resp.content = content
+        resp.is_redirect = False
+        resp.headers = {}
         resp.raise_for_status = MagicMock()
         if status_code >= 400:
             resp.raise_for_status.side_effect = httpx.HTTPStatusError(
@@ -75,14 +89,27 @@ def _mock_http_client(
             )
         return resp
 
+    async def _respond(*_args: Any, **_kwargs: Any) -> Any:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        if side_effect is not None:
+            raise side_effect
+        return _build_response()
+
     client = AsyncMock()
-    client.get = AsyncMock(side_effect=_get)
+    client.get = AsyncMock(side_effect=_respond)
+    client.build_request = MagicMock(return_value=MagicMock(spec=httpx.Request))
+    client.send = AsyncMock(side_effect=_respond)
     return client
 
 
 @pytest.fixture(autouse=True)
 def loader() -> ImageLoader:
-    return ImageLoader(cache_size=4, http_timeout=30.0)
+    return ImageLoader(
+        cache_size=4,
+        http_timeout=30.0,
+        url_policy=_permissive_policy(),
+    )
 
 
 # --- Concurrent same-URL dedup ---
@@ -103,7 +130,7 @@ async def test_concurrent_same_url_deduplicates(loader: ImageLoader) -> None:
     assert len(results) == 2
     assert results[0].size == results[1].size
     # Only one HTTP GET should have been issued
-    assert mock_client.get.call_count == 1
+    assert mock_client.send.call_count == 1
 
 
 async def test_concurrent_different_urls_fetch_independently(
@@ -120,7 +147,7 @@ async def test_concurrent_different_urls_fetch_independently(
             loader.load_image("https://example.com/b.png"),
         )
 
-    assert mock_client.get.call_count == 2
+    assert mock_client.send.call_count == 2
 
 
 # --- Waiter cancellation isolation ---
@@ -176,10 +203,29 @@ async def test_retry_after_failure(loader: ImageLoader) -> None:
 # --- Error contract preserved for non-HTTP ---
 
 
-async def test_file_not_found_normalized(loader: ImageLoader) -> None:
-    """file:// path that doesn't exist should raise ValueError, not FileNotFoundError."""
-    with pytest.raises(ValueError, match="Failed to load image"):
-        await loader.load_image("file:///nonexistent/path/img.png")
+async def test_blocked_scheme_rejected() -> None:
+    """With the default deny policy, file:// access should be rejected."""
+    default_loader = ImageLoader(
+        cache_size=4,
+        http_timeout=30.0,
+        url_policy=UrlValidationPolicy(),  # default: deny file://
+    )
+    with pytest.raises(ValueError, match="Local media paths are not permitted"):
+        await default_loader.load_image("file:///etc/passwd")
+
+
+async def test_file_allowed_when_path_configured(tmp_path) -> None:
+    """When allowed_local_path is set, a file inside it should load."""
+    target = tmp_path / "img.png"
+    target.write_bytes(PNG_BYTES)
+
+    permissive = ImageLoader(
+        cache_size=4,
+        http_timeout=30.0,
+        url_policy=_permissive_policy(allowed_local_path=str(tmp_path)),
+    )
+    result = await permissive.load_image(f"file://{target}")
+    assert isinstance(result, Image.Image)
 
 
 async def test_data_url_invalid_base64_normalized(loader: ImageLoader) -> None:
@@ -192,6 +238,48 @@ async def test_data_url_non_image_rejected(loader: ImageLoader) -> None:
     """data: URL with non-image media type should raise ValueError."""
     with pytest.raises(ValueError, match="Data URL must be an image type"):
         await loader.load_image("data:text/plain;base64,aGVsbG8=")
+
+
+# --- SSRF / scheme rejection ---
+
+
+async def test_http_scheme_rejected_by_default(monkeypatch) -> None:
+    """With default env policy, http:// URLs must be rejected before any fetch."""
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+    monkeypatch.delenv("DYN_MM_LOCAL_PATH", raising=False)
+
+    default_loader = ImageLoader(cache_size=4, http_timeout=30.0)
+
+    mock_client = _mock_http_client()
+    with patch(
+        "dynamo.common.multimodal.image_loader.get_http_client",
+        return_value=mock_client,
+    ):
+        with pytest.raises(ValueError, match="scheme|not allowed"):
+            await default_loader.load_image("http://example.com/x.png")
+
+    # The shared HTTP client must not be touched when the URL is rejected.
+    assert mock_client.send.call_count == 0
+    assert mock_client.get.call_count == 0
+
+
+async def test_blocked_private_ip_rejected(monkeypatch) -> None:
+    """Cloud metadata / private IPs must be rejected even over https."""
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+
+    strict_loader = ImageLoader(
+        cache_size=4,
+        http_timeout=30.0,
+        url_policy=UrlValidationPolicy(
+            allow_http=True,
+            allow_private_ips=False,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="blocked range"):
+        await strict_loader.load_image(
+            "https://169.254.169.254/latest/meta-data/"
+        )
 
 
 # --- HTTP error contract ---

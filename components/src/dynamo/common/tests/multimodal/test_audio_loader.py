@@ -8,6 +8,11 @@ import pytest
 
 import dynamo.common.multimodal.audio_loader as audio_loader_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
+from dynamo.common.multimodal.url_validator import (
+    UrlValidationError,
+    UrlValidationPolicy,
+    validate_media_url,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -16,34 +21,95 @@ pytestmark = [
 ]
 
 
+def _permissive_http_policy() -> UrlValidationPolicy:
+    """Policy that lets existing tests keep using https://example.com/... URLs.
+
+    Private/loopback IPs and DNS checks are bypassed so tests don't depend on
+    real DNS resolution of example.com.
+    """
+    return UrlValidationPolicy(
+        allow_http=True,
+        allow_private_ips=True,
+    )
+
+
 def test_normalize_audio_url_converts_local_paths(tmp_path):
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"RIFF")
 
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
     assert (
-        AudioLoader._normalize_audio_url(str(audio_path))
+        validate_media_url(str(audio_path), policy)
         == audio_path.resolve().as_uri()
     )
 
 
 def test_normalize_audio_url_preserves_data_urls():
     data_url = "data:audio/wav;base64,UklGRg=="
-    assert AudioLoader._normalize_audio_url(data_url) == data_url
+    policy = UrlValidationPolicy()
+    assert validate_media_url(data_url, policy) == data_url
 
 
 def test_normalize_audio_url_preserves_http_urls():
     url = "https://example.com/audio.wav"
-    assert AudioLoader._normalize_audio_url(url) == url
+    policy = _permissive_http_policy()
+    assert validate_media_url(url, policy) == url
 
 
-def test_normalize_audio_url_raises_on_missing_file():
-    with pytest.raises(FileNotFoundError, match="Error reading file"):
-        AudioLoader._normalize_audio_url("/nonexistent/audio.wav")
+def test_normalize_audio_url_rejects_bare_path_by_default(tmp_path):
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF")
+
+    policy = UrlValidationPolicy()
+
+    with pytest.raises(UrlValidationError, match="Local media paths are not permitted"):
+        validate_media_url(str(audio_path), policy)
+
+
+def test_normalize_audio_url_rejects_private_ip():
+    policy = UrlValidationPolicy()
+
+    with pytest.raises(UrlValidationError):
+        validate_media_url(
+            "https://169.254.169.254/audio.wav", policy
+        )
+
+
+def test_normalize_audio_url_accepts_file_uri_inside_prefix(tmp_path):
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFF")
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    file_uri = audio_path.resolve().as_uri()
+    assert validate_media_url(file_uri, policy) == file_uri
+
+
+def test_normalize_audio_url_rejects_file_uri_outside_prefix(tmp_path):
+    allowed = tmp_path / "media"
+    allowed.mkdir()
+    other = tmp_path / "secret.wav"
+    other.write_bytes(b"RIFF")
+    policy = UrlValidationPolicy(allowed_local_path=str(allowed))
+
+    with pytest.raises(
+        UrlValidationError, match="outside the allowed directory"
+    ):
+        validate_media_url(other.resolve().as_uri(), policy)
+
+
+@pytest.mark.asyncio
+async def test_load_audio_rejects_http_by_default():
+    loader = AudioLoader(url_policy=UrlValidationPolicy())
+
+    with pytest.raises(ValueError, match="not allowed"):
+        await loader.load_audio("http://example.com/x.wav")
 
 
 @pytest.mark.asyncio
 async def test_load_audio_uses_vllm_media_connector():
     loader = AudioLoader()
+    loader._url_policy = UrlValidationPolicy()
     waveform = np.random.randn(16000).astype(np.float32)
     sr = 44100.0
     loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
@@ -60,7 +126,7 @@ async def test_load_audio_uses_vllm_media_connector():
 
 @pytest.mark.asyncio
 async def test_load_audio_rejects_empty_waveform():
-    loader = AudioLoader()
+    loader = AudioLoader(url_policy=_permissive_http_policy())
     loader._load_audio_with_vllm = AsyncMock(  # type: ignore[method-assign]
         return_value=(np.array([], dtype=np.float32), 16000.0)
     )
