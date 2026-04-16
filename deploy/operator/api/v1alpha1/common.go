@@ -155,6 +155,58 @@ func (e ExtraPodSpec) MarshalJSON() ([]byte, error) {
 	return json.Marshal(aux)
 }
 
+// GPUMemoryServiceMode selects the GMS deployment topology.
+type GPUMemoryServiceMode string
+
+const (
+	// GMSModeIntraPod runs GMS as a sidecar within the same pod.
+	GMSModeIntraPod GPUMemoryServiceMode = "intraPod"
+	// GMSModeInterPod runs GMS as a separate pod (not yet supported).
+	GMSModeInterPod GPUMemoryServiceMode = "interPod"
+)
+
+// GPUMemoryServiceSpec configures the GPU Memory Service (GMS) sidecar for a worker component.
+// When enabled, the operator injects a GMS sidecar that provides shared GPU memory access
+// via DRA (Dynamic Resource Allocation). The sidecar runs two GMS processes per GPU
+// (weights + kv_cache) and communicates with the main container over UDS sockets.
+type GPUMemoryServiceSpec struct {
+	// Enabled activates the GMS sidecar. GPU resources on the main container
+	// are replaced with a DRA ResourceClaim for shared GPU access.
+	Enabled bool `json:"enabled"`
+	// Mode selects the GMS deployment topology.
+	// +kubebuilder:default=intraPod
+	// +kubebuilder:validation:Enum=intraPod;interPod
+	// +optional
+	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
+	// DeviceClassName is the DRA DeviceClass to request GPUs from.
+	// +kubebuilder:default="gpu.nvidia.com"
+	// +optional
+	DeviceClassName string `json:"deviceClassName,omitempty"`
+}
+
+// FailoverSpec configures active-passive failover for a worker component.
+// For intraPod mode: requires gpuMemoryService.enabled; the main container is cloned
+// into engine containers (active + standby) within the same pod.
+// For interPod mode: the operator creates a dedicated GMS weight server pod and
+// multiple engine pods per rank that share GPUs via DRA resource claims.
+type FailoverSpec struct {
+	// Enabled activates failover mode.
+	Enabled bool `json:"enabled"`
+	// Mode selects the failover deployment topology.
+	// intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).
+	// interPod: a dedicated GMS weight server pod + engine pods per rank (requires Grove).
+	// +kubebuilder:default=intraPod
+	// +kubebuilder:validation:Enum=intraPod;interPod
+	// +optional
+	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
+	// NumShadows is the number of shadow (standby) engine pods/containers per rank.
+	// Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	NumShadows int32 `json:"numShadows,omitempty"`
+}
+
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
 // for replica management. When enabled, the DGDSA owns the replicas field and
 // external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.

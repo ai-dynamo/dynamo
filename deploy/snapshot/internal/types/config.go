@@ -56,20 +56,23 @@ type StorageSpec struct {
 
 // RestoreSpec holds settings for the CRIU restore process.
 type RestoreSpec struct {
-	NSRestorePath              string `yaml:"nsRestorePath"`
-	RestoreReadyTimeoutSeconds int    `yaml:"restoreReadyTimeoutSeconds"`
+	NSRestorePath         string `yaml:"nsRestorePath"`
+	RestoreTimeoutSeconds int    `yaml:"restoreTimeoutSeconds"`
 }
 
-func (c *RestoreSpec) RestoreReadyTimeout() time.Duration {
-	if c.RestoreReadyTimeoutSeconds <= 0 {
+func (c *RestoreSpec) RestoreTimeout() time.Duration {
+	if c.RestoreTimeoutSeconds <= 0 {
 		return 0
 	}
-	return time.Duration(c.RestoreReadyTimeoutSeconds) * time.Second
+	return time.Duration(c.RestoreTimeoutSeconds) * time.Second
 }
 
 func (c *RestoreSpec) Validate() error {
 	if c.NSRestorePath == "" {
 		return &ConfigError{Field: "nsRestorePath", Message: "nsRestorePath is required"}
+	}
+	if c.RestoreTimeoutSeconds <= 0 {
+		return &ConfigError{Field: "restoreTimeoutSeconds", Message: "restoreTimeoutSeconds must be greater than zero"}
 	}
 	return nil
 }

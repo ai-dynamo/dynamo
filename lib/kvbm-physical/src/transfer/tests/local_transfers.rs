@@ -9,7 +9,6 @@
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
 use super::*;
-use crate::transfer::TransferCapabilities;
 use crate::transfer::executor::TransferOptionsInternal;
 use crate::transfer::executor::execute_transfer;
 use crate::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};

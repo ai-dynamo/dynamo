@@ -5,15 +5,37 @@
 
 from __future__ import annotations
 
-import atexit
 import os
 
-from cuda.bindings import driver as cuda
-from gpu_memory_service.common.types import GrantedLockType
+from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.utils import fail
 
-_primary_contexts: dict[int, object] = {}
-_primary_context_release_registered = False
+try:
+    from cuda.bindings import driver as cuda
+except ImportError:
+    # Keep import-time collection working in CPU-only environments and let the
+    # first real CUDA call fail with a targeted message instead.
+    class _MissingCuda:
+        def __getattr__(self, name):
+            raise RuntimeError(
+                "cuda-python is required for GPU Memory Service CUDA operations"
+            )
+
+    cuda = _MissingCuda()
+
+
+def list_devices() -> list[int]:
+    """Return list of CUDA device indices visible to this process via NVML."""
+    import pynvml
+
+    pynvml.nvmlInit()
+    try:
+        count = pynvml.nvmlDeviceGetCount()
+    finally:
+        pynvml.nvmlShutdown()
+    if count == 0:
+        raise SystemExit("no nvidia devices found")
+    return list(range(count))
 
 
 def cuda_check_result(result: cuda.CUresult, name: str) -> None:
@@ -157,28 +179,3 @@ def cuda_validate_pointer(va: int) -> None:
 def cuda_synchronize() -> None:
     (result,) = cuda.cuCtxSynchronize()
     cuda_check_result(result, "cuCtxSynchronize")
-
-
-def cuda_set_current_device(device: int) -> None:
-    global _primary_context_release_registered
-
-    ctx = _primary_contexts.get(device)
-    if ctx is None:
-        result, ctx = cuda.cuDevicePrimaryCtxRetain(device)
-        cuda_check_result(result, "cuDevicePrimaryCtxRetain")
-        _primary_contexts[device] = ctx
-        if not _primary_context_release_registered:
-            _primary_context_release_registered = True
-            atexit.register(_release_primary_contexts)
-    (result,) = cuda.cuCtxSetCurrent(ctx)
-    cuda_check_result(result, "cuCtxSetCurrent")
-
-
-def _release_primary_contexts() -> None:
-    for device in list(_primary_contexts):
-        try:
-            (result,) = cuda.cuDevicePrimaryCtxRelease(device)
-        except Exception:
-            continue
-        if result == cuda.CUresult.CUDA_SUCCESS:
-            _primary_contexts.pop(device, None)

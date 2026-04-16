@@ -130,6 +130,11 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		return nil, err
 	}
 
+	// Validate GPU memory service configuration (intra-pod GMS)
+	if err := v.validateGPUMemoryService(); err != nil {
+		return nil, err
+	}
+
 	// Validate GMS failover constraints
 	if err := v.validateFailover(); err != nil {
 		return nil, err
@@ -264,32 +269,93 @@ func (v *SharedSpecValidator) validateFrontendSidecar() error {
 
 // validateFailover validates GMS failover configuration constraints.
 func (v *SharedSpecValidator) validateFailover() error {
-	if !v.spec.IsGMSEnabled() {
+	if v.spec.Failover == nil || !v.spec.Failover.Enabled {
 		return nil
 	}
 
 	var errs []error
 
-	if v.spec.Failover.NumShadows < 1 {
-		errs = append(errs, fmt.Errorf("%s.failover.numShadows must be >= 1", v.fieldPath))
-	}
-
-	gpuCount := int64(0)
-	if v.spec.Resources != nil && v.spec.Resources.Limits != nil && v.spec.Resources.Limits.GPU != "" {
-		if n, err := strconv.ParseInt(v.spec.Resources.Limits.GPU, 10, 32); err == nil {
-			gpuCount = n
+	// For intra-pod mode: require gpuMemoryService.enabled and validate mode matching.
+	if v.spec.Failover.Mode == nvidiacomv1alpha1.GMSModeIntraPod || v.spec.Failover.Mode == "" {
+		if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+			errs = append(errs, fmt.Errorf(
+				"%s.failover: intraPod failover requires gpuMemoryService.enabled to be true",
+				v.fieldPath))
+		} else if v.spec.GPUMemoryService.Mode != "" &&
+			v.spec.GPUMemoryService.Mode != nvidiacomv1alpha1.GMSModeIntraPod {
+			errs = append(errs, fmt.Errorf(
+				"%s.failover: failover.mode %q must match gpuMemoryService.mode %q",
+				v.fieldPath, v.spec.Failover.Mode, v.spec.GPUMemoryService.Mode))
 		}
 	}
-	if gpuCount < 1 {
-		errs = append(errs, fmt.Errorf("%s: GMS failover requires at least 1 GPU in resources.limits.gpu", v.fieldPath))
-	}
 
-	switch v.spec.ComponentType {
-	case consts.ComponentTypeEPP, consts.ComponentTypeFrontend, consts.ComponentTypePlanner:
-		errs = append(errs, fmt.Errorf("%s: GMS failover is not supported for componentType %q", v.fieldPath, v.spec.ComponentType))
+	// For inter-pod mode: validate GPU count and component type restrictions.
+	if v.spec.Failover.Mode == nvidiacomv1alpha1.GMSModeInterPod {
+		if v.spec.Failover.NumShadows < 1 {
+			errs = append(errs, fmt.Errorf("%s.failover.numShadows must be >= 1", v.fieldPath))
+		}
+
+		gpuCount := int64(0)
+		if v.spec.Resources != nil && v.spec.Resources.Limits != nil && v.spec.Resources.Limits.GPU != "" {
+			if n, err := strconv.ParseInt(v.spec.Resources.Limits.GPU, 10, 32); err == nil {
+				gpuCount = n
+			}
+		}
+		if gpuCount < 1 {
+			errs = append(errs, fmt.Errorf("%s: GMS failover requires at least 1 GPU in resources.limits.gpu", v.fieldPath))
+		}
+
+		switch v.spec.ComponentType {
+		case consts.ComponentTypeEPP, consts.ComponentTypeFrontend, consts.ComponentTypePlanner:
+			errs = append(errs, fmt.Errorf("%s: GMS failover is not supported for componentType %q", v.fieldPath, v.spec.ComponentType))
+		}
 	}
 
 	return errors.Join(errs...)
+}
+
+func (v *SharedSpecValidator) validateGPUMemoryService() error {
+	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+		return nil
+	}
+
+	isWorker := v.spec.ComponentType == consts.ComponentTypeWorker ||
+		v.spec.ComponentType == consts.ComponentTypePrefill ||
+		v.spec.ComponentType == consts.ComponentTypeDecode
+	if !isWorker {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service is only supported for worker components (componentType must be worker, prefill, or decode)",
+			v.fieldPath)
+	}
+
+	if v.spec.Resources == nil {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
+			v.fieldPath)
+	}
+
+	gpuStr := ""
+	switch {
+	case v.spec.Resources.Limits != nil && v.spec.Resources.Limits.GPU != "":
+		gpuStr = v.spec.Resources.Limits.GPU
+	case v.spec.Resources.Requests != nil && v.spec.Resources.Requests.GPU != "":
+		gpuStr = v.spec.Resources.Requests.GPU
+	}
+
+	if gpuStr == "" {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
+			v.fieldPath)
+	}
+
+	gpuCount, err := strconv.Atoi(gpuStr)
+	if err != nil || gpuCount < 1 {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
+			v.fieldPath)
+	}
+
+	return nil
 }
 
 // validateServiceAnnotations validates known annotations on the service-level spec.

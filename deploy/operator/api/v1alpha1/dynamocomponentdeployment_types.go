@@ -150,8 +150,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
 
+	// GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+	// When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+	// +optional
+	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
+
 	// Failover configures GMS (GPU Memory Service) failover for this service.
-	// When enabled, the operator creates a dedicated GMS weight server pod and
+	// For intraPod mode: the main container is cloned into two engine containers (active + standby).
+	// For interPod mode: the operator creates a dedicated GMS weight server pod and
 	// multiple engine pods per rank that share GPUs via DRA resource claims.
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
@@ -164,21 +170,6 @@ type MultinodeSpec struct {
 	// Must be greater than 1.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
-}
-
-// FailoverSpec configures GMS (GPU Memory Service) failover for a service.
-// When enabled, the operator creates a GMS weight server pod that pre-loads model
-// weights into shared GPU memory, plus NumShadows+1 engine pods per rank. At runtime,
-// one engine pod acquires the flock and becomes primary; the rest are shadows.
-type FailoverSpec struct {
-	// Enabled activates GMS failover for this service.
-	Enabled bool `json:"enabled"`
-	// NumShadows is the number of shadow (standby) engine pods per rank.
-	// Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).
-	// +kubebuilder:default=1
-	// +kubebuilder:validation:Minimum=1
-	// +optional
-	NumShadows int32 `json:"numShadows,omitempty"`
 }
 
 type IngressTLSSpec struct {
@@ -355,7 +346,13 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 }
 
 func (s *DynamoComponentDeploymentSharedSpec) IsGMSEnabled() bool {
-	return s.Failover != nil && s.Failover.Enabled
+	if s.Failover == nil || !s.Failover.Enabled {
+		return false
+	}
+	// Mode == "" means the field was not set (backward compat with pre-Mode API,
+	// or Go unit tests that don't go through the Kubernetes API defaulting).
+	// New objects created via the K8s API get Mode defaulted to "intraPod".
+	return s.Failover.Mode == GMSModeInterPod || s.Failover.Mode == ""
 }
 
 func (s *DynamoComponentDeploymentSharedSpec) GetNumShadows() int32 {
