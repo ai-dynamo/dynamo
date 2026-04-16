@@ -133,6 +133,17 @@ pub trait SyncIndexer: Send + Sync + 'static {
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
 
+    /// Returns true when a maintenance task should be enqueued.
+    fn try_schedule_cleanup(&self) -> bool {
+        false
+    }
+
+    /// Rolls back a scheduled cleanup when enqueueing the task fails.
+    fn cancel_scheduled_cleanup(&self) {}
+
+    /// Executes a maintenance task on a worker thread.
+    fn run_cleanup_task(&self) {}
+
     /// Dump events directly from the shared structure, bypassing worker channels.
     /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.
     /// ConcurrentRadixTree). Returns `None` for backends that keep per-thread

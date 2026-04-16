@@ -35,6 +35,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x H100/H200/A100 | ✅ | ✅ | FP8 quantization | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x H100/H200/A100 | ✅ | ✅ | Prefill + Decode separation | ❌ |
+| **[Qwen3-32B-FP8](qwen3-32b-fp8/vllm/disagg/)** | vLLM | Disagg (Single-Node) | 8x A100 | ✅ | ✅ | 2× TP2 prefill + 1× TP4 decode, NixlConnector KV transfer | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 16x H100/H200 | ✅ | ✅ | MoE model, TP4×EP4 | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 16x H100/H200 | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
