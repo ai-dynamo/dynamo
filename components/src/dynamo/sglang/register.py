@@ -191,10 +191,14 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
         logging.warning(f"Failed to determine whether model uses MLA backend: {e}")
         is_mla_model = False
 
-    spec_algorithm = SpeculativeAlgorithm.from_string(
-        getattr(server_args, "speculative_algorithm", None)
-    )
-    is_eagle = bool(spec_algorithm.is_eagle())
+    try:
+        spec_algorithm = SpeculativeAlgorithm.from_string(
+            getattr(server_args, "speculative_algorithm", None)
+        )
+        is_eagle = bool(spec_algorithm.is_eagle())
+    except Exception as e:
+        logging.warning(f"Failed to determine speculative algorithm: {e}")
+        is_eagle = False
 
     tp_lcm_size = extra_config.get("tp_lcm_size")
     try:

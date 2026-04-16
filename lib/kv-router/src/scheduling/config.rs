@@ -255,7 +255,8 @@ pub struct KvRouterConfig {
     /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
     /// Blocks available in the shared cache are less valuable than device-local blocks
     /// because they need to be fetched. A value of 0.5 means each shared cache hit
-    /// counts as half a device-local hit. Default: 0.5.
+    /// counts as half a device-local hit. Default: 0.0 (shared cache scoring disabled);
+    /// the CLI sets this to 0.5 when shared cache is enabled.
     #[validate(range(min = 0.0, max = 1.0))]
     pub shared_cache_multiplier: f64,
 

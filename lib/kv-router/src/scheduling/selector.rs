@@ -144,11 +144,12 @@ impl DefaultWorkerSelector {
             };
 
         let potential_prefill_block = (adjusted_prefill_token as f64) / (block_size as f64);
+        let decode_block_fallback = (prefill_token as f64) / (block_size as f64);
         let decode_block = request
             .decode_blocks
             .get(&worker)
             .copied()
-            .unwrap_or(potential_prefill_block.floor() as usize) as f64;
+            .unwrap_or(decode_block_fallback.floor() as usize) as f64;
         let logit = overlap_weight * potential_prefill_block + decode_block;
 
         if shared_beyond > 0 {
