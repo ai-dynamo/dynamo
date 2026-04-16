@@ -12,6 +12,8 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -35,7 +37,7 @@ func failoverPodSpec() corev1.PodSpec {
 					{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "true"},
 					{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 					{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
-					{Name: "TMPDIR", Value: gmsSharedMountPath},
+					{Name: "TMPDIR", Value: gms.SharedMountPath},
 				},
 				Ports: []corev1.ContainerPort{
 					{Name: "system", ContainerPort: 9090, Protocol: corev1.ProtocolTCP},
@@ -56,10 +58,10 @@ func failoverPodSpec() corev1.PodSpec {
 					},
 				},
 				Resources: corev1.ResourceRequirements{
-					Claims: []corev1.ResourceClaim{{Name: gmsDRAClaimName}},
+					Claims: []corev1.ResourceClaim{{Name: dra.ClaimName}},
 				},
 				VolumeMounts: []corev1.VolumeMount{
-					{Name: gmsSharedVolumeName, MountPath: gmsSharedMountPath},
+					{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath},
 				},
 			},
 			{
@@ -164,7 +166,7 @@ func TestBuildFailoverPod_PreservesDRAClaim(t *testing.T) {
 	for i := range 2 {
 		engine := ps.Containers[i]
 		require.Len(t, engine.Resources.Claims, 1, "engine-%d should retain DRA claim", i)
-		assert.Equal(t, gmsDRAClaimName, engine.Resources.Claims[0].Name)
+		assert.Equal(t, dra.ClaimName, engine.Resources.Claims[0].Name)
 	}
 }
 
@@ -212,4 +214,12 @@ func TestIsFailoverEnabled(t *testing.T) {
 		Failover: &v1alpha1.FailoverSpec{Enabled: false},
 	}))
 	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
+}
+
+func envToMap(envs []corev1.EnvVar) map[string]string {
+	m := make(map[string]string, len(envs))
+	for _, e := range envs {
+		m[e.Name] = e.Value
+	}
+	return m
 }

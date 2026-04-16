@@ -26,7 +26,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -256,6 +256,8 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, int32(0), *job.Spec.BackoffLimit)
 	assert.Equal(t, int32(300), *job.Spec.TTLSecondsAfterFinished)
 
+	// Multi-GPU: wrapping decision uses identity.TensorParallelSize, not container GPU limits.
+	ckpt.Spec.Identity.TensorParallelSize = 2
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
@@ -267,16 +269,11 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, job.Spec.Template.Spec.Containers[0].Args)
 }
 
-func TestBuildCheckpointJobTargetsMainContainerWhenSidecarIsFirst(t *testing.T) {
+func TestBuildCheckpointJobWrapsWithCudaCheckpointForMultiGPU(t *testing.T) {
 	s := checkpointTestScheme()
 	ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
+	ckpt.Spec.Identity.TensorParallelSize = 2
 	ckpt.Spec.Job.PodTemplateSpec.Spec.Containers = []corev1.Container{
-		{
-			Name:    "sidecar",
-			Image:   "sidecar:latest",
-			Command: []string{"sleep"},
-			Args:    []string{"infinity"},
-		},
 		{
 			Name:    consts.MainContainerName,
 			Image:   "test-image:latest",
@@ -288,13 +285,19 @@ func TestBuildCheckpointJobTargetsMainContainerWhenSidecarIsFirst(t *testing.T) 
 				},
 			},
 		},
+		{
+			Name:    "sidecar",
+			Image:   "sidecar:latest",
+			Command: []string{"sleep"},
+			Args:    []string{"infinity"},
+		},
 	}
 
 	r := makeCheckpointReconciler(s, ckpt)
 	job, err := buildCheckpointJob(context.Background(), nil, r.Config, ckpt, defaultCheckpointJobName)
 	require.NoError(t, err)
 
-	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
+	main := &job.Spec.Template.Spec.Containers[0]
 	assert.Equal(t, []string{"cuda-checkpoint"}, main.Command)
 	assert.Equal(t, []string{"--launch-job", "python3", "-m", "dynamo.vllm"}, main.Args)
 	require.NotNil(t, main.ReadinessProbe)
@@ -362,22 +365,22 @@ func TestBuildCheckpointJobAddsGMSSidecars(t *testing.T) {
 	require.NoError(t, err)
 
 	main := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, consts.MainContainerName)
-	weightsServer := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, gmsruntime.ServerContainerName)
-	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, checkpoint.GMSSaverContainer)
+	weightsServer := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, gms.ServerContainerName)
+	saver := requireCheckpointContainer(t, job.Spec.Template.Spec.InitContainers, checkpoint.GMSSaverContainer)
 
 	volNames := map[string]bool{}
 	for _, v := range job.Spec.Template.Spec.Volumes {
 		volNames[v.Name] = true
 	}
-	assert.True(t, volNames[gmsruntime.SharedVolumeName])
-	assert.True(t, volNames[gmsruntime.ControlVolumeName])
+	assert.True(t, volNames[gms.SharedVolumeName])
+	assert.True(t, volNames[snapshotprotocol.CheckpointVolumeName])
 	assert.True(t, volNames[snapshotprotocol.CheckpointVolumeName])
 
 	mainMounts := map[string]string{}
 	for _, m := range main.VolumeMounts {
 		mainMounts[m.Name] = m.MountPath
 	}
-	assert.Equal(t, gmsruntime.SharedMountPath, mainMounts[gmsruntime.SharedVolumeName])
+	assert.Equal(t, gms.SharedMountPath, mainMounts[gms.SharedVolumeName])
 
 	assert.Equal(t, []string{"python3", "-m", "gpu_memory_service.cli.server"}, weightsServer.Command)
 	assert.Equal(t, corev1.ContainerRestartPolicyAlways, *weightsServer.RestartPolicy)
