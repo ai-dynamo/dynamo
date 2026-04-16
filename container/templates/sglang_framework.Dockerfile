@@ -80,7 +80,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     git checkout ${SGLANG_REF} && \
     cd python && \
     cp pyproject_xpu.toml pyproject.toml && \
-    uv pip install --extra-index-url https://download.pytorch.org/whl/xpu . && \
+    uv pip install --no-build-isolation --extra-index-url https://download.pytorch.org/whl/xpu . && \
     uv pip install xgrammar --no-deps && \
     uv pip install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate
 
