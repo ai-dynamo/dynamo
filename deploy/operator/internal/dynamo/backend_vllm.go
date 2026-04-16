@@ -400,7 +400,7 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 // health-gate ensuring only the leader is in Ray at vLLM startup, vLLM
 // naturally places all --data-parallel-size workers on the leader node.
 //
-// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready> && <vllm cmd>
+// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
 // Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
 func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
 	switch role {
@@ -413,10 +413,13 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		for i, arg := range container.Args {
 			quotedArgs[i] = shellQuoteForBashC(arg)
 		}
+		// Poll Ray head readiness with a bounded retry loop (150 × 2 s = 5 min max).
+		// An unbounded `until` loop would spin forever if `ray start --head` crashes
+		// silently or the port never opens.
 		container.Args = []string{fmt.Sprintf(
 			`ray start --head --port=%s --block & `+
-				`until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
-				`do sleep 2; done && %s %s`,
+				`i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
+				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s %s`,
 			VLLMPort,
 			VLLMPort,
 			strings.Join(quotedCmd, " "),

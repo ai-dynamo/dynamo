@@ -531,7 +531,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 		// Elastic EP tests: --enable-elastic-ep must use Ray cluster path,
 		// never the --data-parallel-hybrid-lb RPC path.
 		//
-		// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready> && <vllm cmd>  (no --data-parallel-size-local injected)
+		// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>  (no --data-parallel-size-local injected)
 		// Worker: health-gate on DynamoSystemPort (9090) && ray start --address=<leader> --block
 		//
 		// The health-gate ensures the worker only joins Ray after dynamo.vllm is fully
@@ -548,7 +548,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			gpuCount:    2,
 			annotations: nil,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do sleep 2; done && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s`,
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s`,
 				VLLMPort, VLLMPort, dataParallelSizeFlag, enableElasticEPFlag,
 			)},
 			description: "Operator prepends ray head start and TCP readiness poll; --data-parallel-hybrid-lb and --data-parallel-size-local are NOT injected (elastic EP uses Ray for GPU assignment, not the RPC path)",
@@ -583,7 +583,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			gpuCount:    2,
 			annotations: nil,
 			expectedArgs: []string{fmt.Sprintf(
-				`ray start --head --port=%s --block & until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do sleep 2; done && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s %s 2`,
+				`ray start --head --port=%s --block & i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && python3 -m dynamo.vllm --model test %s 4 --data-parallel-backend ray %s %s 2`,
 				VLLMPort, VLLMPort, dataParallelSizeFlag, enableElasticEPFlag, dataParallelSizeLocalFlag,
 			)},
 			description: "Operator prepends ray head start but does not override a user-specified --data-parallel-size-local",
