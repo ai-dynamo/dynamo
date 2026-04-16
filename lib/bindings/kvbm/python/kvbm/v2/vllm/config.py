@@ -20,7 +20,7 @@ from .version_check import version_check
 # from the lazy `kvbm.v2.vllm.connector` façade.
 version_check()
 
-from vllm.config import VllmConfig  # noqa: E402
+from vllm.config import VllmConfig, set_current_vllm_config  # noqa: E402
 from vllm.v1.attention.backends.utils import get_kv_cache_layout  # noqa: E402
 
 from . import KvbmVllmConfig  # noqa: E402
@@ -104,7 +104,7 @@ def extract_vllm_config_for_kvbm(
         "num_gpu_blocks": cfg.cache_config.num_gpu_blocks or 0,
         "num_cpu_blocks": cfg.cache_config.num_cpu_blocks or 0,
         "cache_dtype_bytes": _get_cache_dtype_bytes(cfg),
-        "kv_cache_layout": get_kv_cache_layout(),
+        "kv_cache_layout": _get_kv_cache_layout(cfg),
         "head_size": cfg.model_config.get_head_size(),
         "num_heads": cfg.model_config.get_total_num_kv_heads(),
     }
@@ -124,6 +124,18 @@ def extract_vllm_config_for_kvbm(
 
     # Create and return KvbmVllmConfig object
     return KvbmVllmConfig(parallel_dict, attention_dict)
+
+
+def _get_kv_cache_layout(vllm_config: VllmConfig):
+    """Get KV cache layout, setting the vLLM config context if not already set.
+
+    get_kv_cache_layout() internally calls get_current_vllm_config(), which
+    requires the global vLLM config context to be set. When called from the
+    SCHEDULER role during connector __init__, this context may not yet be
+    established, so we set it explicitly using the config we already have.
+    """
+    with set_current_vllm_config(vllm_config):
+        return get_kv_cache_layout()
 
 
 def _get_cache_dtype_bytes(vllm_config: VllmConfig) -> int:
