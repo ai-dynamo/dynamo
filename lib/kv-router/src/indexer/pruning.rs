@@ -112,22 +112,32 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
             .collect();
     }
 
-    /// Inserts a new timer or updates an existing one for the given key.
-    ///
-    /// # Arguments
-    /// * `key` - The unique key for the timer.
-    /// * `duration` - The duration from now when the timer should expire.
+    /// Inserts a new timer or updates an existing one for the given key,
+    /// using the manager's default TTL.
     pub fn insert(&mut self, keys: Vec<K>) {
-        let expiry_time = Instant::now() + self.ttl;
+        self.insert_with_ttl(keys, self.ttl);
+    }
+
+    /// Inserts or updates timers for the given keys, using a caller-provided TTL.
+    ///
+    /// If the key already has a later expiry recorded, the existing (longer) expiry is kept.
+    /// This lets a real KV event (inserted via `insert`) promote a speculative entry
+    /// without having it later shortened by a subsequent predictive insert.
+    pub fn insert_with_ttl(&mut self, keys: Vec<K>, ttl: Duration) {
+        let expiry_time = Instant::now() + ttl;
 
         for key in keys {
-            // Insert or update the authoritative time in the map.
-            self.timers.insert(key.clone(), expiry_time);
+            let effective_expiry = match self.timers.get(&key) {
+                Some(existing) if *existing >= expiry_time => *existing,
+                _ => expiry_time,
+            };
+
+            self.timers.insert(key.clone(), effective_expiry);
 
             // Push the new expiration onto the heap. If the key was updated,
             // this leaves a "stale" entry on the heap for the old time,
             // which will be ignored when it's popped.
-            self.expirations.push((Reverse(expiry_time), key));
+            self.expirations.push((Reverse(effective_expiry), key));
         }
 
         // Check if we should rebuild the heap to remove stale entries
@@ -280,6 +290,95 @@ mod tests {
         assert!(pm.get_expiry(&3).is_none());
     }
 
+    /// `insert_with_ttl` should honour a shorter-than-default TTL: entries must
+    /// expire after the caller-provided duration.
+    #[tokio::test]
+    async fn test_prune_manager_insert_with_ttl_expires_early() {
+        const DEFAULT_TTL: Duration = Duration::from_secs(60);
+        const SHORT_TTL: Duration = Duration::from_millis(30);
+        let prune_config = PruneConfig {
+            ttl: DEFAULT_TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
+
+        pm.insert_with_ttl(vec![1], SHORT_TTL);
+        assert!(pm.get_expiry(&1).is_some());
+
+        time::sleep(SHORT_TTL + Duration::from_millis(10)).await;
+        let expired = pm.pop_expired();
+        assert_eq!(expired, vec![1]);
+        assert!(pm.get_expiry(&1).is_none());
+    }
+
+    /// A short-TTL predictive insert followed by a default-TTL (event-sourced)
+    /// insert must promote the entry to the longer expiry, so speculatively
+    /// predicted blocks aren't evicted once a real KV event confirms them.
+    #[tokio::test]
+    async fn test_prune_manager_default_insert_promotes_predicted() {
+        const DEFAULT_TTL: Duration = Duration::from_millis(200);
+        const SHORT_TTL: Duration = Duration::from_millis(30);
+        let prune_config = PruneConfig {
+            ttl: DEFAULT_TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
+
+        // Predict-on-route style insert with a short TTL.
+        pm.insert_with_ttl(vec![7], SHORT_TTL);
+        let predicted_expiry = *pm.get_expiry(&7).unwrap();
+
+        // Event-sourced insert (long TTL) arrives before the predicted entry expires.
+        pm.insert(vec![7]);
+        let promoted_expiry = *pm.get_expiry(&7).unwrap();
+        assert!(
+            promoted_expiry > predicted_expiry,
+            "default-TTL insert should extend expiry"
+        );
+
+        // Wait past the short TTL — the entry must still be alive thanks to promotion.
+        time::sleep(SHORT_TTL + Duration::from_millis(20)).await;
+        let expired = pm.pop_expired();
+        assert!(
+            expired.is_empty(),
+            "promoted entry must not expire at short TTL"
+        );
+        assert!(pm.get_expiry(&7).is_some());
+    }
+
+    /// A default-TTL insert followed by a short-TTL predictive insert for the
+    /// same key must NOT shorten the existing expiry — a real KV event already
+    /// confirmed the block, and subsequent predictions shouldn't demote it.
+    #[tokio::test]
+    async fn test_prune_manager_short_ttl_does_not_shorten_existing() {
+        const DEFAULT_TTL: Duration = Duration::from_millis(200);
+        const SHORT_TTL: Duration = Duration::from_millis(30);
+        let prune_config = PruneConfig {
+            ttl: DEFAULT_TTL,
+            max_tree_size: usize::MAX,
+            prune_target_ratio: 0.5,
+        };
+        let mut pm: PruneManager<u32> = PruneManager::new(50, prune_config);
+
+        pm.insert(vec![9]);
+        let first_expiry = *pm.get_expiry(&9).unwrap();
+
+        pm.insert_with_ttl(vec![9], SHORT_TTL);
+        let second_expiry = *pm.get_expiry(&9).unwrap();
+        assert_eq!(
+            second_expiry, first_expiry,
+            "short-TTL insert must not shorten a confirmed entry"
+        );
+
+        time::sleep(SHORT_TTL + Duration::from_millis(20)).await;
+        assert!(
+            pm.pop_expired().is_empty(),
+            "confirmed entry must not expire at short TTL"
+        );
+    }
+
     /// Validate that reinserting an existing key extends its TTL and prevents premature expiry.
     #[tokio::test]
     async fn test_prune_manager_update_resets_ttl() {
@@ -360,6 +459,7 @@ mod tests {
             .process_routing_decision_for_request(
                 &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_id),
+                None,
             )
             .await
             .unwrap();
@@ -413,6 +513,7 @@ mod tests {
             .process_routing_decision_for_request(
                 &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_id),
+                None,
             )
             .await
             .unwrap();
@@ -473,6 +574,7 @@ mod tests {
             .process_routing_decision_for_request(
                 &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_0),
+                None,
             )
             .await
             .unwrap();
@@ -481,6 +583,7 @@ mod tests {
             .process_routing_decision_for_request(
                 &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_1),
+                None,
             )
             .await
             .unwrap();
@@ -551,6 +654,7 @@ mod tests {
             .process_routing_decision_for_request(
                 &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_a),
+                None,
             )
             .await
             .unwrap();
@@ -616,6 +720,7 @@ mod tests {
             .process_routing_decision_for_request(
                 &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_0),
+                None,
             )
             .await
             .unwrap();
@@ -624,6 +729,7 @@ mod tests {
             .process_routing_decision_for_request(
                 &mut tokens_with_hashes,
                 WorkerWithDpRank::from_worker_id(worker_1),
+                None,
             )
             .await
             .unwrap();
@@ -798,7 +904,7 @@ mod tests {
             let tokens: Vec<u32> = vec![i * 10, i * 10 + 1, i * 10 + 2, i * 10 + 3];
             let mut tokens_with_hashes = TokensWithHashes::new(tokens, KV_BLOCK_SIZE);
             indexer
-                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+                .process_routing_decision_for_request(&mut tokens_with_hashes, worker, None)
                 .await
                 .unwrap();
             time::sleep(Duration::from_millis(1)).await; // Ensure different timestamps
@@ -823,7 +929,7 @@ mod tests {
         let tokens: Vec<u32> = vec![50, 51, 52, 53];
         let mut tokens_with_hashes = TokensWithHashes::new(tokens, KV_BLOCK_SIZE);
         indexer
-            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker, None)
             .await
             .unwrap();
 

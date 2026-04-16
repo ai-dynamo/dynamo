@@ -43,6 +43,16 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 - `--router-max-tree-size`: Maximum tree size before pruning is triggered. Defaults to 1048576 (2^20 blocks) when `--no-router-kv-events` is used.
 - `--router-prune-target-ratio`: Target size ratio to prune down to when `--router-max-tree-size` is exceeded. Defaults to 0.8 when `--no-router-kv-events` is used.
 - `--router-event-threads`: Number of event processing threads for the KV indexer (default: 4). With KV events enabled, values greater than 1 use the concurrent radix tree; approximate mode always uses a single-threaded indexer.
+- `--router-predict-on-route`: Speculatively inserts a request's prefix blocks into the indexer at routing time. Works with or without `--router-kv-events`. When both are enabled, the engine's real KV event (long TTL) promotes the speculative entry, so confirmed prefixes are never shortened. Off by default.
+- `--router-predicted-ttl-secs`: TTL in seconds applied to `--router-predict-on-route` insertions. Unset uses the indexer default (`--router-ttl-secs`, 120s). Short values (e.g. 2-5s) cause unconfirmed predictions to expire quickly if the engine never publishes a matching KV event.
+
+### When to use `--router-predict-on-route`
+
+Without this flag, the router depends entirely on engine KV events to learn which worker now holds which prefix. That works for steady-state traffic, but creates a race when many sibling requests arrive in a single batch — for example, 16 problems × 4 samples each with a shared system prompt, or any parallel-sampling / best-of-N workload. None of the engines has emitted a "block stored" event yet, so the router scores every sibling with zero overlap and round-robins them across workers. The prefix then gets prefilled on every worker instead of being reused.
+
+Enabling `--router-predict-on-route` makes the router insert its own routing decision into the indexer immediately, so the second, third, and fourth siblings already see the first sibling's prefix when they score candidates and get pinned to the same worker. With `--router-kv-events` still on, the engine's real event arrives moments later and re-inserts the same blocks at the default (long) TTL, which promotes the speculative entry. Use a short `--router-predicted-ttl-secs` (a few seconds) if you want predictions that the engine never confirms — for instance, because the request was cancelled before prefill completed — to fall out of the indexer quickly.
+
+You do not need this flag if you already run with `--no-router-kv-events`: approximate mode inserts on routing decisions by construction.
 
 To implement KV event publishing for custom inference engines, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`), see [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints).
@@ -61,6 +71,8 @@ These activate automatically with `--router-mode kv` -- no additional flags are 
 `--router-kv-overlap-score-weight` is the primary knob for balancing prefill efficiency against decode load. Prefill-heavy workloads benefit from a higher weight, which steers requests toward workers with better cache overlap and reduces TTFT. Decode-heavy workloads benefit from a lower weight, which distributes decode load more evenly and reduces ITL. The default of 1.0 is a reasonable starting point. This weight can also be overridden per request via `nvext.agent_hints.kv_overlap_score_weight`.
 
 Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly. In this mode the router falls back to approximate routing, predicting cache state from its own routing decisions with TTL-based expiration and pruning.
+
+Use `--router-predict-on-route` (with events still enabled) when the workload fires bursts of sibling requests with shared prefixes — parallel sampling, best-of-N, agent fan-out. It closes the window between the routing decision and the engine's first "block stored" event so siblings co-locate on the worker the first sibling picked. See the configuration section above for the promotion-on-event mechanics.
 
 Use `--no-router-assume-kv-reuse` in disaggregated setups where the decode worker does not reuse transferred KV cache blocks. Without this flag, the router undercounts decode blocks when duplicates exist, leading to inaccurate load estimates.
 

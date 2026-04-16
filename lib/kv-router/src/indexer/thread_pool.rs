@@ -321,6 +321,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         &self,
         _tokens_with_hashes: &mut TokensWithHashes,
         _worker: WorkerWithDpRank,
+        _ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         // No-op: pruning not supported in ThreadPoolIndexer
         Ok(())
