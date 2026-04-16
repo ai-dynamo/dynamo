@@ -1570,6 +1570,37 @@ def run_mocker_synthetic_trace_replay(
     """Replay a synthetic mocker workload without requiring a trace file."""
     ...
 
+class PlannerReplayBridge:
+    """Step-based bridge for driving an offline replay with a Python planner."""
+
+    def __init__(
+        self,
+        trace_file: str | os.PathLike[str],
+        extra_engine_args: MockEngineArgs,
+        num_workers: int,
+        router_mode: str = "round_robin",
+        router_config: Optional[KvRouterConfig] = None,
+        arrival_speedup_ratio: float = 1.0,
+        trace_block_size: int = 512,
+    ) -> None: ...
+
+    @staticmethod
+    def create_disagg(
+        trace_file: str | os.PathLike[str],
+        prefill_engine_args: MockEngineArgs,
+        decode_engine_args: MockEngineArgs,
+        num_prefill_workers: int,
+        num_decode_workers: int,
+        router_mode: str = "round_robin",
+        router_config: Optional[KvRouterConfig] = None,
+        arrival_speedup_ratio: float = 1.0,
+        trace_block_size: int = 512,
+    ) -> "PlannerReplayBridge": ...
+
+    def advance_to(self, until_ms: float) -> Dict[str, Any]: ...
+    def apply_scaling(self, target_prefill: int, target_decode: int) -> None: ...
+    def finalize(self) -> Dict[str, Any]: ...
+
 class Layer:
     """
     A KV cache block layer

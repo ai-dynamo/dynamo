@@ -19,6 +19,7 @@ use dynamo_kv_router::{
     SchedulingPolicy, SchedulingRequest, SequenceRequest, WorkerSelector,
 };
 use dynamo_tokens::SequenceHash;
+use rustc_hash::FxHashMap;
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -29,7 +30,7 @@ use crate::loadgen::ReplayRequestHashes;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_policy, replay_router_config, replay_selector,
-    replay_slots, replay_workers_with_configs,
+    replay_slots, replay_worker_config, replay_workers_with_configs,
 };
 
 type ReplayQueueKey = <RouterSchedulingPolicy as SchedulingPolicy>::Key;
@@ -124,8 +125,8 @@ impl PendingRequest {
 
     fn scheduling_request(
         &self,
-        decode_blocks: HashMap<WorkerWithDpRank, usize>,
-        prefill_tokens: HashMap<WorkerWithDpRank, usize>,
+        decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
+        prefill_tokens: FxHashMap<WorkerWithDpRank, usize>,
     ) -> SchedulingRequest {
         SchedulingRequest {
             maybe_request_id: Some(self.request_id()),
@@ -180,6 +181,7 @@ pub(crate) struct OfflineReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
     queue_threshold: Option<f64>,
+    worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
     slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
     selector: DefaultWorkerSelector,
@@ -199,20 +201,18 @@ impl OfflineReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
         let selector = replay_selector(&config);
         let policy = replay_policy(&config, args);
-        let queue_threshold = if num_workers > 1 {
-            config.router_queue_threshold
-        } else {
-            None
-        };
+        let queue_threshold = config.router_queue_threshold;
 
         Ok(Self {
             config,
             block_size: args.block_size as u32,
             queue_threshold,
+            worker_config_template,
             workers_with_configs,
             slots,
             selector,
@@ -309,6 +309,51 @@ impl OfflineReplayRouter {
         self.pending.len()
     }
 
+    /// Register a new worker with the router without disturbing existing slot state.
+    pub(crate) fn add_worker(&mut self, worker_id: usize) -> Result<()> {
+        let wid = worker_id as WorkerId;
+        if self
+            .workers_with_configs
+            .insert(wid, self.worker_config_template.clone())
+            .is_some()
+        {
+            return Err(anyhow!("router worker {worker_id} already exists"));
+        }
+        let dp_range = HashMap::from([(wid, (0u32, 1u32))]);
+        self.slots.register_external_workers(&dp_range);
+
+        Ok(())
+    }
+
+    /// Remove a worker from routing eligibility.
+    ///
+    /// Only removes the worker from the config map so the selector won't
+    /// pick it for new requests.  The radix tree and active-sequence slots
+    /// are left intact so that in-flight requests on this worker can still
+    /// complete (free / mark_prefill_completed) and KV events can still
+    /// reference existing blocks without "parent block not found" errors.
+    /// Stale slot and indexer state is harmless — the selector and
+    /// `all_workers_busy` both skip workers absent from `workers_with_configs`.
+    pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
+        let wid = worker_id as WorkerId;
+        self.workers_with_configs.remove(&wid);
+        Ok(())
+    }
+
+    pub(crate) fn on_topology_changed(&mut self, now_ms: f64) -> Result<RouterEffects> {
+        if self.workers_with_configs.is_empty() {
+            return Ok(RouterEffects::default());
+        }
+        let decay_now = self.decay_now(now_ms);
+        Ok(RouterEffects {
+            admissions: self
+                .drain_pending(decay_now)?
+                .into_iter()
+                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
+                .collect(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_snapshot(&self, now_ms: f64) -> OfflineRouterSnapshot {
         let decay_now = self.decay_now(now_ms);
@@ -366,7 +411,7 @@ impl OfflineReplayRouter {
         let arrival_offset = Duration::from_secs_f64((now_ms.max(0.0)) / 1000.0);
         self.policy.enqueue_key(
             arrival_offset,
-            &request.scheduling_request(HashMap::new(), HashMap::new()),
+            &request.scheduling_request(FxHashMap::default(), FxHashMap::default()),
         )
     }
 
@@ -555,7 +600,7 @@ mod tests {
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
     use uuid::Uuid;
 
-    use super::OfflineReplayRouter;
+    use super::{OfflineReplayRouter, WorkerAdmission};
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
 
@@ -582,10 +627,25 @@ mod tests {
             .unwrap()
     }
 
+    fn queueing_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(64))
+            .build()
+            .unwrap()
+    }
+
     fn router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_track_prefill_tokens: true,
             router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            ..KvRouterConfig::default()
+        }
+    }
+
+    fn queueing_router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            router_queue_threshold: Some(0.5),
             ..KvRouterConfig::default()
         }
     }
@@ -629,6 +689,147 @@ mod tests {
         assert_eq!(
             router.debug_snapshot(10_000.0).active_tokens_by_worker,
             vec![(0, 0)]
+        );
+    }
+
+    #[test]
+    fn test_single_worker_router_honors_queue_threshold() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+
+        let first = router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        assert_eq!(first.admissions.len(), 1);
+
+        let second = router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        assert!(second.admissions.is_empty());
+        assert_eq!(router.pending_count(), 1);
+        assert_eq!(
+            router
+                .debug_snapshot(0.0)
+                .pending
+                .into_iter()
+                .map(|request| request.uuid)
+                .collect::<Vec<_>>(),
+            vec![Uuid::from_u128(2)]
+        );
+    }
+
+    #[test]
+    fn test_scaled_down_router_matches_fresh_single_worker_queueing() {
+        let mut fresh =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+        fresh.on_request_arrival(&request(1, 7), None, 0.0).unwrap();
+        fresh.on_request_arrival(&request(2, 8), None, 0.0).unwrap();
+
+        let mut scaled =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 2)
+                .unwrap();
+        scaled.remove_worker(1).unwrap();
+        scaled
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        scaled
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+
+        assert_eq!(scaled.pending_count(), fresh.pending_count());
+        assert_eq!(
+            scaled
+                .debug_snapshot(0.0)
+                .pending
+                .into_iter()
+                .map(|request| request.uuid)
+                .collect::<Vec<_>>(),
+            fresh
+                .debug_snapshot(0.0)
+                .pending
+                .into_iter()
+                .map(|request| request.uuid)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_router_can_scale_from_zero_workers() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+
+        router.remove_worker(0).unwrap();
+        router.add_worker(3).unwrap();
+
+        let effects = router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        assert_eq!(
+            effects.admissions,
+            vec![WorkerAdmission {
+                uuid: Uuid::from_u128(1),
+                worker_idx: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_add_worker_preserves_draining_worker_state() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 2)
+                .unwrap();
+
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        assert_eq!(
+            router.debug_snapshot(0.0).active_tokens_by_worker,
+            vec![(0, 64), (1, 64)]
+        );
+
+        router.remove_worker(1).unwrap();
+        router.add_worker(2).unwrap();
+
+        assert_eq!(
+            router.debug_snapshot(0.0).active_tokens_by_worker,
+            vec![(0, 64), (1, 64), (2, 0)]
+        );
+    }
+
+    #[test]
+    fn test_topology_change_drains_pending_after_scale_up() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        assert_eq!(router.pending_count(), 1);
+
+        router.add_worker(1).unwrap();
+        let effects = router.on_topology_changed(0.0).unwrap();
+
+        assert_eq!(
+            effects.admissions,
+            vec![WorkerAdmission {
+                uuid: Uuid::from_u128(2),
+                worker_idx: 1,
+            }]
+        );
+        assert_eq!(router.pending_count(), 0);
+        assert_eq!(
+            router.debug_snapshot(0.0).active_tokens_by_worker,
+            vec![(0, 64), (1, 64)]
         );
     }
 }

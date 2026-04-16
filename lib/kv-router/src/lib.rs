@@ -6,6 +6,8 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
+mod active_set;
+
 pub mod indexer;
 pub mod protocols;
 pub mod recovery;

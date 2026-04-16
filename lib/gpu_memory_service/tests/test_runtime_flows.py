@@ -254,6 +254,12 @@ def running_gms(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         client_memory_manager,
+        "cuda_set_current_device",
+        lambda device: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        client_memory_manager,
         "cumem_get_allocation_granularity",
         lambda device: 4096,
     )
