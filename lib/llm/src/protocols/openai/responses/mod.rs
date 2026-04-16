@@ -2072,7 +2072,10 @@ thinking
     }
 
     #[test]
-    fn test_include_logprobs_stripped_by_default() {
+    fn test_include_logprobs_empty_by_default() {
+        // OpenResponses schema requires `logprobs` to be an array. When the
+        // caller did not request them via `include`, emit an empty array
+        // rather than null.
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams::default();
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
@@ -2081,9 +2084,10 @@ thinking
             if let OutputItem::Message(msg) = item {
                 for content in &msg.content {
                     if let OutputMessageContent::OutputText(t) = content {
-                        assert!(
-                            t.logprobs.is_none(),
-                            "logprobs should be stripped by default"
+                        assert_eq!(
+                            t.logprobs.as_deref(),
+                            Some(&[][..]),
+                            "logprobs should be an empty array by default"
                         );
                     }
                 }
@@ -2140,11 +2144,9 @@ thinking
         assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
     }
 
-    /// Validate the JSON wire shape of NvResponse.
-    ///
-    /// The migration to upstream async-openai v0.34 removed fields that were
-    /// incorrectly present on our old local Response type (they belong on the
-    /// request, not the response, per the OpenAI Responses API spec).
+    /// Validate the JSON wire shape of NvResponse matches the OpenResponses
+    /// spec: required scalars always present, nullable-required fields
+    /// emitted as `null` when None.
     #[test]
     fn test_response_wire_format_shape() {
         let chat_resp = make_chat_resp_with_text("hello");
@@ -2152,14 +2154,14 @@ thinking
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let json = serde_json::to_value(&resp).unwrap();
 
-        // Fields that were on our old local type but are NOT in the OpenAI
-        // Responses API spec -- they are request-level, not response-level.
-        assert!(json.get("frequency_penalty").is_none());
-        assert!(json.get("presence_penalty").is_none());
-        assert!(json.get("store").is_none());
-        assert!(json.get("max_tool_calls").is_none());
+        // Required scalars the spec mandates on every response. Upstream
+        // async-openai's Response struct doesn't model these; NvResponse's
+        // custom serializer injects them.
+        assert_eq!(json["frequency_penalty"], 0.0);
+        assert_eq!(json["presence_penalty"], 0.0);
+        assert_eq!(json["store"], false);
 
-        // Fields that should be present with expected values
+        // Other required fields with expected values
         assert_eq!(json["object"], "response");
         assert_eq!(json["status"], "completed");
         assert_eq!(json["metadata"], serde_json::json!({}));
@@ -2167,12 +2169,25 @@ thinking
         assert!(json["output"][0].get("id").is_some());
         assert!(json["output"][0].get("status").is_some());
 
-        // Optional fields with None should be omitted (upstream uses skip_serializing_if)
-        assert!(json.get("error").is_none());
-        assert!(json.get("incomplete_details").is_none());
-        assert!(json.get("billing").is_none());
-        assert!(json.get("conversation").is_none());
-        assert!(json.get("safety_identifier").is_none());
+        // Nullable-required fields must be present as null (not missing).
+        for key in [
+            "error",
+            "incomplete_details",
+            "billing",
+            "conversation",
+            "safety_identifier",
+            "max_tool_calls",
+            "instructions",
+            "previous_response_id",
+            "prompt_cache_key",
+            "reasoning",
+        ] {
+            assert_eq!(
+                json.get(key),
+                Some(&serde_json::Value::Null),
+                "expected {key} to be present as null"
+            );
+        }
 
         // nvext should be omitted when None
         assert!(json.get("nvext").is_none());
