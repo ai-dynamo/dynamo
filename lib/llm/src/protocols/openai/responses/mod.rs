@@ -54,7 +54,7 @@ pub struct NvCreateResponse {
     pub nvext: Option<NvExt>,
 }
 
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
 pub struct NvResponse {
     /// Flattened Response fields (includes upstream + extended spec fields).
     #[serde(flatten)]
@@ -64,6 +64,94 @@ pub struct NvResponse {
     /// NVIDIA extension field for response metadata (worker IDs, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+
+    /// OpenResponses spec requires these as non-null scalars on every response,
+    /// but async-openai's `Response` doesn't model them. Populated from the
+    /// originating request. Surfaced during serialization (see `Serialize`
+    /// impl below); not persisted as top-level fields on the inner struct.
+    #[serde(default)]
+    pub presence_penalty: f32,
+    #[serde(default)]
+    pub frequency_penalty: f32,
+    #[serde(default)]
+    pub store: bool,
+}
+
+/// Patch an already-serialized `Response` JSON object to match the
+/// OpenResponses spec. Applied both to one-shot `NvResponse` serialization
+/// and to every `Response` embedded inside a streaming event payload.
+///
+/// Reconciles two spec gaps between upstream async-openai's `Response` and
+/// the OpenResponses spec:
+///
+///  1. Fields the spec requires as `T | null` that upstream marks
+///     `Option<T>` with `skip_serializing_if = Option::is_none`. These are
+///     silently dropped when None; the spec wants them present as null.
+///  2. Fields the spec requires (`presence_penalty`, `frequency_penalty`,
+///     `store`) that are absent from upstream `Response` entirely.
+///
+/// Rather than fork the upstream output chain (which would cascade into
+/// `OutputItem`, streaming events, and a long tail of sub-types, per
+/// `lib/protocols/CLAUDE.md`), we patch the serialized JSON. Adds a
+/// single `serde_json::to_value` round-trip per response, which is
+/// negligible next to tokenization/inference cost.
+pub(crate) fn patch_response_for_spec(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+    store: bool,
+) {
+    for key in [
+        "billing",
+        "completed_at",
+        "conversation",
+        "error",
+        "incomplete_details",
+        "instructions",
+        "max_output_tokens",
+        "max_tool_calls",
+        "previous_response_id",
+        "prompt",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "reasoning",
+        "safety_identifier",
+        "usage",
+    ] {
+        obj.entry(key).or_insert(serde_json::Value::Null);
+    }
+
+    obj.insert(
+        "presence_penalty".into(),
+        serde_json::json!(presence_penalty),
+    );
+    obj.insert(
+        "frequency_penalty".into(),
+        serde_json::json!(frequency_penalty),
+    );
+    obj.insert("store".into(), serde_json::json!(store));
+}
+
+impl Serialize for NvResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut value = serde_json::to_value(&self.inner).map_err(serde::ser::Error::custom)?;
+        let serde_json::Value::Object(obj) = &mut value else {
+            return value.serialize(serializer);
+        };
+
+        patch_response_for_spec(
+            obj,
+            self.presence_penalty,
+            self.frequency_penalty,
+            self.store,
+        );
+
+        if let Some(nvext) = &self.nvext {
+            obj.insert("nvext".into(), nvext.clone());
+        }
+
+        value.serialize(serializer)
+    }
 }
 
 /// Implements `NvExtProvider` for `NvCreateResponse`,
@@ -235,6 +323,24 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
         .join("")
 }
 
+/// Counterpart to `convert_input_content_to_text` for upstream's
+/// `InputContent`. Upstream's enum appears inside `FunctionCallOutput::Content`
+/// and `EasyInputContent::ContentList`, neither of which is Dynamo-owned, so
+/// payloads deserialized through those paths land as upstream variants.
+fn convert_upstream_input_content_to_text(
+    content: &[dynamo_protocols::types::responses::UpstreamInputContent],
+) -> String {
+    use dynamo_protocols::types::responses::UpstreamInputContent;
+    content
+        .iter()
+        .filter_map(|p| match p {
+            UpstreamInputContent::InputText(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// Accumulator for consecutive assistant-side items (OutputMessage, FunctionCall,
 /// assistant EasyMessage). Chat Completions represents an assistant turn as a
 /// single message carrying both `content` and `tool_calls`, so we coalesce
@@ -366,7 +472,9 @@ fn convert_input_items_to_messages(
                     std::mem::take(&mut pending).flush_into(&mut messages);
                     let output_text = match &fco.output {
                         FunctionCallOutput::Text(text) => text.clone(),
-                        FunctionCallOutput::Content(parts) => convert_input_content_to_text(parts),
+                        FunctionCallOutput::Content(parts) => {
+                            convert_upstream_input_content_to_text(parts)
+                        }
                     };
                     messages.push(ChatCompletionRequestMessage::Tool(
                         ChatCompletionRequestToolMessage {
@@ -388,7 +496,7 @@ fn convert_input_items_to_messages(
                         text.clone()
                     }
                     dynamo_protocols::types::responses::EasyInputContent::ContentList(parts) => {
-                        convert_input_content_to_text(parts)
+                        convert_upstream_input_content_to_text(parts)
                     }
                 };
                 match easy.role {
@@ -824,12 +932,14 @@ pub fn chat_completion_to_response(
         .include
         .as_ref()
         .is_some_and(|inc| inc.contains(&IncludeEnum::MessageOutputTextLogprobs));
-    if !keep_logprobs {
-        for item in &mut output {
-            if let OutputItem::Message(msg) = item {
-                for content in &mut msg.content {
-                    if let OutputMessageContent::OutputText(text) = content {
-                        text.logprobs = None;
+    for item in &mut output {
+        if let OutputItem::Message(msg) = item {
+            for content in &mut msg.content {
+                if let OutputMessageContent::OutputText(text) = content {
+                    if !keep_logprobs {
+                        text.logprobs = Some(Vec::new());
+                    } else if text.logprobs.is_none() {
+                        text.logprobs = Some(Vec::new());
                     }
                 }
             }
@@ -908,6 +1018,9 @@ pub fn chat_completion_to_response(
     Ok(NvResponse {
         inner: response,
         nvext,
+        presence_penalty: 0.0,
+        frequency_penalty: 0.0,
+        store: params.store.unwrap_or(false),
     })
 }
 

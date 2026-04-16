@@ -35,6 +35,13 @@ use serde::{Deserialize, Serialize};
 // shadow their upstream counterparts where no dual-side conflict exists.
 pub use async_openai::types::responses::*;
 
+// Re-export upstream's pre-shadow `InputContent` under an explicit alias.
+// Needed because `FunctionCallOutput::Content` and `EasyInputContent::ContentList`
+// are non-owned upstream types that carry upstream's original `InputContent`
+// inline, so downstream consumers occasionally need to name it alongside the
+// Dynamo-owned shadow defined further down this module.
+pub use async_openai::types::responses::InputContent as UpstreamInputContent;
+
 // Re-export from parent module for backward compat.
 pub use crate::types::ImageDetail;
 pub use crate::types::ReasoningEffort;
@@ -98,6 +105,45 @@ pub struct InputOutputMessage {
     pub role: AssistantRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<MessagePhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<OutputStatus>,
+}
+
+// ---------------------------------------------------------------------------
+// Input-side image / content / message (shadow upstream, relaxed shapes)
+// ---------------------------------------------------------------------------
+
+/// Relaxed counterpart to upstream `InputImageContent`. `detail` defaults to
+/// `ImageDetail::Auto` when the client omits it — OpenAI's hosted API and the
+/// OpenResponses spec both accept this shape, but upstream's struct marks
+/// `detail` as required.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct InputImageContent {
+    #[serde(default)]
+    pub detail: ImageDetail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+}
+
+/// Parts of an input message: text, image, or file. Mirrors upstream
+/// `InputContent` but routes `InputImage` through the Dynamo-owned relaxed
+/// `InputImageContent` above.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputContent {
+    InputText(InputTextContent),
+    InputImage(InputImageContent),
+    InputFile(InputFileContent),
+}
+
+/// User / system / developer input message. Shadows upstream `InputMessage`
+/// so we can route through the Dynamo-owned `InputContent` chain.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct InputMessage {
+    pub content: Vec<InputContent>,
+    pub role: InputRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<OutputStatus>,
 }

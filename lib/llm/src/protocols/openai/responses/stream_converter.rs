@@ -555,7 +555,16 @@ impl ResponseStreamConverter {
 
 fn make_sse_event(event: &ResponseStreamEvent) -> Result<Event, anyhow::Error> {
     let event_type = get_event_type(event);
-    let data = serde_json::to_string(event)?;
+    // Lifecycle events (`response.created`, `response.in_progress`, etc.) carry
+    // an inline `response` object that must satisfy the same OpenResponses
+    // schema as the one-shot response body. Patch it before serializing.
+    let mut value = serde_json::to_value(event)?;
+    if let serde_json::Value::Object(ref mut obj) = value
+        && let Some(serde_json::Value::Object(inner)) = obj.get_mut("response")
+    {
+        super::patch_response_for_spec(inner, 0.0, 0.0, false);
+    }
+    let data = serde_json::to_string(&value)?;
     Ok(Event::default().event(event_type).data(data))
 }
 
