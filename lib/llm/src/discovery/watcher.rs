@@ -560,8 +560,7 @@ impl ModelWatcher {
         card.download_config().await?;
 
         self.manager
-            .check_name_conflicts(card.name(), &card.aliases)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+            .check_name_conflicts(card.name(), &card.aliases)?;
 
         let component = self
             .drt

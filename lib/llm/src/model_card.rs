@@ -517,8 +517,11 @@ impl ModelDeploymentCard {
     }
 
     /// Set alternative names for this model.
+    ///
+    /// Also invalidates the cached checksum, since `mdcsum()` incorporates aliases into its hash.
     pub fn set_aliases(&mut self, aliases: Vec<String>) {
         self.aliases = aliases;
+        self.checksum = std::sync::OnceLock::new();
     }
 
     pub fn source_path(&self) -> &str {

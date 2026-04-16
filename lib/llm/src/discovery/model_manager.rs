@@ -202,8 +202,12 @@ impl ModelManager {
 
     /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
+    ///
+    /// Enforces alias-conflict invariants internally so callers can't bypass the check by skipping
+    /// a prior `check_name_conflicts` call.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
         if !card.aliases.is_empty() {
+            self.check_name_conflicts(card.name(), &card.aliases)?;
             self.register_aliases(card.name(), &card.aliases);
         }
         self.cards.insert(key.to_string(), card);
@@ -579,7 +583,11 @@ impl ModelManager {
     /// Remove a model entirely (all its WorkerSets).
     /// Returns the removed Model, or None if not found.
     pub fn remove_model(&self, model: &str) -> Option<Arc<Model>> {
-        self.models.remove(model).map(|(_, m)| m)
+        let removed = self.models.remove(model).map(|(_, m)| m);
+        if removed.is_some() {
+            self.alias_to_model.retain(|_, v| v != model);
+        }
+        removed
     }
 
     // Per-type remove methods for in-process models (used by Python bindings).

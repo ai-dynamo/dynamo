@@ -46,6 +46,12 @@ impl Model {
 
     /// Check if a given name matches this model's display name or any of its aliases.
     /// Aliases are stored in the ModelDeploymentCard within each WorkerSet.
+    ///
+    /// Note: aliases are intentionally model-global — if *any* WorkerSet advertises an
+    /// alias, the model matches that name. Routing still picks a concrete WorkerSet via
+    /// the usual per-namespace logic, so this does not change request placement. Conflicts
+    /// are prevented upstream by `ModelManager::check_name_conflicts`, which rejects the
+    /// same alias pointing at two different display names across the manager.
     pub fn matches_name(&self, name: &str) -> bool {
         // Fast path: exact match on display name
         if self.name == name {
