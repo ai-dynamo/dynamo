@@ -18,6 +18,7 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType, fetch_model, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.args import get_served_model_name
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.stage_router import init_omni_stage_router
@@ -84,12 +85,13 @@ async def init_omni(
     if "audio" in config.output_modalities:
         dummy_tokenizer_paths = ensure_dummy_tokenizer_for_tts(config.model)
 
+    primary_name = get_served_model_name(config.model, config.served_model_name)
     await register_model(
         ModelInput.Text,
         model_type,
         generate_endpoint,
         config.model,
-        config.served_model_name,
+        primary_name,
         kv_cache_block_size=config.engine_args.block_size,
     )
 
@@ -109,11 +111,11 @@ async def init_omni(
             metrics_labels=[
                 (
                     prometheus_names.labels.MODEL,
-                    config.served_model_name or config.model,
+                    primary_name,
                 ),
                 (
                     prometheus_names.labels.MODEL_NAME,
-                    config.served_model_name or config.model,
+                    primary_name,
                 ),
             ],
             health_check_payload=health_check_payload,

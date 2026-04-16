@@ -20,6 +20,7 @@ from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
 from dynamo import prometheus_names
 from dynamo.llm import ModelType
 from dynamo.runtime import DistributedRuntime
+from dynamo.vllm.args import get_served_model_name
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
@@ -322,11 +323,11 @@ async def init_omni_stage(
             metrics_labels=[
                 (
                     prometheus_names.labels.MODEL,
-                    config.served_model_name or config.model,
+                    get_served_model_name(config.model, config.served_model_name),
                 ),
                 (
                     prometheus_names.labels.MODEL_NAME,
-                    config.served_model_name or config.model,
+                    get_served_model_name(config.model, config.served_model_name),
                 ),
             ],
             health_check_payload=health_check_payload,

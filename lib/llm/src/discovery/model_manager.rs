@@ -132,13 +132,13 @@ impl ModelManager {
                     existing_model: name.to_string(),
                 });
             }
-            if let Some(existing_model) = self.alias_to_model.get(name) {
-                if existing_model.value() != new_model_name {
-                    return Err(ModelManagerError::AliasConflict {
-                        alias: name.to_string(),
-                        existing_model: existing_model.clone(),
-                    });
-                }
+            if let Some(existing_model) = self.alias_to_model.get(name)
+                && existing_model.value() != new_model_name
+            {
+                return Err(ModelManagerError::AliasConflict {
+                    alias: name.to_string(),
+                    existing_model: existing_model.clone(),
+                });
             }
         }
         Ok(())
@@ -159,10 +159,10 @@ impl ModelManager {
         if let Some(model) = self.models.get(name) {
             return Some((name.to_string(), model.clone()));
         }
-        if let Some(model_name) = self.alias_to_model.get(name) {
-            if let Some(model) = self.models.get(model_name.value()) {
-                return Some((model_name.clone(), model.clone()));
-            }
+        if let Some(model_name) = self.alias_to_model.get(name)
+            && let Some(model) = self.models.get(model_name.value())
+        {
+            return Some((model_name.clone(), model.clone()));
         }
         None
     }

@@ -20,6 +20,7 @@ except ImportError:
 from dynamo._core import Context
 from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
 from dynamo.common.utils.output_modalities import RequestType
+from dynamo.vllm.args import get_served_model_name
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 
 logger = logging.getLogger(__name__)
@@ -162,7 +163,7 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if request_type == RequestType.AUDIO_GENERATION:
             return NvAudioSpeechResponse(
                 id=request_id,
-                model=self.config.served_model_name or self.config.model,
+                model=get_served_model_name(self.config.model, self.config.served_model_name),
                 status="failed",
                 created=int(time.time()),
                 error=error_message,

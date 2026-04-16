@@ -24,7 +24,7 @@ from dynamo.common.utils.prometheus import (
 from dynamo.llm import ModelInput, ModelType
 from dynamo.runtime import DistributedRuntime
 
-from .args import Config
+from .args import Config, get_served_model_name
 from .constants import DisaggregationMode
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler, get_dp_range_for_worker
 from .health_check import VllmHealthCheckPayload, VllmPrefillHealthCheckPayload
@@ -326,7 +326,7 @@ class WorkerFactory:
             register_embedding_cache_metrics(
                 endpoint=generate_endpoint,
                 cache=embedding_cache,
-                model_name=config.served_model_name or config.model,
+                model_name=get_served_model_name(config.model, config.served_model_name),
                 component_name=config.component,
             )
 
@@ -406,11 +406,11 @@ class WorkerFactory:
             model_metrics_labels = [
                 (
                     prometheus_names.labels.MODEL,
-                    config.served_model_name or config.model,
+                    get_served_model_name(config.model, config.served_model_name),
                 ),
                 (
                     prometheus_names.labels.MODEL_NAME,
-                    config.served_model_name or config.model,
+                    get_served_model_name(config.model, config.served_model_name),
                 ),
             ]
 
@@ -560,7 +560,7 @@ class WorkerFactory:
             register_embedding_cache_metrics(
                 endpoint=generate_endpoint,
                 cache=embedding_cache,
-                model_name=config.served_model_name or config.model,
+                model_name=get_served_model_name(config.model, config.served_model_name),
                 component_name=config.component,
             )
 
@@ -604,11 +604,11 @@ class WorkerFactory:
         prefill_metrics_labels = [
             (
                 prometheus_names.labels.MODEL,
-                config.served_model_name or config.model,
+                get_served_model_name(config.model, config.served_model_name),
             ),
             (
                 prometheus_names.labels.MODEL_NAME,
-                config.served_model_name or config.model,
+                get_served_model_name(config.model, config.served_model_name),
             ),
         ]
 

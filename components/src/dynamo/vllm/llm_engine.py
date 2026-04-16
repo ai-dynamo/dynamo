@@ -27,7 +27,7 @@ from dynamo.common.backend.engine import (
 )
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.llm import ModelInput
-from dynamo.vllm.args import parse_args
+from dynamo.vllm.args import get_served_model_name, parse_args
 
 from .handlers import build_sampling_params
 
@@ -58,7 +58,9 @@ class VllmLLMEngine(LLMEngine):
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
-            served_model_name=config.served_model_name,
+            served_model_name=get_served_model_name(
+                config.model, config.served_model_name
+            ),
             model_input=ModelInput.Tokens,
         )
         return engine, worker_config

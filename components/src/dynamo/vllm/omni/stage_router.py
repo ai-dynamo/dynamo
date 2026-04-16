@@ -19,6 +19,7 @@ from dynamo.common.utils.output_modalities import (
 )
 from dynamo.llm import ModelInput, register_model
 from dynamo.runtime import DistributedRuntime
+from dynamo.vllm.args import get_served_model_name
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
 from dynamo.vllm.omni.output_formatter import OutputFormatter
@@ -45,7 +46,7 @@ class OmniStageRouter:
             get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
         )
         self._formatter = OutputFormatter(
-            model_name=config.served_model_name or config.model,
+            model_name=get_served_model_name(config.model, config.served_model_name),
             media_fs=media_fs,
             media_http_url=config.media_output_http_url,
             default_fps=config.default_video_fps,
@@ -183,12 +184,13 @@ async def init_omni_stage_router(
     if model_type is None:
         model_type = _resolve_model_type(final_output_type)
 
+    primary_name = get_served_model_name(config.model, config.served_model_name)
     await register_model(
         ModelInput.Text,
         model_type,
         generate_endpoint,
         config.model,
-        config.served_model_name,
+        primary_name,
     )
     logger.info("OmniStageRouter registered at '%s'", generate_endpoint)
 
@@ -199,11 +201,11 @@ async def init_omni_stage_router(
             metrics_labels=[
                 (
                     prometheus_names.labels.MODEL,
-                    config.served_model_name or config.model,
+                    primary_name,
                 ),
                 (
                     prometheus_names.labels.MODEL_NAME,
-                    config.served_model_name or config.model,
+                    primary_name,
                 ),
             ],
         )
