@@ -35,7 +35,7 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
     /// Flattened CreateResponse fields (model, input, temperature, etc.)
     #[serde(flatten)]
@@ -44,6 +44,78 @@ pub struct NvCreateResponse {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+}
+
+/// Walk `input[*]` and patch previous-assistant message items so they satisfy
+/// upstream `OutputMessage`'s required fields. Clients (e.g. Codex) round-trip
+/// assistant messages as `{"type":"message","role":"assistant","content":[...]}`
+/// without `id` / `status`, and `output_text` parts without `annotations`.
+/// Upstream async-openai `MessageItem` is an untagged enum with strict schemas
+/// (`InputMessage` rejects role=assistant, `OutputMessage` requires id+status),
+/// so these otherwise-valid payloads fail deserialization. Patch them before
+/// delegating to the strict deserializer.
+fn patch_input_items_for_assistant_messages(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let Some(input) = obj.get_mut("input") else {
+        return;
+    };
+    let Some(arr) = input.as_array_mut() else {
+        return;
+    };
+    for item in arr {
+        let Some(item_obj) = item.as_object_mut() else {
+            continue;
+        };
+        let is_message = item_obj.get("type").and_then(|v| v.as_str()) == Some("message");
+        let is_assistant = item_obj.get("role").and_then(|v| v.as_str()) == Some("assistant");
+        if !(is_message && is_assistant) {
+            continue;
+        }
+        item_obj
+            .entry("id")
+            .or_insert_with(|| serde_json::Value::String(String::new()));
+        item_obj
+            .entry("status")
+            .or_insert_with(|| serde_json::Value::String("completed".into()));
+        if let Some(content) = item_obj.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for part in content {
+                let Some(part_obj) = part.as_object_mut() else {
+                    continue;
+                };
+                if part_obj.get("type").and_then(|v| v.as_str()) != Some("output_text") {
+                    continue;
+                }
+                part_obj
+                    .entry("annotations")
+                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for NvCreateResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        patch_input_items_for_assistant_messages(&mut value);
+
+        let nvext = value
+            .as_object_mut()
+            .and_then(|m| m.remove("nvext"))
+            .filter(|v| !v.is_null())
+            .map(serde_json::from_value::<NvExt>)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+
+        let inner: dynamo_protocols::types::responses::CreateResponse =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+
+        Ok(NvCreateResponse { inner, nvext })
+    }
 }
 
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
@@ -227,17 +299,69 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
         .join("")
 }
 
+/// Accumulator for consecutive assistant-side items (OutputMessage, FunctionCall,
+/// assistant EasyMessage). Chat Completions represents an assistant turn as a
+/// single message carrying both `content` and `tool_calls`, so we coalesce
+/// adjacent assistant-side Responses input items before emitting.
+#[derive(Default)]
+struct PendingAssistant {
+    content: Option<String>,
+    tool_calls: Vec<ChatCompletionMessageToolCall>,
+}
+
+impl PendingAssistant {
+    fn push_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match self.content.as_mut() {
+            Some(existing) => existing.push_str(text),
+            None => self.content = Some(text.to_string()),
+        }
+    }
+
+    fn push_tool_call(&mut self, call: ChatCompletionMessageToolCall) {
+        self.tool_calls.push(call);
+    }
+
+    fn flush_into(self, out: &mut Vec<ChatCompletionRequestMessage>) {
+        if self.content.is_none() && self.tool_calls.is_empty() {
+            return;
+        }
+        out.push(ChatCompletionRequestMessage::Assistant(
+            ChatCompletionRequestAssistantMessage {
+                content: self
+                    .content
+                    .map(ChatCompletionRequestAssistantMessageContent::Text),
+                reasoning_content: None,
+                refusal: None,
+                name: None,
+                audio: None,
+                tool_calls: if self.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(self.tool_calls)
+                },
+                #[allow(deprecated)]
+                function_call: None,
+            },
+        ));
+    }
+}
+
 /// Convert InputParam::Items to a Vec of ChatCompletionRequestMessages.
 fn convert_input_items_to_messages(
     items: &[InputItem],
 ) -> Result<Vec<ChatCompletionRequestMessage>, anyhow::Error> {
     let mut messages = Vec::with_capacity(items.len());
+    let mut pending = PendingAssistant::default();
 
     for item in items {
         match item {
             InputItem::Item(inner_item) => match inner_item {
                 Item::Message(msg_item) => match msg_item {
                     MessageItem::Input(msg) => {
+                        std::mem::take(&mut pending).flush_into(&mut messages);
                         let chat_msg = match msg.role {
                             InputRole::System | InputRole::Developer => {
                                 let text = convert_input_content_to_text(&msg.content);
@@ -263,7 +387,6 @@ fn convert_input_items_to_messages(
                         messages.push(chat_msg);
                     }
                     MessageItem::Output(out_msg) => {
-                        // Previous assistant output message -> assistant message
                         let text = out_msg
                             .content
                             .iter()
@@ -273,46 +396,21 @@ fn convert_input_items_to_messages(
                             })
                             .collect::<Vec<_>>()
                             .join("");
-                        messages.push(ChatCompletionRequestMessage::Assistant(
-                            ChatCompletionRequestAssistantMessage {
-                                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                    text,
-                                )),
-                                reasoning_content: None,
-                                refusal: None,
-                                name: None,
-                                audio: None,
-                                tool_calls: None,
-                                #[allow(deprecated)]
-                                function_call: None,
-                            },
-                        ));
+                        pending.push_text(&text);
                     }
                 },
                 Item::FunctionCall(fc) => {
-                    // A function call from a previous assistant turn -> assistant message with tool_calls
-                    messages.push(ChatCompletionRequestMessage::Assistant(
-                        ChatCompletionRequestAssistantMessage {
-                            content: None,
-                            reasoning_content: None,
-                            refusal: None,
-                            name: None,
-                            audio: None,
-                            tool_calls: Some(vec![ChatCompletionMessageToolCall {
-                                id: fc.call_id.clone(),
-                                r#type: FunctionType::Function,
-                                function: dynamo_protocols::types::FunctionCall {
-                                    name: fc.name.clone(),
-                                    arguments: fc.arguments.clone(),
-                                },
-                            }]),
-                            #[allow(deprecated)]
-                            function_call: None,
+                    pending.push_tool_call(ChatCompletionMessageToolCall {
+                        id: fc.call_id.clone(),
+                        r#type: FunctionType::Function,
+                        function: dynamo_protocols::types::FunctionCall {
+                            name: fc.name.clone(),
+                            arguments: fc.arguments.clone(),
                         },
-                    ));
+                    });
                 }
                 Item::FunctionCallOutput(fco) => {
-                    // The output of a function call -> tool message
+                    std::mem::take(&mut pending).flush_into(&mut messages);
                     let output_text = match &fco.output {
                         FunctionCallOutput::Text(text) => text.clone(),
                         FunctionCallOutput::Content(parts) => convert_input_content_to_text(parts),
@@ -332,7 +430,6 @@ fn convert_input_items_to_messages(
                 }
             },
             InputItem::EasyMessage(easy) => {
-                // Handle easy input messages based on role
                 let content_text = match &easy.content {
                     dynamo_protocols::types::responses::EasyInputContent::Text(text) => {
                         text.clone()
@@ -341,41 +438,41 @@ fn convert_input_items_to_messages(
                         convert_input_content_to_text(parts)
                     }
                 };
-                let chat_msg = match easy.role {
+                match easy.role {
                     ResponseRole::System | ResponseRole::Developer => {
-                        ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-                            content: ChatCompletionRequestSystemMessageContent::Text(content_text),
-                            name: None,
-                        })
+                        std::mem::take(&mut pending).flush_into(&mut messages);
+                        messages.push(ChatCompletionRequestMessage::System(
+                            ChatCompletionRequestSystemMessage {
+                                content: ChatCompletionRequestSystemMessageContent::Text(
+                                    content_text,
+                                ),
+                                name: None,
+                            },
+                        ));
                     }
                     ResponseRole::User => {
-                        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                            content: ChatCompletionRequestUserMessageContent::Text(content_text),
-                            name: None,
-                        })
+                        std::mem::take(&mut pending).flush_into(&mut messages);
+                        messages.push(ChatCompletionRequestMessage::User(
+                            ChatCompletionRequestUserMessage {
+                                content: ChatCompletionRequestUserMessageContent::Text(
+                                    content_text,
+                                ),
+                                name: None,
+                            },
+                        ));
                     }
-                    ResponseRole::Assistant => ChatCompletionRequestMessage::Assistant(
-                        ChatCompletionRequestAssistantMessage {
-                            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                content_text,
-                            )),
-                            reasoning_content: None,
-                            refusal: None,
-                            name: None,
-                            audio: None,
-                            tool_calls: None,
-                            #[allow(deprecated)]
-                            function_call: None,
-                        },
-                    ),
-                };
-                messages.push(chat_msg);
+                    ResponseRole::Assistant => {
+                        pending.push_text(&content_text);
+                    }
+                }
             }
             InputItem::ItemReference(_) => {
                 // Skip item references
             }
         }
     }
+
+    pending.flush_into(&mut messages);
 
     Ok(messages)
 }
@@ -1127,6 +1224,131 @@ mod tests {
     }
 
     #[test]
+    fn test_function_call_with_interstitial_assistant_message_is_coalesced() {
+        // Regression: prior turn was `function_call` + assistant text + `function_call_output`.
+        // The converter must emit a SINGLE assistant chat message carrying both `content`
+        // and `tool_calls`, otherwise chat templates that require a tool message to
+        // immediately follow its assistant tool_call (e.g. MiniMax) will reject the input.
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "What's the weather?".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: r#"{"location":"SF"}"#.into(),
+                        call_id: "call_123".into(),
+                        namespace: None,
+                        name: "get_weather".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::Message(MessageItem::Output(OutputMessage {
+                        id: "msg_interstitial".into(),
+                        role: AssistantRole::Assistant,
+                        status: OutputStatus::Completed,
+                        phase: None,
+                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                            text: "\n\n".into(),
+                            annotations: vec![],
+                            logprobs: None,
+                        })],
+                    }))),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+                        call_id: "call_123".into(),
+                        output: FunctionCallOutput::Text(r#"{"temp":"72F"}"#.into()),
+                        id: None,
+                        status: None,
+                    })),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        assert_eq!(messages.len(), 3, "expected coalesced [user, assistant, tool]");
+        assert!(matches!(messages[0], ChatCompletionRequestMessage::User(_)));
+        match &messages[1] {
+            ChatCompletionRequestMessage::Assistant(a) => {
+                let tool_calls = a.tool_calls.as_ref().expect("tool_calls must be present");
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].id, "call_123");
+                assert_eq!(tool_calls[0].function.name, "get_weather");
+                match a.content.as_ref().expect("content must carry interstitial text") {
+                    ChatCompletionRequestAssistantMessageContent::Text(t) => {
+                        assert_eq!(t, "\n\n");
+                    }
+                    _ => panic!("expected text content"),
+                }
+            }
+            _ => panic!("expected a single merged assistant message at index 1"),
+        }
+        assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
+    }
+
+    #[test]
+    fn test_easy_message_assistant_coalesced_with_adjacent_function_call() {
+        // The same coalescing rule applies to EasyInputMessage shape (string content,
+        // role=assistant, no `type:"message"` discriminator).
+        use dynamo_protocols::types::responses::{
+            EasyInputContent, EasyInputMessage, Role as ResponseRole,
+        };
+
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::User,
+                        content: EasyInputContent::Text("x".into()),
+                        ..Default::default()
+                    }),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: "{}".into(),
+                        call_id: "c".into(),
+                        namespace: None,
+                        name: "f".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::Assistant,
+                        content: EasyInputContent::Text("".into()),
+                        ..Default::default()
+                    }),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+                        call_id: "c".into(),
+                        output: FunctionCallOutput::Text("x".into()),
+                        id: None,
+                        status: None,
+                    })),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        assert_eq!(messages.len(), 3);
+        match &messages[1] {
+            ChatCompletionRequestMessage::Assistant(a) => {
+                assert!(a.tool_calls.is_some());
+                assert_eq!(a.tool_calls.as_ref().unwrap().len(), 1);
+            }
+            _ => panic!("expected merged assistant message"),
+        }
+        assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
+    }
+
+    #[test]
     fn test_tools_conversion() {
         let req = NvCreateResponse {
             inner: CreateResponse {
@@ -1553,7 +1775,8 @@ thinking
 
         // With the upstream schema, `id` (String) and `status` (OutputStatus) are
         // required on OutputMessage. An assistant message without them can't
-        // deserialize as either OutputMessage or InputMessage (wrong role).
+        // deserialize as either OutputMessage or InputMessage (wrong role)
+        // through the bare upstream type.
         let json = serde_json::json!({
             "role": "assistant",
             "content": [{"type": "output_text", "text": "Hello!", "annotations": []}],
@@ -1563,8 +1786,44 @@ thinking
         let result = serde_json::from_value::<InputItem>(json);
         assert!(
             result.is_err(),
-            "Expected deserialization to fail without id and status"
+            "Expected bare-type deserialization to fail without id and status"
         );
+    }
+
+    #[test]
+    fn test_nvcreate_response_patches_bare_assistant_messages() {
+        // Clients like Codex send assistant messages without `id`/`status` and
+        // `output_text` parts without `annotations`. The custom Deserialize on
+        // NvCreateResponse must patch these so the upstream strict types accept
+        // the payload.
+        let body = serde_json::json!({
+            "model": "m",
+            "input": [
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": "hi"}
+                ]},
+                {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
+                {"type": "message", "role": "assistant", "content": [
+                    {"type": "output_text", "text": "\n\n\n"}
+                ]},
+                {"type": "function_call_output", "call_id": "c", "output": "x"}
+            ]
+        });
+
+        let req: NvCreateResponse =
+            serde_json::from_value(body).expect("custom deserialize should patch and succeed");
+        let items = match &req.inner.input {
+            InputParam::Items(items) => items,
+            _ => panic!("expected Items input"),
+        };
+        assert_eq!(items.len(), 4);
+        // The third item must round-trip as an assistant OutputMessage.
+        match &items[2] {
+            InputItem::Item(Item::Message(MessageItem::Output(out))) => {
+                assert_eq!(out.role, AssistantRole::Assistant);
+            }
+            other => panic!("expected MessageItem::Output, got {:?}", other),
+        }
     }
 
     #[test]
