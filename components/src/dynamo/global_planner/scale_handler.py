@@ -12,7 +12,6 @@ from typing import Optional
 from kubernetes import client
 
 from dynamo.planner import KubernetesConnector
-from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
 from dynamo.planner.connectors.protocol import ScaleRequest, ScaleResponse, ScaleStatus
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
@@ -65,8 +64,8 @@ class ScaleRequestHandler:
         self.no_operation = no_operation
         self.max_total_gpus = max_total_gpus
         self.connectors: dict[str, KubernetesConnector] = {}  # Cache per DGD
-        # Protects connectors dict (main + watch thread); held briefly.
-        self._connectors_lock = threading.Lock()
+        self._dgd_cache: dict[str, dict] = {}  # DGD objects maintained by watch thread
+        self._dgd_cache_lock = threading.Lock()
         # Serializes budget-check + scale-execution so concurrent requests from
         # different pools cannot both pass against the same pre-scale state.
         self._scale_lock = asyncio.Lock()
@@ -88,19 +87,18 @@ class ScaleRequestHandler:
                 "scale requests will be logged but not executed"
             )
 
-        # Always run list+watch to reduce API server pressure (single stream vs many get/list).
-        # The cache is also used for GPU budget checks (multi-replica safe).
-        self._populate_k8s_connectors()
-        self._dgd_watch_thread = threading.Thread(
-            target=self._run_dgd_watch, daemon=True, name="global-planner-dgd-watch"
-        )
-        self._dgd_watch_thread.start()
-        logger.info("DGD list+watch started (reduces API server load)")
-
         if self.max_total_gpus >= 0:
             logger.info(
                 f"GPU budget enforcement ENABLED: max {self.max_total_gpus} total GPUs"
             )
+            self._populate_k8s_connectors()
+            self._dgd_watch_thread = threading.Thread(
+                target=self._run_dgd_watch,
+                daemon=True,
+                name="global-planner-dgd-watch",
+            )
+            self._dgd_watch_thread.start()
+            logger.info("DGD list+watch started for GPU budget cache")
         else:
             logger.info("GPU budget enforcement DISABLED (unlimited)")
 
@@ -148,22 +146,21 @@ class ScaleRequestHandler:
                 if managed_names is not None and name not in managed_names:
                     continue
                 key = f"{self.k8s_namespace}/{name}"
-                with self._connectors_lock:
-                    self.connectors[key] = {
-                        "dgd": dgd,
-                        "connector": KubernetesConnector(
-                            dynamo_namespace="discovered",
-                            k8s_namespace=self.k8s_namespace,
-                            parent_dgd_name=name,
-                        ),
-                    }
+                if key not in self.connectors:
+                    self.connectors[key] = KubernetesConnector(
+                        dynamo_namespace="discovered",
+                        k8s_namespace=self.k8s_namespace,
+                        parent_dgd_name=name,
+                    )
+                with self._dgd_cache_lock:
+                    self._dgd_cache[key] = dgd
                 discovered.append(name)
             logger.info(f"Discovered {len(discovered)} existing DGDs: {discovered}")
         except Exception as e:
             logger.warning(f"Failed to discover existing DGDs: {e}")
 
     def _run_dgd_watch(self) -> None:
-        """Background thread: list+watch DGDs and keep connectors[].dgd updated."""
+        """Background thread: list+watch DGDs and keep _dgd_cache updated."""
         _BACKOFF_BASE_SEC = 5
         _BACKOFF_MAX_SEC = 60
         _ERROR_LOG_THRESHOLD = (
@@ -183,17 +180,11 @@ class ScaleRequestHandler:
                             continue
                         key = f"{self.k8s_namespace}/{name}"
                         logger.debug(f"DGD watch event: {event_type} {key}")
-                        with self._connectors_lock:
+                        with self._dgd_cache_lock:
                             if event_type == "DELETED":
-                                self.connectors.pop(key, None)
+                                self._dgd_cache.pop(key, None)
                             else:
-                                if key not in self.connectors:
-                                    self.connectors[key] = {
-                                        "dgd": dgd,
-                                        "connector": None,
-                                    }
-                                else:
-                                    self.connectors[key]["dgd"] = dgd
+                                self._dgd_cache[key] = dgd
                     # watch_graph_deployments exhausted without error → reset counter
                     consecutive_failures = 0
                 except client.ApiException as e:
@@ -252,7 +243,7 @@ class ScaleRequestHandler:
             )
 
     def is_dgd_watch_healthy(self) -> bool:
-        """Return True if the DGD watch thread is running. List+watch is always started."""
+        """Return True if the DGD watch thread is alive."""
         if self._dgd_watch_thread is None:
             return False
         if self._dgd_watch_exited_unexpectedly:
@@ -260,43 +251,21 @@ class ScaleRequestHandler:
         return self._dgd_watch_thread.is_alive()
 
     def get_dgd_watch_health_status(self) -> dict:
-        """Return health status for the DGD watch thread (for health endpoint).
-        List+watch is always enabled to reduce API server load.
-        """
+        """Return health status for the DGD watch thread (for health endpoint)."""
+        enabled = self.max_total_gpus >= 0
         return {
-            "dgd_watch_enabled": True,
+            "dgd_watch_enabled": enabled,
             "dgd_watch_alive": self.is_dgd_watch_healthy(),
             "dgd_watch_exited_unexpectedly": self._dgd_watch_exited_unexpectedly,
-            "gpu_budget_enabled": self.max_total_gpus >= 0,
+            "gpu_budget_enabled": enabled,
         }
-
-    def _update_cache_after_scale(
-        self, connector_key: str, target_replicas: list
-    ) -> None:
-        """Update cached DGD with new replica counts after a successful scale (no API call)."""
-        with self._connectors_lock:
-            entry = self.connectors.get(connector_key)
-            deployment = entry.get("dgd") if entry else None
-            if not deployment:
-                return
-            services = deployment.setdefault("spec", {}).setdefault("services", {})
-            for target in target_replicas:
-                sub_type = (
-                    target.sub_component_type.value
-                    if isinstance(target.sub_component_type, SubComponentType)
-                    else target.sub_component_type
-                )
-                for svc_spec in services.values():
-                    if svc_spec.get("subComponentType") == sub_type:
-                        svc_spec["replicas"] = target.desired_replicas
-                        break
 
     def _calculate_total_gpus_after_request(self, request: ScaleRequest) -> int:
         """Calculate total GPUs across all managed DGDs if this request is granted.
 
-        Uses the list+watch DGD cache when GPU budget is enabled so every replica
-        has the same full view (multi-replica safe). For the requesting DGD, uses
-        the desired replica counts from the request; for others, current spec.
+        Uses the list+watch DGD cache when GPU budget is enabled to avoid
+        per-request API calls. For the requesting DGD, uses the desired replica
+        counts from the request; for others, current spec.
 
         NOTE: GPU count is read from spec.services[].resources.limits.gpu only.
         GPUs specified via resources.requests.gpu or extraPodSpec resource
@@ -306,30 +275,18 @@ class ScaleRequestHandler:
         requesting_key = f"{request.k8s_namespace}/{request.graph_deployment_name}"
         deployments: list = []
 
-        # Always use list+watch cache when GPU budget is on: no per-request get per DGD.
         if self.max_total_gpus >= 0:
-            with self._connectors_lock:
-                deployments = [
-                    (k, e.get("dgd"))
-                    for k, e in self.connectors.items()
-                    if e.get("dgd")
-                ]
-                need_get = requesting_key not in self.connectors or not self.connectors[
-                    requesting_key
-                ].get("dgd")
+            with self._dgd_cache_lock:
+                deployments = list(self._dgd_cache.items())
+                need_get = requesting_key not in self._dgd_cache
             if need_get:
                 try:
                     kube_api = KubernetesAPI(self.k8s_namespace)
                     deployment = kube_api.get_graph_deployment(
                         request.graph_deployment_name
                     )
-                    with self._connectors_lock:
-                        if requesting_key not in self.connectors:
-                            self.connectors[requesting_key] = {
-                                "dgd": None,
-                                "connector": None,
-                            }
-                        self.connectors[requesting_key]["dgd"] = deployment
+                    with self._dgd_cache_lock:
+                        self._dgd_cache[requesting_key] = deployment
                     deployments.append((requesting_key, deployment))
                 except Exception as e:
                     logger.warning(
@@ -413,23 +370,14 @@ class ScaleRequestHandler:
 
             # Get or create connector for this DGD
             connector_key = f"{request.k8s_namespace}/{request.graph_deployment_name}"
-            with self._connectors_lock:
-                entry = self.connectors.get(connector_key)
-                connector = entry.get("connector") if entry else None
+            connector = self.connectors.get(connector_key)
             if connector is None:
                 connector = KubernetesConnector(
                     dynamo_namespace=request.caller_namespace,
                     k8s_namespace=request.k8s_namespace,
                     parent_dgd_name=request.graph_deployment_name,
                 )
-                with self._connectors_lock:
-                    if connector_key not in self.connectors:
-                        self.connectors[connector_key] = {
-                            "dgd": None,
-                            "connector": connector,
-                        }
-                    else:
-                        self.connectors[connector_key]["connector"] = connector
+                self.connectors[connector_key] = connector
                 logger.debug(f"Created new connector for {connector_key}")
             else:
                 logger.debug(f"Reusing cached connector for {connector_key}")
@@ -464,11 +412,7 @@ class ScaleRequestHandler:
                     request.target_replicas, blocking=request.blocking
                 )
 
-            # Optimistic cache update so next budget calculation sees new replicas immediately.
-            self._update_cache_after_scale(connector_key, request.target_replicas)
-
-            # Verify and report: read DGD from API for server-authoritative current_replicas
-            # and refresh cache with actual state (watch may deliver MODIFIED later).
+            # Read DGD from API for current_replicas and refresh cache.
             deployment = connector.kube_api.get_graph_deployment(
                 connector.parent_dgd_name
             )
@@ -479,13 +423,8 @@ class ScaleRequestHandler:
                 sub_type = service_spec.get("subComponentType", "")
                 if sub_type:
                     current_replicas[sub_type] = service_spec.get("replicas", 0)
-            with self._connectors_lock:
-                if connector_key not in self.connectors:
-                    self.connectors[connector_key] = {
-                        "dgd": None,
-                        "connector": connector,
-                    }
-                self.connectors[connector_key]["dgd"] = deployment
+            with self._dgd_cache_lock:
+                self._dgd_cache[connector_key] = deployment
 
             logger.info(
                 f"Successfully scaled {request.graph_deployment_name}: {current_replicas}"

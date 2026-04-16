@@ -142,23 +142,23 @@ async def main(runtime: DistributedRuntime, args):
     logger.info("GlobalPlanner is ready and waiting for scale requests")
     logger.info("=" * 60)
 
-    # Periodic liveness check for DGD watch thread (list+watch always runs)
-    DGD_WATCH_LIVENESS_INTERVAL_SEC = 60
+    if args.max_total_gpus >= 0:
+        DGD_WATCH_LIVENESS_INTERVAL_SEC = 60
 
-    async def watch_liveness_loop():
-        while True:
-            await asyncio.sleep(DGD_WATCH_LIVENESS_INTERVAL_SEC)
-            if not handler.is_dgd_watch_healthy():
-                logger.critical(
-                    "DGD watch thread is not running; DGD cache may be stale. "
-                    "Scaling decisions may use outdated data."
-                )
+        async def watch_liveness_loop():
+            while True:
+                await asyncio.sleep(DGD_WATCH_LIVENESS_INTERVAL_SEC)
+                if not handler.is_dgd_watch_healthy():
+                    logger.critical(
+                        "DGD watch thread is not running; DGD cache may be stale. "
+                        "Scaling decisions may use outdated data."
+                    )
 
-    asyncio.create_task(watch_liveness_loop())
-    logger.info(
-        "DGD watch liveness check started (interval %ds)",
-        DGD_WATCH_LIVENESS_INTERVAL_SEC,
-    )
+        asyncio.create_task(watch_liveness_loop())
+        logger.info(
+            "DGD watch liveness check started (interval %ds)",
+            DGD_WATCH_LIVENESS_INTERVAL_SEC,
+        )
 
     # Keep running forever (process scale requests as they come)
     await asyncio.Event().wait()
