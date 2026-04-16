@@ -218,11 +218,13 @@ impl Indexer {
         }
 
         if kv_router_config.router_event_threads > 1 {
+            let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
             return Ok(Self::Concurrent {
-                primary: Arc::new(ThreadPoolIndexer::new(
+                primary: Arc::new(ThreadPoolIndexer::new_with_metrics(
                     ConcurrentRadixTreeCompressed::new(),
                     kv_router_config.router_event_threads as usize,
                     block_size,
+                    Some(kv_indexer_metrics),
                 )),
                 lower_tier: LowerTierIndexers::new(
                     kv_router_config.router_event_threads as usize,

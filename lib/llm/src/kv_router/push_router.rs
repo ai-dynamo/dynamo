@@ -77,6 +77,11 @@ struct RequestGuard {
     expected_output_tokens: Option<u32>,
     /// Deferred session close action (fires after generation completes)
     deferred_close: Option<SessionCloseAction>,
+    /// True once inner.direct() has returned Ok — guards record_metrics() so
+    /// that a dispatch failure does not emit metrics for a request that never
+    /// reached the backend (spurious requests_total increment, OSL histogram
+    /// zeros, premature tracker.record_finish()).
+    dispatched: bool,
 }
 
 impl RequestGuard {
@@ -170,7 +175,10 @@ impl RequestGuard {
     }
 
     fn record_metrics(&mut self) {
-        if self.metrics_recorded {
+        // Skip metrics for requests that never reached the backend (dispatch
+        // failure before direct() returned Ok). Recording here would emit
+        // spurious requests_total increments and OSL-histogram zeros.
+        if self.metrics_recorded || !self.dispatched {
             return;
         }
         self.metrics_recorded = true;
@@ -184,9 +192,15 @@ impl RequestGuard {
                     .observe(latency);
             }
         }
-        self.request_metrics
-            .output_sequence_tokens
-            .observe(self.cumulative_osl as f64);
+        // Only record output sequence length for requests that actually
+        // produced output tokens. Recording zero for failed/cancelled requests
+        // would corrupt histogram averages (sum/count) and percentiles.
+        // Failures are already tracked by requests_total.
+        if self.cumulative_osl > 0 {
+            self.request_metrics
+                .output_sequence_tokens
+                .observe(self.cumulative_osl as f64);
+        }
         self.request_metrics.requests_total.inc();
     }
 }
@@ -617,6 +631,38 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
+
+        // Build the guard BEFORE calling direct() so that its Drop covers the
+        // error path as well as the drop-before-first-poll path.
+        //
+        // Without this, if direct().await? below returns Err, both the
+        // scheduler slot (booked by find_best_match with update_states=true)
+        // and the SessionCloseAction (obtained above via on_routed) are leaked:
+        // SessionCloseAction has no Drop impl, so dropping it never sends the
+        // close_session RPC; chooser.free() is only called via RequestGuard::Drop.
+        //
+        // All guard fields are available here (deferred_close was just obtained;
+        // isl_tokens/block_size/tracker were set before request.into_parts()).
+        let mut guard = RequestGuard {
+            chooser: chooser.clone(),
+            scheduler_tracked,
+            context_id: context_id.clone(),
+            tracker: tracker.clone(),
+            request_metrics: request_metrics.clone(),
+            cumulative_osl: 0,
+            metrics_recorded: false,
+            freed: false,
+            prefill_marked: false,
+            first_token_recorded: false,
+            track_output_blocks: scheduler_tracked && track_output_blocks,
+            current_total_blocks: isl_tokens.div_ceil(block_size),
+            isl_tokens,
+            block_size,
+            expected_output_tokens,
+            deferred_close,
+            dispatched: false,
+        };
+
         let mut response_stream = self
             .inner
             .direct(updated_request, instance_id)
@@ -629,28 +675,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 phase = ?phase,
             ))
             .await?;
+        // direct() succeeded — mark dispatched so record_metrics() fires.
+        // If direct() returned Err above, guard drops here with dispatched=false
+        // → RequestGuard::Drop fires → chooser.free() + deferred_close.execute()
+        //   but record_metrics() is suppressed (no backend work was done).
+        guard.dispatched = true;
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
         let wrapped_stream = Box::pin(async_stream::stream! {
-            let mut guard = RequestGuard {
-                chooser: chooser.clone(),
-                scheduler_tracked,
-                context_id: context_id.clone(),
-                tracker: tracker.clone(),
-                request_metrics: request_metrics.clone(),
-                cumulative_osl: 0,
-                metrics_recorded: false,
-                freed: false,
-                prefill_marked: false,
-                first_token_recorded: false,
-                track_output_blocks: scheduler_tracked && track_output_blocks,
-                current_total_blocks: isl_tokens.div_ceil(block_size),
-                isl_tokens,
-                block_size,
-                expected_output_tokens,
-                deferred_close,
-            };
+            // Move guard into the stream closure. Drop fires here if the stream
+            // is polled to completion, or via the outer Drop if never polled.
+            let mut guard = guard;
 
             loop {
                 tokio::select! {

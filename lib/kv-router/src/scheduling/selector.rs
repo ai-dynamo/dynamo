@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use rand::Rng;
+use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
 use super::types::{KvSchedulerError, SchedulingRequest};
@@ -24,7 +25,7 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
 /// Helper function for softmax sampling.
 /// Returns the selected worker and its logit.
 fn softmax_sample(
-    logits: &HashMap<WorkerWithDpRank, f64>,
+    logits: &FxHashMap<WorkerWithDpRank, f64>,
     temperature: f64,
 ) -> (WorkerWithDpRank, f64) {
     let mut rng = rand::rng();
@@ -32,7 +33,7 @@ fn softmax_sample(
 }
 
 fn softmax_sample_with_sample(
-    logits: &HashMap<WorkerWithDpRank, f64>,
+    logits: &FxHashMap<WorkerWithDpRank, f64>,
     temperature: f64,
     sample: f64,
 ) -> (WorkerWithDpRank, f64) {
@@ -273,7 +274,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 (min_workers[0], min_score)
             }
         } else {
-            let mut worker_logits = HashMap::new();
+            let mut worker_logits = FxHashMap::default();
             for worker in worker_iter {
                 let score = get_score(worker);
                 worker_logits.insert(worker, score);
@@ -388,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_softmax_sample_single_key() {
-        let mut logits = HashMap::new();
+        let mut logits = FxHashMap::default();
         let worker = WorkerWithDpRank::from_worker_id(42);
         for (logit, temperature) in [
             (0.5, 0.1),
@@ -410,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_softmax_sample_zero_temperature() {
-        let mut logits = HashMap::new();
+        let mut logits = FxHashMap::default();
         let worker1 = WorkerWithDpRank::from_worker_id(1);
         let worker2 = WorkerWithDpRank::from_worker_id(2);
         let worker3 = WorkerWithDpRank::from_worker_id(3);
@@ -467,7 +468,7 @@ mod tests {
         let worker2 = WorkerWithDpRank::from_worker_id(2);
         let worker3 = WorkerWithDpRank::from_worker_id(3);
 
-        let logits = HashMap::from([(worker1, 0.0), (worker2, 3.0), (worker3, 9.0)]);
+        let logits = FxHashMap::from_iter([(worker1, 0.0), (worker2, 3.0), (worker3, 9.0)]);
         let entries: Vec<_> = logits
             .iter()
             .map(|(worker, logit)| (*worker, *logit))

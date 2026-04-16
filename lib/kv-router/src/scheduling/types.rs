@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use dynamo_tokens::SequenceHash;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
@@ -54,8 +55,8 @@ pub struct SchedulingRequest {
     pub tier_overlap_blocks: TierOverlapBlocks,
     pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
     pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
-    pub decode_blocks: HashMap<WorkerWithDpRank, usize>,
-    pub prefill_tokens: HashMap<WorkerWithDpRank, usize>,
+    pub decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
+    pub prefill_tokens: FxHashMap<WorkerWithDpRank, usize>,
     pub track_prefill_tokens: bool,
     pub router_config_override: Option<RouterConfigOverride>,
     pub update_states: bool,

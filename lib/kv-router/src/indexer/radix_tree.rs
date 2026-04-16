@@ -24,6 +24,7 @@ use std::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::MatchDetails;
+use crate::active_set::reconcile_active_workers;
 use crate::protocols::*;
 
 /// A shared reference to a [`RadixBlock`].
@@ -266,28 +267,10 @@ impl RadixTree {
                 let borrow = block.borrow();
                 let child_count = borrow.workers.len();
 
-                if child_count < active_count {
-                    // Workers dropped out. Record scores for those that left.
-                    // Score = matched_depth (number of nodes they were present at).
-                    for worker in &active {
-                        if !borrow.workers.contains(worker) {
-                            scores.scores.insert(*worker, matched_depth);
-                            last_matched_hashes.insert(*worker, current_hash);
-                        }
-                    }
-                    active.clone_from(&borrow.workers);
-                    active_count = child_count;
-                } else if child_count > active_count {
-                    // Stale entries: child retains workers already removed from
-                    // an ancestor. Fall back to full membership check.
-                    active.retain(|w| {
-                        if borrow.workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, matched_depth);
-                            last_matched_hashes.insert(*w, current_hash);
-                            false
-                        }
+                if child_count != active_count {
+                    reconcile_active_workers(&mut active, &borrow.workers, |worker| {
+                        scores.scores.insert(worker, matched_depth);
+                        last_matched_hashes.insert(worker, current_hash);
                     });
                     active_count = active.len();
                 }

@@ -65,7 +65,6 @@ class PlannerConfig(BaseModel):
         ),
     )
 
-    no_operation: bool = SLAPlannerDefaults.no_operation
     log_dir: Optional[str] = SLAPlannerDefaults.log_dir
     throughput_adjustment_interval: int = (
         SLAPlannerDefaults.throughput_adjustment_interval
@@ -135,6 +134,9 @@ class PlannerConfig(BaseModel):
     load_metric_samples: int = SLAPlannerDefaults.load_metric_samples
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
 
+    # Advisory mode: compute and log decisions without executing scaling
+    advisory: bool = SLAPlannerDefaults.advisory
+
     # Diagnostics report settings
     report_interval_hours: Optional[float] = Field(
         default=24.0,
@@ -146,6 +148,14 @@ class PlannerConfig(BaseModel):
     report_output_dir: str = Field(
         default="./planner_reports",
         description="Directory for HTML diagnostics reports.",
+    )
+    report_filename: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fixed filename for HTML diagnostics reports. "
+            "When set, reports are written to report_output_dir/report_filename "
+            "instead of the default timestamped name."
+        ),
     )
     live_dashboard_port: int = Field(
         default=8080,
