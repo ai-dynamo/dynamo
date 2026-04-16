@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
+from collections import deque
 from typing import Optional, Tuple
 
 import torch
@@ -127,8 +129,11 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
 
         def callback():
             self.event.record()
+            iteration = (
+                self._forward_iterations.popleft() if self._forward_iterations else None
+            )
             # Non-blocking: passes event to Rust for async polling
-            self._connector.submit_offload_on_event(self.event.cuda_event)
+            self._connector.submit_offload_on_event(self.event.cuda_event, iteration)
             # Returns immediately - no CPU blocking
 
         return callback
@@ -136,7 +141,7 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
     @staticmethod
     def _use_forward_pass_callable() -> bool:
         return os.environ.get(
-            "DYN_KVBM_TRTLLM_USE_FORWARD_PASS_CALLABLE", "false"
+            "DYN_KVBM_TRTLLM_USE_FORWARD_PASS_CALLABLE", "true"
         ).lower() in (
             "true",
             "1",
@@ -214,10 +219,11 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             nccl_comm_ref=nccl_comm_ref,
         )
         self.event = torch.cuda.Event()
+        self._forward_iterations = deque()
 
-        # Default to the layer hook path. The end-of-forward callable is faster,
-        # but some TRT-LLM disaggregated decode steps can bind the next connector
-        # metadata before that callable drains staged offload operations.
+        # Prefer the end-of-forward callable so offloads are gated on a single
+        # CUDA event after the forward pass. Rust stages operations by metadata
+        # iteration so later metadata binds cannot be drained by an earlier event.
         self.use_forward_pass_callable = False
 
     @nvtx_annotate(category="worker")
@@ -284,6 +290,16 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
             metadata (bytes): the connector metadata.
         """
         super().bind_connector_meta(metadata)
+        if self.use_forward_pass_callable:
+            try:
+                self._forward_iterations.append(json.loads(metadata)["iteration"])
+            except Exception as e:
+                logger.warning(
+                    "KVBM TRTLLM could not decode connector metadata iteration; "
+                    "falling back to Rust current iteration for offload ordering. Error: %s",
+                    e,
+                )
+                self._forward_iterations.append(None)
         self._connector.bind_connector_meta(metadata)
 
     @nvtx_annotate(category="worker")
