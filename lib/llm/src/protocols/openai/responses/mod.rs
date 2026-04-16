@@ -1416,7 +1416,10 @@ mod tests {
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
         assert_eq!(messages.len(), 3);
-        assert!(matches!(messages[1], ChatCompletionRequestMessage::Assistant(_)));
+        assert!(matches!(
+            messages[1],
+            ChatCompletionRequestMessage::Assistant(_)
+        ));
     }
 
     #[test]
