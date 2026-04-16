@@ -157,11 +157,11 @@ class LoadScalingMixin:
         final_p = p_desired if p_desired is not None else self._num_p_workers
         final_d = d_desired if d_desired is not None else self._num_d_workers
 
-        if final_p == self._num_p_workers and final_d == self._num_d_workers:
-            logger.info("Load-based scaling: no scaling needed")
-            self._diag_load_reason = "no_change"
-            return None
-
+        # Enforce bounds first so "no change" comparison is against the
+        # post-floor target, not the raw load decision.  Otherwise a load
+        # decision of "no change" would skip the floor and let replicas
+        # stay below a throughput-scaling lower bound that was raised on
+        # a previous (or same) tick.
         original_p, original_d = final_p, final_d
         if self._config.enable_throughput_scaling:
             final_p = max(final_p, self._throughput_lower_bound_p)
@@ -171,9 +171,21 @@ class LoadScalingMixin:
         final_d = max(final_d, self._config.min_endpoint)
         final_p, final_d = self._apply_global_budget(final_p, final_d)
 
-        if (final_p > original_p or final_d > original_d) and (
+        # Detect the "floor lifted a load-scale-down back toward current"
+        # case: load wanted to scale down, but the throughput floor clamped
+        # the final count at or above current.
+        floor_capped = (final_p > original_p or final_d > original_d) and (
             original_p < self._num_p_workers or original_d < self._num_d_workers
-        ):
+        )
+
+        if final_p == self._num_p_workers and final_d == self._num_d_workers:
+            logger.info("Load-based scaling: no scaling needed")
+            self._diag_load_reason = (
+                "scale_down_capped_by_throughput" if floor_capped else "no_change"
+            )
+            return None
+
+        if floor_capped:
             self._diag_load_reason = "scale_down_capped_by_throughput"
         elif final_p > self._num_p_workers or final_d > self._num_d_workers:
             self._diag_load_reason = "scale_up"
@@ -270,9 +282,10 @@ class LoadScalingMixin:
         ):
             desired = max(p_desired, d_desired)
         else:
-            logger.info("Agg scaling: no scaling needed")
-            self._diag_load_reason = "no_change"
-            return None
+            # Load scaling sees "no change" -- but the throughput floor may
+            # still require scaling up, so keep processing rather than
+            # returning early.
+            desired = num_workers
 
         original_desired = desired
         desired = max(desired, self._config.min_endpoint)
@@ -280,8 +293,19 @@ class LoadScalingMixin:
             desired = max(desired, self._throughput_lower_bound_d)
         desired = self._apply_single_budget(desired, "decode")
 
+        # Preserve "load wanted to scale down but floor lifted it" as a
+        # distinct diagnostic reason even when the net result is no change.
+        floor_capped = desired > original_desired and original_desired < num_workers
+
+        if desired == num_workers:
+            logger.info("Agg scaling: no scaling needed")
+            self._diag_load_reason = (
+                "scale_down_capped_by_throughput" if floor_capped else "no_change"
+            )
+            return None
+
         if desired < num_workers:
-            if desired > original_desired:
+            if floor_capped:
                 self._diag_load_reason = "scale_down_capped_by_throughput"
             else:
                 self._diag_load_reason = "scale_down"
