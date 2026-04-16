@@ -1,0 +1,22 @@
+---
+source: lib/llm/tests/anthropic_replay.rs
+expression: redact(json)
+---
+{
+  "id": "[ID]",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Hello world."
+    }
+  ],
+  "model": "harness-model",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 7,
+    "output_tokens": 3
+  }
+}

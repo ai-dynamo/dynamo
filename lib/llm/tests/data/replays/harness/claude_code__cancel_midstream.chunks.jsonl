@@ -1,0 +1,36 @@
+// Long content — paired with a short interval in the cancel test so the
+// client can disconnect before completion. The tokens past the cancel
+// point must never land in the emitted SSE stream. 30 deltas keeps the
+// replay running long enough for axum to detect the client-side TCP
+// close (takes up to ~1s on busy schedulers).
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"tok_01"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_02"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_03"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_04"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_05"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_06"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_07"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_08"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_09"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_10"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_11"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_12"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_13"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_14"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_15"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_16"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_17"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_18"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_19"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_20"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_21"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_22"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_23"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_24"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_25"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_26"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_27"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_28"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" tok_29"}}]}
+{"id":"chatcmpl-harness-cancel","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}

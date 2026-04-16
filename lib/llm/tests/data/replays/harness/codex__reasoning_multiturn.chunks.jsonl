@@ -1,0 +1,7 @@
+// Multi-turn reasoning: second-turn reply that references FunctionCallOutput
+// from a prior turn. Replay carries interleaved reasoning + content chunks.
+{"id":"chatcmpl-harness-codex-r2","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Got tool result 42."}}]}
+{"id":"chatcmpl-harness-codex-r2","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"reasoning_content":" Format it back."}}]}
+{"id":"chatcmpl-harness-codex-r2","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"The answer is 42."}}]}
+{"id":"chatcmpl-harness-codex-r2","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+{"id":"chatcmpl-harness-codex-r2","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":62,"completion_tokens":15,"total_tokens":77}}

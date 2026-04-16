@@ -1,0 +1,6 @@
+// Plain text streaming — response.created / output_item.added /
+// output_text.delta / completed framing.
+{"id":"chatcmpl-harness-codex-hello","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-codex-hello","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"Pong."}}]}
+{"id":"chatcmpl-harness-codex-hello","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+{"id":"chatcmpl-harness-codex-hello","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}

@@ -1,0 +1,7 @@
+// Chat-completion chunks that carry reasoning_content — the Responses
+// converter turns these into ReasoningItem / SummaryTextContent events.
+{"id":"chatcmpl-harness-codex-reason","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"I should greet politely."}}]}
+{"id":"chatcmpl-harness-codex-reason","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"reasoning_content":" Pick a simple hello."}}]}
+{"id":"chatcmpl-harness-codex-reason","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"Hi there."}}]}
+{"id":"chatcmpl-harness-codex-reason","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+{"id":"chatcmpl-harness-codex-reason","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":9,"completion_tokens":12,"total_tokens":21}}

@@ -1,0 +1,9 @@
+// Single tool_use block: preamble + one tool_call whose arguments are
+// streamed across three deltas + finish_reason=tool_calls + usage.
+{"id":"chatcmpl-harness-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"Looking up the weather."}}]}
+{"id":"chatcmpl-harness-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}
+{"id":"chatcmpl-harness-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"Paris"}}]}}]}
+{"id":"chatcmpl-harness-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\",\"unit\":\"c\"}"}}]}}]}
+{"id":"chatcmpl-harness-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+{"id":"chatcmpl-harness-tool","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":18,"total_tokens":60}}

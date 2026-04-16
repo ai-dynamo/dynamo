@@ -1,0 +1,6 @@
+// Minimal text-only stream: role prelude + two content deltas + stop.
+{"id":"chatcmpl-harness-hello","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
+{"id":"chatcmpl-harness-hello","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":"Hello"}}]}
+{"id":"chatcmpl-harness-hello","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{"content":" world."}}]}
+{"id":"chatcmpl-harness-hello","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+{"id":"chatcmpl-harness-hello","object":"chat.completion.chunk","created":1000000000,"model":"harness-model","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}

@@ -1,0 +1,7 @@
+---
+source: lib/llm/tests/anthropic_replay.rs
+expression: redact(value)
+---
+{
+  "input_tokens": 5
+}
