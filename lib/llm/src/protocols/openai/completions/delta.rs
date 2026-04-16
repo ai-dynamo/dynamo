@@ -75,6 +75,7 @@ impl NvCreateCompletionRequest {
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
             enable_tracking,
+            return_tokens_as_token_ids: self.return_tokens_as_token_ids.unwrap_or(false),
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
@@ -87,6 +88,8 @@ pub struct DeltaGeneratorOptions {
     pub continuous_usage_stats: bool,
     pub enable_logprobs: bool,
     pub enable_tracking: bool,
+    /// When true, logprob token fields use "token_id:<id>" format instead of decoded text.
+    pub return_tokens_as_token_ids: bool,
 }
 
 pub struct DeltaGenerator {
@@ -170,6 +173,7 @@ impl DeltaGenerator {
             .map(|(_, lp)| lp as f32)
             .collect::<Vec<f32>>();
 
+        let return_as_ids = self.options.return_tokens_as_token_ids;
         let top_lps = top_logprobs.map_or(vec![], |top_logprobs| {
             toks.iter()
                 .zip(tok_lps.iter())
@@ -181,8 +185,19 @@ impl DeltaGenerator {
                 .collect()
         });
 
+        let tokens_out: Vec<String> = toks
+            .iter()
+            .map(|(t, tid)| {
+                if return_as_ids {
+                    format!("token_id:{}", tid)
+                } else {
+                    t.clone()
+                }
+            })
+            .collect();
+
         Some(dynamo_protocols::types::Logprobs {
-            tokens: toks.iter().map(|(t, _)| t.clone()).collect(),
+            tokens: tokens_out,
             token_logprobs: tok_lps.into_iter().map(Some).collect(),
             text_offset: vec![],
             top_logprobs: top_lps,
