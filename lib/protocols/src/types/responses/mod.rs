@@ -75,6 +75,19 @@ where
     Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
+/// Deserialize `null` or a missing field as `T::default()`. Scalar counterpart
+/// to `deserialize_null_as_empty_vec` — plain `#[serde(default)]` rejects
+/// explicit `null` because serde tries to deserialize the null into `T` and
+/// fails. Real clients emit `null` for unset enum-ish fields (e.g. OpenAI
+/// Agents SDK sending `"detail": null` on `input_image` parts).
+fn deserialize_null_as_default<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Deserialize<'de> + Default,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
 /// Relaxed counterpart to upstream `OutputTextContent` for input-side content.
 /// `annotations` tolerates both missing and explicit `null`; upstream requires
 /// it to be a present non-null array.
@@ -119,7 +132,7 @@ pub struct InputOutputMessage {
 /// `detail` as required.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct InputImageContent {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub detail: ImageDetail,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<String>,
@@ -297,6 +310,33 @@ mod tests {
                 assert!(out.status.is_none());
             }
             other => panic!("expected Item::Message(Output), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_image_without_detail_defaults_to_auto() {
+        let json = serde_json::json!({
+            "type": "input_image",
+            "image_url": "https://example.com/cat.jpg"
+        });
+        let content: InputContent = serde_json::from_value(json).unwrap();
+        match content {
+            InputContent::InputImage(img) => assert_eq!(img.detail, ImageDetail::Auto),
+            other => panic!("expected InputImage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_image_with_explicit_null_detail_defaults_to_auto() {
+        let json = serde_json::json!({
+            "type": "input_image",
+            "image_url": "https://example.com/cat.jpg",
+            "detail": null
+        });
+        let content: InputContent = serde_json::from_value(json).unwrap();
+        match content {
+            InputContent::InputImage(img) => assert_eq!(img.detail, ImageDetail::Auto),
+            other => panic!("expected InputImage, got {other:?}"),
         }
     }
 
