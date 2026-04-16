@@ -664,7 +664,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         // End route stage — worker has been selected and routing metrics recorded.
+        // Dispatch stage starts immediately so there is no gap between stages.
         drop(route_guard);
+        let stage_dispatch_guard = StageGuard::new("dispatch", &phase_label);
 
         // Dispatch to worker
         let isl_tokens = request.token_ids.len();
@@ -697,7 +699,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
-        let stage_dispatch_guard = StageGuard::new("dispatch", &phase_label);
         let dispatch_guard = PendingDispatchGuard::new(
             chooser.clone(),
             scheduler_tracked,

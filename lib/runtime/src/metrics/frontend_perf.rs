@@ -24,7 +24,7 @@ pub static STAGE_REQUESTS: Lazy<IntGaugeVec> = Lazy::new(|| {
         ),
         &["stage", "phase"],
     )
-    .expect("stage_requests gauge vec")
+    .expect("failed to create dynamo_frontend_stage_requests gauge")
 });
 
 /// RAII guard that increments a per-stage gauge on creation and decrements on drop.
