@@ -42,8 +42,7 @@ RUN apt-get update \
     && unzip -q /tmp/bun.zip -d /tmp \
     && install -m 0755 /tmp/bun-linux-x64/bun /usr/local/bin/bun \
     && rm -rf /tmp/bun.zip /tmp/bun-linux-x64 \
-    && npm install -g @openai/codex \
-    && curl -fsSL https://claude.ai/install.sh | bash -s -- -b /usr/local/bin
+    && npm install -g @openai/codex @anthropic-ai/claude-code
 
 USER dynamo
 

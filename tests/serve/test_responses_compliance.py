@@ -77,8 +77,12 @@ def test_responses_openresponses_compliance(
     repo_dir = tmp_path / "openresponses"
     _clone_openresponses(repo_dir)
 
+    codex_home = tmp_path / "codex_home"
+    _write_codex_config(codex_home, frontend_port)
+
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(repo_dir, frontend_port)
+        _run_codex_exec_smoke(codex_home)
 
 
 def _clone_openresponses(repo_dir) -> None:
@@ -127,4 +131,72 @@ def _run_bun_compliance(repo_dir, frontend_port: int) -> None:
         pytest.fail(
             f"OpenResponses compliance suite failed (exit={result.returncode}).\n"
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+        )
+
+
+def _write_codex_config(codex_home, frontend_port: int) -> None:
+    """Emit a minimal ~/.codex/config.toml pointing Codex at Dynamo.
+
+    Using a per-test CODEX_HOME keeps the runner's global Codex state
+    (if any) untouched.
+    """
+    codex_home.mkdir(parents=True, exist_ok=True)
+    config_path = codex_home / "config.toml"
+    config_path.write_text(
+        f"""
+[model_providers.local]
+name = "local-dynamo"
+base_url = "http://localhost:{frontend_port}/v1"
+wire_api = "responses"
+env_key = "LOCAL_API_KEY"
+""".lstrip()
+    )
+
+
+def _run_codex_exec_smoke(codex_home) -> None:
+    """Run `codex exec` against the Dynamo Responses endpoint.
+
+    Loose assertion: exit 0 and model produced a non-empty answer. The
+    agent may invoke tool calls, so we don't pin the exact output.
+    """
+    logger.info("Running codex exec smoke test against CODEX_HOME=%s", codex_home)
+
+    env = {
+        **os.environ,
+        "CODEX_HOME": str(codex_home),
+        "LOCAL_API_KEY": "sk-none",
+    }
+
+    result = subprocess.run(
+        [
+            "codex",
+            "-m",
+            COMPLIANCE_MODEL,
+            "-c",
+            "model_provider=local",
+            "exec",
+            "what is 10+10",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    if result.stdout:
+        logger.info("codex stdout:\n%s", result.stdout)
+    if result.stderr:
+        logger.info("codex stderr:\n%s", result.stderr)
+
+    if result.returncode != 0:
+        pytest.fail(
+            f"codex exec failed (exit={result.returncode}).\n"
+            f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
+        )
+
+    if "20" not in result.stdout:
+        pytest.fail(
+            f"codex exec produced unexpected output — expected the answer '20' "
+            f"for 'what is 10+10', got:\n{result.stdout}"
         )
