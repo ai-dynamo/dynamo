@@ -1306,15 +1306,15 @@ mod test_event_dedup_filter {
         let data = store_data(&[1, 2, 3]);
 
         // Store same hashes twice — refcount should be 2
-        filter.track_store(0, &data);
-        filter.track_store(0, &data);
+        filter.track_store(0, StorageTier::Device, &data);
+        filter.track_store(0, StorageTier::Device, &data);
 
         // First remove — refcounts 2→1, all filtered out
-        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_none());
 
         // Second remove — refcounts 1→0, all pass through
-        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_some());
         assert_eq!(result.unwrap().block_hashes.len(), 3);
     }
@@ -1324,15 +1324,15 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store same hash twice
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // First remove — refcount 2→1, filtered out
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_none());
 
         // Second remove — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
         assert_eq!(result.unwrap().block_hashes.len(), 1);
     }
@@ -1342,17 +1342,17 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store hash 1
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // Remove hash 1 — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
         // Store hash 1 again — refcount starts fresh at 1
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // Remove again — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
     }
 
@@ -1361,20 +1361,20 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store on rank 0 and rank 1
-        filter.track_store(0, &store_data(&[1, 2]));
-        filter.track_store(0, &store_data(&[1, 2]));
-        filter.track_store(1, &store_data(&[1, 2]));
-        filter.track_store(1, &store_data(&[1, 2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1, 2]));
 
         // Clear wipes all ranks (matches indexer semantics where Cleared
         // from any rank removes all blocks for the entire worker).
         filter.clear();
 
         // Both ranks pass through defensively after clear
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
-        let result = filter.filter_remove(1, remove_data(&[1]));
+        let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
     }
 
@@ -1383,18 +1383,18 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Hash 1: stored twice (refcount 2)
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(0, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
 
         // Hash 2: stored once (refcount 1)
-        filter.track_store(0, &store_data(&[2]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[2]));
 
         // Hash 3: stored twice (refcount 2)
-        filter.track_store(0, &store_data(&[3]));
-        filter.track_store(0, &store_data(&[3]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[3]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[3]));
 
         // Remove all three — only hash 2 (refcount 1→0) passes through
-        let result = filter.filter_remove(0, remove_data(&[1, 2, 3]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1, 2, 3]));
         assert!(result.is_some());
         let result = result.unwrap();
         assert_eq!(result.block_hashes.len(), 1);
@@ -1406,20 +1406,20 @@ mod test_event_dedup_filter {
         let mut filter = EventDedupFilter::new();
 
         // Store hash 1 on rank 0 (twice) and rank 1 (once)
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(0, &store_data(&[1]));
-        filter.track_store(1, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(0, StorageTier::Device, &store_data(&[1]));
+        filter.track_store(1, StorageTier::Device, &store_data(&[1]));
 
         // Remove hash 1 on rank 1 — refcount 1→0, passes through
-        let result = filter.filter_remove(1, remove_data(&[1]));
+        let result = filter.filter_remove(1, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
 
         // Remove hash 1 on rank 0 — refcount 2→1, filtered out
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_none());
 
         // Remove hash 1 on rank 0 again — refcount 1→0, passes through
-        let result = filter.filter_remove(0, remove_data(&[1]));
+        let result = filter.filter_remove(0, StorageTier::Device, remove_data(&[1]));
         assert!(result.is_some());
     }
 }

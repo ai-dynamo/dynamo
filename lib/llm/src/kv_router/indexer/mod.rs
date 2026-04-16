@@ -112,10 +112,16 @@ fn query_lower_tiers(
             continue;
         };
 
+        let continuations_before = continuations.len();
         if let Some(&first_hash) = sequence.first() {
-            for worker in indexer.backend().root_workers(first_hash) {
+            let root_workers: Vec<_> = indexer.backend().root_workers(first_hash);
+            let mut new_roots = 0usize;
+            for worker in root_workers.iter() {
+                if !continuations.contains_key(worker) {
+                    new_roots += 1;
+                }
                 continuations
-                    .entry(worker)
+                    .entry(*worker)
                     .or_insert_with(|| LowerTierContinuation::from_root(0));
             }
         }
@@ -256,10 +262,9 @@ impl Indexer {
     ) -> Result<MatchDetails, KvRouterError> {
         match self {
             Self::KvIndexer { primary, .. } => primary.find_match_details(sequence).await,
-            Self::Concurrent { primary, .. } => Ok(MatchDetails {
-                overlap_scores: primary.backend().find_matches_impl(&sequence, false),
-                ..Default::default()
-            }),
+            Self::Concurrent { primary, .. } => {
+                Ok(primary.backend().find_match_details_impl(&sequence, false))
+            }
             Self::Remote(remote) => remote
                 .find_matches(sequence)
                 .await
@@ -823,6 +828,58 @@ mod tests {
                 .get(&StorageTier::Disk)
                 .and_then(|tier| tier.hits.get(&disk_only_worker)),
             Some(&1)
+        );
+    }
+
+    /// Regression test: when a worker has blocks in both device and lower-tier
+    /// storage (e.g. same prefix stored on GPU and offloaded to host), the
+    /// Concurrent indexer doesn't return last_matched_hashes. Without the fix,
+    /// query_lower_tiers would re-query that worker from root in the lower tier,
+    /// double-counting overlap blocks and producing cached_tokens > ISL.
+    #[tokio::test]
+    async fn concurrent_tiered_query_does_not_double_count_device_and_lower_tier_overlap() {
+        let indexer = make_test_concurrent_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+
+        // Worker has the same blocks in both device and host-pinned storage.
+        indexer
+            .apply_event(store_event(7, 0, 1, &[], &[11, 12, 13], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(store_event(
+                7,
+                0,
+                2,
+                &[],
+                &[11, 12, 13],
+                StorageTier::HostPinned,
+            ))
+            .await;
+        flush_indexer(&indexer).await;
+
+        let matches = indexer
+            .find_matches_by_tier(vec![
+                LocalBlockHash(11),
+                LocalBlockHash(12),
+                LocalBlockHash(13),
+            ])
+            .await
+            .unwrap();
+
+        // Device overlap should be 3 blocks.
+        assert_eq!(matches.device.overlap_scores.scores.get(&worker), Some(&3));
+
+        // Lower-tier must NOT report additional hits for the same worker
+        // whose blocks are already fully accounted for in the device tier.
+        let host_hits = matches
+            .lower_tier
+            .get(&StorageTier::HostPinned)
+            .and_then(|tier| tier.hits.get(&worker).copied())
+            .unwrap_or(0);
+        assert_eq!(
+            host_hits, 0,
+            "lower-tier should not double-count blocks already matched in device tier \
+             (got {host_hits} host-pinned hits for a worker with full device overlap)"
         );
     }
 

@@ -297,6 +297,12 @@ impl CacheStatusTracker {
         source: EventSource,
         tier: Option<StorageTier>,
     ) -> bool {
+        tracing::info!(
+            block_hash,
+            ?source,
+            ?tier,
+            "[tier-debug] consolidator handle_remove"
+        );
         self.event_queue.push(ConsolidatedEvent::Remove {
             block_hash: block_hash.to_string(),
             source: source.to_str().to_string(),

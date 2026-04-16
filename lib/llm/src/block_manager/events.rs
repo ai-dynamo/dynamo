@@ -248,10 +248,10 @@ impl DynamoEventManager {
         let block_hash = registration_handle.published_sequence_hash().to_string();
         let tier = registration_handle.storage_tier();
 
-        tracing::debug!(
-            "DynamoEventManager::publish_remove_event called: block_hash={}, tier={:?}",
-            block_hash,
-            tier
+        tracing::info!(
+            %block_hash,
+            ?tier,
+            "[tier-debug] KVBM publish_remove_event"
         );
 
         let kv_event_consolidator = self.consolidator_handle.clone();

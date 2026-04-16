@@ -216,11 +216,11 @@ impl KvEventConsolidatorPublisher {
             let vllm_events: Vec<Event> = events
                 .into_iter()
                 .filter_map(|event| match Event::from_consolidated(event) {
-                    Ok(e) => Some(e),
-                    Err(err) => {
-                        tracing::error!("Failed to convert consolidated event, skipping: {}", err);
-                        None
-                    }
+                        Ok(e) => Some(e),
+                        Err(err) => {
+                            tracing::error!("Failed to convert consolidated event, skipping: {}", err);
+                            None
+                        }
                 })
                 .collect();
 

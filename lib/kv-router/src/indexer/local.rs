@@ -718,7 +718,24 @@ impl KvIndexerInterface for LocalKvIndexer {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        self.indexer.dump_events().await
+        let mut events = self.indexer.dump_events().await?;
+
+        // Also dump lower-tier indexer state so the router receives
+        // host-pinned / disk block information during recovery.
+        let lower_tiers: Vec<(StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>)> = {
+            let indexers = self.lower_tier_indexers.lock().unwrap();
+            indexers.iter().map(|(&tier, idx)| (tier, idx.clone())).collect()
+        };
+        for (tier, indexer) in lower_tiers {
+            if let Ok(tier_events) = indexer.dump_events().await {
+                for mut event in tier_events {
+                    event.storage_tier = tier;
+                    events.push(event);
+                }
+            }
+        }
+
+        Ok(events)
     }
 
     async fn process_routing_decision_for_request(
