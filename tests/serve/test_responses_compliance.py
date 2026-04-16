@@ -61,15 +61,25 @@ def test_responses_openresponses_compliance(
         marks=[],
         request_payloads=[],
         model=COMPLIANCE_MODEL,
-        script_name="agg_compliance.sh",
-        script_args=[],
+        script_name="agg.sh",
+        # Qwen3-VL-2B-specific flags: vision-model CUDA graph workaround +
+        # model-aware reasoning/tool-call parsers. Forwarded verbatim to
+        # `dynamo.sglang` by agg.sh's pass-through loop.
+        script_args=[
+            "--model-path",
+            COMPLIANCE_MODEL,
+            "--disable-piecewise-cuda-graph",
+            "--dyn-reasoning-parser",
+            "qwen3",
+            "--dyn-tool-call-parser",
+            "qwen3_coder",
+        ],
         timeout=360,
-        env={"MODEL": COMPLIANCE_MODEL},
+        env={},
         frontend_port=frontend_port,
     )
 
     merged_env = {
-        "MODEL": COMPLIANCE_MODEL,
         "DYN_HTTP_PORT": str(frontend_port),
         "DYN_SYSTEM_PORT": str(system_port),
     }
