@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# vllm serve baseline (no embedding cache) for Qwen3.5-397B on 8xH100.
-# Phase 1 of the sweep — runs while dynamo builds in parallel.
+# vllm serve (no embedding cache) vs Dynamo frontend+backend (4GB/GPU EC)
+# for Qwen3.5-397B on 8xH100, sweeping request rates 1, 2, 4.
 
 model: Qwen/Qwen3.5-397B-A17B-FP8
 request_rates: [1, 2, 4]
@@ -30,3 +30,22 @@ configs:
       - --mm-processor-cache-gb
       - "30"
       - --enable-prefix-caching
+
+  - label: dynamo-ec
+    workflow: benchmarks/multimodal/sweep/workflows/dynamo_serve.sh
+    extra_args:
+      - --tensor-parallel-size
+      - "8"
+      - --enable-expert-parallel
+      - --enable-multimodal
+      - --mm-encoder-tp-mode
+      - data
+      - --mm-processor-cache-gb
+      - "30"
+      - --multimodal-embedding-cache-capacity-gb
+      - "4"
+      - --enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.9"
+      - --max-model-len
+      - "16384"
