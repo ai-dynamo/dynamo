@@ -607,13 +607,19 @@ class SglangStreamingPostProcessor:
                 # Re-index sequentially so repeated calls to the same
                 # tool get distinct indices (parse_non_stream may assign
                 # indices based on the tool-definition position instead).
-                for seq_idx, tc in enumerate(final_calls):
-                    if seq_idx not in self._tool_call_ids:
+                # When the re-parse returns results, it is authoritative:
+                # clear streaming state first so we don't mix a name from
+                # the re-parse with args from streaming at the same index.
+                if final_calls:
+                    self._tool_call_ids.clear()
+                    self._tool_call_names.clear()
+                    self._tool_call_args.clear()
+                    for seq_idx, tc in enumerate(final_calls):
                         self._tool_call_ids[seq_idx] = self._tool_call_id(tc)
-                    if tc.name:
-                        self._tool_call_names[seq_idx] = tc.name
-                    if tc.parameters and seq_idx not in self._tool_call_args:
-                        self._tool_call_args[seq_idx] = [tc.parameters]
+                        if tc.name:
+                            self._tool_call_names[seq_idx] = tc.name
+                        if tc.parameters:
+                            self._tool_call_args[seq_idx] = [tc.parameters]
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []
