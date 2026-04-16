@@ -4,7 +4,6 @@
 use async_trait::async_trait;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::{KvIndexerMetrics, KvRouterError, WorkerTask};
 use crate::protocols::*;
@@ -83,14 +82,10 @@ pub trait KvIndexerInterface {
     ///
     /// * `tokens_with_hashes` - Tokens with lazily computed hashes.
     /// * `worker` - The worker (with dp_rank) that was selected.
-    /// * `ttl_override` - When `Some`, use this TTL for inserted blocks instead of the
-    ///   indexer's default. Used by predict-on-route to give speculative entries a
-    ///   shorter lifetime until a real KV event re-inserts them at the default TTL.
     async fn process_routing_decision_for_request(
         &self,
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
-        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError>;
 
     /// Async task that returns when all pending events have been processed.

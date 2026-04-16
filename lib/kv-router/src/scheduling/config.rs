@@ -215,17 +215,19 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub serve_indexer: bool,
 
-    /// Whether the router should speculatively insert a request's blocks into the
-    /// indexer on the routing decision itself, so that sibling requests arriving
-    /// before the engine emits a KV event still see the prefix. Works independently
-    /// of `use_kv_events`: when both are enabled, the engine's real KV event
-    /// (long-TTL insert) promotes the speculative entry.
+    /// When `use_kv_events=true`, run a secondary approximate indexer alongside
+    /// the event-driven one. The side indexer is populated by routing decisions
+    /// with a short TTL (`router_predicted_ttl_secs`); `find_matches` queries
+    /// both indexers and returns the per-worker maximum overlap. This closes
+    /// the window between a routing decision and the engine's first "block
+    /// stored" event so sibling requests in a burst can still co-locate.
     #[serde(default)]
     pub router_predict_on_route: bool,
 
-    /// TTL in seconds applied to predict-on-route insertions. `None` means use the
-    /// indexer's default TTL (`router_ttl_secs`). Only meaningful when
-    /// `router_predict_on_route=true`.
+    /// TTL in seconds applied to entries in the predict-on-route side indexer.
+    /// `None` falls back to `DEFAULT_PREDICTED_TTL_SECS`. Keep this short (a
+    /// few seconds) so unconfirmed predictions age out quickly. Only meaningful
+    /// when both `use_kv_events=true` and `router_predict_on_route=true`.
     #[serde(default)]
     #[validate(range(min = 0.0))]
     pub router_predicted_ttl_secs: Option<f64>,
@@ -365,12 +367,6 @@ impl KvRouterConfig {
             let mut rng = rand::rng();
             Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
         }
-    }
-
-    /// Returns the TTL to apply to predict-on-route insertions. `None` means
-    /// let the indexer use its default TTL.
-    pub fn predicted_ttl(&self) -> Option<Duration> {
-        self.router_predicted_ttl_secs.map(Duration::from_secs_f64)
     }
 
     /// Check if KV event subscription should be started.

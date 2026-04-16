@@ -4,7 +4,6 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -22,6 +21,8 @@ use crate::protocols::*;
 use super::DumpRequest;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(test)]
+use tokio::time::Duration;
 
 // -------------------------------------------------
 // Decentralized router: LocalKvIndexer for workers
@@ -664,12 +665,11 @@ impl KvIndexerInterface for LocalKvIndexer {
         &self,
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
-        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         // TODO I guess the local kvindexers have little use for this method?
         // Keeping it here now to implement the trait fully
         self.indexer
-            .process_routing_decision_for_request(tokens_with_hashes, worker, ttl_override)
+            .process_routing_decision_for_request(tokens_with_hashes, worker)
             .await
     }
 

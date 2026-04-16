@@ -280,10 +280,7 @@ impl KvIndexer {
                                     seq_position: idx,
                                 }
                             }).collect();
-                            match routing_req.ttl_override {
-                                Some(ttl) => pm.insert_with_ttl(block_entries, ttl),
-                                None => pm.insert(block_entries),
-                            }
+                            pm.insert(block_entries);
 
                             // Check if we need to prune due to tree size
                             let Some(ref pc) = pm.prune_config else { continue };
@@ -506,18 +503,12 @@ impl KvIndexerInterface for KvIndexer {
         &self,
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
-        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
         let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
 
-        self.process_routing_decision_with_hashes(
-            worker,
-            local_hashes,
-            sequence_hashes,
-            ttl_override,
-        )
-        .await
+        self.process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+            .await
     }
     async fn flush(&self) -> usize {
         let curr_size = self.event_tx.max_capacity() - self.event_tx.capacity();
@@ -538,14 +529,12 @@ impl KvIndexer {
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
-        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         self.routing_tx
             .send(RoutingDecisionRequest {
                 worker,
                 local_hashes,
                 sequence_hashes,
-                ttl_override,
             })
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
