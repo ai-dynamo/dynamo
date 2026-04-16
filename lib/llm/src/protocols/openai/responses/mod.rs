@@ -231,7 +231,7 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
 /// attached tool_calls. Used to fold consecutive Responses API items that
 /// belong to the same assistant turn into a single ChatCompletion message.
 fn append_assistant_text(prev: &mut ChatCompletionRequestAssistantMessage, text: &str) {
-    if text.is_empty() && prev.content.is_some() {
+    if text.is_empty() {
         return;
     }
     match prev.content.take() {
