@@ -562,14 +562,11 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 		*out = new(TopologyConstraint)
 		**out = **in
 	}
-<<<<<<< HEAD
-=======
 	if in.GPUMemoryService != nil {
 		in, out := &in.GPUMemoryService, &out.GPUMemoryService
 		*out = new(GPUMemoryServiceSpec)
 		**out = **in
 	}
->>>>>>> origin/main
 	if in.Failover != nil {
 		in, out := &in.Failover, &out.Failover
 		*out = new(FailoverSpec)

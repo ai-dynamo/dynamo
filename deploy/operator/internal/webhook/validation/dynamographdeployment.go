@@ -852,18 +852,24 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 }
 
 // validateFailoverRequiresDiscoveryMode checks that when any service has
-// failover enabled, the DGD carries the nvidia.com/dynamo-kube-discovery-mode
-// annotation set to "container". Failover pods produce multiple engine
-// containers that each need their own discovery identity.
+// intra-pod failover enabled, the DGD carries the nvidia.com/dynamo-kube-discovery-mode
+// annotation set to "container". Intra-pod failover produces multiple engine
+// containers within the same pod that each need their own discovery identity.
+// Inter-pod failover uses separate pods, so the annotation is not required.
 func (v *DynamoGraphDeploymentValidator) validateFailoverRequiresDiscoveryMode() error {
-	hasFailover := false
+	hasIntraPodFailover := false
 	for _, svc := range v.deployment.Spec.Services {
-		if svc != nil && svc.Failover != nil && svc.Failover.Enabled {
-			hasFailover = true
+		if svc == nil || svc.Failover == nil || !svc.Failover.Enabled {
+			continue
+		}
+		// Mode == "" is backward compat for pre-Mode API (treated as interPod).
+		// New objects get Mode defaulted to "intraPod" by the Kubernetes API.
+		if svc.Failover.Mode == nvidiacomv1alpha1.GMSModeIntraPod {
+			hasIntraPodFailover = true
 			break
 		}
 	}
-	if !hasFailover {
+	if !hasIntraPodFailover {
 		return nil
 	}
 

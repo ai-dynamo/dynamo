@@ -700,6 +700,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
 								NumShadows: 1,
 							},
 							Resources: &nvidiacomv1alpha1.Resources{
@@ -724,6 +725,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
 								NumShadows: 1,
 							},
 						},
@@ -748,6 +750,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 							ComponentType: "frontend",
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
 								NumShadows: 1,
 							},
 							Resources: &nvidiacomv1alpha1.Resources{
@@ -777,6 +780,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
 								NumShadows: 1,
 							},
 							Resources: &nvidiacomv1alpha1.Resources{
@@ -803,6 +807,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
 								NumShadows: 1,
 							},
 							Resources: &nvidiacomv1alpha1.Resources{
