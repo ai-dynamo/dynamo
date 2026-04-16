@@ -16,8 +16,8 @@ apiVersion: v2
 name: snapshot
 description: Checkpoint/Restore infrastructure for Dynamo (PVC + DaemonSet + CRIU Agent)
 type: application
-version: 1.0.1
-appVersion: "1.0.1"
+version: 1.0.2
+appVersion: "1.0.2"
 keywords:
   - nvidia
   - dynamo
