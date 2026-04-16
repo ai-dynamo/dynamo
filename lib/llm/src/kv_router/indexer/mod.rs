@@ -83,11 +83,15 @@ impl Indexer {
         }
 
         if kv_router_config.router_event_threads > 1 {
-            return Ok(Self::Concurrent(Arc::new(ThreadPoolIndexer::new(
-                ConcurrentRadixTreeCompressed::new(),
-                kv_router_config.router_event_threads as usize,
-                block_size,
-            ))));
+            let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
+            return Ok(Self::Concurrent(Arc::new(
+                ThreadPoolIndexer::new_with_metrics(
+                    ConcurrentRadixTreeCompressed::new(),
+                    kv_router_config.router_event_threads as usize,
+                    block_size,
+                    Some(kv_indexer_metrics),
+                ),
+            )));
         }
 
         let kv_indexer_metrics = KvIndexerMetrics::from_component(component);

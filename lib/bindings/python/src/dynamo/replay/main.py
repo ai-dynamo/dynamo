@@ -153,7 +153,7 @@ def _run_planner_replay(
     from dynamo.planner.offline.replay_adapter import ReplayPlannerAdapter
 
     planner_config = PlannerConfig.from_config_arg(planner_config_arg)
-    planner_config.no_operation = True
+    planner_config.advisory = True
 
     if planner_config.mode == "agg":
         if extra_engine_args is None:
@@ -326,6 +326,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write("\n")
         sys.stdout.write(f"Saved full report to: {report_path}\n")
         sys.stdout.write(f"Planner ticks: {planner_report.total_ticks}\n")
+        if planner_report.html_report_path:
+            sys.stdout.write(
+                f"Planner diagnostics report: {planner_report.html_report_path}\n"
+            )
         return 0
 
     if using_trace_file:

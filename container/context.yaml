@@ -91,7 +91,7 @@ sglang:
     runtime_image: intel/deep-learning-essentials
     runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
     sglang_ref: aa78564e1a3ab684b7eafa3eba19a8654c90476f
-  nixl_ref: 0.10.0
+  nixl_ref: v1.0.1
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
@@ -104,7 +104,7 @@ trtllm:
     runtime_image_tag: 26.02-cuda13.1-runtime-ubuntu24.04
   nixl_ref: 0.10.1
   enable_media_ffmpeg: "false"
-  enable_gpu_memory_service: "false"
+  enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   python_version: "3.12"
   index_url: https://pypi.nvidia.com/

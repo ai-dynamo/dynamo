@@ -385,7 +385,13 @@ class DiagnosticsRecorder:
                         break
                 y.append(val)
             fig.add_trace(
-                go.Scatter(x=labels, y=y, name=f"P {eid} queued", mode="lines+markers"),
+                go.Scatter(
+                    x=labels,
+                    y=y,
+                    name=f"P {eid} queued",
+                    mode="lines+markers",
+                    showlegend=False,
+                ),
                 row=4,
                 col=1,
             )
@@ -409,6 +415,7 @@ class DiagnosticsRecorder:
                     y=y_queued,
                     name=f"D {eid} queued",
                     mode="lines+markers",
+                    showlegend=False,
                 ),
                 row=4,
                 col=2,
@@ -420,6 +427,7 @@ class DiagnosticsRecorder:
                     name=f"D {eid} inflight",
                     mode="lines",
                     line=dict(dash="dot"),
+                    showlegend=False,
                 ),
                 row=4,
                 col=2,
@@ -576,7 +584,7 @@ class DiagnosticsRecorder:
             title=dict(text=summary, font=dict(size=14), y=0.99, yanchor="top"),
             height=2000,
             showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=-0.03),
+            legend=dict(orientation="h", yanchor="top", y=-0.05),
             template="plotly_white",
             margin=dict(t=100),
         )
@@ -595,10 +603,13 @@ class DiagnosticsRecorder:
         output_dir = self.config.report_output_dir
         os.makedirs(output_dir, exist_ok=True)
         self._report_count += 1
-        ts_label = datetime.fromtimestamp(ts[-1], tz=timezone.utc).strftime(
-            "%Y%m%d_%H%M%S"
-        )
-        filename = f"planner_report_{ts_label}_{self._report_count:03d}.html"
+        if self.config.report_filename:
+            filename = self.config.report_filename
+        else:
+            ts_label = datetime.fromtimestamp(ts[-1], tz=timezone.utc).strftime(
+                "%Y%m%d_%H%M%S"
+            )
+            filename = f"planner_report_{ts_label}_{self._report_count:03d}.html"
         filepath = os.path.join(output_dir, filename)
 
         with open(filepath, "w") as f:

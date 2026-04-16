@@ -2,18 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
+from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
-from dynamo.common.protocols.image_protocol import NvCreateImageRequest
-from dynamo.common.protocols.video_protocol import NvCreateVideoRequest
+from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
+from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
 from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 from dynamo.llm.exceptions import EngineShutdown
@@ -255,35 +257,60 @@ class OmniHandler(BaseOmniHandler):
             fps=0,
         )
 
+    @staticmethod
+    def _update_if_not_none(object: Any, key: str, val: Any) -> None:
+        if val is not None:
+            setattr(object, key, val)
+
+    def _build_sampling_params_list(
+        self, diffusion_sp: OmniDiffusionSamplingParams
+    ) -> list:
+        # This is in sync with how vllm-omni builds sampling params currently.
+        defaults = list(self.engine_client.default_sampling_params_list or [])
+        result = []
+        for i, default in enumerate(defaults):
+            stage_type = self.engine_client.engine.get_stage_metadata(i).get(
+                "stage_type", "llm"
+            )
+            if stage_type == "diffusion":
+                result.append(diffusion_sp)
+            else:
+                result.append(
+                    default.clone() if hasattr(default, "clone") else SamplingParams()
+                )
+        return result if result else [diffusion_sp]
+
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
         width, height = parse_size(req.size, default_w=1024, default_h=1024)
-        nvext = req.nvext
+        nvext = req.nvext or ImageNvExt()
 
-        prompt = OmniTextPrompt(
-            prompt=req.prompt,
-            negative_prompt=(
-                nvext.negative_prompt if nvext and nvext.negative_prompt else None
-            ),
-        )
+        prompt = OmniTextPrompt(prompt=req.prompt)
+        if nvext and nvext.negative_prompt is not None:
+            prompt.negative_prompt = nvext.negative_prompt
 
         sp = OmniDiffusionSamplingParams(
             height=height,
             width=width,
         )
-        if req.n is not None:
-            sp.num_outputs_per_prompt = req.n
-        if nvext:
-            if nvext.num_inference_steps is not None:
-                sp.num_inference_steps = nvext.num_inference_steps
-            if nvext.guidance_scale is not None:
-                sp.guidance_scale = nvext.guidance_scale
-            if nvext.seed is not None:
-                sp.seed = nvext.seed
+
+        # TODO: Apply LoRA Request params here and move to shared utilities for disaggregated stages to use as well.
+
+        self._update_if_not_none(sp, "num_outputs_per_prompt", req.n)
+
+        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
+        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
+        # If seed is not provided, generate a random one to ensure
+        # a proper generator is initialized in the backend.
+        # This fixes issues where using the default global generator
+        # might produce blurry images in some environments.
+        sp.seed = (
+            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
+        )
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=[sp],
+            sampling_params_list=self._build_sampling_params_list(sp),
             request_type=RequestType.IMAGE_GENERATION,
             response_format=req.response_format,
         )
@@ -302,25 +329,19 @@ class OmniHandler(BaseOmniHandler):
                 I2V pipeline pre-process can use it.
         """
         width, height = parse_size(req.size)
-        nvext = req.nvext
-
-        nvext_fps = nvext.fps if nvext else None
-        nvext_num_frames = nvext.num_frames if nvext else None
+        nvext = req.nvext or VideoNvExt()
 
         num_frames = compute_num_frames(
-            num_frames=nvext_num_frames,
+            num_frames=nvext.num_frames,
             seconds=req.seconds,
-            fps=nvext_fps,
+            fps=nvext.fps,
             default_fps=DEFAULT_VIDEO_FPS,
         )
-        fps = nvext_fps if nvext_fps is not None else DEFAULT_VIDEO_FPS
+        fps = nvext.fps if nvext.fps is not None else DEFAULT_VIDEO_FPS
 
-        prompt = OmniTextPrompt(
-            prompt=req.prompt,
-            negative_prompt=(
-                nvext.negative_prompt if nvext and nvext.negative_prompt else None
-            ),
-        )
+        prompt = OmniTextPrompt(prompt=req.prompt)
+        if nvext.negative_prompt is not None:
+            prompt.negative_prompt = nvext.negative_prompt
 
         if image is not None:
             prompt["multi_modal_data"] = {"image": image}
@@ -335,19 +356,14 @@ class OmniHandler(BaseOmniHandler):
             width=width,
             num_frames=num_frames,
         )
-        if nvext:
-            if nvext.num_inference_steps is not None:
-                sp.num_inference_steps = nvext.num_inference_steps
-            if nvext.guidance_scale is not None:
-                sp.guidance_scale = nvext.guidance_scale
-            if nvext.seed is not None:
-                sp.seed = nvext.seed
-            if nvext.boundary_ratio is not None:
-                sp.boundary_ratio = nvext.boundary_ratio
-            if nvext.guidance_scale_2 is not None:
-                sp.guidance_scale_2 = nvext.guidance_scale_2
-        if fps is not None:
-            sp.fps = fps
+        self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
+        self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
+        sp.seed = (
+            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
+        )
+        self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
+        self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
+        self._update_if_not_none(sp, "fps", fps)
 
         logger.info(
             f"Video diffusion request: prompt='{req.prompt[:50]}...', "
@@ -356,7 +372,7 @@ class OmniHandler(BaseOmniHandler):
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=[sp],
+            sampling_params_list=self._build_sampling_params_list(sp),
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
         )
