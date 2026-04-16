@@ -44,6 +44,18 @@ RUN apt-get update \
     && rm -rf /tmp/bun.zip /tmp/bun-linux-x64 \
     && npm install -g @openai/codex @anthropic-ai/claude-code
 
+# Pre-clone the OpenResponses compliance suite at a pinned SHA and install
+# its runtime deps. Bakes the suite into the image so the compliance test
+# doesn't clone + `bun install` on every run (saves ~10-30s per run and
+# removes github.com as a source of test flakes). Bumps go through this
+# file in lockstep with the SHA pin in test_responses_compliance.py.
+ARG OPENRESPONSES_SHA=fa29df5
+RUN git clone --filter=blob:none https://github.com/openresponses/openresponses.git /opt/openresponses \
+    && cd /opt/openresponses \
+    && git checkout "${OPENRESPONSES_SHA}" \
+    && bun install --frozen-lockfile \
+    && chmod -R a+rX /opt/openresponses
+
 USER dynamo
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)

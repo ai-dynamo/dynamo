@@ -3,20 +3,21 @@
 
 """OpenResponses compliance suite against a live Dynamo frontend.
 
-Spins up an aggregated sglang worker behind a frontend with Responses and
-Anthropic Messages APIs enabled, then runs the upstream OpenResponses
-compliance-test.ts suite (a bun/TypeScript harness that validates the
-response wire shape against zod schemas generated from the OpenAPI spec).
-
-The suite is pinned to a specific commit so flakes are locked to our
-version bumps rather than upstream changes.
+Spins up an aggregated sglang worker behind a frontend, then runs the
+upstream OpenResponses compliance-test.ts suite (a bun/TypeScript harness
+that validates the response wire shape against zod schemas generated from
+the OpenAPI spec) plus a codex exec smoke test. The suite is pre-cloned
+and `bun install`ed into `/opt/openresponses` by `container/Dockerfile.test`
+at a pinned SHA; bumps go through that file in lockstep.
 """
 
 import logging
 import os
 import subprocess
+import time
 
 import pytest
+import requests
 
 from tests.serve.common import WORKSPACE_DIR
 from tests.utils.engine_process import EngineConfig, EngineProcess
@@ -27,10 +28,9 @@ sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
 
-# Pin the OpenResponses checkout. Update in lockstep with intentional bumps
-# — bumps should include a CI run showing the suite still passes.
-OPENRESPONSES_REPO = "https://github.com/openresponses/openresponses.git"
-OPENRESPONSES_SHA = "fa29df5"
+# OpenResponses suite pre-installed here by Dockerfile.test; SHA pin lives
+# with the git clone in that file. This path must stay in sync with it.
+OPENRESPONSES_DIR = "/opt/openresponses"
 
 COMPLIANCE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 
@@ -41,7 +41,10 @@ COMPLIANCE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 @pytest.mark.model(COMPLIANCE_MODEL)
 @pytest.mark.profiled_vram_gib(6.0)
 @pytest.mark.requested_sglang_kv_tokens(512)
-@pytest.mark.timeout(420)
+# Budget: sglang cold start (30-60s) + bun compliance (up to 180s) +
+# inter-suite health check + codex exec (up to 180s) + teardown. 600s
+# leaves headroom for CI variance without masking real hangs.
+@pytest.mark.timeout(600)
 @pytest.mark.pre_merge
 def test_responses_openresponses_compliance(
     request,
@@ -54,6 +57,12 @@ def test_responses_openresponses_compliance(
 
     frontend_port = int(dynamo_dynamic_ports.frontend_port)
     system_port = int(dynamo_dynamic_ports.system_ports[0])
+
+    if not os.path.isdir(OPENRESPONSES_DIR):
+        pytest.skip(
+            f"OpenResponses suite not pre-installed at {OPENRESPONSES_DIR} "
+            "— rebuild the test image from container/Dockerfile.test"
+        )
 
     config = EngineConfig(
         name="responses_compliance",
@@ -84,29 +93,46 @@ def test_responses_openresponses_compliance(
         "DYN_SYSTEM_PORT": str(system_port),
     }
 
-    repo_dir = tmp_path / "openresponses"
-    _clone_openresponses(repo_dir)
-
     codex_home = tmp_path / "codex_home"
     _write_codex_config(codex_home, frontend_port)
 
     with EngineProcess.from_script(config, request, extra_env=merged_env):
-        _run_bun_compliance(repo_dir, frontend_port)
+        _run_bun_compliance(frontend_port)
+        _wait_for_frontend_healthy(frontend_port)
         _run_codex_exec_smoke(codex_home)
 
 
-def _clone_openresponses(repo_dir) -> None:
-    """Shallow-clone OpenResponses at the pinned SHA into `repo_dir`."""
-    subprocess.run(
-        ["git", "clone", "--filter=blob:none", OPENRESPONSES_REPO, str(repo_dir)],
-        check=True,
+def _wait_for_frontend_healthy(
+    frontend_port: int, timeout_s: float = 15.0, model: str = COMPLIANCE_MODEL
+) -> None:
+    """Confirm the frontend is still serving before the next subprocess fires.
+
+    Without this check, if bun compliance accidentally destabilized the
+    server (e.g. a hang that the bun timeout cut short) a codex exec
+    failure looks identical to "codex is broken" in CI logs. The health
+    probe collapses that ambiguity: if the frontend has crashed or the
+    worker has deregistered, fail here with a clear message rather than
+    letting codex run and time out.
+    """
+    deadline = time.monotonic() + timeout_s
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            resp = requests.get(
+                f"http://localhost:{frontend_port}/v1/models", timeout=2
+            )
+            if resp.ok and any(m.get("id") == model for m in resp.json().get("data", [])):
+                return
+        except requests.RequestException as e:
+            last_err = e
+        time.sleep(0.5)
+    pytest.fail(
+        f"frontend unhealthy after bun compliance — /v1/models did not list "
+        f"{model!r} within {timeout_s}s (last error: {last_err})"
     )
-    subprocess.run(["git", "checkout", OPENRESPONSES_SHA], cwd=repo_dir, check=True)
-    # `bun install` fetches the suite's runtime deps (zod, etc.).
-    subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=repo_dir, check=True)
 
 
-def _run_bun_compliance(repo_dir, frontend_port: int) -> None:
+def _run_bun_compliance(frontend_port: int) -> None:
     """Invoke compliance-test.ts against the running frontend."""
     base_url = f"http://localhost:{frontend_port}/v1"
     logger.info("Running OpenResponses compliance suite against %s", base_url)
@@ -124,7 +150,7 @@ def _run_bun_compliance(repo_dir, frontend_port: int) -> None:
             COMPLIANCE_MODEL,
             "--verbose",
         ],
-        cwd=repo_dir,
+        cwd=OPENRESPONSES_DIR,
         capture_output=True,
         text=True,
         timeout=180,
