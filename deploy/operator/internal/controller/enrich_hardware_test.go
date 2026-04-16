@@ -33,15 +33,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	gpupkg "github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
+	"k8s.io/utils/ptr"
 )
 
-func newFakeReconciler(nodes ...*corev1.Node) *DynamoGraphDeploymentRequestReconciler {
+func newFakeReconciler(objs ...client.Object) *DynamoGraphDeploymentRequestReconciler {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
-	objs := make([]client.Object, len(nodes))
-	for i, n := range nodes {
-		objs[i] = n
-	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 	return &DynamoGraphDeploymentRequestReconciler{
 		Client:    fakeClient,
@@ -67,73 +64,126 @@ func intStr(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// TestEnrichHardwareFromDiscovery_UsesAICSystemIdentifier is the regression test for the
-// bug where GPUSKU was set to the raw GFD product name (e.g. "NVIDIA-B200") instead of
-// the AIC system identifier (e.g. "b200_sxm"), causing AIC support checks to always fail
-// and forcing every model/backend to fall back to naive config generation.
-func TestEnrichHardwareFromDiscovery_UsesAICSystemIdentifier(t *testing.T) {
+func dcgmPod(name, ip string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "gpu-operator",
+			Labels: map[string]string{gpupkg.LabelApp: gpupkg.LabelValueNvidiaDCGMExporter}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: ip},
+	}
+}
+
+func TestEnrichHardwareFromDiscovery(t *testing.T) {
 	tests := []struct {
-		name           string
-		gfdProduct     string                      // raw GFD label value
-		expectedGPUSKU nvidiacomv1beta1.GPUSKUType // what the profiler needs
+		name string
+
+		// Input hardware spec (nil fields = not set by user).
+		hardware *nvidiacomv1beta1.HardwareSpec
+
+		// Discovery mock: what DCGM returns. Nil means no discovery available.
+		discoveredGPU *gpupkg.GPUInfo
+
+		// Expected outcome.
+		wantErr       bool
+		wantGPUSKU    string
+		wantVRAM      float64
+		wantGPUsNode  int32
+		wantTotalGPUs int32
 	}{
 		{
-			name:           "B200 GFD label maps to AIC system identifier",
-			gfdProduct:     "NVIDIA-B200",
-			expectedGPUSKU: "b200_sxm",
+			name: "all four fields set, discovery skipped",
+			hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU: "h100_sxm", VRAMMB: ptr.To(81920.0),
+				NumGPUsPerNode: ptr.To(int32(8)), TotalGPUs: ptr.To(int32(16)),
+			},
+			wantGPUSKU: "h100_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 16,
 		},
 		{
-			name:           "H200 GFD label maps to AIC system identifier",
-			gfdProduct:     "NVIDIA-H200-SXM5-141GB",
-			expectedGPUSKU: "h200_sxm",
+			name:          "nothing set, full discovery",
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "H100-SXM5-80GB", VRAMPerGPU: 81920},
+			wantGPUSKU:    "h100_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 8,
+		},
+		{
+			name:          "nothing set, unknown GPU falls back to model name",
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "Tesla-V100-SXM2-16GB", VRAMPerGPU: 16384},
+			wantGPUSKU:    "Tesla-V100-SXM2-16GB", wantVRAM: 16384, wantGPUsNode: 8, wantTotalGPUs: 8,
+		},
+		{
+			name: "only totalGpus missing, discovery fills it",
+			hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU: "b200_sxm", VRAMMB: ptr.To(141312.0), NumGPUsPerNode: ptr.To(int32(8)),
+			},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "NVIDIA-B200", VRAMPerGPU: 141312},
+			wantGPUSKU:    "b200_sxm", wantVRAM: 141312, wantGPUsNode: 8, wantTotalGPUs: 8,
+		},
+		{
+			name: "only gpuSku missing, discovery fills it",
+			hardware: &nvidiacomv1beta1.HardwareSpec{
+				VRAMMB: ptr.To(81920.0), NumGPUsPerNode: ptr.To(int32(8)), TotalGPUs: ptr.To(int32(16)),
+			},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "H200-SXM5-141GB", VRAMPerGPU: 141312},
+			wantGPUSKU:    "h200_sxm", wantVRAM: 81920, wantGPUsNode: 8, wantTotalGPUs: 16, // user overrides win
+		},
+		{
+			name: "vramMb and numGpusPerNode override discovery",
+			hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU: "a100_sxm", VRAMMB: ptr.To(40960.0), NumGPUsPerNode: ptr.To(int32(4)),
+			},
+			discoveredGPU: &gpupkg.GPUInfo{NodeName: "n1", GPUsPerNode: 8, Model: "A100-SXM4-80GB", VRAMPerGPU: 81920},
+			wantGPUSKU:    "a100_sxm", wantVRAM: 40960, wantGPUsNode: 4, wantTotalGPUs: 8,
+		},
+		{
+			name:    "no fields set, discovery fails",
+			wantErr: true,
+		},
+		{
+			name: "three fields set, discovery fails",
+			hardware: &nvidiacomv1beta1.HardwareSpec{
+				GPUSKU: "h100_sxm", VRAMMB: ptr.To(81920.0), NumGPUsPerNode: ptr.To(int32(8)),
+			},
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newFakeReconciler(gpuNode("gpu-node-1", tt.gfdProduct, 8, 141312))
-			vram := float64(141312)
-			gpus := int32(8)
+			var r *DynamoGraphDeploymentRequestReconciler
+			if tt.discoveredGPU != nil {
+				// Set up a DCGM pod and mock scraper so discovery works.
+				r = newFakeReconciler(dcgmPod("dcgm-exporter", "10.0.0.1"))
+				r.GPUDiscovery = gpupkg.NewGPUDiscovery(func(ctx context.Context, endpoint string) (*gpupkg.GPUInfo, error) {
+					return tt.discoveredGPU, nil
+				})
+				r.GPUDiscoveryCache = gpupkg.NewGPUDiscoveryCache()
+			} else if tt.wantErr {
+				// No discovery — will fail if discovery is attempted.
+				r = newFakeReconciler()
+			} else {
+				// All fields set — discovery not needed, no mock required.
+				r = newFakeReconciler()
+			}
 
+			hw := tt.hardware
+			if hw == nil {
+				hw = &nvidiacomv1beta1.HardwareSpec{}
+			}
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Hardware: &nvidiacomv1beta1.HardwareSpec{
-						GPUSKU:         tt.expectedGPUSKU,
-						VRAMMB:         &vram,
-						NumGPUsPerNode: &gpus,
-					},
+					Hardware: hw,
 				},
 			}
+
 			err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
 
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
 			require.NoError(t, err)
 			require.NotNil(t, dgdr.Spec.Hardware)
-			assert.Equal(t, string(tt.expectedGPUSKU), string(dgdr.Spec.Hardware.GPUSKU),
-				"GPUSKU should be the AIC system identifier, not the raw GFD product name %q", tt.gfdProduct)
+			assert.Equal(t, tt.wantGPUSKU, string(dgdr.Spec.Hardware.GPUSKU))
+			assert.Equal(t, tt.wantVRAM, *dgdr.Spec.Hardware.VRAMMB)
+			assert.Equal(t, tt.wantGPUsNode, *dgdr.Spec.Hardware.NumGPUsPerNode)
+			assert.Equal(t, tt.wantTotalGPUs, *dgdr.Spec.Hardware.TotalGPUs)
 		})
 	}
-}
-
-// TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU verifies that for GPUs
-// not in the AIC support matrix, the raw GFD product name is used as a fallback.
-func TestEnrichHardwareFromDiscovery_FallsBackToModelForUnknownGPU(t *testing.T) {
-	r := newFakeReconciler(gpuNode("gpu-node-1", "Tesla-V100-SXM2-16GB", 8, 16384))
-	vram := float64(16384)
-	gpus := int32(8)
-
-	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-			Hardware: &nvidiacomv1beta1.HardwareSpec{
-				GPUSKU:         "Tesla-V100-SXM2-16GB",
-				VRAMMB:         &vram,
-				NumGPUsPerNode: &gpus,
-			},
-		},
-	}
-
-	err := r.enrichHardwareFromDiscovery(context.Background(), dgdr)
-	require.NoError(t, err)
-	require.NotNil(t, dgdr.Spec.Hardware)
-	assert.Equal(t, "Tesla-V100-SXM2-16GB", string(dgdr.Spec.Hardware.GPUSKU),
-		"Unknown GPU should fall back to raw model name")
 }

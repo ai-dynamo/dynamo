@@ -568,6 +568,68 @@ func TestDiscoverGPUsFromDCGM_CacheHit(t *testing.T) {
 	require.Equal(t, info1, info2)
 }
 
+func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
+	ctx := context.Background()
+
+	// Two DCGM pods, one per node
+	pods := []client.Object{
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "dcgm-h100", Namespace: "gpu-operator",
+				Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "dcgm-a100", Namespace: "gpu-operator",
+				Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	k8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pods...).Build()
+
+	// Return different GPU models per pod IP. H100 has more VRAM to win tie-breaking.
+	mockScraper := func(ctx context.Context, endpoint string) (*GPUInfo, error) {
+		if strings.Contains(endpoint, "10.0.0.1") {
+			return &GPUInfo{NodeName: "node-h100", GPUsPerNode: 8, Model: "H100-SXM5-80GB", VRAMPerGPU: 81920}, nil
+		}
+		return &GPUInfo{NodeName: "node-a100", GPUsPerNode: 8, Model: "A100-SXM4-80GB", VRAMPerGPU: 40960}, nil
+	}
+
+	discovery := NewGPUDiscovery(mockScraper)
+
+	t.Run("unfiltered selects best and counts only matching SKU", func(t *testing.T) {
+		info, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, nil, "")
+		require.NoError(t, err)
+		assert.Equal(t, "h100_sxm", string(info.System))
+		assert.Equal(t, 1, info.NodesWithGPUs, "should count only H100 nodes")
+	})
+
+	t.Run("filter by a100_sxm", func(t *testing.T) {
+		info, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, nil, "a100_sxm")
+		require.NoError(t, err)
+		assert.Equal(t, "a100_sxm", string(info.System))
+		assert.Equal(t, 1, info.NodesWithGPUs)
+		assert.Equal(t, "A100-SXM4-80GB", info.Model)
+	})
+
+	t.Run("filter by nonexistent SKU", func(t *testing.T) {
+		_, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, nil, "l40s")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no GPU nodes matching SKU")
+	})
+
+	t.Run("cache is per SKU", func(t *testing.T) {
+		cache := NewGPUDiscoveryCache()
+		info1, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, cache, "")
+		require.NoError(t, err)
+		info2, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, cache, "a100_sxm")
+		require.NoError(t, err)
+		assert.NotEqual(t, info1.System, info2.System, "different SKU filters should return different results")
+	})
+}
+
 func TestDiscoverGPUsFromDCGM_GPUOperatorInstalled_DCgmNotEnabled(t *testing.T) {
 	ctx := context.Background()
 

@@ -1166,9 +1166,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 	}
 
 	// Enrich hardware from GPU discovery before marshalling the spec.
-	// This fills in gpuSku, vramMb, numGpusPerNode if the user didn't set them.
+	// This fills in any missing hardware fields (gpuSku, vramMb, numGpusPerNode, totalGpus).
 	if err := r.enrichHardwareFromDiscovery(ctx, dgdr); err != nil {
-		logger.Info("GPU discovery not available, proceeding without enrichment", "reason", err.Error())
+		return err
 	}
 
 	// Use SyncResource to create/update the job
@@ -1436,39 +1436,30 @@ func (r *DynamoGraphDeploymentRequestReconciler) enrichHardwareFromDiscovery(ctx
 	}
 	hw := dgdr.Spec.Hardware
 
-	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil {
-		return nil // all fields already set by user; TotalGPUs is filled below when discovery runs
+	// All fields already provided — nothing to discover.
+	if hw.GPUSKU != "" && hw.VRAMMB != nil && hw.NumGPUsPerNode != nil && hw.TotalGPUs != nil {
+		return nil
 	}
 
-	var gpuInfo *gpu.GPUInfo
+	// Run discovery to fill in any fields the user didn't set.
 	logger := log.FromContext(ctx)
-	// Check if user provided hardware info in the typed spec
-	hasManualConfig := dgdr.Spec.Hardware != nil && (dgdr.Spec.Hardware.GPUSKU != "" ||
-		dgdr.Spec.Hardware.VRAMMB != nil ||
-		dgdr.Spec.Hardware.NumGPUsPerNode != nil)
-	if !hasManualConfig {
-
-		logger.Info("Attempting GPU discovery for profiling job")
-		discoveredInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGM(ctx, r.APIReader, r.GPUDiscoveryCache)
-		if err != nil {
-			// This path is expected for namespace-restricted operators without node read permissions
-			// Refine the logger message
-			reason := GetGPUDiscoveryFailureReason(err)
-			logger.Info("GPU discovery not available, using manual hardware configuration from profiling config",
-				"reason", reason, "error", err.Error())
-			return err
-		} else {
-			gpuInfo = discoveredInfo
-			logger.Info("GPU discovery completed successfully",
-				"gpusPerNode", gpuInfo.GPUsPerNode,
-				"nodesWithGPUs", gpuInfo.NodesWithGPUs,
-				"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
-				"model", gpuInfo.Model,
-				"vramMiB", gpuInfo.VRAMPerGPU,
-				"system", gpuInfo.System,
-				"cloudprovider", gpuInfo.CloudProvider)
-		}
+	logger.Info("Attempting GPU discovery for profiling job")
+	gpuInfo, err := r.GPUDiscovery.DiscoverGPUsFromDCGMFiltered(ctx, r.APIReader, r.GPUDiscoveryCache, hw.GPUSKU)
+	if err != nil {
+		reason := GetGPUDiscoveryFailureReason(err)
+		logger.Info("GPU discovery not available", "reason", reason, "error", err.Error())
+		return fmt.Errorf("GPU hardware info required but auto-discovery failed. Add spec.hardware.gpuSku, spec.hardware.vramMb, spec.hardware.numGpusPerNode, spec.hardware.totalGpus")
 	}
+
+	logger.Info("GPU discovery completed successfully",
+		"gpusPerNode", gpuInfo.GPUsPerNode,
+		"nodesWithGPUs", gpuInfo.NodesWithGPUs,
+		"totalGpus", gpuInfo.GPUsPerNode*gpuInfo.NodesWithGPUs,
+		"model", gpuInfo.Model,
+		"vramMiB", gpuInfo.VRAMPerGPU,
+		"system", gpuInfo.System,
+		"cloudprovider", gpuInfo.CloudProvider)
+
 	if hw.GPUSKU == "" {
 		if gpuInfo.System != "" {
 			hw.GPUSKU = gpuInfo.System
