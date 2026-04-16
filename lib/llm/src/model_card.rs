@@ -602,20 +602,19 @@ impl ModelDeploymentCard {
     pub(crate) fn local_file_dir(&self) -> Option<&Path> {
         if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
             &self.tokenizer
+            && let Some(dir) = cf.path().and_then(|p| p.parent())
         {
-            if let Some(dir) = cf.path().and_then(|p| p.parent()) {
-                return Some(dir);
-            }
+            return Some(dir);
         }
-        if let Some(ModelInfoType::HfConfigJson(cf)) = &self.model_info {
-            if let Some(dir) = cf.path().and_then(|p| p.parent()) {
-                return Some(dir);
-            }
+        if let Some(ModelInfoType::HfConfigJson(cf)) = &self.model_info
+            && let Some(dir) = cf.path().and_then(|p| p.parent())
+        {
+            return Some(dir);
         }
-        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(cf)) = &self.prompt_formatter {
-            if let Some(dir) = cf.path().and_then(|p| p.parent()) {
-                return Some(dir);
-            }
+        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(cf)) = &self.prompt_formatter
+            && let Some(dir) = cf.path().and_then(|p| p.parent())
+        {
+            return Some(dir);
         }
         None
     }
