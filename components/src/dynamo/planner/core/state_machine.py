@@ -170,6 +170,19 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         if tick_input.worker_counts is not None:
             self._update_inventory(tick_input.worker_counts)
 
+        # Run throughput scaling first so any updated lower bound is visible
+        # to the load scaling pass on a combined tick.  Otherwise load scaling
+        # reads the stale bound, potentially deciding to scale below the new
+        # floor set in this same tick.
+        throughput_decision = None
+        if tick.run_throughput_scaling:
+            if tick_input.traffic is not None:
+                self._observe_traffic(tick_input.traffic)
+                throughput_decision = self._advance_throughput(tick_input.traffic)
+            self._next_throughput_s = (
+                tick_input.now_s + self._config.throughput_adjustment_interval
+            )
+
         if tick.run_load_scaling:
             if tick_input.fpm_observations is not None:
                 if not self._is_easy:
@@ -179,16 +192,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
                     effects.scale_to = load_decision
             self._next_load_s = tick_input.now_s + self._config.load_adjustment_interval
 
-        if tick.run_throughput_scaling:
-            if tick_input.traffic is not None:
-                self._observe_traffic(tick_input.traffic)
-                throughput_decision = self._advance_throughput(tick_input.traffic)
-                if throughput_decision is not None:
-                    if effects.scale_to is None:
-                        effects.scale_to = throughput_decision
-            self._next_throughput_s = (
-                tick_input.now_s + self._config.throughput_adjustment_interval
-            )
+        # Load scaling has precedence when it produced a decision; otherwise
+        # fall back to the throughput-scaling decision.
+        if effects.scale_to is None and throughput_decision is not None:
+            effects.scale_to = throughput_decision
 
         effects.diagnostics = self._build_diagnostics()
         effects.next_tick = self._next_scheduled_tick()
