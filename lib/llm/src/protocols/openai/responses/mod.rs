@@ -340,8 +340,7 @@ fn convert_input_items_to_messages(
                             arguments: fc.arguments.clone(),
                         },
                     };
-                    if let Some(ChatCompletionRequestMessage::Assistant(prev)) =
-                        messages.last_mut()
+                    if let Some(ChatCompletionRequestMessage::Assistant(prev)) = messages.last_mut()
                     {
                         match &mut prev.tool_calls {
                             Some(calls) => calls.push(new_call),
