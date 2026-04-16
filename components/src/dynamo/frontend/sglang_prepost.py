@@ -560,8 +560,20 @@ class SglangStreamingPostProcessor:
             missing_args = any(
                 idx not in self._tool_call_args for idx in self._tool_call_names
             )
+            should_reparse = False
+            full_text = ""
             if missing_names or missing_args:
                 full_text = "".join(self._tool_text_parts)
+                # Skip the re-parse when the accumulated text has no
+                # tool-call markers.  Avoids wasted `parse_non_stream`
+                # work on plain-text responses (common when tools are
+                # offered but the model replies without calling any) and
+                # guards against detectors that raise on arbitrary input.
+                should_reparse = bool(
+                    full_text
+                ) and self.tool_call_parser.has_tool_call(full_text)
+
+            if should_reparse:
                 if self._is_json_array_parser:
                     final_calls = _parse_json_array_buffer(full_text)
                     # Secondary fallback: when guided decoding did not
@@ -581,18 +593,16 @@ class SglangStreamingPostProcessor:
                             )
                             _, final_calls = fcp.parse_non_stream(full_text)
                         except (
-                            ValueError,  # includes json.JSONDecodeError
+                            ValueError,
                             KeyError,
+                            json.JSONDecodeError,
                             IndexError,
-                            TypeError,
-                            AttributeError,
-                            SyntaxError,  # pythonic detector uses ast.literal_eval
                         ) as e:
-                            # Best-effort fallback: model emitted malformed
-                            # tool-call text. Drop to no tool calls rather
-                            # than crash — the primary JSON-array parse has
-                            # already failed and the normal text is still
-                            # usable.
+                            # Fallback path: model-native tool-call text is
+                            # malformed. Log and return no tool calls rather
+                            # than crashing the whole response — the primary
+                            # JSON-array path has already failed, and the
+                            # normal text is still usable.
                             logger.warning(
                                 "Native tool-call fallback parse failed (parser=%r): %s",
                                 self._tool_call_parser_name,
