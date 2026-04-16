@@ -1214,7 +1214,11 @@ mod tests {
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
-        assert_eq!(messages.len(), 3, "expected coalesced [user, assistant, tool]");
+        assert_eq!(
+            messages.len(),
+            3,
+            "expected coalesced [user, assistant, tool]"
+        );
         assert!(matches!(messages[0], ChatCompletionRequestMessage::User(_)));
         match &messages[1] {
             ChatCompletionRequestMessage::Assistant(a) => {
@@ -1222,7 +1226,11 @@ mod tests {
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].id, "call_123");
                 assert_eq!(tool_calls[0].function.name, "get_weather");
-                match a.content.as_ref().expect("content must carry interstitial text") {
+                match a
+                    .content
+                    .as_ref()
+                    .expect("content must carry interstitial text")
+                {
                     ChatCompletionRequestAssistantMessageContent::Text(t) => {
                         assert_eq!(t, "\n\n");
                     }
