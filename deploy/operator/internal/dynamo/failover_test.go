@@ -590,10 +590,13 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 
 func TestIsFailoverEnabled(t *testing.T) {
 	assert.True(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
-		Failover: &v1alpha1.FailoverSpec{Enabled: true},
+		Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod},
 	}))
 	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
-		Failover: &v1alpha1.FailoverSpec{Enabled: false},
+		Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod},
+	}), "inter-pod mode must not trigger intra-pod container cloning")
+	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Failover: &v1alpha1.FailoverSpec{Enabled: false, Mode: v1alpha1.GMSModeIntraPod},
 	}))
 	assert.False(t, isFailoverEnabled(&v1alpha1.DynamoComponentDeploymentSharedSpec{}))
 }

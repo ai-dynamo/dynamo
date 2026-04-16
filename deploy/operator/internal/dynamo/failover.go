@@ -77,6 +77,19 @@ func gmsStartupProbeCommand(gpuCount int) []string {
 	}
 }
 
+// applyGMSSharedResources attaches the resources common to both GMS weight
+// server pods and engine pods: strips GPU limits (DRA handles allocation),
+// adds the GPU toleration, mounts the rank-isolated hostPath shared volume,
+// and prepends the permission-fix init container.
+func applyGMSSharedResources(podSpec *corev1.PodSpec, c *corev1.Container, rank int32) {
+	removeGPUFromLimits(c)
+	addGPUToleration(podSpec)
+	vol, mount := gmsSharedVolume(rank)
+	podSpec.Volumes = append(podSpec.Volumes, vol)
+	c.VolumeMounts = append(c.VolumeMounts, mount)
+	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, c.Image))
+}
+
 // gmsWeightServerPodSpec builds a GMS weight server pod spec by cloning and
 // modifying a base engine pod spec. The GMS pod runs a different command,
 // has no liveness/readiness probes, and uses a startup probe that checks
@@ -107,14 +120,7 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 		Value: gmsSharedMountPath,
 	})
 
-	removeGPUFromLimits(c)
-	addGPUToleration(podSpec)
-
-	vol, mount := gmsSharedVolume(rank)
-	podSpec.Volumes = append(podSpec.Volumes, vol)
-	c.VolumeMounts = append(c.VolumeMounts, mount)
-
-	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, c.Image))
+	applyGMSSharedResources(podSpec, c, rank)
 
 	return podSpec
 }
@@ -150,14 +156,7 @@ func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32) {
 	c.Env = append(c.Env, gmsEngineEnvVars()...)
 	removeEnvVar(c, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
 
-	removeGPUFromLimits(c)
-	addGPUToleration(podSpec)
-
-	vol, mount := gmsSharedVolume(rank)
-	podSpec.Volumes = append(podSpec.Volumes, vol)
-	c.VolumeMounts = append(c.VolumeMounts, mount)
-
-	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, c.Image))
+	applyGMSSharedResources(podSpec, c, rank)
 	podSpec.RestartPolicy = corev1.RestartPolicyNever
 }
 
@@ -342,8 +341,13 @@ const (
 	failoverEngineCount = 2
 )
 
+// isFailoverEnabled returns true only for intra-pod failover mode, where the
+// main container is cloned into active + standby containers within the same pod.
+// Inter-pod failover (Mode=interPod) is handled separately via expandRolesForService
+// and generatePodSpecForRole — it does not use container cloning.
 func isFailoverEnabled(component *v1alpha1.DynamoComponentDeploymentSharedSpec) bool {
-	return component.Failover != nil && component.Failover.Enabled
+	return component.Failover != nil && component.Failover.Enabled &&
+		component.Failover.Mode == v1alpha1.GMSModeIntraPod
 }
 
 // buildFailoverPod clones the main container into two engine containers (active + standby).
@@ -414,10 +418,9 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		}
 	}
 
-	containerName := fmt.Sprintf("engine-%d", engineID)
 	failoverEnvs := []corev1.EnvVar{
 		{Name: "ENGINE_ID", Value: strconv.Itoa(engineID)},
-		{Name: "CONTAINER_NAME", Value: containerName},
+		{Name: "CONTAINER_NAME", Value: engine.Name},
 		{Name: "FAILOVER_LOCK_PATH", Value: intraPodFailoverLockFile},
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
 		{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(systemPort)},

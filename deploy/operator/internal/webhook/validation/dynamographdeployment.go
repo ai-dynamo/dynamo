@@ -862,8 +862,6 @@ func (v *DynamoGraphDeploymentValidator) validateFailoverRequiresDiscoveryMode()
 		if svc == nil || svc.Failover == nil || !svc.Failover.Enabled {
 			continue
 		}
-		// Mode == "" is backward compat for pre-Mode API (treated as interPod).
-		// New objects get Mode defaulted to "intraPod" by the Kubernetes API.
 		if svc.Failover.Mode == nvidiacomv1alpha1.GMSModeIntraPod {
 			hasIntraPodFailover = true
 			break

@@ -2109,6 +2109,7 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
 								NumShadows: 1,
 							},
 						},
@@ -2127,6 +2128,7 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
 								NumShadows: 1,
 							},
 						},
@@ -2140,6 +2142,7 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 						"worker": {
 							Failover: &nvidiacomv1alpha1.FailoverSpec{
 								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
 								NumShadows: 3,
 							},
 						},

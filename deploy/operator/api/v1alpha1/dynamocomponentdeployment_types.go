@@ -346,13 +346,7 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 }
 
 func (s *DynamoComponentDeploymentSharedSpec) IsGMSEnabled() bool {
-	if s.Failover == nil || !s.Failover.Enabled {
-		return false
-	}
-	// Mode == "" means the field was not set (backward compat with pre-Mode API,
-	// or Go unit tests that don't go through the Kubernetes API defaulting).
-	// New objects created via the K8s API get Mode defaulted to "intraPod".
-	return s.Failover.Mode == GMSModeInterPod || s.Failover.Mode == ""
+	return s.Failover != nil && s.Failover.Enabled && s.Failover.Mode == GMSModeInterPod
 }
 
 func (s *DynamoComponentDeploymentSharedSpec) GetNumShadows() int32 {

@@ -276,7 +276,7 @@ func (v *SharedSpecValidator) validateFailover() error {
 	var errs []error
 
 	// For intra-pod mode: require gpuMemoryService.enabled and validate mode matching.
-	if v.spec.Failover.Mode == nvidiacomv1alpha1.GMSModeIntraPod || v.spec.Failover.Mode == "" {
+	if v.spec.Failover.Mode == nvidiacomv1alpha1.GMSModeIntraPod {
 		if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
 			errs = append(errs, fmt.Errorf(
 				"%s.failover: intraPod failover requires gpuMemoryService.enabled to be true",

@@ -4387,7 +4387,7 @@ func TestExpandRolesForService(t *testing.T) {
 			serviceName:   "svc",
 			numberOfNodes: 1,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Failover: &v1alpha1.FailoverSpec{Enabled: true, NumShadows: 1},
+				Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 1},
 			},
 			expected: []ServiceRole{
 				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
@@ -4399,7 +4399,7 @@ func TestExpandRolesForService(t *testing.T) {
 			serviceName:   "svc",
 			numberOfNodes: 1,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Failover: &v1alpha1.FailoverSpec{Enabled: true, NumShadows: 3},
+				Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 3},
 			},
 			expected: []ServiceRole{
 				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
@@ -4411,7 +4411,7 @@ func TestExpandRolesForService(t *testing.T) {
 			serviceName:   "svc",
 			numberOfNodes: 2,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Failover: &v1alpha1.FailoverSpec{Enabled: true, NumShadows: 1},
+				Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 1},
 			},
 			expected: []ServiceRole{
 				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
@@ -4425,7 +4425,7 @@ func TestExpandRolesForService(t *testing.T) {
 			serviceName:   "svc",
 			numberOfNodes: 3,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Failover: &v1alpha1.FailoverSpec{Enabled: true, NumShadows: 2},
+				Failover: &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: 2},
 			},
 			expected: []ServiceRole{
 				{Name: "svc-gms-0", Role: RoleGMS, Replicas: 1, Rank: 0},
