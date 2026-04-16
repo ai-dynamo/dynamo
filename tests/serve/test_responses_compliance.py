@@ -74,6 +74,14 @@ def test_responses_openresponses_compliance(
         # Qwen3-VL-2B-specific flags: vision-model CUDA graph workaround +
         # model-aware reasoning/tool-call parsers. Forwarded verbatim to
         # `dynamo.sglang` by agg.sh's pass-through loop.
+        #
+        # Tool-call parser is `hermes`, not `qwen3_coder`: Qwen3-VL-Instruct
+        # emits `<tool_call>{"name":..., "arguments":...}</tool_call>` (JSON
+        # inside the tags — Hermes-style), while `qwen3_coder` expects the
+        # XML-structured `<tool_call><function=name><parameter=k>v</parameter>
+        # </function></tool_call>` that Qwen3-Coder models emit. Using the
+        # wrong parser leaves tool calls as raw text in the response and
+        # breaks end-to-end agent flows (codex exec, etc.).
         script_args=[
             "--model-path",
             COMPLIANCE_MODEL,
@@ -81,7 +89,7 @@ def test_responses_openresponses_compliance(
             "--dyn-reasoning-parser",
             "qwen3",
             "--dyn-tool-call-parser",
-            "qwen3_coder",
+            "hermes",
         ],
         timeout=360,
         env={},
@@ -96,10 +104,19 @@ def test_responses_openresponses_compliance(
     codex_home = tmp_path / "codex_home"
     _write_codex_config(codex_home, frontend_port)
 
+    # Marker file that codex can only "see" by invoking its shell tool; if it
+    # answers from its prior without actually running `ls`, the marker won't
+    # appear in stdout and the assertion fails. Proves the tool-call path
+    # through the frontend end-to-end, not just text generation.
+    codex_cwd = tmp_path / "codex_cwd"
+    codex_cwd.mkdir()
+    marker_filename = "dynamo_compliance_marker.txt"
+    (codex_cwd / marker_filename).write_text("compliance-smoke")
+
     with EngineProcess.from_script(config, request, extra_env=merged_env):
         _run_bun_compliance(frontend_port)
         _wait_for_frontend_healthy(frontend_port)
-        _run_codex_exec_smoke(codex_home)
+        _run_codex_exec_smoke(codex_home, codex_cwd, marker_filename)
 
 
 def _wait_for_frontend_healthy(
@@ -189,11 +206,15 @@ env_key = "LOCAL_API_KEY"
     )
 
 
-def _run_codex_exec_smoke(codex_home) -> None:
-    """Run `codex exec` against the Dynamo Responses endpoint.
+def _run_codex_exec_smoke(codex_home, cwd, marker_filename: str) -> None:
+    """Run `codex exec` against the Dynamo Responses endpoint and assert the
+    tool-call path actually fires.
 
-    Loose assertion: exit 0 and model produced a non-empty answer. The
-    agent may invoke tool calls, so we don't pin the exact output.
+    We prompt codex to list `cwd`; `cwd` contains `marker_filename` and nothing
+    else the model could pattern-match from prior knowledge. If codex answers
+    without invoking its shell tool, the marker won't appear in stdout and the
+    assertion fails — which proves we're testing the full Responses API
+    tool-calling chain, not just text generation.
     """
     logger.info("Running codex exec smoke test against CODEX_HOME=%s", codex_home)
 
@@ -211,9 +232,10 @@ def _run_codex_exec_smoke(codex_home) -> None:
             "-c",
             "model_provider=local",
             "exec",
-            "what is 10+10",
+            "Run `ls` in the current directory and tell me the filenames.",
             "--dangerously-bypass-approvals-and-sandbox",
         ],
+        cwd=str(cwd),
         env=env,
         capture_output=True,
         text=True,
@@ -231,8 +253,9 @@ def _run_codex_exec_smoke(codex_home) -> None:
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
 
-    if "20" not in result.stdout:
+    if marker_filename not in result.stdout:
         pytest.fail(
-            f"codex exec produced unexpected output — expected the answer '20' "
-            f"for 'what is 10+10', got:\n{result.stdout}"
+            "codex exec did not report the marker file — expected stdout to "
+            f"contain {marker_filename!r} (implies the shell tool was invoked "
+            f"and actually ran `ls` in {cwd}). Got:\n{result.stdout}"
         )
