@@ -138,7 +138,9 @@ class ReplayPlannerAdapter:
 
         # Diagnostics recorder for HTML report generation
         decode_max_kv = (
-            capabilities.decode.max_kv_tokens if capabilities and capabilities.decode else None
+            capabilities.decode.max_kv_tokens
+            if capabilities and capabilities.decode
+            else None
         )
         self._recorder = DiagnosticsRecorder(
             config=planner_config, max_kv_tokens=decode_max_kv
