@@ -53,9 +53,19 @@ spec:
               value: "Qwen/Qwen3-32B-FP8"
             - name: HF_HOME
               value: /opt/models
+            - name: UCX_TLS
+              value: "rc_x,rc,cuda_copy,cuda_ipc"
+            - name: UCX_NET_DEVICES
+              value: "mlx5_0:1"
+            - name: UCX_IB_ADDR_TYPE
+              value: "eth"
+            - name: UCX_RNDV_SCHEME
+              value: "get_zcopy"
+            - name: UCX_RNDV_THRESH
+              value: "0"
           args:
           - |
-            python3 -m dynamo.vllm \
+            ulimit -l unlimited && python3 -m dynamo.vllm \
               --model $MODEL_PATH \
               --served-model-name $SERVED_MODEL_NAME \
               --tensor-parallel-size 2 \
@@ -71,12 +81,22 @@ spec:
           - -c
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace/examples/backends/vllm
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
       replicas: 2
       resources:
         limits:
           gpu: "2"
+          custom:
+            rdma/ib: "2"
         requests:
           gpu: "2"
+          custom:
+            rdma/ib: "2"
     VllmDecodeWorker:
       componentType: worker
       subComponentType: decode
@@ -107,9 +127,19 @@ spec:
               value: "Qwen/Qwen3-32B-FP8"
             - name: HF_HOME
               value: /opt/models
+            - name: UCX_TLS
+              value: "rc_x,rc,cuda_copy,cuda_ipc"
+            - name: UCX_NET_DEVICES
+              value: "mlx5_0:1"
+            - name: UCX_IB_ADDR_TYPE
+              value: "eth"
+            - name: UCX_RNDV_SCHEME
+              value: "get_zcopy"
+            - name: UCX_RNDV_THRESH
+              value: "0"
           args:
           - |
-            python3 -m dynamo.vllm \
+            ulimit -l unlimited && python3 -m dynamo.vllm \
               --model $MODEL_PATH \
               --served-model-name $SERVED_MODEL_NAME \
               --tensor-parallel-size 4 \
@@ -124,9 +154,19 @@ spec:
           - -c
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0
           workingDir: /workspace/examples/backends/vllm
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
       replicas: 1
       resources:
         limits:
           gpu: "4"
+          custom:
+            rdma/ib: "2"
         requests:
           gpu: "4"
+          custom:
+            rdma/ib: "2"
