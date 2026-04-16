@@ -60,8 +60,10 @@ def _public_method_names(cls: type) -> set[str]:
             continue
         if name in _IGNORED_ATTRIBUTE_NAMES:
             continue
-        if inspect.isfunction(value) or inspect.ismethod(value) or isinstance(
-            value, property
+        if (
+            inspect.isfunction(value)
+            or inspect.ismethod(value)
+            or isinstance(value, property)
         ):
             result.add(name)
     return result
@@ -79,9 +81,7 @@ def _protocol_method_names(proto: type) -> set[str]:
     return result
 
 
-def _normalize_hints(
-    obj: Any, include_extras: bool = False
-) -> dict[str, Any]:
+def _normalize_hints(obj: Any, include_extras: bool = False) -> dict[str, Any]:
     """Resolve a function's type annotations to real types."""
     try:
         return get_type_hints(obj, include_extras=include_extras)
@@ -89,9 +89,7 @@ def _normalize_hints(
         return {"__unresolved__": repr(exc)}
 
 
-def _compare_signature(
-    method_name: str, proto_fn: Any, real_fn: Any
-) -> list[str]:
+def _compare_signature(method_name: str, proto_fn: Any, real_fn: Any) -> list[str]:
     """Return a list of human-readable drift descriptions, empty on match."""
     errors: list[str] = []
 
@@ -165,12 +163,11 @@ def _property_errors(name: str, proto_prop: property, real_prop: property) -> li
 
 
 def test_protocol_matches_vllm_kv_cache_manager() -> None:
-    from vllm.v1.core.kv_cache_manager import KVCacheManager
-
     from kvbm.v2.vllm.kv_cache_manager_protocol import (
         PINNED_VLLM_VERSION,
         VllmKvCacheManagerProtocol,
     )
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
 
     all_errors: list[str] = []
 
@@ -234,9 +231,7 @@ def test_protocol_matches_vllm_kv_cache_manager() -> None:
 def test_protocol_is_runtime_checkable() -> None:
     """Sanity: the Protocol is marked ``@runtime_checkable`` so Python
     code can do an ``isinstance`` check against concrete impls."""
-    from kvbm.v2.vllm.kv_cache_manager_protocol import (
-        VllmKvCacheManagerProtocol,
-    )
+    from kvbm.v2.vllm.kv_cache_manager_protocol import VllmKvCacheManagerProtocol
 
     # Accessing this attribute triggers the runtime_checkable-only behavior.
     assert hasattr(VllmKvCacheManagerProtocol, "__runtime_checkable__") or getattr(

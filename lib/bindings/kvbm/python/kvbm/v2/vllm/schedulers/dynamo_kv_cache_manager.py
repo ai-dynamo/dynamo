@@ -61,9 +61,8 @@ def make_kvbm_cache_manager_scheduler(
     subset they need without relying on vLLM's positional ordering
     (which has drifted between releases).
     """
-    from vllm.v1.core.sched.scheduler import Scheduler
-
     from kvbm.v2.vllm.kv_cache_manager import RustKvCacheManager
+    from vllm.v1.core.sched.scheduler import Scheduler
 
     scheduler = Scheduler(
         vllm_config=vllm_config,
@@ -73,7 +72,7 @@ def make_kvbm_cache_manager_scheduler(
         log_stats=log_stats,
     )
 
-    connector_leader = _find_kvbm_connector_leader(scheduler)
+    connector_leader = find_kvbm_connector_leader(scheduler)
 
     # Pull the already-constructed manager's constructor-relevant
     # settings off the vllm config / the stock cache manager vLLM
@@ -87,9 +86,7 @@ def make_kvbm_cache_manager_scheduler(
         enable_caching=getattr(stock_manager, "enable_caching", True),
         use_eagle=getattr(stock_manager, "use_eagle", False),
         log_stats=log_stats,
-        enable_kv_cache_events=getattr(
-            stock_manager, "enable_kv_cache_events", False
-        ),
+        enable_kv_cache_events=getattr(stock_manager, "enable_kv_cache_events", False),
         dcp_world_size=getattr(stock_manager, "dcp_world_size", 1),
         connector_leader=connector_leader,
     )
@@ -97,10 +94,13 @@ def make_kvbm_cache_manager_scheduler(
     return scheduler
 
 
-def _find_kvbm_connector_leader(scheduler: "Scheduler"):
-    """Walk the scheduler's connector to find the kvbm PyConnectorLeader.
+def find_kvbm_connector_leader(scheduler):
+    """Walk the scheduler's connector(s) to find the kvbm PyConnectorLeader.
 
-    Returns the PyConnectorLeader handle if found, or None.
+    Looks for a ``SchedulerConnectorLeader``-shaped object reachable as
+    ``connector._scheduler.leader``. Returns the PyConnectorLeader handle
+    if found, or ``None`` — callers fall back to constructing a
+    standalone (isolated-registry) ``RustKvCacheManager``.
     """
     connector = getattr(scheduler, "connector", None)
     if connector is None:
@@ -115,4 +115,4 @@ def _find_kvbm_connector_leader(scheduler: "Scheduler"):
     return None
 
 
-__all__ = ["make_kvbm_cache_manager_scheduler"]
+__all__ = ["make_kvbm_cache_manager_scheduler", "find_kvbm_connector_leader"]

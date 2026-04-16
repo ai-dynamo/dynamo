@@ -191,13 +191,9 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         stats.hits = int(hits) * self._block_size
         return stats
 
-    def get_computed_blocks(
-        self, request: "Request"
-    ) -> "tuple[KVCacheBlocks, int]":
+    def get_computed_blocks(self, request: "Request") -> "tuple[KVCacheBlocks, int]":
         self._ensure_slot(request)
-        block_ids, num_tokens = self._core.get_computed_blocks(
-            request.request_id
-        )
+        block_ids, num_tokens = self._core.get_computed_blocks(request.request_id)
         return self._wrap_block_ids(block_ids), int(num_tokens)
 
     def allocate_slots(
@@ -207,18 +203,22 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         num_new_computed_tokens: int = 0,
         new_computed_blocks: "KVCacheBlocks | None" = None,
         num_lookahead_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
     ) -> "KVCacheBlocks | None":
         if num_lookahead_tokens:
             raise NotImplementedError(
-                "RustKvCacheManager does not yet support "
-                "num_lookahead_tokens > 0"
+                "RustKvCacheManager does not yet support " "num_lookahead_tokens > 0"
             )
         if num_encoder_tokens:
             raise NotImplementedError(
+                "RustKvCacheManager does not yet support " "num_encoder_tokens > 0"
+            )
+        if num_external_computed_tokens:
+            raise NotImplementedError(
                 "RustKvCacheManager does not yet support "
-                "num_encoder_tokens > 0"
+                "num_external_computed_tokens > 0 (connector-cached prefix)"
             )
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be > 0")
@@ -236,9 +236,7 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         # initial prefill: the slot already has the full token stream
         # from `create_slot`, so the token slice only needs to cover
         # brand-new tokens the scheduler appended since the last call.
-        prev_committed = max(
-            0, request.num_computed_tokens - num_new_computed_tokens
-        )
+        prev_committed = max(0, request.num_computed_tokens - num_new_computed_tokens)
         new_committed = request.num_computed_tokens + num_new_tokens
         if new_committed > len(request.all_token_ids):
             new_committed = len(request.all_token_ids)
@@ -263,9 +261,7 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         self._ensure_core()
         return bool(self._core.reset_prefix_cache())
 
-    def get_num_common_prefix_blocks(
-        self, running_request_id: str
-    ) -> list[int]:
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         # Mirrors vLLM's ``FullAttentionManager.get_num_common_prefix_blocks``
         # (vllm/v1/core/single_type_kv_cache_manager.py): walk the
         # running request's assigned blocks in order, count blocks
@@ -297,9 +293,7 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         # vLLM returns one list per kv cache group. We only support one.
         return (ids,)
 
-    def cache_blocks(
-        self, request: "Request", num_computed_tokens: int
-    ) -> None:
+    def cache_blocks(self, request: "Request", num_computed_tokens: int) -> None:
         self._ensure_core()
         self._core.cache_blocks(request.request_id, int(num_computed_tokens))
 
@@ -309,6 +303,32 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 
         return KVCacheBlocks(blocks=blocks)
+
+    # ------------------------------------------------------------------
+    # Compatibility shims for vLLM ≥ 0.12 (not in pinned 0.11.1 Protocol)
+    # ------------------------------------------------------------------
+
+    def new_step_starts(self) -> None:
+        """vLLM calls this at the top of every ``scheduler.schedule()``.
+        Upstream delegates to ``self.coordinator.new_step_starts()`` for
+        async output placeholder tracking; kvbm-logical does not track
+        step boundaries, so this is a no-op."""
+        return None
+
+    def remove_skipped_blocks(
+        self, request_id: str, total_computed_tokens: int
+    ) -> None:
+        """Sliding-window attention hook — frees out-of-window prefix
+        blocks before the block table is handed to the connector. Not
+        exercised by the models we currently support (Qwen3-0.6B is not
+        sliding-window); no-op until kvbm-logical grows a window API."""
+        return None
+
+    def evict_blocks(self, blocks) -> None:
+        """Called after an async KV-connector load failure to drop the
+        blocks the transfer would have written into. Not exercised in
+        the isolated G1 path (no connector); no-op."""
+        return None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -325,9 +345,7 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
             request_id=request.request_id,
             tokens=list(request.all_token_ids),
             salt_hash=salt_hash,
-            max_output_tokens=max(
-                1, self._max_model_len - len(request.all_token_ids)
-            ),
+            max_output_tokens=max(1, self._max_model_len - len(request.all_token_ids)),
         )
 
     def _wrap_block_ids(self, block_ids: "list[int]") -> "KVCacheBlocks":

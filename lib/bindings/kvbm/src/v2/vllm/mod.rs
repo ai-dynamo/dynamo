@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! vLLM integration Python bindings.
+//!
+//! Thin PyO3 shims only. The pure-Rust impls live in
+//! `kvbm_connector::vllm`. See `/CLAUDE.md` for the separation rule.
 
-pub mod block_manager_handle;
+pub mod cache_manager;
 pub mod config;
-pub mod kv_cache_manager;
-pub use block_manager_handle::PyG1BlockManagerHandle;
+pub mod handle;
+
+pub use cache_manager::PyRustKvCacheManager;
 pub use config::PyKvbmVllmConfig;
-pub use kv_cache_manager::PyRustKvCacheManager;
+pub use handle::PyG1BlockManagerHandle;

@@ -72,7 +72,8 @@ class VllmKvCacheManagerProtocol(Protocol):
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
-    ) -> None: ...
+    ) -> None:
+        ...
 
     # -- Core scheduling surface ---------------------------------------
 
@@ -86,9 +87,7 @@ class VllmKvCacheManagerProtocol(Protocol):
         ``None`` if ``log_stats=False``."""
         ...
 
-    def get_computed_blocks(
-        self, request: "Request"
-    ) -> "tuple[KVCacheBlocks, int]":
+    def get_computed_blocks(self, request: "Request") -> "tuple[KVCacheBlocks, int]":
         """Prefix-match the request's token ids against the cache. Returns
         ``(matched_blocks, num_local_computed_tokens)``."""
         ...
@@ -127,9 +126,7 @@ class VllmKvCacheManagerProtocol(Protocol):
         weight updates. Returns ``True`` on success."""
         ...
 
-    def get_num_common_prefix_blocks(
-        self, running_request_id: str
-    ) -> list[int]:
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         """Return the number of blocks shared by every running request,
         one count per KV cache group."""
         ...
@@ -148,9 +145,7 @@ class VllmKvCacheManagerProtocol(Protocol):
         per KV cache group."""
         ...
 
-    def cache_blocks(
-        self, request: "Request", num_computed_tokens: int
-    ) -> None:
+    def cache_blocks(self, request: "Request", num_computed_tokens: int) -> None:
         """Register the blocks holding the first ``num_computed_tokens``
         tokens of ``request`` into the prefix cache. Called after a KV
         transfer finishes for a request that was allocated with
