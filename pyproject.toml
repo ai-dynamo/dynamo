@@ -239,6 +239,7 @@ markers = [
     "requested_vllm_kv_cache_bytes(N): exact KV cache bytes for vLLM (skips memory profiling). Sets _PROFILE_PYTEST_KV_CACHE_BYTES. Most deterministic method for parallel execution",
     "requested_sglang_kv_tokens(N): max KV cache tokens for SGLang parallel execution. Sets _OVERRIDE_SGLANG_MAX_TOTAL_TOKENS to cap --max-total-tokens and prevent over-allocation",
     "e2e: marks tests as end-to-end tests",
+    "e2e_agent: marks real-CLI agent e2e tests (codex/claude against dynamo.mocker)",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "stress: marks tests as stress tests",
