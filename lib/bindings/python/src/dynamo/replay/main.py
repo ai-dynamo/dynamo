@@ -283,7 +283,11 @@ def _run_planner_replay(
     if not adapter._sm._is_easy:
         ref_args = extra_engine_args or prefill_engine_args or MockEngineArgs()
         aic_backend = ref_args.aic_backend
-        if aic_backend is None:
+        if (
+            aic_backend is None
+            or ref_args.aic_system is None
+            or ref_args.aic_model_path is None
+        ):
             sys.stderr.write(
                 "Note: throughput-based scaling regression requires AIC perf model "
                 "(set aic_backend/aic_system/aic_model_path in --extra-engine-args). "
