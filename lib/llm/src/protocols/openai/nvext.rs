@@ -134,21 +134,26 @@ pub struct NvExtResponseFieldSelection {
 
 impl NvExtResponseFieldSelection {
     pub fn from_nvext(nvext: Option<&NvExt>) -> Self {
-        let query_instance_id = nvext.is_some_and(NvExt::has_query_instance_id_annotation);
-        let has_extra_field = |field_name: &str| {
-            nvext.is_some_and(|ext| {
-                ext.extra_fields
-                    .as_ref()
-                    .is_some_and(|fields| fields.iter().any(|field| field == field_name))
-            })
+        let Some(ext) = nvext else {
+            return Self::default();
         };
 
-        Self {
-            worker_id: has_extra_field("worker_id") || query_instance_id,
-            timing: has_extra_field("timing"),
-            token_ids: query_instance_id,
-            routed_experts: has_extra_field("routed_experts"),
+        let mut selection = Self::default();
+        if let Some(fields) = ext.extra_fields.as_ref() {
+            for field in fields {
+                match field.as_str() {
+                    "worker_id" => selection.worker_id = true,
+                    "timing" => selection.timing = true,
+                    "routed_experts" => selection.routed_experts = true,
+                    _ => {}
+                }
+            }
         }
+        if ext.has_query_instance_id_annotation() {
+            selection.worker_id = true;
+            selection.token_ids = true;
+        }
+        selection
     }
 }
 
