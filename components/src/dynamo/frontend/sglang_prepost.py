@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
@@ -16,6 +17,8 @@ from sglang.srt.function_call.utils import get_json_schema_constraint
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from .utils import random_call_id
+
+logger = logging.getLogger(__name__)
 
 # Union of parser types used for tool call detection.
 # - FunctionCallParser: model-specific format detection (tool_choice="auto")
@@ -569,7 +572,17 @@ class SglangStreamingPostProcessor:
                                 tool_call_parser=self._tool_call_parser_name,
                             )
                             _, final_calls = fcp.parse_non_stream(full_text)
-                        except Exception:
+                        except Exception as e:
+                            # Fallback path: model-native tool-call text is
+                            # malformed. Log and return no tool calls rather
+                            # than crashing the whole response — the primary
+                            # JSON-array path has already failed, and the
+                            # normal text is still usable.
+                            logger.warning(
+                                "Native tool-call fallback parse failed (parser=%r): %s",
+                                self._tool_call_parser_name,
+                                e,
+                            )
                             final_calls = []
                 else:
                     _, final_calls = self.tool_call_parser.parse_non_stream(full_text)

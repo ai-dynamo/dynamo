@@ -15,7 +15,6 @@ Validates:
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
 import os
@@ -39,7 +38,6 @@ Draft7Validator = jsonschema.Draft7Validator
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-_SGLANG_AVAILABLE = importlib.util.find_spec("sglang") is not None
 
 pytestmark = [
     pytest.mark.sglang,
@@ -48,6 +46,7 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.model(MODEL_NAME),
+    pytest.mark.timeout(300),
 ]
 
 
@@ -123,19 +122,14 @@ class ToolCallingFrontendProcess(ManagedProcess):
             str(frontend_port),
             "--router-mode",
             "round-robin",
+            "--dyn-chat-processor",
+            "sglang",
+            "--tool-call-parser",
+            "qwen25",
+            "--reasoning-parser",
+            "qwen3",
+            "--trust-remote-code",
         ]
-        if _SGLANG_AVAILABLE:
-            command.extend(
-                [
-                    "--dyn-chat-processor",
-                    "sglang",
-                    "--tool-call-parser",
-                    "qwen25",
-                    "--reasoning-parser",
-                    "qwen3",
-                    "--trust-remote-code",
-                ]
-            )
 
         super().__init__(
             command=command,

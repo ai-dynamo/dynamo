@@ -32,6 +32,7 @@ from dynamo.runtime import DistributedRuntime
 
 from .sglang_prepost import (
     SglangStreamingPostProcessor,
+    ToolCallParserType,
     _get_history_tool_calls_count,
     convert_tools,
     create_parsers,
@@ -154,6 +155,7 @@ def _preprocess_worker(
         model_name,
         eos_token_id,
         pre.guided_decoding,
+        pre.tool_call_parser,
     )
 
     return SglangPreprocessWorkerResult(
@@ -169,6 +171,7 @@ def _build_dynamo_preproc(
     model_name: str,
     eos_token_id: int | None,
     guided_decoding: dict[str, Any] | None = None,
+    tool_call_parser: ToolCallParserType | None = None,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
@@ -218,12 +221,11 @@ def _build_dynamo_preproc(
         "output_options": {
             "logprobs": logprobs_val,
             "prompt_logprobs": None,
-            # SGLang native disables skip_special_tokens when tools are
-            # active so that tool-call delimiter tokens (e.g. <|tool_call|>)
-            # are preserved for the parser.
-            "skip_special_tokens": not (
-                request.get("tools") and request.get("tool_choice", "auto") != "none"
-            ),
+            # Preserve special tokens only when a tool-call parser is
+            # actually active — the parser needs delimiter tokens
+            # (e.g. <|tool_call|>) to detect calls. Mirrors the
+            # post-processor's _skip_special_tokens logic.
+            "skip_special_tokens": tool_call_parser is None,
         },
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],
@@ -339,6 +341,7 @@ class SglangProcessor:
                 request["model"],
                 self.eos_token_id,
                 pre.guided_decoding,
+                pre.tool_call_parser,
             )
         except Exception as exc:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
