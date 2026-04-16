@@ -72,6 +72,7 @@ class TickSnapshot:
     decode_engines: list[PerEngineFpm] = field(default_factory=list)
 
     # Throughput lower bound
+    throughput_lower_bound_prefill: Optional[int] = None
     throughput_lower_bound_decode: Optional[int] = None
 
     # Scaling decision
@@ -181,6 +182,7 @@ class DiagnosticsRecorder:
             engine_rps_decode=diag.engine_rps_decode,
             load_decision_reason=diag.load_decision_reason,
             throughput_decision_reason=diag.throughput_decision_reason,
+            throughput_lower_bound_prefill=diag.throughput_lower_bound_prefill,
             throughput_lower_bound_decode=diag.throughput_lower_bound_decode,
             prefill_engines=prefill_engines,
             decode_engines=decode_engines,
@@ -258,13 +260,26 @@ class DiagnosticsRecorder:
             row=1,
             col=1,
         )
-        tp_lower = _vals("throughput_lower_bound_decode")
-        if any(v is not None and v > 1 for v in tp_lower):
+        tp_lower_p = _vals("throughput_lower_bound_prefill")
+        if any(v is not None and v > 1 for v in tp_lower_p):
             fig.add_trace(
                 go.Scatter(
                     x=labels,
-                    y=tp_lower,
-                    name="Throughput Lower Bound",
+                    y=tp_lower_p,
+                    name="Prefill TP Lower Bound",
+                    mode="lines",
+                    line=dict(dash="dash", color="darkblue"),
+                ),
+                row=1,
+                col=1,
+            )
+        tp_lower_d = _vals("throughput_lower_bound_decode")
+        if any(v is not None and v > 1 for v in tp_lower_d):
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=tp_lower_d,
+                    name="Decode TP Lower Bound",
                     mode="lines",
                     line=dict(dash="dash", color="red"),
                 ),

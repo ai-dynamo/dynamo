@@ -25,13 +25,13 @@ class DecodeRegressionModel(_BaseRegressionModel):
     compute, while ``num_decode_requests`` has a weaker secondary effect
     from linear-layer work.  Under multicollinearity (both features scale
     with batch size), the ``num_decode_requests`` coefficient can flip
-    sign under noisy fits; we allow this and clip to 0 rather than
-    rejecting the whole fit.
+    sign under noisy fits; we accept the small negative value since
+    ``sum_decode_kv_tokens`` keeps the overall prediction monotone.
     """
 
     # num_decode_requests (index 0) is relaxable; sum_decode_kv_tokens (index 1)
     # must remain non-negative.
-    _clippable_feature_indices = frozenset({0})
+    _relaxable_feature_indices = frozenset({0})
 
     def __init__(
         self,
