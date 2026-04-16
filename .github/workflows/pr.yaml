@@ -4,9 +4,9 @@
 name: PR
 
 on:
-  # push:
-  #   branches:
-  #     - "pull-request/[0-9]+"
+  push:
+    branches:
+      - "pull-request/[0-9]+"
   workflow_dispatch:
 
 concurrency:
