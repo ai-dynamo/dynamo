@@ -35,16 +35,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func newFailoverPod(name, namespace string, phase corev1.PodPhase, pcsg, replicaIdx, podIdx string) *corev1.Pod {
+const cascadeTestNamespace = "test-ns"
+
+func newFailoverPod(name string, phase corev1.PodPhase, pcsg, replicaIdx, podIdx string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: namespace,
+			Namespace: cascadeTestNamespace,
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
-				groveLabelPCSG:                            pcsg,
-				groveLabelPCSGReplicaIndex:                replicaIdx,
-				groveLabelPodIndex:                        podIdx,
+				groveLabelPCSG:             pcsg,
+				groveLabelPCSGReplicaIndex: replicaIdx,
+				groveLabelPodIndex:         podIdx,
 			},
 		},
 		Status: corev1.PodStatus{Phase: phase},
@@ -65,84 +67,84 @@ func newCascadeReconciler(objs ...client.Object) (*FailoverCascadeReconciler, cl
 }
 
 func TestFailoverCascade_FailedPodDeletesEntireGroup(t *testing.T) {
-	ns := "test-ns"
-	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	sibling1 := newFailoverPod("gms-0-0", ns, corev1.PodRunning, "my-pcsg", "0", "0")
-	sibling2 := newFailoverPod("wkr-1-0", ns, corev1.PodRunning, "my-pcsg", "0", "0")
+
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
+	sibling1 := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
+	sibling2 := newFailoverPod("wkr-1-0", corev1.PodRunning, "my-pcsg", "0", "0")
 
 	r, c := newCascadeReconciler(failedPod, sibling1, sibling2)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
 	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Empty(t, remaining.Items, "all pods in the engine group should be deleted")
 }
 
 func TestFailoverCascade_SucceededPodDeletesEntireGroup(t *testing.T) {
-	ns := "test-ns"
-	succeededPod := newFailoverPod("ldr-0", ns, corev1.PodSucceeded, "my-pcsg", "0", "0")
-	sibling := newFailoverPod("gms-0-0", ns, corev1.PodRunning, "my-pcsg", "0", "0")
+
+	succeededPod := newFailoverPod("ldr-0", corev1.PodSucceeded, "my-pcsg", "0", "0")
+	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
 
 	r, c := newCascadeReconciler(succeededPod, sibling)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
 	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Empty(t, remaining.Items, "succeeded pod should also trigger cascade")
 }
 
 func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
-	ns := "test-ns"
-	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	differentGroup := newFailoverPod("ldr-1", ns, corev1.PodRunning, "my-pcsg", "0", "1")
+
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
+	differentGroup := newFailoverPod("ldr-1", corev1.PodRunning, "my-pcsg", "0", "1")
 
 	r, c := newCascadeReconciler(failedPod, differentGroup)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 
 	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Len(t, remaining.Items, 1, "only the different engine group pod should remain")
 	assert.Equal(t, "ldr-1", remaining.Items[0].Name)
 }
 
 func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {
-	ns := "test-ns"
-	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	alsoFailed := newFailoverPod("wkr-1-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	running := newFailoverPod("gms-0-0", ns, corev1.PodRunning, "my-pcsg", "0", "0")
+
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
+	alsoFailed := newFailoverPod("wkr-1-0", corev1.PodFailed, "my-pcsg", "0", "0")
+	running := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
 
 	r, c := newCascadeReconciler(failedPod, alsoFailed, running)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 
 	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Empty(t, remaining.Items, "all pods in the engine group should be deleted")
 }
 
 func TestFailoverCascade_PodWithoutLabelIgnored(t *testing.T) {
-	ns := "test-ns"
+
 	unlabeled := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "random-pod",
-			Namespace: ns,
+			Namespace: cascadeTestNamespace,
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodFailed},
 	}
@@ -150,26 +152,26 @@ func TestFailoverCascade_PodWithoutLabelIgnored(t *testing.T) {
 	r, _ := newCascadeReconciler(unlabeled)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "random-pod", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "random-pod", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
 func TestFailoverCascade_NonFailedPodIsNoop(t *testing.T) {
-	ns := "test-ns"
-	runningPod := newFailoverPod("ldr-0", ns, corev1.PodRunning, "my-pcsg", "0", "0")
-	sibling := newFailoverPod("gms-0-0", ns, corev1.PodRunning, "my-pcsg", "0", "0")
+
+	runningPod := newFailoverPod("ldr-0", corev1.PodRunning, "my-pcsg", "0", "0")
+	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
 
 	r, c := newCascadeReconciler(runningPod, sibling)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 
 	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Len(t, remaining.Items, 2, "running pod should not trigger cascade")
 }
 
@@ -177,18 +179,18 @@ func TestFailoverCascade_NotFoundPodIsNoop(t *testing.T) {
 	r, _ := newCascadeReconciler()
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "gone", Namespace: "test-ns"},
+		NamespacedName: types.NamespacedName{Name: "gone", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
 func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
-	ns := "test-ns"
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "partial-labels",
-			Namespace: ns,
+			Namespace: cascadeTestNamespace,
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
 				groveLabelPCSG:                            "my-pcsg",
@@ -200,72 +202,72 @@ func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
 	r, _ := newCascadeReconciler(pod)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "partial-labels", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "partial-labels", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
 func TestFailoverCascade_DifferentPCSGReplicaUnaffected(t *testing.T) {
-	ns := "test-ns"
-	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	differentReplica := newFailoverPod("ldr-r1-0", ns, corev1.PodRunning, "my-pcsg", "1", "0")
+
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
+	differentReplica := newFailoverPod("ldr-r1-0", corev1.PodRunning, "my-pcsg", "1", "0")
 
 	r, c := newCascadeReconciler(failedPod, differentReplica)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 
 	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Len(t, remaining.Items, 1, "only the different PCSG replica pod should remain")
 	assert.Equal(t, "ldr-r1-0", remaining.Items[0].Name)
 }
 
 func TestFailoverCascade_DeletingPodIsSkipped(t *testing.T) {
-	ns := "test-ns"
+
 	now := metav1.Now()
 
-	failedPod := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
 	failedPod.DeletionTimestamp = &now
 	failedPod.DeletionGracePeriodSeconds = ptr.To(int64(0))
 	failedPod.Finalizers = []string{"test-finalizer"}
-	sibling := newFailoverPod("gms-0-0", ns, corev1.PodRunning, "my-pcsg", "0", "0")
+	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
 
 	r, c := newCascadeReconciler(failedPod, sibling)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
 	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Len(t, remaining.Items, 2, "already-deleting pod should not trigger a cascade")
 }
 
 func TestFailoverCascade_ConcurrentReconcileIsIdempotent(t *testing.T) {
-	ns := "test-ns"
-	pod1 := newFailoverPod("ldr-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
-	pod2 := newFailoverPod("wkr-1-0", ns, corev1.PodFailed, "my-pcsg", "0", "0")
+
+	pod1 := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
+	pod2 := newFailoverPod("wkr-1-0", corev1.PodFailed, "my-pcsg", "0", "0")
 
 	r, c := newCascadeReconciler(pod1, pod2)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 
 	// Second reconcile for the other pod — it's already gone (NotFound).
 	_, err = r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "wkr-1-0", Namespace: ns},
+		NamespacedName: types.NamespacedName{Name: "wkr-1-0", Namespace: cascadeTestNamespace},
 	})
 	require.NoError(t, err)
 
 	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(ns)))
+	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
 	assert.Empty(t, remaining.Items)
 }

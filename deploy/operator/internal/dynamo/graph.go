@@ -677,7 +677,7 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 		labels[k] = v
 	}
 	if params.IsK8sDiscovery {
-		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
@@ -1713,7 +1713,7 @@ func generateLabels(
 	}
 	// Discovery labels on pod template — needed for Pod reflector filtering in container mode
 	if discovery.Backend == configv1alpha1.DiscoveryBackendKubernetes {
-		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 	return labels, nil

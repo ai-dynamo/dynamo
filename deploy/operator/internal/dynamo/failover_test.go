@@ -56,7 +56,7 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 			},
 			Resources: corev1.ResourceRequirements{
 				Limits: corev1.ResourceList{
-					"nvidia.com/gpu": k8sresource.MustParse("8"),
+					"nvidia.com/gpu":      k8sresource.MustParse("8"),
 					corev1.ResourceMemory: k8sresource.MustParse("64Gi"),
 				},
 			},

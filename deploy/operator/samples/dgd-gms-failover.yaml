@@ -65,7 +65,7 @@ spec:
           command: ["python3", "-m", "dynamo.vllm"]
           # args: ["--model", "Qwen/Qwen3-235B-A22B", "--tensor-parallel-size", "8", "--enforce-eager", "--gpu-memory-utilization", "0.85"]
           args: ["--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2", "--enforce-eager", "--gpu-memory-utilization", "0.85"]
-          
+
       # sharedMemory:
       #   size: 16Gi
 

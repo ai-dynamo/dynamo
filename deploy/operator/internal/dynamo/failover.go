@@ -262,7 +262,7 @@ func gmsRCTName(serviceName string, rank int32) string {
 // each rank's GMS + engine pods get their own ResourceClaim.
 func gmsResourceClaimTemplateConfigs(serviceName string, resources *v1alpha1.Resources, roles []ServiceRole) []grovev1alpha1.ResourceClaimTemplateConfig {
 	seen := map[int32]bool{}
-	var configs []grovev1alpha1.ResourceClaimTemplateConfig
+	configs := make([]grovev1alpha1.ResourceClaimTemplateConfig, 0, len(roles))
 	for _, r := range roles {
 		if seen[r.Rank] {
 			continue
