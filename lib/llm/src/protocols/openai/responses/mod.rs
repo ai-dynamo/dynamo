@@ -227,6 +227,32 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
         .join("")
 }
 
+/// Append `text` to an existing assistant message, preserving any previously
+/// attached tool_calls. Used to fold consecutive Responses API items that
+/// belong to the same assistant turn into a single ChatCompletion message.
+fn append_assistant_text(prev: &mut ChatCompletionRequestAssistantMessage, text: &str) {
+    if text.is_empty() && prev.content.is_some() {
+        return;
+    }
+    match prev.content.take() {
+        Some(ChatCompletionRequestAssistantMessageContent::Text(existing)) => {
+            let mut combined = existing;
+            combined.push_str(text);
+            prev.content = Some(ChatCompletionRequestAssistantMessageContent::Text(combined));
+        }
+        Some(other) => {
+            // Array-form content is not produced by this converter; preserve it
+            // as-is rather than silently dropping structured parts.
+            prev.content = Some(other);
+        }
+        None => {
+            prev.content = Some(ChatCompletionRequestAssistantMessageContent::Text(
+                text.to_string(),
+            ));
+        }
+    }
+}
+
 /// Convert InputParam::Items to a Vec of ChatCompletionRequestMessages.
 fn convert_input_items_to_messages(
     items: &[InputItem],
@@ -263,7 +289,13 @@ fn convert_input_items_to_messages(
                         messages.push(chat_msg);
                     }
                     MessageItem::Output(out_msg) => {
-                        // Previous assistant output message -> assistant message
+                        // Previous assistant output message -> assistant message.
+                        // Merge into the trailing assistant message (if any) so that a
+                        // single Responses API turn that emits both text and tool calls
+                        // collapses to one ChatCompletion assistant message. This keeps
+                        // the subsequent tool-role message adjacent to the assistant
+                        // message that owns its tool_calls, which is required by the
+                        // tool-aware chat templates (e.g. minimax_m2).
                         let text = out_msg
                             .content
                             .iter()
@@ -273,43 +305,62 @@ fn convert_input_items_to_messages(
                             })
                             .collect::<Vec<_>>()
                             .join("");
+                        if let Some(ChatCompletionRequestMessage::Assistant(prev)) =
+                            messages.last_mut()
+                        {
+                            append_assistant_text(prev, &text);
+                        } else {
+                            messages.push(ChatCompletionRequestMessage::Assistant(
+                                ChatCompletionRequestAssistantMessage {
+                                    content: Some(
+                                        ChatCompletionRequestAssistantMessageContent::Text(text),
+                                    ),
+                                    reasoning_content: None,
+                                    refusal: None,
+                                    name: None,
+                                    audio: None,
+                                    tool_calls: None,
+                                    #[allow(deprecated)]
+                                    function_call: None,
+                                },
+                            ));
+                        }
+                    }
+                },
+                Item::FunctionCall(fc) => {
+                    // A function call from a previous assistant turn -> assistant
+                    // message with tool_calls. Merge into the trailing assistant
+                    // message (if any) so the tool_calls stay attached to the same
+                    // assistant turn that (optionally) produced text alongside them.
+                    let new_call = ChatCompletionMessageToolCall {
+                        id: fc.call_id.clone(),
+                        r#type: FunctionType::Function,
+                        function: dynamo_protocols::types::FunctionCall {
+                            name: fc.name.clone(),
+                            arguments: fc.arguments.clone(),
+                        },
+                    };
+                    if let Some(ChatCompletionRequestMessage::Assistant(prev)) =
+                        messages.last_mut()
+                    {
+                        match &mut prev.tool_calls {
+                            Some(calls) => calls.push(new_call),
+                            None => prev.tool_calls = Some(vec![new_call]),
+                        }
+                    } else {
                         messages.push(ChatCompletionRequestMessage::Assistant(
                             ChatCompletionRequestAssistantMessage {
-                                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                    text,
-                                )),
+                                content: None,
                                 reasoning_content: None,
                                 refusal: None,
                                 name: None,
                                 audio: None,
-                                tool_calls: None,
+                                tool_calls: Some(vec![new_call]),
                                 #[allow(deprecated)]
                                 function_call: None,
                             },
                         ));
                     }
-                },
-                Item::FunctionCall(fc) => {
-                    // A function call from a previous assistant turn -> assistant message with tool_calls
-                    messages.push(ChatCompletionRequestMessage::Assistant(
-                        ChatCompletionRequestAssistantMessage {
-                            content: None,
-                            reasoning_content: None,
-                            refusal: None,
-                            name: None,
-                            audio: None,
-                            tool_calls: Some(vec![ChatCompletionMessageToolCall {
-                                id: fc.call_id.clone(),
-                                r#type: FunctionType::Function,
-                                function: dynamo_protocols::types::FunctionCall {
-                                    name: fc.name.clone(),
-                                    arguments: fc.arguments.clone(),
-                                },
-                            }]),
-                            #[allow(deprecated)]
-                            function_call: None,
-                        },
-                    ));
                 }
                 Item::FunctionCallOutput(fco) => {
                     // The output of a function call -> tool message
@@ -1262,6 +1313,226 @@ mod tests {
             }
             _ => panic!("Expected FunctionCall output"),
         }
+    }
+
+    // Regression: the Responses API may interleave a `function_call` item and
+    // an assistant `output_text` message that belong to the *same* assistant
+    // turn (e.g. Codex + minimax_m2 where the reasoning parser emits a short
+    // text segment alongside tool calls). These must collapse to a single
+    // assistant ChatCompletion message that carries both `content` and
+    // `tool_calls`; otherwise the following `function_call_output` is lifted
+    // as a tool-role message whose preceding assistant message lacks
+    // `tool_calls`, and tool-aware chat templates reject the sequence with
+    // "Message has tool role, but there was no previous assistant message
+    // with a tool call!"
+    #[test]
+    fn test_function_call_then_output_text_then_output_merges_to_one_turn() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "Call say with x=hi".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: r#"{"x":"hi"}"#.into(),
+                        call_id: "call_minimal".into(),
+                        namespace: None,
+                        name: "say".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::Message(MessageItem::Output(OutputMessage {
+                        id: "msg_1".into(),
+                        role: AssistantRole::Assistant,
+                        status: OutputStatus::Completed,
+                        phase: None,
+                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                            text: "\n\n\n".into(),
+                            annotations: vec![],
+                            logprobs: None,
+                        })],
+                    }))),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+                        call_id: "call_minimal".into(),
+                        output: FunctionCallOutput::Text("hi".into()),
+                        id: None,
+                        status: None,
+                    })),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+
+        assert_eq!(
+            messages.len(),
+            3,
+            "function_call + assistant output_text must collapse to one assistant message"
+        );
+        assert!(matches!(messages[0], ChatCompletionRequestMessage::User(_)));
+
+        let assistant = match &messages[1] {
+            ChatCompletionRequestMessage::Assistant(m) => m,
+            other => panic!("expected assistant at index 1, got {other:?}"),
+        };
+        let tool_calls = assistant
+            .tool_calls
+            .as_ref()
+            .expect("assistant message must carry tool_calls so the template can match them to the following tool result");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_minimal");
+        assert_eq!(tool_calls[0].function.name, "say");
+        match &assistant.content {
+            Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => {
+                assert_eq!(t, "\n\n\n");
+            }
+            other => panic!("expected assistant text content, got {other:?}"),
+        }
+
+        match &messages[2] {
+            ChatCompletionRequestMessage::Tool(tool) => {
+                assert_eq!(tool.tool_call_id, "call_minimal");
+            }
+            other => panic!("expected tool message at index 2, got {other:?}"),
+        }
+    }
+
+    // Same-turn merge also works in the opposite order (text item emitted
+    // before the function_call): Responses API items from one assistant turn
+    // should always collapse into a single ChatCompletion assistant message.
+    #[test]
+    fn test_output_text_then_function_call_then_output_merges_to_one_turn() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "What's the weather?".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::Message(MessageItem::Output(OutputMessage {
+                        id: "msg_1".into(),
+                        role: AssistantRole::Assistant,
+                        status: OutputStatus::Completed,
+                        phase: None,
+                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                            text: "Let me check.".into(),
+                            annotations: vec![],
+                            logprobs: None,
+                        })],
+                    }))),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: r#"{"location":"SF"}"#.into(),
+                        call_id: "call_abc".into(),
+                        namespace: None,
+                        name: "get_weather".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+                        call_id: "call_abc".into(),
+                        output: FunctionCallOutput::Text(r#"{"temp":"72F"}"#.into()),
+                        id: None,
+                        status: None,
+                    })),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+
+        assert_eq!(messages.len(), 3);
+        let assistant = match &messages[1] {
+            ChatCompletionRequestMessage::Assistant(m) => m,
+            _ => panic!("expected assistant at index 1"),
+        };
+        match &assistant.content {
+            Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => {
+                assert_eq!(t, "Let me check.");
+            }
+            _ => panic!("expected preserved text content"),
+        }
+        let tool_calls = assistant.tool_calls.as_ref().expect("tool_calls preserved");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_abc");
+    }
+
+    // Multiple function_calls emitted in a single assistant turn must attach
+    // to the same assistant message so subsequent tool results can pair off.
+    #[test]
+    fn test_multiple_function_calls_merge_into_single_assistant_message() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "Parallel calls please".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: r#"{"x":"a"}"#.into(),
+                        call_id: "call_1".into(),
+                        namespace: None,
+                        name: "say".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: r#"{"x":"b"}"#.into(),
+                        call_id: "call_2".into(),
+                        namespace: None,
+                        name: "say".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+                        call_id: "call_1".into(),
+                        output: FunctionCallOutput::Text("a".into()),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+                        call_id: "call_2".into(),
+                        output: FunctionCallOutput::Text("b".into()),
+                        id: None,
+                        status: None,
+                    })),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        assert_eq!(messages.len(), 4);
+        let assistant = match &messages[1] {
+            ChatCompletionRequestMessage::Assistant(m) => m,
+            _ => panic!("expected one merged assistant message"),
+        };
+        let tool_calls = assistant.tool_calls.as_ref().expect("tool_calls preserved");
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].id, "call_1");
+        assert_eq!(tool_calls[1].id, "call_2");
+        assert!(matches!(messages[2], ChatCompletionRequestMessage::Tool(_)));
+        assert!(matches!(messages[3], ChatCompletionRequestMessage::Tool(_)));
     }
 
     #[test]
