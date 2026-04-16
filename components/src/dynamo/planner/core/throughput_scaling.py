@@ -140,6 +140,8 @@ class ThroughputScalingMixin:
             max_num_batched_tokens=max_tokens,
             ttft_sla=self._config.ttft,
             itl_sla=self._config.itl,
+            max_kv_tokens=d_caps.max_kv_tokens if d_caps else None,
+            max_num_seqs=d_caps.max_num_seqs if d_caps else None,
         )
         if engine_rps <= 0:
             logger.warning("Agg perf model not ready, skipping throughput scaling")
