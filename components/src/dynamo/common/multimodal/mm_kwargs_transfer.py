@@ -235,7 +235,8 @@ class MmKwargsReceiver:
             if size_bytes <= self._max_item_bytes:
                 original_size = desc._data_size
                 desc._data_size = size_bytes
-                assert desc._data_ref is not None
+                if desc._data_ref is None:
+                    raise RuntimeError("Pre-allocated descriptor has no data reference")
                 tensor_view = desc._data_ref[:size_bytes]
                 return desc, tensor_view, False, original_size
             else:
@@ -397,8 +398,13 @@ class MmKwargsShmSender:
             try:
                 sm.close()
                 sm.unlink()
+            except FileNotFoundError:
+                pass  # Already unlinked (e.g., by resource_tracker)
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to clean up shared memory handle",
+                    exc_info=True,
+                )
 
 
 class MmKwargsShmReceiver:
@@ -423,19 +429,12 @@ class MmKwargsShmReceiver:
         for item in meta.get("items", []):
             name = item["name"]
             size = item["size"]
-            try:
-                with _nvtx.annotate("mm_shm:open_and_read", color="cyan"):
-                    sm = shm.SharedMemory(name=name, create=False)
-                    data = bytes(sm.buf[:size])
-                    sm.close()
-                results.setdefault("__pickled_kwargs_item__", []).append(data)
-                logger.debug("[SHM-Receiver] read %d bytes from shm %s", size, name)
-            except Exception:
-                logger.warning(
-                    "[SHM-Receiver] failed to read shm %s",
-                    name,
-                    exc_info=True,
-                )
+            with _nvtx.annotate("mm_shm:open_and_read", color="cyan"):
+                sm = shm.SharedMemory(name=name, create=False)
+                data = bytes(sm.buf[:size])
+                sm.close()
+            results.setdefault("__pickled_kwargs_item__", []).append(data)
+            logger.debug("[SHM-Receiver] read %d bytes from shm %s", size, name)
 
         _nvtx.end_range(rng)
         return results

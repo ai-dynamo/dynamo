@@ -137,7 +137,17 @@ class VLLMWorkerProcess(ManagedProcess):
 class FrontendProcess(ManagedProcess):
     """Frontend with vLLM processor and KV router."""
 
-    def __init__(self, request, *, frontend_port: int):
+    def __init__(self, request, *, frontend_port: int, transfer_mode: str = "shm"):
+        # Transfer mode controls how mm_kwargs are sent from frontend to backend:
+        #   shm: shared memory (same-node, ~2ms)
+        #   nixl: NIXL RDMA (cross-node capable)
+        #   disabled: no transfer; backend re-processes images from URLs
+        extra_env: dict[str, str] = {}
+        if transfer_mode == "disabled":
+            extra_env["DYNAMO_DISABLE_NIXL_MM"] = "1"
+        else:
+            extra_env["DYNAMO_MM_TRANSFER"] = transfer_mode
+
         super().__init__(
             command=[
                 "python3",
@@ -154,13 +164,13 @@ class FrontendProcess(ManagedProcess):
                 "--model-name",
                 VLLM_MM_MODEL,
             ],
-            env=_make_process_env(log_level="debug"),
+            env=_make_process_env(log_level="debug", **extra_env),
             health_check_urls=[
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             ],
             timeout=240,
             straggler_commands=["-m dynamo.frontend"],
-            log_dir=_prepare_log_dir(request, "vllm-mm-frontend"),
+            log_dir=_prepare_log_dir(request, f"vllm-mm-frontend-{transfer_mode}"),
             **_COMMON_PROCESS_KWARGS,
         )
 
@@ -175,16 +185,19 @@ def mm_runtime_services(request):
         os.environ.pop("ETCD_ENDPOINTS", None)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="module", params=["shm", "nixl", "disabled"])
 def start_vllm_mm_services(
     request, mm_runtime_services
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
+    transfer_mode = request.param
     frontend_port, vllm_port, kv_event_port = allocate_ports(count=3, start_port=10000)
 
     with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
         # Worker health check passed; wait briefly for ZMQ publisher to bind.
         time.sleep(2)
-        with FrontendProcess(request, frontend_port=frontend_port) as frontend_proc:
+        with FrontendProcess(
+            request, frontend_port=frontend_port, transfer_mode=transfer_mode
+        ) as frontend_proc:
             yield frontend_port, frontend_proc
 
 

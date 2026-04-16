@@ -34,7 +34,6 @@ NUM_WORKERS="${NUM_WORKERS:-2}"          # Number of backend workers
 # testing on machines with a single GPU.  Reduces performance by sharing
 # GPU memory between workers.
 SINGLE_GPU="${SINGLE_GPU:-false}"
-PREPROCESS_WORKERS="${PREPROCESS_WORKERS:-0}"  # Frontend preprocess worker pool size (0=disabled)
 NUM_FRONTENDS="${NUM_FRONTENDS:-1}"           # Number of frontend replicas (>1 for parallel HF processing)
 
 # KV cache override for parallel-safe GPU memory control
@@ -65,7 +64,6 @@ echo "HTTP_PORT=${HTTP_PORT}"
 echo "BLOCK_SIZE=${BLOCK_SIZE}"
 echo "NUM_WORKERS=${NUM_WORKERS}"
 echo "SINGLE_GPU=${SINGLE_GPU}"
-echo "PREPROCESS_WORKERS=${PREPROCESS_WORKERS}"
 echo "NUM_FRONTENDS=${NUM_FRONTENDS}"
 echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
@@ -167,11 +165,6 @@ echo "=== Starting frontend (with vLLM processor + KV router) ==="
 #   2. Runs vLLM's process_inputs() → mm_features with hashes + placeholders
 #   3. Builds mm_routing_info from mm_features → passes to KvRouter
 #   4. Forwards mm_hashes to backend for hash consistency
-FRONTEND_POOL_ARGS=""
-if [[ "${PREPROCESS_WORKERS}" -gt 0 ]]; then
-    FRONTEND_POOL_ARGS="--dyn-preprocess-workers ${PREPROCESS_WORKERS}"
-fi
-
 FRONTEND_SYSTEM_PORT_BASE="${FRONTEND_SYSTEM_PORT_BASE:-9080}"
 
 for f in $(seq 1 "${NUM_FRONTENDS}"); do
@@ -200,7 +193,6 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
             --dyn-chat-processor vllm \
             --router-mode kv \
             --kv-cache-block-size "${BLOCK_SIZE}" \
-            ${FRONTEND_POOL_ARGS} \
             ${RESET_ARGS} \
             ${SYNC_ARGS} \
             --model-name "${MODEL}" \

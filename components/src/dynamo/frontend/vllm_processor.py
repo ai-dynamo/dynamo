@@ -24,6 +24,10 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.multimodal.mm_kwargs_transfer import (
+    MmKwargsSender,
+    MmKwargsShmSender,
+)
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.frontend.frontend_args import FrontendConfig
@@ -201,10 +205,6 @@ class VllmProcessor:
             elif self.use_shm_transfer:
                 # Shared memory path: ~2ms same-node transfer.
                 try:
-                    from dynamo.common.multimodal.mm_kwargs_transfer import (
-                        MmKwargsShmSender,
-                    )
-
                     if self._shm_sender is None:
                         self._shm_sender = MmKwargsShmSender()
                     with _nvtx.annotate("mm_frontend:shm_sender_prepare", color="cyan"):
@@ -227,10 +227,6 @@ class VllmProcessor:
             else:
                 # NIXL RDMA path: ~47ms same-node (UCX TCP), faster cross-node (IB).
                 try:
-                    from dynamo.common.multimodal.mm_kwargs_transfer import (
-                        MmKwargsSender,
-                    )
-
                     if self._mm_kwargs_sender is None:
                         self._mm_kwargs_sender = MmKwargsSender()
                     with _nvtx.annotate(
@@ -441,49 +437,55 @@ class VllmProcessor:
         }
 
         # Extract MM routing metadata and prepare transfer.
-        (
-            mm_routing_info,
-            nixl_completion_futures,
-            nixl_transferred,
-            shm_handles,
-        ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
+        shm_handles: list = []
+        try:
+            (
+                mm_routing_info,
+                nixl_completion_futures,
+                nixl_transferred,
+                shm_handles,
+            ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
 
-        # Forward multimodal URLs so the backend handler can load the media.
-        # Only skip when ALL features were transferred — a partial transfer
-        # (some features had data=None due to processor cache) still needs
-        # URLs for the backend to process the missing features.
-        n_features = len(vllm_preproc.mm_features) if vllm_preproc.mm_features else 0
-        n_with_data = sum(
-            1 for f in (vllm_preproc.mm_features or []) if f.data is not None
-        )
-        all_transferred = nixl_transferred and n_with_data == n_features
-        if not all_transferred:
-            mm_data = extract_mm_urls(request.get("messages") or [])
-            if mm_data:
-                dynamo_preproc["multi_modal_data"] = mm_data
+            # Forward multimodal URLs so the backend handler can load the media.
+            # Only skip when ALL features were transferred — a partial transfer
+            # (some features had data=None due to processor cache) still needs
+            # URLs for the backend to process the missing features.
+            n_features = (
+                len(vllm_preproc.mm_features) if vllm_preproc.mm_features else 0
+            )
+            n_with_data = sum(
+                1 for f in (vllm_preproc.mm_features or []) if f.data is not None
+            )
+            all_transferred = nixl_transferred and n_with_data == n_features
+            if not all_transferred:
+                mm_data = extract_mm_urls(request.get("messages") or [])
+                if mm_data:
+                    dynamo_preproc["multi_modal_data"] = mm_data
 
-        post = StreamingPostProcessor(
-            tokenizer=self.tokenizer,
-            request_for_sampling=request_for_sampling,
-            sampling_params=sampling_params,
-            prompt_token_ids=tokens,
-            tool_parser=tool_parser,
-            reasoning_parser_class=self.reasoning_parser_class,
-            chat_template_kwargs=chat_template_kwargs,
-        )
+            post = StreamingPostProcessor(
+                tokenizer=self.tokenizer,
+                request_for_sampling=request_for_sampling,
+                sampling_params=sampling_params,
+                prompt_token_ids=tokens,
+                tool_parser=tool_parser,
+                reasoning_parser_class=self.reasoning_parser_class,
+                chat_template_kwargs=chat_template_kwargs,
+            )
 
-        async for item in self._generate_and_stream(
-            request_id,
-            request,
-            dynamo_preproc,
-            tokens,
-            vllm_preproc,
-            post,
-            mm_routing_info=mm_routing_info,
-            nixl_completion_futures=nixl_completion_futures,
-            shm_handles=shm_handles,
-        ):
-            yield item
+            async for item in self._generate_and_stream(
+                request_id,
+                request,
+                dynamo_preproc,
+                tokens,
+                vllm_preproc,
+                post,
+                mm_routing_info=mm_routing_info,
+                nixl_completion_futures=nixl_completion_futures,
+            ):
+                yield item
+        finally:
+            if shm_handles:
+                MmKwargsShmSender.cleanup(shm_handles)
 
     async def _generate_and_stream(
         self,
@@ -495,7 +497,6 @@ class VllmProcessor:
         post: StreamingPostProcessor,
         mm_routing_info: dict[str, Any] | None = None,
         nixl_completion_futures: list | None = None,
-        shm_handles: list | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         self.output_processor.add_request(vllm_preproc, None)
 
@@ -616,13 +617,6 @@ class VllmProcessor:
                             "[mm-routing] NIXL: transfer completion failed",
                             exc_info=True,
                         )
-            # Clean up SHM handles after backend has read.
-            if shm_handles:
-                from dynamo.common.multimodal.mm_kwargs_transfer import (
-                    MmKwargsShmSender,
-                )
-
-                MmKwargsShmSender.cleanup(shm_handles)
             if vllm_preproc.request_id in self.output_processor.request_states:
                 self.output_processor.abort_requests(
                     [vllm_preproc.request_id], internal=True
@@ -666,6 +660,11 @@ class EngineFactory:
             raise RuntimeError(
                 f"model type {model_type} is not supported by this factory"
             )
+        if self.config.preprocess_workers != 0:
+            raise RuntimeError(
+                "preprocess_workers is not supported for vllm processor. "
+                "Use the sglang processor for worker-pool preprocessing."
+            )
         loop = asyncio.get_running_loop()
 
         source_path = mdc.source_path()
@@ -677,8 +676,6 @@ class EngineFactory:
         load_format = getattr(self.flags, "load_format", None) or "dummy"
         trust_remote_code = getattr(self.flags, "trust_remote_code", False)
         enable_auto_tool_choice = getattr(self.flags, "enable_auto_tool_choice", False)
-
-        trust_remote_code = getattr(self.flags, "trust_remote_code", False)
 
         model_config = ModelConfig(
             model=source_path,

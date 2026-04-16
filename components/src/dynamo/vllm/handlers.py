@@ -1354,6 +1354,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 kwargs_items = []
                 for pi in pickled_items:
                     item = pickle.loads(pi)
+                    if not isinstance(item, MultiModalKwargsItem):
+                        logger.warning(
+                            "[mm-routing] SHM: deserialized object is %s, expected "
+                            "MultiModalKwargsItem; falling back to normal path",
+                            type(item).__name__,
+                        )
+                        _nvtx.end_range(rng)
+                        return None
                     kwargs_items.append(item)
 
             expanded_token_ids = extra_args.get("expanded_token_ids")

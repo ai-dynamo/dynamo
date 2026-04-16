@@ -245,6 +245,76 @@ class TestMmKwargsShmTransfer:
             shm_mod.SharedMemory(name=name, create=False)
 
 
+class TestMmKwargsShmCleanupErrorHandling:
+    """Tests for SHM cleanup error handling (Devin review fix #1)."""
+
+    def test_cleanup_handles_file_not_found(self):
+        """FileNotFoundError is silently handled (already unlinked)."""
+
+        feat = _make_feature(data="test", mm_hash="hash")
+        sender = MmKwargsShmSender()
+        meta, handles = sender.prepare([feat], modality="image")
+
+        assert len(handles) == 1
+        # Manually unlink to simulate resource_tracker cleanup
+        handles[0].close()
+        handles[0].unlink()
+
+        # cleanup() should not raise even though SHM is already gone
+        MmKwargsShmSender.cleanup(handles)
+
+    def test_cleanup_logs_non_file_errors(self):
+        """Non-FileNotFoundError exceptions are logged but don't crash."""
+        handle = MagicMock()
+        handle.close.side_effect = PermissionError("mocked permission error")
+
+        # Should not raise
+        MmKwargsShmSender.cleanup([handle])
+
+    def test_cleanup_processes_all_handles_despite_errors(self):
+        """All handles are attempted even if earlier ones fail."""
+        handle_ok = MagicMock()
+        handle_fail = MagicMock()
+        handle_fail.close.side_effect = OSError("mocked")
+        handle_ok2 = MagicMock()
+
+        MmKwargsShmSender.cleanup([handle_ok, handle_fail, handle_ok2])
+
+        # All handles should have close() called
+        handle_ok.close.assert_called_once()
+        handle_fail.close.assert_called_once()
+        handle_ok2.close.assert_called_once()
+
+
+class TestMmKwargsReceiverDescriptorValidation:
+    """Tests for _acquire_descriptor RuntimeError (Devin review fix #6)."""
+
+    def test_acquire_descriptor_raises_on_none_data_ref(self):
+        """Pre-allocated descriptor with None _data_ref raises RuntimeError."""
+        from dynamo.common.multimodal.mm_kwargs_transfer import MmKwargsReceiver
+
+        # Create a receiver with a mocked pool
+        receiver = MmKwargsReceiver.__new__(MmKwargsReceiver)
+        receiver._available = True
+        receiver._max_item_bytes = 1024
+
+        # Mock a pre-allocated descriptor with _data_ref = None
+        mock_desc = MagicMock()
+        mock_desc._data_ref = None
+        mock_desc._data_size = 1024
+
+        from queue import Queue
+
+        receiver._pool = Queue()
+        receiver._pool.put(mock_desc)
+
+        # Mock nixl_connect for dynamic fallback
+        receiver._nixl_connect = MagicMock()
+
+        with pytest.raises(RuntimeError, match="no data reference"):
+            receiver._acquire_descriptor(512)
+
+
 class TestMmKwargsReceiverOrdering:
     """Tests that NIXL receiver preserves spec order under concurrent reads."""
 
