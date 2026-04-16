@@ -65,7 +65,14 @@ impl Indexer {
             return Ok(Self::Remote(Arc::new(remote)));
         }
 
-        if !kv_router_config.use_kv_events {
+        // Approximate (indexer-only) mode and predict-on-route both rely on the
+        // single-threaded KvIndexer's prune manager to record speculative
+        // routing decisions. Without a PruneConfig, routing-decision messages
+        // are silently dropped by the indexer task.
+        let needs_prune_config =
+            !kv_router_config.use_kv_events || kv_router_config.router_predict_on_route;
+
+        if needs_prune_config {
             let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
             let cancellation_token = component.drt().primary_token();
             let prune_config = Some(PruneConfig {
@@ -129,11 +136,17 @@ impl Indexer {
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer(indexer) => {
                 indexer
-                    .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+                    .process_routing_decision_with_hashes(
+                        worker,
+                        local_hashes,
+                        sequence_hashes,
+                        ttl_override,
+                    )
                     .await
             }
             Self::Concurrent(_) => {
@@ -143,7 +156,12 @@ impl Indexer {
                 Err(KvRouterError::IndexerDroppedRequest)
             }
             Self::Remote(remote) => remote
-                .record_hashed_routing_decision(worker, local_hashes, sequence_hashes)
+                .record_hashed_routing_decision(
+                    worker,
+                    local_hashes,
+                    sequence_hashes,
+                    ttl_override,
+                )
                 .await
                 .map_err(|error| {
                     tracing::warn!(error = %error, "Remote indexer write failed");
@@ -170,16 +188,22 @@ impl Indexer {
         &self,
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer(_) | Self::Remote(_) => {
                 let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
                 let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
-                self.record_hashed_routing_decision(worker, local_hashes, sequence_hashes)
-                    .await
+                self.record_hashed_routing_decision(
+                    worker,
+                    local_hashes,
+                    sequence_hashes,
+                    ttl_override,
+                )
+                .await
             }
             Self::Concurrent(tpi) => {
-                tpi.process_routing_decision_for_request(tokens_with_hashes, worker)
+                tpi.process_routing_decision_for_request(tokens_with_hashes, worker, ttl_override)
                     .await
             }
             Self::None => Ok(()),

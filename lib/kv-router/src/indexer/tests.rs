@@ -748,7 +748,7 @@ mod interface_tests {
 
         // Process routing decision - should not error
         let result = index
-            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker, None)
             .await;
         assert!(result.is_ok());
     }
@@ -1932,7 +1932,7 @@ async fn test_routing_decision_assigns_first_seen_worker() {
     let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
 
     index
-        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes)
+        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes, None)
         .await
         .unwrap();
     flush_and_settle(&index).await;

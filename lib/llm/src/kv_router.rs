@@ -273,9 +273,10 @@ where
         &self,
         mut tokens_with_hashes: TokensWithHashes,
         worker: WorkerWithDpRank,
+        ttl_override: Option<std::time::Duration>,
     ) -> Result<(), KvRouterError> {
         self.indexer
-            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker, ttl_override)
             .await
     }
 

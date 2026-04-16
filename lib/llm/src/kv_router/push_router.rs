@@ -517,10 +517,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         } = selection;
         let scheduler_tracked = !is_query_only && bookkeeping_dp_rank.is_some();
 
-        // In approximate mode (use_kv_events=false), record the routing decision
-        // so the indexer can track cache state based on routing decisions.
-        // This covers both pre-selected workers and find_best_match selections.
-        if !is_query_only && !self.chooser.kv_router_config().use_kv_events {
+        // Record the routing decision into the indexer when:
+        //   - approximate mode (use_kv_events=false): the only cache-state signal, or
+        //   - predict-on-route: speculative insert so sibling requests in a batch
+        //     see the prefix before the engine emits a KV event.
+        // In the second case we use a short TTL so stale predictions age out
+        // quickly; the engine's real event will re-insert at the default TTL,
+        // which `PruneManager::insert_with_ttl` keeps as a promotion.
+        let cfg = self.chooser.kv_router_config();
+        let should_record = !is_query_only && (!cfg.use_kv_events || cfg.router_predict_on_route);
+        if should_record {
+            let ttl_override = if cfg.use_kv_events && cfg.router_predict_on_route {
+                cfg.predicted_ttl()
+            } else {
+                None
+            };
             if let Some(dp_rank) = bookkeeping_dp_rank {
                 let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
                 let (routing_token_ids, block_mm_infos) = request.block_mm_routing_info();
@@ -536,7 +547,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
                 if let Err(e) = self
                     .chooser
-                    .record_routing_decision(tokens_with_hashes, worker)
+                    .record_routing_decision(tokens_with_hashes, worker, ttl_override)
                     .await
                 {
                     tracing::warn!(
@@ -544,14 +555,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         worker_id = instance_id,
                         dp_rank = dp_rank,
                         error = %e,
-                        "Failed to record routing decision in approximate mode"
+                        "Failed to record routing decision"
                     );
                 }
             } else {
                 tracing::debug!(
                     request_id = %context_id,
                     worker_id = instance_id,
-                    "Skipping approximate-mode routing decision for unresolved dp_rank"
+                    "Skipping routing-decision record for unresolved dp_rank"
                 );
             }
         }
