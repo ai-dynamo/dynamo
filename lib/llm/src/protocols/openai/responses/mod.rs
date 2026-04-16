@@ -102,24 +102,8 @@ pub(crate) fn patch_response_for_spec(
     frequency_penalty: f32,
     store: bool,
 ) {
-    for key in [
-        "billing",
-        "completed_at",
-        "conversation",
-        "error",
-        "incomplete_details",
-        "instructions",
-        "max_output_tokens",
-        "max_tool_calls",
-        "previous_response_id",
-        "prompt",
-        "prompt_cache_key",
-        "prompt_cache_retention",
-        "reasoning",
-        "safety_identifier",
-        "usage",
-    ] {
-        obj.entry(key).or_insert(serde_json::Value::Null);
+    for key in dynamo_protocols::types::responses::SPEC_NULLABLE_REQUIRED_RESPONSE_FIELDS {
+        obj.entry(*key).or_insert(serde_json::Value::Null);
     }
 
     obj.insert(

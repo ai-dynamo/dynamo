@@ -58,6 +58,40 @@ pub type ResponseStream = std::pin::Pin<
     Box<dyn futures::Stream<Item = Result<ResponseStreamEvent, crate::error::OpenAIError>> + Send>,
 >;
 
+/// Fields on upstream `Response` that the OpenResponses spec requires as
+/// `T | null` but async-openai declares as `Option<T>` with
+/// `skip_serializing_if = Option::is_none` — meaning `None` disappears from
+/// the wire shape, where the spec wants an explicit `null`.
+///
+/// Colocated here (next to the upstream `Response` re-export) rather than in
+/// `lib/llm/src/protocols/openai/responses/mod.rs` so that when upstream's
+/// `Response` gains a new nullable-required field, the reviewer editing this
+/// module is looking directly at the authoritative list. Keep sorted
+/// alphabetically; entries must match serde field names on `Response` exactly.
+///
+/// Any field we unconditionally populate ourselves during response
+/// construction (e.g. `metadata`, `parallel_tool_calls`, `temperature`,
+/// `text`, `tool_choice`, `tools`, `top_p`, `top_logprobs`, `truncation`,
+/// `service_tier`, `background`) is deliberately absent — it's always
+/// present on the wire, so listing it here would be noise.
+pub const SPEC_NULLABLE_REQUIRED_RESPONSE_FIELDS: &[&str] = &[
+    "billing",
+    "completed_at",
+    "conversation",
+    "error",
+    "incomplete_details",
+    "instructions",
+    "max_output_tokens",
+    "max_tool_calls",
+    "previous_response_id",
+    "prompt",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+    "reasoning",
+    "safety_identifier",
+    "usage",
+];
+
 // ---------------------------------------------------------------------------
 // Input-side assistant message (relaxed vs upstream OutputMessage)
 // ---------------------------------------------------------------------------
