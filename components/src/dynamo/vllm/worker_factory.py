@@ -326,7 +326,9 @@ class WorkerFactory:
             register_embedding_cache_metrics(
                 endpoint=generate_endpoint,
                 cache=embedding_cache,
-                model_name=get_served_model_name(config.model, config.served_model_name),
+                model_name=get_served_model_name(
+                    config.model, config.served_model_name
+                ),
                 component_name=config.component,
             )
 
@@ -560,7 +562,9 @@ class WorkerFactory:
             register_embedding_cache_metrics(
                 endpoint=generate_endpoint,
                 cache=embedding_cache,
-                model_name=get_served_model_name(config.model, config.served_model_name),
+                model_name=get_served_model_name(
+                    config.model, config.served_model_name
+                ),
                 component_name=config.component,
             )
 

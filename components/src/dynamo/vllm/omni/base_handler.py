@@ -163,7 +163,9 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if request_type == RequestType.AUDIO_GENERATION:
             return NvAudioSpeechResponse(
                 id=request_id,
-                model=get_served_model_name(self.config.model, self.config.served_model_name),
+                model=get_served_model_name(
+                    self.config.model, self.config.served_model_name
+                ),
                 status="failed",
                 created=int(time.time()),
                 error=error_message,
