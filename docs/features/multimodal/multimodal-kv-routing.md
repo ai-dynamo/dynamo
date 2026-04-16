@@ -92,7 +92,7 @@ Key environment variables:
 | `BLOCK_SIZE` | `16` | KV cache block size (must match backend) |
 | `GPU_MEMORY_UTILIZATION` | `0.40` | Per-worker GPU memory fraction |
 | `SINGLE_GPU` | `false` | Pack all workers onto GPU 0 (for single-GPU testing) |
-| `DYNAMO_MM_TRANSFER` | `auto` | Transfer mode for pre-processed mm_kwargs: `auto`/`shm` (shared memory, same-node), `nixl` (RDMA, cross-node) |
+| `DYNAMO_MM_TRANSFER` | `shm` | Transfer mode for pre-processed mm_kwargs: `shm` (shared memory, same-node), `nixl` (RDMA, cross-node) |
 | `DYNAMO_DISABLE_NIXL_MM` | unset | Set to `1` to disable mm_kwargs transfer entirely (backend re-processes images from URLs) |
 
 ### TRT-LLM
@@ -108,7 +108,7 @@ See the [TRT-LLM MM Router README](https://github.com/ai-dynamo/dynamo/tree/main
 
 The `DYNAMO_MM_TRANSFER` environment variable controls how the frontend sends pre-processed image data to the backend:
 
-- **`auto` / `shm`** (default): Uses POSIX shared memory. The frontend writes pickled mm_kwargs to a `/dev/shm` segment (~2ms for a typical image). The backend reads it directly. If the backend can't access the segment (e.g., cross-node), it falls back to re-processing images from URLs.
+- **`shm`** (default): Uses POSIX shared memory. The frontend writes pickled mm_kwargs to a `/dev/shm` segment (~2ms for a typical image). The backend reads it directly. If the backend can't access the segment (e.g., cross-node), it falls back to re-processing images from URLs.
 - **`nixl`**: Uses NIXL RDMA transfer. Works across nodes via InfiniBand. Higher latency on same-node (~50ms due to UCX TCP fallback) but required for cross-node deployments.
 - **`DYNAMO_DISABLE_NIXL_MM=1`**: Disables all transfer. The backend downloads and processes images itself. Useful for debugging or when transfer overhead exceeds re-processing cost.
 

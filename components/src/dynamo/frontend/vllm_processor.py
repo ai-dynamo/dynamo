@@ -101,14 +101,13 @@ class VllmProcessor:
         self._shm_sender: Any = None
         # Set DYNAMO_DISABLE_NIXL_MM=1 to disable mm_kwargs transfer entirely.
         # Set DYNAMO_MM_TRANSFER to choose transfer mode:
-        #   auto (default): use SHM. Same-node backends read directly from
-        #     shared memory (~2ms); cross-node backends fail gracefully and
-        #     fall back to normal processing (backend runs HF processor).
-        #   shm: same as auto (explicit).
-        #   nixl: use NIXL RDMA. Works cross-node via IB.
+        #   shm (default): shared memory. Same-node only (~2ms). If the
+        #     backend can't read the segment (cross-node), it falls back to
+        #     normal processing (backend runs HF processor).
+        #   nixl: NIXL RDMA. Works cross-node via IB.
         self.nixl_mm_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
-        transfer_mode = os.environ.get("DYNAMO_MM_TRANSFER", "auto").lower()
-        self.use_shm_transfer = transfer_mode in ("auto", "shm")
+        transfer_mode = os.environ.get("DYNAMO_MM_TRANSFER", "shm").lower()
+        self.use_shm_transfer = transfer_mode == "shm"
         logger.info("[mm-routing] Transfer mode: %s", transfer_mode)
 
     def _get_eos_token_ids(self) -> list[int]:
@@ -193,11 +192,10 @@ class VllmProcessor:
                     )
                 # Transfer pre-processed mm_kwargs to the backend so it can skip
             # the HF processor.  Strategy:
-            #   - auto (default): use SHM. Same-node backends read directly;
-            #     cross-node backends fail gracefully and fall back to normal
-            #     processing.  Use DYNAMO_MM_TRANSFER=nixl for cross-node.
-            #   - shm: force shared memory (same-node only).
-            #   - nixl: force NIXL RDMA (works cross-node via IB).
+            #   - shm (default): shared memory, same-node only (~2ms).
+            #     Cross-node backends fail gracefully and fall back to
+            #     normal processing.
+            #   - nixl: NIXL RDMA (works cross-node via IB).
             if not self.nixl_mm_enabled:
                 logger.debug(
                     "[mm-routing] mm_kwargs transfer disabled via DYNAMO_DISABLE_NIXL_MM"
