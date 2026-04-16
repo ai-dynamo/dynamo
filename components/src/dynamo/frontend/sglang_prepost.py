@@ -299,10 +299,18 @@ def _parse_json_array_buffer(buffer: str) -> list[ToolCallItem]:
         if not isinstance(tool, dict):
             continue
         name = tool.get("name", "")
-        params = tool.get("parameters") or tool.get("arguments")
+        params = tool.get("parameters")
+        if params is None:
+            params = tool.get("arguments")
         if params is not None and not isinstance(params, str):
             params = json.dumps(params, ensure_ascii=False)
-        calls.append(ToolCallItem(tool_index=i, name=name, parameters=params or ""))
+        calls.append(
+            ToolCallItem(
+                tool_index=i,
+                name=name,
+                parameters=params if params is not None else "",
+            )
+        )
     return calls
 
 
