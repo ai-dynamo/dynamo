@@ -104,8 +104,20 @@ class ThroughputScalingMixin:
     ) -> Optional[ScalingDecision]:
         num_p = self._compute_prefill_replicas(demand_rps, isl, osl)
         num_d = self._compute_decode_replicas(demand_rps, isl, osl)
+        # _compute_* sets _diag_throughput_reason = "model_not_ready" when
+        # the regression isn't fit yet; record per-component reasons.
+        self._diag_throughput_reason_prefill = (
+            "model_not_ready" if num_p is None else None
+        )
+        self._diag_throughput_reason_decode = (
+            "model_not_ready" if num_d is None else None
+        )
         if num_p is None or num_d is None:
             return None
+
+        reason = "set_lower_bound" if self._config.enable_load_scaling else "scale"
+        self._diag_throughput_reason_prefill = reason
+        self._diag_throughput_reason_decode = reason
 
         if self._config.enable_load_scaling:
             self._throughput_lower_bound_p = num_p

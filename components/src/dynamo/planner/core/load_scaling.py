@@ -171,28 +171,39 @@ class LoadScalingMixin:
         final_d = max(final_d, self._config.min_endpoint)
         final_p, final_d = self._apply_global_budget(final_p, final_d)
 
-        # Detect the "floor lifted a load-scale-down back toward current"
-        # case: load wanted to scale down, but the throughput floor clamped
-        # the final count at or above current.
-        floor_capped = (final_p > original_p or final_d > original_d) and (
-            original_p < self._num_p_workers or original_d < self._num_d_workers
+        # Per-component reasons
+        def _reason(final: int, original: int, current: int) -> str:
+            floor_capped = final > original and original < current
+            if final > current:
+                return "scale_up"
+            if final < current:
+                return (
+                    "scale_down_capped_by_throughput" if floor_capped else "scale_down"
+                )
+            return "scale_down_capped_by_throughput" if floor_capped else "no_change"
+
+        self._diag_load_reason_prefill = _reason(
+            final_p, original_p, self._num_p_workers
+        )
+        self._diag_load_reason_decode = _reason(
+            final_d, original_d, self._num_d_workers
+        )
+
+        # Aggregate reason: prioritise "most interesting" across components.
+        _PRIORITY = {
+            "scale_up": 4,
+            "scale_down_capped_by_throughput": 3,
+            "scale_down": 2,
+            "no_change": 1,
+        }
+        self._diag_load_reason = max(
+            (self._diag_load_reason_prefill, self._diag_load_reason_decode),
+            key=lambda r: _PRIORITY.get(r or "", 0),
         )
 
         if final_p == self._num_p_workers and final_d == self._num_d_workers:
             logger.info("Load-based scaling: no scaling needed")
-            self._diag_load_reason = (
-                "scale_down_capped_by_throughput" if floor_capped else "no_change"
-            )
             return None
-
-        if floor_capped:
-            self._diag_load_reason = "scale_down_capped_by_throughput"
-        elif final_p > self._num_p_workers or final_d > self._num_d_workers:
-            self._diag_load_reason = "scale_up"
-        elif final_p < self._num_p_workers or final_d < self._num_d_workers:
-            self._diag_load_reason = "scale_down"
-        else:
-            self._diag_load_reason = "no_change"
 
         logger.info(
             f"Load-based disagg scaling: prefill {self._num_p_workers}->{final_p}, "

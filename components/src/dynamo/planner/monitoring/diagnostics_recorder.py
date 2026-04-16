@@ -66,6 +66,10 @@ class TickSnapshot:
     engine_rps_decode: Optional[float] = None
     load_decision_reason: Optional[str] = None
     throughput_decision_reason: Optional[str] = None
+    load_decision_reason_prefill: Optional[str] = None
+    load_decision_reason_decode: Optional[str] = None
+    throughput_decision_reason_prefill: Optional[str] = None
+    throughput_decision_reason_decode: Optional[str] = None
 
     # Per-engine FPM queue depths
     prefill_engines: list[PerEngineFpm] = field(default_factory=list)
@@ -182,6 +186,10 @@ class DiagnosticsRecorder:
             engine_rps_decode=diag.engine_rps_decode,
             load_decision_reason=diag.load_decision_reason,
             throughput_decision_reason=diag.throughput_decision_reason,
+            load_decision_reason_prefill=diag.load_decision_reason_prefill,
+            load_decision_reason_decode=diag.load_decision_reason_decode,
+            throughput_decision_reason_prefill=diag.throughput_decision_reason_prefill,
+            throughput_decision_reason_decode=diag.throughput_decision_reason_decode,
             throughput_lower_bound_prefill=diag.throughput_lower_bound_prefill,
             throughput_lower_bound_decode=diag.throughput_lower_bound_decode,
             prefill_engines=prefill_engines,
@@ -532,7 +540,6 @@ class DiagnosticsRecorder:
 
         # -- Row 6: Decision timelines -----------------------------------
 
-        load_reasons = _vals("load_decision_reason")
         _LOAD_COLORS = {
             "scale_up": "green",
             "scale_down": "blue",
@@ -544,25 +551,6 @@ class DiagnosticsRecorder:
             "worker_count_mismatch": "red",
             "insufficient_data": "pink",
         }
-        fig.add_trace(
-            go.Scatter(
-                x=labels,
-                y=[1] * len(labels),
-                mode="markers",
-                marker=dict(
-                    color=[_LOAD_COLORS.get(r or "", "gray") for r in load_reasons],
-                    size=10,
-                    symbol="square",
-                ),
-                text=load_reasons,
-                name="Load Decision",
-                hoverinfo="text+x",
-            ),
-            row=6,
-            col=1,
-        )
-
-        tp_reasons = _vals("throughput_decision_reason")
         _TP_COLORS = {
             "scale": "green",
             "set_lower_bound": "blue",
@@ -571,23 +559,125 @@ class DiagnosticsRecorder:
             "predict_failed": "red",
             "model_not_ready": "orange",
         }
-        fig.add_trace(
-            go.Scatter(
-                x=labels,
-                y=[1] * len(labels),
-                mode="markers",
-                marker=dict(
-                    color=[_TP_COLORS.get(r or "", "gray") for r in tp_reasons],
-                    size=10,
-                    symbol="diamond",
-                ),
-                text=tp_reasons,
-                name="Throughput Decision",
-                hoverinfo="text+x",
-            ),
-            row=6,
-            col=2,
+
+        # Detect disagg mode: if any per-component reason is populated,
+        # plot two horizontal tracks (prefill at y=2, decode at y=1);
+        # otherwise plot a single aggregate track at y=1.
+        has_per_component_load = any(
+            s.load_decision_reason_prefill is not None
+            or s.load_decision_reason_decode is not None
+            for s in snaps
         )
+        has_per_component_tp = any(
+            s.throughput_decision_reason_prefill is not None
+            or s.throughput_decision_reason_decode is not None
+            for s in snaps
+        )
+
+        def _add_decision_track(
+            field_name: str,
+            y_value: int,
+            label: str,
+            colors: dict,
+            symbol: str,
+            row: int,
+            col: int,
+        ) -> None:
+            reasons = _vals(field_name)
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=[y_value] * len(labels),
+                    mode="markers",
+                    marker=dict(
+                        color=[colors.get(r or "", "gray") for r in reasons],
+                        size=10,
+                        symbol=symbol,
+                    ),
+                    text=reasons,
+                    name=label,
+                    hoverinfo="text+x",
+                    showlegend=False,
+                ),
+                row=row,
+                col=col,
+            )
+
+        if has_per_component_load:
+            _add_decision_track(
+                "load_decision_reason_prefill",
+                2,
+                "Load (prefill)",
+                _LOAD_COLORS,
+                "square",
+                6,
+                1,
+            )
+            _add_decision_track(
+                "load_decision_reason_decode",
+                1,
+                "Load (decode)",
+                _LOAD_COLORS,
+                "square",
+                6,
+                1,
+            )
+            fig.update_yaxes(
+                tickmode="array",
+                tickvals=[1, 2],
+                ticktext=["decode", "prefill"],
+                range=[0.5, 2.5],
+                row=6,
+                col=1,
+            )
+        else:
+            _add_decision_track(
+                "load_decision_reason",
+                1,
+                "Load Decision",
+                _LOAD_COLORS,
+                "square",
+                6,
+                1,
+            )
+
+        if has_per_component_tp:
+            _add_decision_track(
+                "throughput_decision_reason_prefill",
+                2,
+                "TP (prefill)",
+                _TP_COLORS,
+                "diamond",
+                6,
+                2,
+            )
+            _add_decision_track(
+                "throughput_decision_reason_decode",
+                1,
+                "TP (decode)",
+                _TP_COLORS,
+                "diamond",
+                6,
+                2,
+            )
+            fig.update_yaxes(
+                tickmode="array",
+                tickvals=[1, 2],
+                ticktext=["decode", "prefill"],
+                range=[0.5, 2.5],
+                row=6,
+                col=2,
+            )
+        else:
+            _add_decision_track(
+                "throughput_decision_reason",
+                1,
+                "Throughput Decision",
+                _TP_COLORS,
+                "diamond",
+                6,
+                2,
+            )
 
         # -- Layout -------------------------------------------------------
 

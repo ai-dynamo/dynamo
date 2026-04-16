@@ -116,6 +116,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_engine_rps_decode: Optional[float] = None
         self._diag_load_reason: Optional[str] = None
         self._diag_throughput_reason: Optional[str] = None
+        self._diag_load_reason_prefill: Optional[str] = None
+        self._diag_load_reason_decode: Optional[str] = None
+        self._diag_throughput_reason_prefill: Optional[str] = None
+        self._diag_throughput_reason_decode: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -211,6 +215,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_engine_rps_decode = None
         self._diag_load_reason = None
         self._diag_throughput_reason = None
+        self._diag_load_reason_prefill = None
+        self._diag_load_reason_decode = None
+        self._diag_throughput_reason_prefill = None
+        self._diag_throughput_reason_decode = None
 
     def _build_diagnostics(self) -> TickDiagnostics:
         return TickDiagnostics(
@@ -225,6 +233,10 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             throughput_lower_bound_decode=self._throughput_lower_bound_d,
             load_decision_reason=self._diag_load_reason,
             throughput_decision_reason=self._diag_throughput_reason,
+            load_decision_reason_prefill=self._diag_load_reason_prefill,
+            load_decision_reason_decode=self._diag_load_reason_decode,
+            throughput_decision_reason_prefill=self._diag_throughput_reason_prefill,
+            throughput_decision_reason_decode=self._diag_throughput_reason_decode,
         )
 
     # ------------------------------------------------------------------

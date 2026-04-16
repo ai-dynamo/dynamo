@@ -117,8 +117,15 @@ class TickDiagnostics:
     throughput_lower_bound_decode: Optional[int] = None
 
     # Scaling decision reasons (set by the mixin that ran)
+    # Aggregate reasons (agg mode, or combined disagg).
     load_decision_reason: Optional[str] = None
     throughput_decision_reason: Optional[str] = None
+    # Per-component reasons (populated in disagg mode for separate
+    # prefill / decode decision timelines).
+    load_decision_reason_prefill: Optional[str] = None
+    load_decision_reason_decode: Optional[str] = None
+    throughput_decision_reason_prefill: Optional[str] = None
+    throughput_decision_reason_decode: Optional[str] = None
 
 
 @dataclass
