@@ -7,3 +7,6 @@
 # Ignore placeholder URLs in docs templates
 ^https://\.\.\./
 ^https://github\.com/\.\.\.
+
+# Ignore pre-existing flaky external URLs
+https://charts\.bitnami\.com
