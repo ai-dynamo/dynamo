@@ -7,11 +7,11 @@ use std::collections::HashMap;
 
 use dynamo_protocols::types::responses::{
     AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, InputContent, InputItem,
-    InputParam, InputRole, InputTokenDetails, Instructions, Item, MessageItem, OutputItem,
-    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
-    Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage, Role as ResponseRole,
-    ServiceTier, Status, SummaryPart, SummaryTextContent, TextResponseFormatConfiguration, Tool,
-    ToolChoiceOptions, ToolChoiceParam, Truncation,
+    InputOutputMessageContent, InputParam, InputRole, InputTokenDetails, Instructions, Item,
+    MessageItem, OutputItem, OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent,
+    OutputTokenDetails, Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage,
+    Role as ResponseRole, ServiceTier, Status, SummaryPart, SummaryTextContent,
+    TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageToolCall, ChatCompletionNamedToolChoice,
@@ -35,87 +35,23 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 
-#[derive(ToSchema, Serialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
-    /// Flattened CreateResponse fields (model, input, temperature, etc.)
+    /// Flattened CreateResponse fields (model, input, temperature, etc.).
+    ///
+    /// `CreateResponse` and its `input` chain (`InputParam`, `InputItem`,
+    /// `Item`, `MessageItem`, `OutputMessage`, `OutputMessageContent`,
+    /// `OutputTextContent`) are Dynamo-owned in `dynamo-protocols`. They mirror
+    /// upstream async-openai but accept the relaxed shapes real clients emit
+    /// (optional `id` / `status` on assistant messages, optional `annotations`
+    /// on `output_text` parts). See `dynamo_protocols::types::responses` for
+    /// the full rationale.
     #[serde(flatten)]
     #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::responses::CreateResponse,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
-}
-
-/// Walk `input[*]` and patch previous-assistant message items so they satisfy
-/// upstream `OutputMessage`'s required fields. Clients (e.g. Codex) round-trip
-/// assistant messages as `{"type":"message","role":"assistant","content":[...]}`
-/// without `id` / `status`, and `output_text` parts without `annotations`.
-/// Upstream async-openai `MessageItem` is an untagged enum with strict schemas
-/// (`InputMessage` rejects role=assistant, `OutputMessage` requires id+status),
-/// so these otherwise-valid payloads fail deserialization. Patch them before
-/// delegating to the strict deserializer.
-fn patch_input_items_for_assistant_messages(value: &mut serde_json::Value) {
-    let Some(obj) = value.as_object_mut() else {
-        return;
-    };
-    let Some(input) = obj.get_mut("input") else {
-        return;
-    };
-    let Some(arr) = input.as_array_mut() else {
-        return;
-    };
-    for item in arr {
-        let Some(item_obj) = item.as_object_mut() else {
-            continue;
-        };
-        let is_message = item_obj.get("type").and_then(|v| v.as_str()) == Some("message");
-        let is_assistant = item_obj.get("role").and_then(|v| v.as_str()) == Some("assistant");
-        if !(is_message && is_assistant) {
-            continue;
-        }
-        item_obj
-            .entry("id")
-            .or_insert_with(|| serde_json::Value::String(String::new()));
-        item_obj
-            .entry("status")
-            .or_insert_with(|| serde_json::Value::String("completed".into()));
-        if let Some(content) = item_obj.get_mut("content").and_then(|c| c.as_array_mut()) {
-            for part in content {
-                let Some(part_obj) = part.as_object_mut() else {
-                    continue;
-                };
-                if part_obj.get("type").and_then(|v| v.as_str()) != Some("output_text") {
-                    continue;
-                }
-                part_obj
-                    .entry("annotations")
-                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-            }
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for NvCreateResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut value = serde_json::Value::deserialize(deserializer)?;
-        patch_input_items_for_assistant_messages(&mut value);
-
-        let nvext = value
-            .as_object_mut()
-            .and_then(|m| m.remove("nvext"))
-            .filter(|v| !v.is_null())
-            .map(serde_json::from_value::<NvExt>)
-            .transpose()
-            .map_err(serde::de::Error::custom)?;
-
-        let inner: dynamo_protocols::types::responses::CreateResponse =
-            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-
-        Ok(NvCreateResponse { inner, nvext })
-    }
 }
 
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
@@ -391,7 +327,7 @@ fn convert_input_items_to_messages(
                             .content
                             .iter()
                             .filter_map(|c| match c {
-                                OutputMessageContent::OutputText(t) => Some(t.text.as_str()),
+                                InputOutputMessageContent::OutputText(t) => Some(t.text.as_str()),
                                 _ => None,
                             })
                             .collect::<Vec<_>>()
@@ -962,7 +898,8 @@ pub fn chat_completion_to_response(
 mod tests {
     use dynamo_protocols::types::responses::{
         CreateResponse, FunctionCallOutput, FunctionCallOutputItemParam, FunctionTool,
-        FunctionToolCall, InputContent, InputImageContent, InputItem, InputMessage, InputParam,
+        FunctionToolCall, InputContent, InputImageContent, InputItem, InputMessage,
+        InputOutputMessage, InputOutputMessageContent, InputOutputTextContent, InputParam,
         InputRole, InputTextContent, Item, MessageItem, Tool,
     };
     use dynamo_protocols::types::{
@@ -1099,16 +1036,18 @@ mod tests {
                         role: InputRole::User,
                         status: None,
                     }))),
-                    InputItem::Item(Item::Message(MessageItem::Output(OutputMessage {
-                        id: "msg_1".into(),
+                    InputItem::Item(Item::Message(MessageItem::Output(InputOutputMessage {
+                        id: Some("msg_1".into()),
                         role: AssistantRole::Assistant,
-                        status: OutputStatus::Completed,
+                        status: Some(OutputStatus::Completed),
                         phase: None,
-                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
-                            text: "4".into(),
-                            annotations: vec![],
-                            logprobs: None,
-                        })],
+                        content: vec![InputOutputMessageContent::OutputText(
+                            InputOutputTextContent {
+                                text: "4".into(),
+                                annotations: vec![],
+                                logprobs: None,
+                            },
+                        )],
                     }))),
                     InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
                         content: vec![InputContent::InputText(InputTextContent {
@@ -1247,16 +1186,18 @@ mod tests {
                         id: None,
                         status: None,
                     })),
-                    InputItem::Item(Item::Message(MessageItem::Output(OutputMessage {
-                        id: "msg_interstitial".into(),
+                    InputItem::Item(Item::Message(MessageItem::Output(InputOutputMessage {
+                        id: Some("msg_interstitial".into()),
                         role: AssistantRole::Assistant,
-                        status: OutputStatus::Completed,
+                        status: Some(OutputStatus::Completed),
                         phase: None,
-                        content: vec![OutputMessageContent::OutputText(OutputTextContent {
-                            text: "\n\n".into(),
-                            annotations: vec![],
-                            logprobs: None,
-                        })],
+                        content: vec![InputOutputMessageContent::OutputText(
+                            InputOutputTextContent {
+                                text: "\n\n".into(),
+                                annotations: vec![],
+                                logprobs: None,
+                            },
+                        )],
                     }))),
                     InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
                         call_id: "call_123".into(),
@@ -1770,32 +1711,33 @@ thinking
     }
 
     #[test]
-    fn test_output_message_without_id_and_status_fails_to_deserialize() {
-        use dynamo_protocols::types::responses::InputItem;
-
-        // With the upstream schema, `id` (String) and `status` (OutputStatus) are
-        // required on OutputMessage. An assistant message without them can't
-        // deserialize as either OutputMessage or InputMessage (wrong role)
-        // through the bare upstream type.
+    fn test_bare_assistant_output_message_deserializes_via_owned_types() {
+        // Regression: upstream async-openai's OutputMessage required `id` and
+        // `status`. Dynamo-owned types make them optional so real-world client
+        // shapes (no id/status, no annotations) round-trip successfully.
         let json = serde_json::json!({
             "role": "assistant",
-            "content": [{"type": "output_text", "text": "Hello!", "annotations": []}],
+            "content": [{"type": "output_text", "text": "Hello!"}],
             "type": "message"
         });
 
-        let result = serde_json::from_value::<InputItem>(json);
-        assert!(
-            result.is_err(),
-            "Expected bare-type deserialization to fail without id and status"
-        );
+        let item: InputItem =
+            serde_json::from_value(json).expect("relaxed deserialize should succeed");
+        match item {
+            InputItem::Item(Item::Message(MessageItem::Output(msg))) => {
+                assert_eq!(msg.role, AssistantRole::Assistant);
+                assert!(msg.id.is_none());
+                assert!(msg.status.is_none());
+            }
+            other => panic!("Expected Item::Message(Output), got {:?}", other),
+        }
     }
 
     #[test]
-    fn test_nvcreate_response_patches_bare_assistant_messages() {
-        // Clients like Codex send assistant messages without `id`/`status` and
-        // `output_text` parts without `annotations`. The custom Deserialize on
-        // NvCreateResponse must patch these so the upstream strict types accept
-        // the payload.
+    fn test_nvcreate_response_accepts_bare_assistant_messages() {
+        // End-to-end: a real Codex-style payload with an interstitial assistant
+        // text item (no id/status/annotations) deserializes into NvCreateResponse
+        // via the standard derive on our Dynamo-owned CreateResponse chain.
         let body = serde_json::json!({
             "model": "m",
             "input": [
@@ -1811,13 +1753,12 @@ thinking
         });
 
         let req: NvCreateResponse =
-            serde_json::from_value(body).expect("custom deserialize should patch and succeed");
+            serde_json::from_value(body).expect("relaxed deserialize should succeed");
         let items = match &req.inner.input {
             InputParam::Items(items) => items,
             _ => panic!("expected Items input"),
         };
         assert_eq!(items.len(), 4);
-        // The third item must round-trip as an assistant OutputMessage.
         match &items[2] {
             InputItem::Item(Item::Message(MessageItem::Output(out))) => {
                 assert_eq!(out.role, AssistantRole::Assistant);
@@ -1841,8 +1782,8 @@ thinking
         let item: InputItem = serde_json::from_value(json).unwrap();
         match item {
             InputItem::Item(Item::Message(MessageItem::Output(msg))) => {
-                assert_eq!(msg.id, "msg_abc123");
-                assert_eq!(msg.status, OutputStatus::Completed);
+                assert_eq!(msg.id.as_deref(), Some("msg_abc123"));
+                assert_eq!(msg.status, Some(OutputStatus::Completed));
             }
             other => panic!("Expected Item::Message(Output), got {:?}", other),
         }
