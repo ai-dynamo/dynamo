@@ -370,8 +370,7 @@ impl KvRouterConfig {
     /// Returns the TTL to apply to predict-on-route insertions. `None` means
     /// let the indexer use its default TTL.
     pub fn predicted_ttl(&self) -> Option<Duration> {
-        self.router_predicted_ttl_secs
-            .map(Duration::from_secs_f64)
+        self.router_predicted_ttl_secs.map(Duration::from_secs_f64)
     }
 
     /// Check if KV event subscription should be started.

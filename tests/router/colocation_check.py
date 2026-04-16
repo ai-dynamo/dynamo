@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Batch co-location probe for predict_on_route.
 
 Launches two mocker workers behind a KvRouter and fires NUM_PROBLEMS groups of
