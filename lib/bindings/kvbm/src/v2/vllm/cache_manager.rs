@@ -58,8 +58,9 @@ impl PyRustKvCacheManager {
         enable_caching: bool,
         log_stats: bool,
     ) -> PyResult<Self> {
-        let core = RustKvCacheManager::from_manager(handle.inner.clone(), enable_caching, log_stats)
-            .map_err(to_pyerr)?;
+        let core =
+            RustKvCacheManager::from_manager(handle.inner.clone(), enable_caching, log_stats)
+                .map_err(to_pyerr)?;
         Ok(Self { core })
     }
 
@@ -103,10 +104,7 @@ impl PyRustKvCacheManager {
             .map_err(to_pyerr)
     }
 
-    pub fn get_computed_blocks(
-        &self,
-        request_id: &str,
-    ) -> PyResult<(Vec<BlockId>, usize)> {
+    pub fn get_computed_blocks(&self, request_id: &str) -> PyResult<(Vec<BlockId>, usize)> {
         self.core.get_computed_blocks(request_id).map_err(to_pyerr)
     }
 
