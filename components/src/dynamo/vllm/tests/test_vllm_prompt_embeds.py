@@ -29,6 +29,7 @@ def mock_handler():
         pass
 
     handler = MockHandler()
+    handler.model_config = Mock(enable_prompt_embeds=True)
     handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )
