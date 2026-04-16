@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytest.importorskip("PIL", reason="Pillow required for image generation benchmarks")
+
 # The generators use relative imports, so add the source dir to sys.path
 JSONL_DIR = Path(__file__).resolve().parents[4] / "benchmarks" / "multimodal" / "jsonl"
 sys.path.insert(0, str(JSONL_DIR))
