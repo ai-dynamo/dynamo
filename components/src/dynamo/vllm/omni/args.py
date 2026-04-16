@@ -6,7 +6,7 @@
 import argparse
 import dataclasses
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from vllm_omni.engine.arg_utils import OmniEngineArgs
 
@@ -324,7 +324,7 @@ class OmniConfig(DynamoRuntimeConfig):
     endpoint: Optional[str] = None
 
     model: str
-    served_model_name: Optional[str] = None
+    served_model_name: Optional[str | List[str]] = None
     engine_args: OmniEngineArgs
 
     stage_configs_path: Optional[str] = None
@@ -425,11 +425,14 @@ def parse_omni_args() -> OmniConfig:
 
     engine_args = OmniEngineArgs.from_cli_args(vllm_args)
 
+    # Normalize served_model_name to list
+    # vLLM accepts str | list[str] | None, we normalize to list[str] | None
     if getattr(engine_args, "served_model_name", None) is not None:
         served = engine_args.served_model_name
-        if len(served) > 1:
-            raise ValueError("We do not support multiple model names.")
-        config.served_model_name = served[0]
+        if isinstance(served, str):
+            config.served_model_name = [served]
+        else:
+            config.served_model_name = served
 
     config.engine_args = engine_args
     config.validate()

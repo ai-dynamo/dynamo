@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import socket
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -47,7 +47,7 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
 
     # mirror vLLM
     model: str
-    served_model_name: Optional[str] = None
+    served_model_name: Optional[str | List[str]] = None
 
     # rest vLLM args
     engine_args: AsyncEngineArgs
@@ -144,14 +144,6 @@ def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
     """Update dynamo_config fields from engine_config and worker flags."""
-
-    if getattr(engine_config, "served_model_name", None) is not None:
-        served = engine_config.served_model_name
-        if len(served) > 1:
-            raise ValueError("We do not support multiple model names.")
-        dynamo_config.served_model_name = served[0]
-    else:
-        dynamo_config.served_model_name = None
 
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint
@@ -612,3 +604,13 @@ def ensure_side_channel_host():
     host_ip = get_host_ip()
     os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_ip
     logger.info("Set VLLM_NIXL_SIDE_CHANNEL_HOST to %s (auto-detected)", host_ip)
+
+
+def get_served_model_name(model: str, served_model_name: str | List[str] | None) -> str:
+    """Extract the primary model name from served_model_name."""
+
+    if not served_model_name:
+        return model
+    if isinstance(served_model_name, list):
+        return served_model_name[0]
+    return served_model_name

@@ -263,7 +263,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, model_aliases=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -282,6 +282,7 @@ fn register_model<'p>(
     media_fetcher: Option<MediaFetcher>,
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
+    model_aliases: Option<Vec<String>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill
@@ -357,6 +358,7 @@ fn register_model<'p>(
             card.model_type = model_type_obj;
             card.model_input = model_input;
             card.user_data = user_data_json;
+            card.set_aliases(model_aliases.unwrap_or_default());
 
             if let Some(cfg) = runtime_config {
                 card.runtime_config = cfg.inner;
@@ -394,6 +396,7 @@ fn register_model<'p>(
             .source_path(source_path.clone().into())
             // --served_model_name
             .model_name(model_name.clone())
+            .model_aliases(model_aliases.unwrap_or_default())
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(Some(router_config))

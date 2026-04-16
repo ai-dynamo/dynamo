@@ -559,6 +559,10 @@ impl ModelWatcher {
     ) -> anyhow::Result<()> {
         card.download_config().await?;
 
+        self.manager
+            .check_name_conflicts(card.name(), &card.aliases)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
         let component = self
             .drt
             .namespace(&mcid.namespace)?
