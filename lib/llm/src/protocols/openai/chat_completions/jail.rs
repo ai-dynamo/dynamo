@@ -1463,12 +1463,14 @@ mod tests {
             content: Some(
                 text.chars()
                     .enumerate()
-                    .map(|(i, c)| dynamo_protocols::types::ChatCompletionTokenLogprob {
-                        token: c.to_string(),
-                        logprob: -(i as f32 + 1.0) * 0.1,
-                        bytes: Some(c.to_string().into_bytes()),
-                        top_logprobs: vec![],
-                    })
+                    .map(
+                        |(i, c)| dynamo_protocols::types::ChatCompletionTokenLogprob {
+                            token: c.to_string(),
+                            logprob: -(i as f32 + 1.0) * 0.1,
+                            bytes: Some(c.to_string().into_bytes()),
+                            top_logprobs: vec![],
+                        },
+                    )
                     .collect(),
             ),
             refusal: None,
@@ -1537,7 +1539,12 @@ mod tests {
 
         let responses: Vec<_> = output_stream.collect().await;
         let tool_calls = collect_tool_calls(&responses);
-        assert_eq!(tool_calls.len(), 1, "Expected 1 tool call, got {:?}", tool_calls);
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "Expected 1 tool call, got {:?}",
+            tool_calls
+        );
         assert_eq!(tool_calls[0].0, "get_weather");
 
         // Logprobs must be preserved even though the entire output is a tool call

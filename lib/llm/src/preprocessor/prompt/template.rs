@@ -84,9 +84,12 @@ impl PromptFormatter {
                                     mdc.display_name
                                 );
                             };
-                            let chat_template = std::fs::read_to_string(path)
-                                .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
-                            config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
+                            let chat_template =
+                                std::fs::read_to_string(path).with_context(|| {
+                                    format!("fs:read_to_string '{}'", path.display())
+                                })?;
+                            config.chat_template =
+                                Some(ChatTemplateValue(either::Left(chat_template)));
                         }
                         Some(PromptFormatterArtifact::HfChatTemplateJson {
                             file: checked_file,
@@ -98,10 +101,11 @@ impl PromptFormatter {
                                     mdc.display_name
                                 );
                             };
-                            let raw = std::fs::read_to_string(path)
-                                .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
-                            let wrapper: serde_json::Value =
-                                serde_json::from_str(&raw).with_context(|| {
+                            let raw = std::fs::read_to_string(path).with_context(|| {
+                                format!("fs:read_to_string '{}'", path.display())
+                            })?;
+                            let wrapper: serde_json::Value = serde_json::from_str(&raw)
+                                .with_context(|| {
                                     format!("Failed to parse '{}' as JSON", path.display())
                                 })?;
                             let field = wrapper.get("chat_template").ok_or_else(|| {
