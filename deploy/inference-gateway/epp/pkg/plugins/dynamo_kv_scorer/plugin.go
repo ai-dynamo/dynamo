@@ -279,7 +279,7 @@ func SerializeEndpointsToJSON(endpoints []schedtypes.Endpoint) (string, error) {
 	return string(data), nil
 }
 
-func BuildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
+func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error) {
 	requestBody := make(map[string]any)
 
 	if req == nil || req.Body == nil {

@@ -86,7 +86,7 @@ func (f *LabelFilter) WithName(name string) *LabelFilter {
 }
 
 // Filter returns only the endpoints whose label matches one of the configured valid values.
-func (f *LabelFilter) Filter(_ context.Context, _ *schedtypes.CycleState, _ *schedtypes.LLMRequest, endpoints []schedtypes.Endpoint) []schedtypes.Endpoint {
+func (f *LabelFilter) Filter(_ context.Context, _ *schedtypes.CycleState, _ *schedtypes.InferenceRequest, endpoints []schedtypes.Endpoint) []schedtypes.Endpoint {
 	filtered := make([]schedtypes.Endpoint, 0, len(endpoints))
 	for _, ep := range endpoints {
 		if ep == nil || ep.GetMetadata() == nil {

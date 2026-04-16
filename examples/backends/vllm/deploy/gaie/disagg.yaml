@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:rc2-fresh
+          image: docker.io/lambda108/epp-inference-extension-dynamo:rc2-v3
           imagePullPolicy: IfNotPresent
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE

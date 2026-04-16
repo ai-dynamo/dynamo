@@ -35,6 +35,7 @@ import (
 	"github.com/go-logr/logr"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
@@ -68,7 +69,7 @@ func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 }
 
 // buildRequestJSON builds an OpenAI-compatible JSON string from a GAIE LLMRequest.
-func buildRequestJSON(req *schedtypes.LLMRequest) (string, error) {
+func buildRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
 	requestBody, err := dynscorer.BuildOpenAIRequest(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to build OpenAI request: %w", err)
@@ -109,7 +110,7 @@ func uniformScores(endpoints []schedtypes.Endpoint, score float64) map[schedtype
 // plugins run. For the PayloadMap mutation to reach the worker, the framework
 // must re-serialize the PayloadMap after scheduling — see
 // https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/XXXX
-func setTokenizedPrompt(req *schedtypes.LLMRequest, tokens []int64, logger logr.Logger) {
+func setTokenizedPrompt(req *schedtypes.InferenceRequest, tokens []int64, logger logr.Logger) {
 	if req == nil || len(tokens) == 0 {
 		logger.V(logutil.DEFAULT).Info("[EPP-INJECT] No tokens to inject (empty token list)")
 		return
@@ -127,7 +128,7 @@ func setTokenizedPrompt(req *schedtypes.LLMRequest, tokens []int64, logger logr.
 	// Inject into the PayloadMap so the body includes nvext.token_data.
 	payloadInjected := false
 	if req.Body != nil {
-		if pm, ok := req.Body.Payload.(schedtypes.PayloadMap); ok {
+		if pm, ok := req.Body.Payload.(fwkrh.PayloadMap); ok {
 			nvext, _ := pm["nvext"].(map[string]any)
 			if nvext == nil {
 				nvext = map[string]any{}

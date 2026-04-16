@@ -76,7 +76,7 @@ func (h *DisaggProfileHandler) WithName(name string) *DisaggProfileHandler {
 }
 
 // Pick selects which profiles to run in the current iteration.
-func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.CycleState, _ *schedtypes.LLMRequest,
+func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.CycleState, _ *schedtypes.InferenceRequest,
 	profiles map[string]schedtypes.SchedulerProfile, profileResults map[string]*schedtypes.ProfileRunResult) map[string]schedtypes.SchedulerProfile {
 
 	logger := log.FromContext(ctx).V(logutil.VERBOSE)
@@ -123,7 +123,7 @@ func (h *DisaggProfileHandler) Pick(ctx context.Context, cycleState *schedtypes.
 }
 
 // ProcessResults aggregates the profile run results and designates the primary profile.
-func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.CycleState, req *schedtypes.LLMRequest,
+func (h *DisaggProfileHandler) ProcessResults(_ context.Context, _ *schedtypes.CycleState, req *schedtypes.InferenceRequest,
 	profileResults map[string]*schedtypes.ProfileRunResult) (*schedtypes.SchedulingResult, error) {
 
 	if h.enforceDisagg && (req.Headers == nil || req.Headers[PrefillWorkerIDHeader] == "") {

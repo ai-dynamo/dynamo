@@ -86,7 +86,7 @@ func (s *DynPrefillScorer) Category() schedtypes.ScorerCategory {
 }
 
 // Score scores endpoints for prefill suitability.
-func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.LLMRequest, endpoints []schedtypes.Endpoint) map[schedtypes.Endpoint]float64 {
+func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.CycleState, req *schedtypes.InferenceRequest, endpoints []schedtypes.Endpoint) map[schedtypes.Endpoint]float64 {
 	logger := log.FromContext(ctx)
 
 	if !readPrefillEnabled(cycleState) {
