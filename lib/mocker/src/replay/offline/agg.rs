@@ -7,7 +7,8 @@ pub(super) use super::components::ReplayMode;
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
-    next_timestamp as choose_next_timestamp, pop_ready_worker_completion, push_worker_completion,
+    next_timestamp as choose_next_timestamp, pop_ready_worker_completion, pop_ready_worker_ready,
+    push_worker_completion, push_worker_ready,
 };
 #[cfg(test)]
 use super::state::AggRequestPhase;
@@ -313,12 +314,31 @@ impl AggRuntime {
         Ok(uuid)
     }
 
-    /// Return true once no workers, router queues, or admissions remain.
+    /// Return true once no events, workers, router queues, or admissions remain.
     fn is_done(&self) -> bool {
         self.events.is_empty()
             && self.cluster_in_flight() == 0
             && self.admission.is_drained()
             && self.engine.is_drained()
+    }
+
+    /// Return true once the request workload is complete, even if `WorkerReady`
+    /// events remain in the queue. Used by `advance_to` so the planner adapter
+    /// can terminate when there is no more work — lingering startup events for
+    /// workers that will never receive requests should not block completion.
+    fn is_workload_done(&self) -> bool {
+        self.cluster_in_flight() == 0
+            && self.admission.is_drained()
+            && self.engine.is_drained()
+            && self.only_worker_ready_events_remain()
+    }
+
+    /// True if the event heap is empty or contains only `WorkerReady` events.
+    fn only_worker_ready_events_remain(&self) -> bool {
+        use super::events::SimulationEventKind;
+        self.events
+            .iter()
+            .all(|e| matches!(e.kind, SimulationEventKind::WorkerReady { .. }))
     }
 
     /// Pick the next logical timestamp from either arrivals or scheduled worker completions.
@@ -496,10 +516,32 @@ impl AggRuntime {
         Ok(())
     }
 
+    /// Activate workers whose startup period has elapsed at the current timestamp.
+    fn apply_worker_ready_events(&mut self) -> anyhow::Result<bool> {
+        let mut changed = false;
+        while let Some((stage, worker_id)) = pop_ready_worker_ready(&mut self.events, self.now_ms) {
+            debug_assert_eq!(stage, SimulationWorkerStage::Aggregated);
+            if self.engine.mark_worker_ready(worker_id) {
+                if let Some(router) = self.router.as_mut() {
+                    router.add_worker(worker_id)?;
+                    // Drain any requests that were queued while all workers
+                    // were busy — the new worker may have capacity for them.
+                    let effects = router.try_drain_pending(self.now_ms)?;
+                    self.dispatch_router_admissions(effects.admissions)?;
+                }
+                changed = true;
+            }
+            // If mark_worker_ready returned false the worker was cancelled
+            // during startup (scale-down) — the stale event is silently ignored.
+        }
+        Ok(changed)
+    }
+
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> anyhow::Result<()> {
         loop {
             let mut changed = self.apply_worker_completions()?;
+            changed |= self.apply_worker_ready_events()?;
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_ready_workers()?;
 
@@ -516,7 +558,8 @@ impl AggRuntime {
     // ------------------------------------------------------------------
 
     /// Advance the simulation up to `until_ms` simulated time, then pause.
-    /// Returns `true` if the replay is done (no more work).
+    /// Returns `true` if the request workload is done — pending `WorkerReady`
+    /// events do not block completion since there is no work for those workers.
     pub(in crate::replay) fn advance_to(&mut self, until_ms: f64) -> anyhow::Result<bool> {
         self.drain_current_timestamp()?;
 
@@ -536,7 +579,7 @@ impl AggRuntime {
             self.drain_current_timestamp()?;
         }
 
-        Ok(self.is_done())
+        Ok(self.is_workload_done())
     }
 
     /// Current simulated time in milliseconds.
@@ -565,19 +608,42 @@ impl AggRuntime {
     }
 
     /// Apply a scaling decision: set the target number of workers.
-    /// Scale-up is immediate; scale-down removes the worker from the router
-    /// immediately (so no new requests land on it) and lets it drain in-flight
-    /// work in the engine.
+    ///
+    /// Scale-up: if `startup_time` is configured, new workers enter a startup
+    /// phase and a `WorkerReady` event is scheduled.  They become active (and
+    /// are registered with the router) only when that event fires.  Without
+    /// `startup_time`, workers are available immediately.
+    ///
+    /// Scale-down: the worker is removed from the router immediately (so no
+    /// new requests land on it) and drains in-flight work in the engine.
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
         let (added, newly_marked) = self.engine.apply_target_count(target_workers);
         #[cfg(test)]
         if let Some(new_len) = added.iter().max().map(|id| id + 1) {
             self.worker_active_requests.resize(new_len, Vec::new());
         }
-        let admissions = if let Some(router) = self.router.as_mut() {
-            for id in added {
-                router.add_worker(id)?;
+        let startup_delay_ms = self.engine.startup_time_ms();
+
+        for &id in &added {
+            match startup_delay_ms {
+                Some(delay) => {
+                    push_worker_ready(
+                        &mut self.events,
+                        &mut self.next_event_seq,
+                        self.now_ms + delay,
+                        SimulationWorkerStage::Aggregated,
+                        id,
+                    );
+                }
+                None => {
+                    if let Some(router) = self.router.as_mut() {
+                        router.add_worker(id)?;
+                    }
+                }
             }
+        }
+
+        let admissions = if let Some(router) = self.router.as_mut() {
             for id in newly_marked {
                 router.remove_worker(id)?;
             }
@@ -1829,5 +1895,156 @@ mod tests {
                 single.snapshot(Uuid::from_u128(uuid))
             );
         }
+    }
+
+    // ---- startup delay tests ----
+
+    fn startup_args(startup_time_s: f64) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(64)
+            .num_gpu_blocks(256)
+            .max_num_batched_tokens(Some(8192))
+            .max_num_seqs(Some(8))
+            .enable_prefix_caching(true)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1000.0)
+            .startup_time(Some(startup_time_s))
+            .build()
+            .unwrap()
+    }
+
+    fn simple_requests(n: usize, arrival_interval_ms: f64) -> VecDeque<DirectRequest> {
+        (0..n)
+            .map(|i| DirectRequest {
+                tokens: vec![1; 64],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(i as u128 + 1)),
+                dp_rank: 0,
+                arrival_timestamp_ms: Some(i as f64 * arrival_interval_ms),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_apply_scaling_with_startup_delay_defers_activation() {
+        // Use enough requests spread over a long enough window that the
+        // workload is still in-flight when the startup delay elapses.
+        let args = startup_args(5.0); // 5-second startup delay
+        let requests = simple_requests(20, 1000.0); // arrivals at 0, 1s, 2s, ... 19s
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        // Advance to t=500ms — first request dispatched to worker 0.
+        rt.advance_to(500.0).unwrap();
+        assert_eq!(rt.active_worker_count(), 1);
+        assert_eq!(rt.total_worker_count(), 1);
+
+        // Scale up to 2 workers. The WorkerReady event is scheduled at
+        // now_ms + 5000ms.
+        rt.apply_scaling(2).unwrap();
+        let scale_time = rt.now_ms();
+        let expected_ready_ms = scale_time + 5000.0;
+        assert_eq!(rt.active_worker_count(), 1); // new worker still starting
+        assert_eq!(rt.total_worker_count(), 2);
+
+        // Advance to just before the worker is ready.
+        rt.advance_to(expected_ready_ms - 1.0).unwrap();
+        assert_eq!(rt.active_worker_count(), 1); // still starting
+
+        // Advance past the startup time.
+        rt.advance_to(expected_ready_ms).unwrap();
+        assert_eq!(rt.active_worker_count(), 2); // now active
+        assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn test_apply_scaling_without_startup_is_immediate() {
+        let args = fast_router_args(); // no startup_time
+        let requests = simple_requests(4, 100.0);
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        rt.advance_to(50.0).unwrap();
+        rt.apply_scaling(2).unwrap();
+        // Without startup delay, new worker is immediately active.
+        assert_eq!(rt.active_worker_count(), 2);
+        assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn test_startup_cancel_ignores_stale_event() {
+        let args = startup_args(5.0);
+        let requests = simple_requests(20, 1000.0); // long enough to span startup
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        // Scale up to 4 (2 new workers starting).
+        rt.apply_scaling(4).unwrap();
+        assert_eq!(rt.active_worker_count(), 2);
+        assert_eq!(rt.total_worker_count(), 4);
+
+        // Immediately scale back to 2 — should cancel both startup workers.
+        rt.apply_scaling(2).unwrap();
+        assert_eq!(rt.active_worker_count(), 2);
+        assert_eq!(rt.total_worker_count(), 2);
+
+        // Advance past the original startup time. No crash, counts unchanged.
+        rt.advance_to(6000.0).unwrap();
+        assert_eq!(rt.active_worker_count(), 2);
+        assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn test_advance_to_reports_done_when_workload_finishes_before_startup() {
+        // Short trace (4 requests at 0-300ms) with a long startup delay.
+        // The workload finishes well before the startup delay elapses.
+        let args = startup_args(30.0); // 30s startup
+        let requests = simple_requests(4, 100.0); // all done by ~400ms
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        // Scale up before requests arrive.
+        rt.apply_scaling(2).unwrap();
+        assert_eq!(rt.active_worker_count(), 1);
+
+        // Advance well past all request completions but before startup.
+        let done = rt.advance_to(10_000.0).unwrap();
+        // Workload is done even though the WorkerReady event is at ~30000ms.
+        assert!(
+            done,
+            "advance_to should report done when workload is complete"
+        );
     }
 }

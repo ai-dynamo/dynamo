@@ -305,6 +305,19 @@ impl OfflineReplayRouter {
         })
     }
 
+    /// Drain queued requests that can now be admitted (e.g. after a new worker
+    /// becomes available).
+    pub(crate) fn try_drain_pending(&mut self, now_ms: f64) -> Result<RouterEffects> {
+        let decay_now = self.decay_now(now_ms);
+        Ok(RouterEffects {
+            admissions: self
+                .drain_pending(decay_now)?
+                .into_iter()
+                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
+                .collect(),
+        })
+    }
+
     pub(crate) fn pending_count(&self) -> usize {
         self.pending.len()
     }

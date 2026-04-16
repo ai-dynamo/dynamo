@@ -108,6 +108,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_embeddings_models().is_empty()
     } else if model_type == ModelType::Images {
         manager.list_images_models().is_empty()
+    } else if model_type == ModelType::Audios {
+        manager.list_audios_models().is_empty()
     } else if model_type == ModelType::Videos {
         manager.list_videos_models().is_empty()
     } else if model_type == ModelType::TensorBased {
@@ -1059,6 +1061,7 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Completions));
         assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
         assert!(is_model_type_list_empty(&mm, ModelType::Images));
+        assert!(is_model_type_list_empty(&mm, ModelType::Audios));
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
@@ -1076,6 +1079,7 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Completions));
         assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
         assert!(is_model_type_list_empty(&mm, ModelType::Images));
+        assert!(is_model_type_list_empty(&mm, ModelType::Audios));
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
     }
