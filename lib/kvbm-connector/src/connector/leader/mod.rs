@@ -6,7 +6,7 @@ mod request;
 mod slot;
 
 use super::worker::ConnectorWorkerClient;
-use crate::{BlockId, G2, InstanceId, KvbmRuntime};
+use crate::{BlockId, G1, G2, InstanceId, KvbmRuntime};
 use kvbm_config::OnboardMode;
 use kvbm_engine::leader::InstanceLeader;
 use kvbm_engine::leader::{
@@ -15,7 +15,8 @@ use kvbm_engine::leader::{
 use kvbm_engine::offload::OffloadEngine;
 use kvbm_engine::worker::SerializedLayout;
 use kvbm_engine::worker::VeloWorkerClient;
-use kvbm_logical::blocks::ImmutableBlock;
+use kvbm_logical::blocks::{BlockRegistry, ImmutableBlock};
+use kvbm_logical::manager::BlockManager;
 use kvbm_observability::CacheStatsTracker;
 
 use anyhow::{Result, anyhow, bail};
@@ -59,6 +60,15 @@ pub struct ConnectorLeader {
 
     forward_pass_samples: Mutex<Option<ForwardPassSample>>,
     cache_stats: CacheStatsTracker,
+
+    /// Shared block registry, set during initialize_async alongside G2/G3.
+    /// Stored here (not only on InstanceLeader) because InstanceLeader: Clone
+    /// and OnceLock is not Clone.
+    shared_registry: OnceLock<BlockRegistry>,
+
+    /// Lazily-constructed G1 logical block manager sharing `shared_registry`.
+    /// Built on first call to `ensure_g1_block_manager`.
+    g1_manager: OnceLock<Arc<BlockManager<G1>>>,
 }
 
 #[derive(Default, Clone)]
@@ -116,6 +126,8 @@ impl ConnectorLeader {
             control_server_shutdown: OnceLock::new(),
             pending_intra_pass_g2_blocks: Mutex::new(Vec::new()),
             forward_pass_samples: Mutex::new(None),
+            shared_registry: OnceLock::new(),
+            g1_manager: OnceLock::new(),
         }
     }
 
@@ -149,6 +161,34 @@ impl ConnectorLeader {
     /// Returns `None` if `initialize_async()` has not been called.
     pub fn offload_engine(&self) -> Option<&OffloadEngine> {
         self.offload_engine.get()
+    }
+
+    /// Build or retrieve a `BlockManager<G1>` sharing the registry with G2/G3.
+    ///
+    /// Idempotent — repeat calls return the same `Arc`. Requires
+    /// `initialize_async` to have completed (so `shared_registry` is populated).
+    pub fn ensure_g1_block_manager(
+        &self,
+        block_count: usize,
+        block_size: usize,
+    ) -> Result<Arc<BlockManager<G1>>> {
+        if let Some(existing) = self.g1_manager.get() {
+            return Ok(existing.clone());
+        }
+        let registry = self
+            .shared_registry
+            .get()
+            .ok_or_else(|| anyhow!("ConnectorLeader not yet initialized — call initialize_workers first"))?;
+        let manager = Arc::new(
+            BlockManager::<G1>::builder()
+                .block_count(block_count)
+                .block_size(block_size)
+                .registry(registry.clone())
+                .with_lineage_backend()
+                .build()?,
+        );
+        let _ = self.g1_manager.set(manager.clone());
+        Ok(self.g1_manager.get().unwrap().clone())
     }
 
     /// Check if a slot exists for the given request ID.

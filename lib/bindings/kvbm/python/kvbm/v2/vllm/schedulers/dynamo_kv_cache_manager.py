@@ -73,6 +73,8 @@ def make_kvbm_cache_manager_scheduler(
         log_stats=log_stats,
     )
 
+    connector_leader = _find_kvbm_connector_leader(scheduler)
+
     # Pull the already-constructed manager's constructor-relevant
     # settings off the vllm config / the stock cache manager vLLM
     # just built — that way we mirror whatever vLLM decided about
@@ -89,9 +91,28 @@ def make_kvbm_cache_manager_scheduler(
             stock_manager, "enable_kv_cache_events", False
         ),
         dcp_world_size=getattr(stock_manager, "dcp_world_size", 1),
+        connector_leader=connector_leader,
     )
     scheduler.kv_cache_manager = rust_manager
     return scheduler
+
+
+def _find_kvbm_connector_leader(scheduler: "Scheduler"):
+    """Walk the scheduler's connector to find the kvbm PyConnectorLeader.
+
+    Returns the PyConnectorLeader handle if found, or None.
+    """
+    connector = getattr(scheduler, "connector", None)
+    if connector is None:
+        return None
+    candidates = [connector] if not isinstance(connector, list) else connector
+    for c in candidates:
+        sched_leader = getattr(c, "_scheduler", None)
+        if sched_leader is not None:
+            leader = getattr(sched_leader, "leader", None)
+            if leader is not None:
+                return leader
+    return None
 
 
 __all__ = ["make_kvbm_cache_manager_scheduler"]

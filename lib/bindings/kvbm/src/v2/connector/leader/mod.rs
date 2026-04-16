@@ -18,6 +18,7 @@ use kvbm_connector::{BlockId, InstanceId, WorkerAddress};
 
 use crate::to_pyerr;
 use crate::v2::runtime::PyKvbmRuntime;
+use crate::v2::vllm::PyG1BlockManagerHandle;
 
 mod request;
 pub use request::PyRequest;
@@ -224,5 +225,20 @@ impl PyConnectorLeader {
     pub fn initialize_workers(&self) -> PyResult<()> {
         self.inner.initialize().map_err(to_pyerr)?;
         Ok(())
+    }
+
+    /// Build or retrieve a G1 BlockManager sharing the connector's block registry.
+    ///
+    /// Must be called after `initialize_workers()`.
+    pub fn ensure_g1_block_manager(
+        &self,
+        block_count: usize,
+        block_size: usize,
+    ) -> PyResult<PyG1BlockManagerHandle> {
+        let manager = self
+            .inner
+            .ensure_g1_block_manager(block_count, block_size)
+            .map_err(to_pyerr)?;
+        Ok(PyG1BlockManagerHandle::new(manager))
     }
 }

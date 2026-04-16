@@ -49,7 +49,7 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyList, PyType};
 
 use dynamo_tokens::Token;
 
@@ -61,6 +61,7 @@ use kvbm_logical::manager::{
 use kvbm_logical::{BlockId, ImmutableBlock, RequestSequence};
 
 use crate::to_pyerr;
+use super::block_manager_handle::PyG1BlockManagerHandle;
 
 /// A single request's view of the KV cache.
 ///
@@ -193,6 +194,50 @@ impl PyRustKvCacheManager {
 
         Ok(Self {
             block_manager: Arc::new(manager),
+            block_size,
+            enable_caching,
+            log_stats,
+            _reserved_zero: reserved,
+            slots: Mutex::new(HashMap::new()),
+            pinned_cache_hits: Mutex::new(HashMap::new()),
+            prefix_cache_hits: AtomicU64::new(0),
+            prefix_cache_queries: AtomicU64::new(0),
+        })
+    }
+
+    /// Construct from a pre-existing `BlockManager<G1>` (shared registry).
+    ///
+    /// This is the preferred constructor when a `ConnectorLeader` is present —
+    /// the G1 manager shares the same `BlockRegistry` as G2/G3.
+    #[classmethod]
+    #[pyo3(name = "from_g1_handle")]
+    pub fn from_g1_handle(
+        _cls: &Bound<'_, PyType>,
+        handle: &PyG1BlockManagerHandle,
+        enable_caching: bool,
+        log_stats: bool,
+    ) -> PyResult<Self> {
+        let manager = handle.inner.clone();
+        let block_size = manager.block_size();
+
+        // Pin block id 0 — same invariant as the `new` constructor.
+        let mut seed = manager
+            .allocate_blocks(1)
+            .ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "failed to allocate sentinel block from shared G1 manager",
+                )
+            })?;
+        let reserved = seed.pop().expect("allocate_blocks(1) returned empty Vec");
+        assert_eq!(
+            reserved.block_id(),
+            0,
+            "shared BlockManager<G1> did not allocate block id 0 as the first block; \
+             cannot enforce vLLM sentinel reservation"
+        );
+
+        Ok(Self {
+            block_manager: manager,
             block_size,
             enable_caching,
             log_stats,

@@ -72,6 +72,7 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
+        connector_leader: Any = None,
     ) -> None:
         # Enforce the kvbm.v2 vLLM version policy lazily, the same way
         # ``kvbm.v2.vllm.config`` does — this module is the gateway
@@ -116,14 +117,21 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         self._enable_caching = bool(enable_caching)
         self._log_stats = bool(log_stats)
         self._block_size = block_size
+        self._total_blocks = total_blocks
         self._num_kv_cache_groups = num_groups
 
-        self._core = _RustKvCacheManagerCore(
-            total_blocks=total_blocks,
-            block_size=block_size,
-            enable_caching=self._enable_caching,
-            log_stats=self._log_stats,
-        )
+        # When a connector leader is provided, defer core construction
+        # until first use so that initialize_workers() has time to run.
+        self._connector_leader = connector_leader
+        if connector_leader is not None:
+            self._core = None
+        else:
+            self._core = _RustKvCacheManagerCore(
+                total_blocks=total_blocks,
+                block_size=block_size,
+                enable_caching=self._enable_caching,
+                log_stats=self._log_stats,
+            )
 
         # Pre-built empty KVCacheBlocks, returned by `get_computed_blocks`
         # (and used by vLLM's scheduler as a shortcut in the
@@ -135,11 +143,35 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         )
 
     # ------------------------------------------------------------------
+    # Lazy initialization
+    # ------------------------------------------------------------------
+
+    def _ensure_core(self) -> None:
+        """Lazily construct the Rust core when a connector leader is present."""
+        if self._core is not None:
+            return
+        if self._connector_leader is not None:
+            handle = self._connector_leader.ensure_g1_block_manager(
+                self._total_blocks, self._block_size
+            )
+            self._core = _RustKvCacheManagerCore.from_g1_handle(
+                handle, self._enable_caching, self._log_stats
+            )
+        else:
+            self._core = _RustKvCacheManagerCore(
+                total_blocks=self._total_blocks,
+                block_size=self._block_size,
+                enable_caching=self._enable_caching,
+                log_stats=self._log_stats,
+            )
+
+    # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
 
     @property
     def usage(self) -> float:
+        self._ensure_core()
         return float(self._core.usage())
 
     # ------------------------------------------------------------------
@@ -149,6 +181,7 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
     def make_prefix_cache_stats(self) -> "PrefixCacheStats | None":
         if not self._log_stats:
             return None
+        self._ensure_core()
         from vllm.v1.metrics.stats import PrefixCacheStats
 
         hits, queries = self._core.take_prefix_cache_stats()
@@ -223,9 +256,11 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         return self._wrap_block_ids(new_block_ids)
 
     def free(self, request: "Request") -> None:
+        self._ensure_core()
         self._core.free(request.request_id)
 
     def reset_prefix_cache(self) -> bool:
+        self._ensure_core()
         return bool(self._core.reset_prefix_cache())
 
     def get_num_common_prefix_blocks(
@@ -244,16 +279,20 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
         # implementation for details. Returned as a list with one
         # entry per kv cache group (kvbm currently supports exactly
         # one group).
+        self._ensure_core()
         count = int(self._core.get_num_common_prefix_blocks(running_request_id))
         return [count] * self._num_kv_cache_groups
 
     def take_events(self) -> "list[KVCacheEvent]":
+        self._ensure_core()
         return list(self._core.take_events())
 
     def get_blocks(self, request_id: str) -> "KVCacheBlocks":
+        self._ensure_core()
         return self._wrap_block_ids(self._core.get_block_ids(request_id))
 
     def get_block_ids(self, request_id: str) -> "tuple[list[int], ...]":
+        self._ensure_core()
         ids = list(self._core.get_block_ids(request_id))
         # vLLM returns one list per kv cache group. We only support one.
         return (ids,)
@@ -261,6 +300,7 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
     def cache_blocks(
         self, request: "Request", num_computed_tokens: int
     ) -> None:
+        self._ensure_core()
         self._core.cache_blocks(request.request_id, int(num_computed_tokens))
 
     def create_kv_cache_blocks(
@@ -277,6 +317,7 @@ class RustKvCacheManager(VllmKvCacheManagerProtocol):
     def _ensure_slot(self, request: "Request") -> None:
         """Create a Rust-side slot for this request if we haven't seen
         it before. Idempotent."""
+        self._ensure_core()
         if self._core.has_slot(request.request_id):
             return
         salt_hash = 0  # v1 computes this from lora + cache salt; TODO
