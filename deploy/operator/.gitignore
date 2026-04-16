@@ -39,5 +39,3 @@ tilt-settings.local.yaml
 tilt-settings.yaml
 
 !env*
-
-_grove-api/

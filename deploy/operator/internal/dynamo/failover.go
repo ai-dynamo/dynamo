@@ -294,7 +294,7 @@ func gmsResourceClaimTemplateConfigs(serviceName string, resources *v1alpha1.Res
 // gmsResourceSharingEntries builds one PCSG-level ResourceSharingSpec per rank.
 // Each entry uses PerReplica scope and a filter listing only the GMS clique
 // and the engine clique for that rank, ensuring GPU isolation between ranks.
-func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev1alpha1.ResourceSharingSpec {
+func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev1alpha1.PCSGResourceSharingSpec {
 	type rankGroup struct {
 		cliqueNames []string
 	}
@@ -311,13 +311,15 @@ func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev
 		g.cliqueNames = append(g.cliqueNames, strings.ToLower(r.Name))
 	}
 
-	refs := make([]grovev1alpha1.ResourceSharingSpec, 0, len(groups))
+	refs := make([]grovev1alpha1.PCSGResourceSharingSpec, 0, len(groups))
 	for _, rank := range rankOrder {
 		g := groups[rank]
-		refs = append(refs, grovev1alpha1.ResourceSharingSpec{
-			Name:  gmsRCTName(serviceName, rank),
-			Scope: grovev1alpha1.ResourceSharingScopePerReplica,
-			Filter: &grovev1alpha1.ResourceSharingFilter{
+		refs = append(refs, grovev1alpha1.PCSGResourceSharingSpec{
+			ResourceSharingSpec: grovev1alpha1.ResourceSharingSpec{
+				Name:  gmsRCTName(serviceName, rank),
+				Scope: grovev1alpha1.ResourceSharingScopePerReplica,
+			},
+			Filter: &grovev1alpha1.PCSGResourceSharingFilter{
 				ChildCliqueNames: g.cliqueNames,
 			},
 		})
