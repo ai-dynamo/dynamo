@@ -3,7 +3,6 @@
 
 import argparse
 import asyncio
-import json
 import logging
 import os
 import tempfile
@@ -660,12 +659,10 @@ async def register_vllm_model(
 
     # Propagate stream_interval so the frontend can respect --stream-interval.
     # set_engine_specific requires a JSON-encoded string (the Rust binding
-    # parses it with serde_json::from_str).
+    # parses it with serde_json::from_str); str(int) happens to be valid JSON.
     stream_interval = getattr(config.engine_args, "stream_interval", None)
     if stream_interval is not None:
-        runtime_config.set_engine_specific(
-            "stream_interval", json.dumps(stream_interval)
-        )
+        runtime_config.set_engine_specific("stream_interval", str(stream_interval))
 
     # Get data_parallel_size from vllm_config (defaults to 1)
     dp_range = get_dp_range_for_worker(vllm_config)
