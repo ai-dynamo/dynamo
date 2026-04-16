@@ -25,6 +25,10 @@ pub(crate) enum SimulationEventKind {
     DecodeHandoff {
         uuid: Uuid,
     },
+    WorkerReady {
+        stage: SimulationWorkerStage,
+        worker_id: usize,
+    },
 }
 
 #[derive(Debug)]

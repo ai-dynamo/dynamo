@@ -210,10 +210,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 ) error {
 	logger := log.FromContext(ctx)
 
-	// Get or create rollingUpdate status
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 
-	// Compute hash information
 	newWorkerHash := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	prevWorkerHash := r.getCurrentWorkerHash(dgd)
 
@@ -247,25 +245,21 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		logger.Info("Detected stuck rolling update: hashes match but phase is InProgress",
 			"hash", newWorkerHash,
 			"phase", rollingUpdateStatus.Phase)
-		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
 	}
 
 	switch rollingUpdateStatus.Phase {
 	case nvidiacomv1alpha1.RollingUpdatePhaseNone:
-		return r.startRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.startRollingUpdate(ctx, dgd, newWorkerHash)
 
 	case nvidiacomv1alpha1.RollingUpdatePhasePending:
 		rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseInProgress
-		if err := r.Status().Update(ctx, dgd); err != nil {
-			return fmt.Errorf("failed to update rolling update status to InProgress: %w", err)
-		}
-		return nil
+		return nil // deferred function in Reconcile() persists status
 
 	case nvidiacomv1alpha1.RollingUpdatePhaseInProgress:
-		return r.continueRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.continueRollingUpdate(ctx, dgd, newWorkerHash)
 
 	case nvidiacomv1alpha1.RollingUpdatePhaseCompleted:
-		// Cleanup is now done atomically in completeRollingUpdate, nothing to do here
 		logger.Info("Rolling update already completed")
 		return nil
 	}
@@ -277,7 +271,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -289,6 +282,7 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 		"newHash", newWorkerHash)
 
 	now := metav1.Now()
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhasePending
 	rollingUpdateStatus.StartTime = &now
 	rollingUpdateStatus.UpdatedServices = nil
@@ -296,18 +290,13 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
 		"Starting rolling update from worker hash %s to %s", prevWorkerHash, newWorkerHash)
 
-	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to initialize rolling update status: %w", err)
-	}
-
-	return nil
+	return nil // deferred function in Reconcile() persists status
 }
 
 // continueRollingUpdate handles the in-progress phase of a rolling update.
 func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
@@ -355,6 +344,7 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		}
 	}
 	sort.Strings(updatedServices)
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	rollingUpdateStatus.UpdatedServices = updatedServices
 
 	// Count total worker services
@@ -367,15 +357,10 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 
 	// Rolling update is complete when every worker service is individually updated
 	if len(updatedServices) == totalWorkerServices && totalWorkerServices > 0 {
-		return r.completeRollingUpdate(ctx, dgd, rollingUpdateStatus, newWorkerHash)
+		return r.completeRollingUpdate(ctx, dgd, newWorkerHash)
 	}
 
-	// Persist updated services list mid-rolling update
-	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update rolling update status with updated services: %w", err)
-	}
-
-	return nil
+	return nil // deferred function in Reconcile() persists UpdatedServices
 }
 
 // completeRollingUpdate marks the rolling update as completed, cleans up old resources, and updates status.
@@ -383,22 +368,21 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	rollingUpdateStatus *nvidiacomv1alpha1.RollingUpdateStatus,
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
 
 	// Delete all non-current worker DCDs (any number of old generations)
 	if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
-		logger.Error(err, "Failed to delete non-current worker DCDs", "newWorkerHash", newWorkerHash)
-		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "CleanupPartialFailure",
-			"Failed to delete some old worker DCDs: %v", err)
-		// Continue anyway - we don't want cleanup failures to block the rolling update completion
-	} else {
-		logger.Info("Old resources cleaned up", "newWorkerHash", newWorkerHash)
+		return fmt.Errorf("failed to delete old worker DCDs: %w", err)
 	}
 
-	// Update rolling update status to Completed
+	r.setCurrentWorkerHash(dgd, newWorkerHash)
+	if err := r.Update(ctx, dgd); err != nil {
+		return fmt.Errorf("failed to update current worker hash: %w", err)
+	}
+
+	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 	rollingUpdateStatus.Phase = nvidiacomv1alpha1.RollingUpdatePhaseCompleted
 	now := metav1.Now()
 	rollingUpdateStatus.EndTime = &now
@@ -415,16 +399,6 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
 		"Rolling update completed, worker hash %s", newWorkerHash)
-
-	if err := r.Status().Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update rolling update status: %w", err)
-	}
-
-	// Update the current worker hash to the new hash
-	r.setCurrentWorkerHash(dgd, newWorkerHash)
-	if err := r.Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update current worker hash: %w", err)
-	}
 
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
