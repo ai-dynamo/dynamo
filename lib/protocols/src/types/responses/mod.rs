@@ -55,11 +55,25 @@ pub type ResponseStream = std::pin::Pin<
 // Input-side assistant message (relaxed vs upstream OutputMessage)
 // ---------------------------------------------------------------------------
 
+/// Deserialize `null` or a missing field as the default empty `Vec`. Plain
+/// `#[serde(default)]` only fires when the field is absent; explicit `null`
+/// would otherwise fail `Vec::deserialize`. Clients (notably some Agents SDK
+/// variants) have been observed to send `"annotations": null`, so treat
+/// omission and explicit null the same.
+fn deserialize_null_as_empty_vec<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
 /// Relaxed counterpart to upstream `OutputTextContent` for input-side content.
-/// `annotations` defaults to the empty vec; upstream requires it.
+/// `annotations` tolerates both missing and explicit `null`; upstream requires
+/// it to be a present non-null array.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct InputOutputTextContent {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
     pub annotations: Vec<Annotation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<Vec<LogProb>>,
@@ -301,6 +315,45 @@ mod tests {
                 assert!(t.annotations.is_empty());
             }
             _ => panic!("expected OutputText"),
+        }
+    }
+
+    #[test]
+    fn output_text_with_explicit_null_annotations_deserializes_as_empty() {
+        // Some clients serialize absent fields as JSON null instead of omitting
+        // them. `Vec::deserialize` would reject null; the custom deserializer
+        // treats explicit null identically to a missing field.
+        let json = serde_json::json!({"type": "output_text", "text": "hi", "annotations": null});
+        let part: InputOutputMessageContent = serde_json::from_value(json).unwrap();
+        match part {
+            InputOutputMessageContent::OutputText(t) => {
+                assert!(t.annotations.is_empty());
+            }
+            _ => panic!("expected OutputText"),
+        }
+    }
+
+    #[test]
+    fn assistant_message_with_explicit_null_id_and_status_deserializes() {
+        // `Option<T>` natively accepts null as `None`, so these explicit-null
+        // fields should flow through without a custom deserializer. This test
+        // pins that behavior against accidental regressions (e.g. if someone
+        // switches the field type away from `Option<_>`).
+        let json = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "id": null,
+            "status": null,
+            "content": [{"type": "output_text", "text": "hi", "annotations": null}]
+        });
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        match item {
+            InputItem::Item(Item::Message(MessageItem::Output(out))) => {
+                assert!(out.id.is_none());
+                assert!(out.status.is_none());
+                assert_eq!(out.content.len(), 1);
+            }
+            other => panic!("expected Item::Message(Output), got {other:?}"),
         }
     }
 
