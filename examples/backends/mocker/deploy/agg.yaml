@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# NOTE: There is no dedicated `mocker-runtime` image. The mocker component
+# (`python3 -m dynamo.mocker`) is bundled into the standard Dynamo backend
+# runtime images published on NGC (e.g. `nvcr.io/nvidia/ai-dynamo/vllm-runtime`,
+# `sglang-runtime`, `tensorrtllm-runtime`). Replace `my-registry/vllm-runtime:my-tag`
+# below with any of those tags, or with your own built image.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -12,7 +17,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/mocker-runtime:my-tag
+          image: my-registry/vllm-runtime:my-tag
     decode:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -20,7 +25,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/mocker-runtime:my-tag
+          image: my-registry/vllm-runtime:my-tag
           workingDir: /workspace
           command:
           - python3
