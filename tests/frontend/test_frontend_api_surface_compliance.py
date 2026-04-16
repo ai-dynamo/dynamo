@@ -136,9 +136,8 @@ def test_frontend_api_surface_compliance(
     marker_filename = "dynamo_compliance_marker.txt"
     (agent_cwd / marker_filename).write_text("compliance-smoke")
 
-    # Isolated HOME so `claude --bare` doesn't touch the runner's ~/.claude
-    # state; `--bare` already skips auto-memory / hooks / CLAUDE.md discovery
-    # but still writes to $HOME/.claude for session state.
+    # Isolated HOME so claude doesn't write session state into the runner's
+    # ~/.claude during CI / local invocation.
     claude_home = tmp_path / "claude_home"
     claude_home.mkdir()
 
@@ -303,9 +302,10 @@ def _run_claude_exec_smoke(
     appear in stdout and the assertion fails — which proves the full
     Anthropic Messages + tool-calling chain, not just text generation.
 
-    `--bare` skips auto-memory / hooks / CLAUDE.md auto-discovery; the
-    isolated HOME dir prevents claude from writing session state into
-    the runner's `~/.claude`.
+    Isolated HOME so claude doesn't write session state into the runner's
+    `~/.claude`. An `ANTHROPIC_AUTH_TOKEN` is required even though Dynamo
+    ignores the value: on a fresh HOME with no cached OAuth, the CLI
+    aborts with "Not logged in" unless a bearer is supplied.
     """
     base_url = f"http://localhost:{frontend_port}"
     logger.info("Running claude exec smoke test against %s", base_url)
@@ -314,14 +314,12 @@ def _run_claude_exec_smoke(
         **os.environ,
         "HOME": str(claude_home),
         "ANTHROPIC_BASE_URL": base_url,
-        # claude refuses to start without a token; Dynamo ignores the value.
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
     }
 
     result = subprocess.run(
         [
             "claude",
-            "--bare",
             "--model",
             COMPLIANCE_MODEL,
             "--dangerously-skip-permissions",
