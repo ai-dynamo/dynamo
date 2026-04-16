@@ -78,6 +78,9 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
     secrets: inherit
 
   vllm-dev-build:
@@ -89,8 +92,11 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      push_image: false
+      push_image: true
       build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-dev' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-dev-{0}', github.sha) || '' }}
     secrets: inherit
 
   vllm-efa-build:
@@ -119,6 +125,9 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
     secrets: inherit
 
   sglang-dev-build:
@@ -130,8 +139,11 @@ jobs:
       cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      push_image: false
+      push_image: true
       build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-dev' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-dev-{0}', github.sha) || '' }}
     secrets: inherit
 
   trtllm-build:
@@ -144,6 +156,9 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
     secrets: inherit
 
   trtllm-dev-build:
@@ -155,8 +170,11 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-      push_image: false
+      push_image: true
       build_timeout_minutes: 60
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-dev' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-dev-{0}', github.sha) || '' }}
     secrets: inherit
 
   trtllm-efa-build:
@@ -185,6 +203,9 @@ jobs:
       platform: 'linux/amd64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 45
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-dynamo-planner' || '' }}
+        ${{ github.ref_name == 'main' && format('main-dynamo-planner-{0}', github.sha) || '' }}
     secrets: inherit
 
   frontend-build:
@@ -197,6 +218,9 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 45
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-dynamo-frontend' || '' }}
+        ${{ github.ref_name == 'main' && format('main-dynamo-frontend-{0}', github.sha) || '' }}
     secrets: inherit
 
   # ============================================================================
@@ -312,7 +336,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)''
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -364,7 +388,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   sglang-compliance:
@@ -376,7 +400,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   trtllm-compliance:
@@ -388,7 +412,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   planner-compliance:
@@ -412,7 +436,7 @@ jobs:
       target: frontend
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
       cuda_version: '["12.9"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   # ============================================================================
