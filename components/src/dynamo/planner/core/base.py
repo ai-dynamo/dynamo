@@ -333,6 +333,73 @@ class NativePlannerBase:
         pass
 
     # ------------------------------------------------------------------
+    # Discovery backfill
+    # ------------------------------------------------------------------
+
+    def _populate_worker_info_from_discovery(self) -> None:
+        """Fill missing WorkerInfo fields from model cards observed by FPM subscribers.
+
+        The FPM subscriber extracts ``max_num_batched_tokens`` from each
+        worker's ``ModelDeploymentCard.runtime_config`` at discovery time
+        and resolves the **minimum** across all known workers so the
+        planner uses the most constrained capacity.
+
+        When the connector does not provide WorkerInfo fields like
+        max_num_batched_tokens (e.g. VirtualConnector), this method
+        backfills them from discovery.
+
+        If a value is successfully backfilled, the state machine's
+        capabilities are updated so that subsequent scaling decisions
+        see the new value.
+        """
+        changed = False
+        for subscriber, worker_info, label in [
+            (self._prefill_fpm_sub, self.prefill_worker_info, "prefill"),
+            (self._decode_fpm_sub, self.decode_worker_info, "decode"),
+        ]:
+            if subscriber is None:
+                continue
+            if worker_info.max_num_batched_tokens:
+                continue
+            changed |= self._backfill_from_subscriber(subscriber, worker_info, label)
+
+        if changed and self._state_machine is not None:
+            self._state_machine.update_capabilities(
+                build_worker_capabilities(
+                    self.config,
+                    self.prefill_worker_info,
+                    self.decode_worker_info,
+                )
+            )
+
+    def _backfill_from_subscriber(
+        self,
+        subscriber: FpmEventSubscriber,
+        worker_info: WorkerInfo,
+        label: str,
+    ) -> bool:
+        """Try to backfill max_num_batched_tokens from a subscriber.
+
+        The Rust subscriber resolves the minimum value across all known
+        workers, so the result is deterministic even for heterogeneous
+        registrations.
+
+        Returns True if a value was backfilled.
+        """
+        try:
+            val = subscriber.get_max_num_batched_tokens()
+        except RuntimeError:
+            return False
+
+        if val is not None and val > 0:
+            worker_info.max_num_batched_tokens = val
+            logger.info(
+                f"Populated {label} max_num_batched_tokens={val} from discovery"
+            )
+            return True
+        return False
+
+    # ------------------------------------------------------------------
     # Data collection (runtime I/O)
     # ------------------------------------------------------------------
 
@@ -679,6 +746,8 @@ class NativePlannerBase:
                 if now < next_tick.at_s:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue
+
+                self._populate_worker_info_from_discovery()
 
                 tick_input = await self._gather_tick_input(next_tick)
                 effects = self.state_machine.on_tick(next_tick, tick_input)

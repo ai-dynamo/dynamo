@@ -906,6 +906,21 @@ class FpmEventSubscriber:
         """
         ...
 
+    def get_max_num_batched_tokens(self) -> int | None:
+        """
+        Return the effective ``max_num_batched_tokens`` across all known workers.
+
+        The value is the **minimum** observed across workers so the planner
+        uses the most constrained capacity.
+
+        Raises RuntimeError if ``start_tracking()`` has not been called.
+
+        Returns:
+            The minimum ``max_num_batched_tokens``, or ``None`` if no worker
+            has reported one.
+        """
+        ...
+
     def shutdown(self) -> None:
         """Shut down the subscriber (all background tasks)."""
         ...
