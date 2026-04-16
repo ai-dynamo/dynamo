@@ -263,7 +263,6 @@ impl<
 
         request.respond(Ok(SchedulingResponse {
             best_worker: selection.worker,
-            overlap_blocks: selection.overlap_blocks,
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
         }));
@@ -411,7 +410,7 @@ mod tests {
     use tokio::sync::{Barrier, watch};
 
     use super::*;
-    use crate::protocols::{OverlapScores, WorkerSelectionResult, WorkerWithDpRank};
+    use crate::protocols::{WorkerSelectionResult, WorkerWithDpRank};
     use crate::scheduling::types::KvSchedulerError;
     use crate::sequences::ActiveSequencesMultiWorker;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -502,7 +501,6 @@ mod tests {
             Ok(WorkerSelectionResult {
                 worker,
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
-                overlap_blocks: request.overlaps.scores.get(&worker).copied().unwrap_or(0),
                 effective_overlap_blocks: request
                     .effective_overlap_blocks
                     .get(&worker)
@@ -641,10 +639,10 @@ mod tests {
             maybe_request_id: Some(request_id.to_string()),
             token_seq: None,
             isl_tokens,
-            overlaps: OverlapScores::default(),
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks: HashMap::new(),
             effective_cached_tokens: HashMap::new(),
+            tree_sizes: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,
@@ -1035,10 +1033,10 @@ mod tests {
             maybe_request_id: Some("filter-0".to_string()),
             token_seq: None,
             isl_tokens: isl,
-            overlaps: OverlapScores::default(),
             tier_overlap_blocks: Default::default(),
             effective_overlap_blocks: HashMap::new(),
             effective_cached_tokens: HashMap::new(),
+            tree_sizes: HashMap::new(),
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens: true,

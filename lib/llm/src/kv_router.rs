@@ -494,7 +494,13 @@ where
             .await?;
         let tier_overlap_blocks = tier_overlap_blocks_from_tiered_matches(&tiered_matches);
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
-        let overlap_scores = tiered_matches.device.overlap_scores.clone();
+        let tree_sizes: HashMap<_, _> = tiered_matches
+            .device
+            .overlap_scores
+            .tree_sizes
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
         let find_matches_elapsed = start.elapsed();
 
         let response = self
@@ -503,10 +509,10 @@ where
                 context_id.map(|s| s.to_string()),
                 isl_tokens,
                 maybe_seq_hashes,
-                overlap_scores,
                 tier_overlap_blocks,
                 cache_hit_estimates.effective_overlap_blocks,
                 cache_hit_estimates.cached_tokens,
+                tree_sizes,
                 router_config_override,
                 update_states,
                 lora_name,
@@ -775,12 +781,10 @@ where
             .track_prefill_tokens(router_config_override);
         let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
-        let overlap_scores = tiered_matches.device.overlap_scores;
 
         Ok(self.scheduler.get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
-            overlap_scores,
             cache_hit_estimates.cached_tokens,
             track_prefill_tokens,
         ))

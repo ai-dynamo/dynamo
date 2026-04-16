@@ -8,7 +8,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
-use crate::protocols::{DpRank, OverlapScores, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{DpRank, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
@@ -42,7 +42,6 @@ pub enum KvSchedulerError {
 #[derive(Debug)]
 pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
-    pub overlap_blocks: u32,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
 }
@@ -51,10 +50,12 @@ pub struct SchedulingRequest {
     pub maybe_request_id: Option<String>,
     pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
-    pub overlaps: OverlapScores,
     pub tier_overlap_blocks: TierOverlapBlocks,
     pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
     pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+    /// Per-worker tree size, used only for tie-breaking when multiple workers
+    /// produce the same logit at temperature=0.
+    pub tree_sizes: HashMap<WorkerWithDpRank, usize>,
     pub decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
     pub prefill_tokens: FxHashMap<WorkerWithDpRank, usize>,
     pub track_prefill_tokens: bool,
@@ -88,16 +89,6 @@ impl SchedulingRequest {
         Err(KvSchedulerError::PinnedWorkerNotAllowed {
             worker_id: pinned_worker.worker_id,
         })
-    }
-
-    /// Scheduling consumers use the exact pinned-worker overlap when present;
-    /// otherwise they use the best available overlap across eligible workers.
-    pub fn overlap_blocks(&self) -> u32 {
-        if let Some(worker) = self.pinned_worker {
-            return self.overlaps.scores.get(&worker).copied().unwrap_or(0);
-        }
-
-        self.overlaps.scores.values().copied().max().unwrap_or(0)
     }
 
     pub fn bypass_capacity_check(&self) -> bool {

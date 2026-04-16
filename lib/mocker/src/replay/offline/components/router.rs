@@ -146,10 +146,15 @@ impl PendingRequest {
             maybe_request_id: Some(self.request_id()),
             token_seq: self.token_seq.clone(),
             isl_tokens: self.isl_tokens,
-            overlaps: self.overlaps.clone(),
             tier_overlap_blocks: TierOverlapBlocks::default(),
             effective_overlap_blocks,
             effective_cached_tokens,
+            tree_sizes: self
+                .overlaps
+                .tree_sizes
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect(),
             decode_blocks,
             prefill_tokens,
             track_prefill_tokens: self.track_prefill_tokens,
@@ -536,7 +541,7 @@ impl OfflineReplayRouter {
         let request_id = request.request_id();
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selection.overlap_blocks,
+            selection.cached_tokens,
             request.track_prefill_tokens,
         );
 
@@ -599,14 +604,14 @@ impl OfflineReplayRouter {
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        overlap_blocks: u32,
+        cached_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
-        let prefix = (overlap_blocks as usize) * (self.block_size as usize);
+        let prefix = cached_tokens.min(isl_tokens);
         let effective_isl = isl_tokens.saturating_sub(prefix);
         if effective_isl == 0 {
             return None;

@@ -210,16 +210,21 @@ impl KvReplayRouter {
             BlockHashOptions::default(),
             None,
         );
+        let tree_sizes: std::collections::HashMap<_, _> = overlaps
+            .tree_sizes
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect();
         let response = self
             .scheduler
             .schedule(
                 Some(uuid.to_string()),
                 request.tokens.len(),
                 token_seq,
-                overlaps,
                 TierOverlapBlocks::default(),
                 effective_overlap_blocks,
                 effective_cached_tokens,
+                tree_sizes,
                 None,
                 true,
                 None,
@@ -267,12 +272,8 @@ impl KvReplayRouter {
         isl_tokens: usize,
         track_prefill_tokens: bool,
     ) -> Vec<dynamo_kv_router::PotentialLoad> {
-        self.scheduler.get_potential_loads(
-            None,
-            isl_tokens,
-            OverlapScores::default(),
-            track_prefill_tokens,
-        )
+        self.scheduler
+            .get_potential_loads(None, isl_tokens, std::collections::HashMap::new(), track_prefill_tokens)
     }
 }
 

@@ -17,7 +17,7 @@ use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
-use crate::protocols::{OverlapScores, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::{
     ActiveSequencesMultiWorker, SequenceError, SequencePublisher, SequenceRequest,
 };
@@ -174,10 +174,10 @@ where
         maybe_request_id: Option<String>,
         isl_tokens: usize,
         token_seq: Option<Vec<SequenceHash>>,
-        overlaps: OverlapScores,
         tier_overlap_blocks: TierOverlapBlocks,
         effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
         effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        tree_sizes: HashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&super::config::RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -194,10 +194,10 @@ where
             maybe_request_id,
             token_seq,
             isl_tokens,
-            overlaps,
             tier_overlap_blocks,
             effective_overlap_blocks,
             effective_cached_tokens,
+            tree_sizes,
             decode_blocks: FxHashMap::default(),
             prefill_tokens: FxHashMap::default(),
             track_prefill_tokens,
@@ -268,7 +268,6 @@ where
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
-        _overlaps: OverlapScores,
         effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
@@ -317,7 +316,7 @@ mod tests {
     use tokio::sync::{mpsc, watch};
 
     use super::*;
-    use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, OverlapScores};
+    use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
     use crate::scheduling::PrefillLoadEstimator;
     use crate::scheduling::policy::FcfsPolicy;
     use crate::scheduling::selector::DefaultWorkerSelector;
@@ -434,8 +433,8 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
+                HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
                 None,
@@ -475,8 +474,8 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
+                HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
                 Some(&crate::config::RouterConfigOverride {
@@ -522,10 +521,10 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
                 HashMap::from([(worker, 0.75)]),
                 HashMap::from([(worker, 48)]),
+                HashMap::new(),
                 None,
                 true,
                 None,
@@ -539,7 +538,7 @@ mod tests {
 
         assert_eq!(response.best_worker, worker);
         assert_eq!(response.cached_tokens, 48);
-        assert_eq!(response.overlap_blocks, 1);
+        assert_eq!(response.effective_overlap_blocks, 0.75);
         assert_eq!(
             slots.active_tokens(Instant::now()).get(&worker).copied(),
             Some(16),
@@ -567,8 +566,8 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
+                HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
                 None,
@@ -590,8 +589,8 @@ mod tests {
                         Some("req-2".to_string()),
                         64,
                         Some(vec![5, 6, 7, 8]),
-                        OverlapScores::default(),
                         TierOverlapBlocks::default(),
+                        HashMap::new(),
                         HashMap::new(),
                         HashMap::new(),
                         None,
@@ -634,8 +633,8 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
+                HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
                 None,
@@ -657,8 +656,8 @@ mod tests {
                         Some("req-2".to_string()),
                         64,
                         Some(vec![5, 6, 7, 8]),
-                        OverlapScores::default(),
                         TierOverlapBlocks::default(),
+                        HashMap::new(),
                         HashMap::new(),
                         HashMap::new(),
                         None,
@@ -715,8 +714,8 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
+                HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
                 None,
@@ -738,8 +737,8 @@ mod tests {
                         Some("req-2".to_string()),
                         64,
                         Some(vec![5, 6, 7, 8]),
-                        OverlapScores::default(),
                         TierOverlapBlocks::default(),
+                        HashMap::new(),
                         HashMap::new(),
                         HashMap::new(),
                         None,
@@ -795,8 +794,8 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
+                HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
                 None,
@@ -818,8 +817,8 @@ mod tests {
                         Some("req-2".to_string()),
                         64,
                         Some(vec![5, 6, 7, 8]),
-                        OverlapScores::default(),
                         TierOverlapBlocks::default(),
+                        HashMap::new(),
                         HashMap::new(),
                         HashMap::new(),
                         None,
@@ -873,8 +872,8 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
+                HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
                 None,
@@ -917,7 +916,6 @@ mod tests {
         );
         let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
         let token_seq = vec![11, 22, 33, 44];
-        let overlaps = OverlapScores::default();
         let cached_tokens = HashMap::new();
 
         let (decode_blocks, prefill_tokens) =
@@ -934,7 +932,7 @@ mod tests {
         expected.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
         let mut actual =
-            scheduler.get_potential_loads(Some(token_seq), 128, overlaps, cached_tokens, true);
+            scheduler.get_potential_loads(Some(token_seq), 128, cached_tokens, true);
         actual.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
         assert_eq!(actual.len(), expected.len());
@@ -975,8 +973,8 @@ mod tests {
                 Some("req-1".to_string()),
                 100,
                 Some(vec![1, 2, 3, 4]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
+                HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
                 None,
@@ -993,7 +991,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(6)).await;
 
         let loads =
-            scheduler.get_potential_loads(None, 0, OverlapScores::default(), HashMap::new(), true);
+            scheduler.get_potential_loads(None, 0, HashMap::new(), true);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 40);
 
@@ -1007,7 +1005,7 @@ mod tests {
 
         scheduler.register_workers(&HashSet::from([42]));
         let loads =
-            scheduler.get_potential_loads(None, 64, OverlapScores::default(), HashMap::new(), true);
+            scheduler.get_potential_loads(None, 64, HashMap::new(), true);
 
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].worker_id, 42);
@@ -1024,7 +1022,7 @@ mod tests {
 
         assert_eq!(
             scheduler
-                .get_potential_loads(None, 64, OverlapScores::default(), HashMap::new(), true,)
+                .get_potential_loads(None, 64, HashMap::new(), true,)
                 .len(),
             1
         );
@@ -1043,7 +1041,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if scheduler
-                    .get_potential_loads(None, 64, OverlapScores::default(), HashMap::new(), true)
+                    .get_potential_loads(None, 64, HashMap::new(), true)
                     .len()
                     == 3
                 {
@@ -1075,8 +1073,8 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![11, 22]),
-                OverlapScores::default(),
                 TierOverlapBlocks::default(),
+                HashMap::new(),
                 HashMap::new(),
                 HashMap::new(),
                 None,
@@ -1090,13 +1088,7 @@ mod tests {
             .await
             .unwrap();
 
-        let loads = scheduler.get_potential_loads(
-            None,
-            64,
-            OverlapScores::default(),
-            HashMap::new(),
-            false,
-        );
+        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), false);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 64);
 

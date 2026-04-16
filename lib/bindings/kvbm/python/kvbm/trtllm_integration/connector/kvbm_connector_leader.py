@@ -7,7 +7,10 @@ from typing import List, Optional
 
 import tensorrt_llm
 from kvbm import KvbmLeader
-from kvbm.trtllm_integration.consolidator_config import is_truthy
+from kvbm.trtllm_integration.consolidator_config import (
+    get_consolidator_mode,
+    is_truthy,
+)
 from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -55,7 +58,9 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
 
         trtllm_ep = None
         consolidator_output_ep = None
+        consolidator_mode = None
         if consolidator_enabled:
+            consolidator_mode = get_consolidator_mode()
             # Get consolidator endpoint from environment variable
             # DYN_KVBM_TRTLLM_ZMQ_PORT contains just the port number (e.g., "20081")
             zmq_port = os.getenv("DYN_KVBM_TRTLLM_ZMQ_PORT")
@@ -105,6 +110,7 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             leader,
             consolidator_trtllm_endpoint=trtllm_ep,
             consolidator_output_endpoint=consolidator_output_ep,
+            consolidator_mode=consolidator_mode,
         )
 
     @nvtx_annotate(category="scheduler")

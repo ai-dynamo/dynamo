@@ -354,10 +354,8 @@ pub struct WorkerSelectionResult {
     /// The total number of blocks required to prefill the request
     pub required_blocks: u64,
 
-    /// Approximate effective cache hit on the selected worker, rounded to whole blocks.
-    pub overlap_blocks: u32,
-
     /// Approximate effective cache hit on the selected worker in fractional blocks.
+    /// Use `.round() as u32` for a block-count approximation.
     pub effective_overlap_blocks: f64,
 
     /// Approximate cached-token count derived from the weighted cache hit.
