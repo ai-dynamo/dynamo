@@ -23,7 +23,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
     CreateChatCompletionRequest, FunctionName, FunctionObject, FunctionType,
-    ImageDetail as ChatImageDetail, ImageUrl, ResponseFormat, ServiceTier as ChatServiceTier,
+    ImageDetail as ChatImageDetail, ImageUrl, ReasoningContent, ResponseFormat,
+    ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -342,9 +343,10 @@ fn convert_upstream_input_content_to_text(
 }
 
 /// Accumulator for consecutive assistant-side items (OutputMessage, FunctionCall,
-/// assistant EasyMessage). Chat Completions represents an assistant turn as a
-/// single message carrying both `content` and `tool_calls`, so we coalesce
-/// adjacent assistant-side Responses input items before emitting.
+/// Reasoning, assistant EasyMessage). Chat Completions represents an assistant
+/// turn as a single message carrying `content`, `tool_calls`, and
+/// `reasoning_content`, so we coalesce adjacent assistant-side Responses input
+/// items before emitting.
 ///
 /// `touched` records whether any assistant-side item was seen in the current
 /// run. Without it, a standalone assistant message with empty text (or only
@@ -353,6 +355,7 @@ fn convert_upstream_input_content_to_text(
 #[derive(Default)]
 struct PendingAssistant {
     content: Option<String>,
+    reasoning_content: Option<String>,
     tool_calls: Vec<ChatCompletionMessageToolCall>,
     touched: bool,
 }
@@ -369,6 +372,20 @@ impl PendingAssistant {
         }
     }
 
+    /// Route prior-turn reasoning summary text into the pending assistant's
+    /// `reasoning_content`. Codex and the Agents SDK round-trip `Item::Reasoning`
+    /// mid-turn so the model can see its own chain-of-thought as input context.
+    fn push_reasoning(&mut self, text: &str) {
+        self.touched = true;
+        if text.is_empty() {
+            return;
+        }
+        match self.reasoning_content.as_mut() {
+            Some(existing) => existing.push_str(text),
+            None => self.reasoning_content = Some(text.to_string()),
+        }
+    }
+
     fn push_tool_call(&mut self, call: ChatCompletionMessageToolCall) {
         self.touched = true;
         self.tool_calls.push(call);
@@ -378,21 +395,29 @@ impl PendingAssistant {
         if !self.touched {
             return;
         }
-        // Preserve turn boundaries: when an assistant-side item was seen but
-        // produced no text (empty OutputMessage, refusal-only content) and no
-        // tool calls, still emit an empty assistant message so adjacent user
-        // turns are not silently merged.
-        let content = Some(
-            self.content
-                .map(ChatCompletionRequestAssistantMessageContent::Text)
-                .unwrap_or_else(|| {
-                    ChatCompletionRequestAssistantMessageContent::Text(String::new())
-                }),
-        );
+        // Content rules:
+        //   - real text pushed → emit Some(Text(text))
+        //   - pure tool-call turn (no text, has tool_calls) → emit None, matching
+        //     Chat Completions spec's nullable-content contract and the converter's
+        //     behavior before the coalescing refactor.
+        //   - turn-boundary preservation (assistant item seen but no text, no
+        //     tool_calls) → emit Some(Text("")) so adjacent user turns aren't
+        //     silently merged.
+        let content = if self.content.is_some() || self.tool_calls.is_empty() {
+            Some(
+                self.content
+                    .map(ChatCompletionRequestAssistantMessageContent::Text)
+                    .unwrap_or_else(|| {
+                        ChatCompletionRequestAssistantMessageContent::Text(String::new())
+                    }),
+            )
+        } else {
+            None
+        };
         out.push(ChatCompletionRequestMessage::Assistant(
             ChatCompletionRequestAssistantMessage {
                 content,
-                reasoning_content: None,
+                reasoning_content: self.reasoning_content.map(ReasoningContent::Text),
                 refusal: None,
                 name: None,
                 audio: None,
@@ -483,11 +508,27 @@ fn convert_input_items_to_messages(
                         },
                     ));
                 }
+                Item::Reasoning(r) => {
+                    let text = r
+                        .summary
+                        .iter()
+                        .map(|SummaryPart::SummaryText(t)| t.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    pending.push_reasoning(&text);
+                }
                 other => {
+                    // Unknown / unsupported variants (ComputerCall, WebSearchCall,
+                    // tool-output items other than FunctionCallOutput, etc.). We do
+                    // not have a faithful Chat Completions mapping, but silently
+                    // consuming them without flushing would let a following
+                    // FunctionCall coalesce with tool_calls from a different
+                    // semantic turn. Flush first, then skip.
                     tracing::debug!(
                         "Skipping unsupported input item type during conversion: {:?}",
                         std::mem::discriminant(other)
                     );
+                    std::mem::take(&mut pending).flush_into(&mut messages);
                 }
             },
             InputItem::EasyMessage(easy) => {
@@ -1533,6 +1574,209 @@ mod tests {
             messages[1],
             ChatCompletionRequestMessage::Assistant(_)
         ));
+    }
+
+    #[test]
+    fn test_pure_function_call_turn_emits_null_content() {
+        // Chat Completions spec allows `content: null` on assistant messages
+        // that carry only `tool_calls`. Some Jinja templates gate on
+        // `{% if message.content is not none %}`; we must not emit
+        // `content: ""` for pure-tool-call turns. Turn-boundary cases (empty
+        // OutputMessage with no tool_calls) still emit `Some(Text(""))`.
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "hi".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: "{}".into(),
+                        call_id: "c".into(),
+                        namespace: None,
+                        name: "f".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+                        call_id: "c".into(),
+                        output: FunctionCallOutput::Text("ok".into()),
+                        id: None,
+                        status: None,
+                    })),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        assert_eq!(messages.len(), 3);
+        match &messages[1] {
+            ChatCompletionRequestMessage::Assistant(a) => {
+                assert!(
+                    a.content.is_none(),
+                    "pure tool-call turn must have content: null, got {:?}",
+                    a.content
+                );
+                assert!(a.tool_calls.is_some());
+            }
+            _ => panic!("expected assistant message"),
+        }
+    }
+
+    #[test]
+    fn test_reasoning_item_routed_into_reasoning_content() {
+        // Regression: Codex / Agents SDK round-trip Item::Reasoning mid-turn.
+        // The converter must route the reasoning summary into the coalesced
+        // assistant message's `reasoning_content`, not silently drop it.
+        use dynamo_protocols::types::responses::{ReasoningItem, SummaryPart, SummaryTextContent};
+
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "solve".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::Reasoning(ReasoningItem {
+                        id: "rs_1".into(),
+                        summary: vec![SummaryPart::SummaryText(SummaryTextContent {
+                            text: "thinking step 1".into(),
+                        })],
+                        content: None,
+                        encrypted_content: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: "{}".into(),
+                        call_id: "c".into(),
+                        namespace: None,
+                        name: "f".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+                        call_id: "c".into(),
+                        output: FunctionCallOutput::Text("ok".into()),
+                        id: None,
+                        status: None,
+                    })),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        assert_eq!(messages.len(), 3);
+        match &messages[1] {
+            ChatCompletionRequestMessage::Assistant(a) => {
+                match a
+                    .reasoning_content
+                    .as_ref()
+                    .expect("reasoning must be preserved")
+                {
+                    ReasoningContent::Text(t) => assert_eq!(t, "thinking step 1"),
+                    _ => panic!("expected Text reasoning content"),
+                }
+                assert!(a.tool_calls.is_some());
+            }
+            _ => panic!("expected assistant message with reasoning + tool_calls"),
+        }
+    }
+
+    #[test]
+    fn test_unsupported_item_variant_flushes_pending() {
+        // Sequence: function_call → (an unsupported tool-output variant) →
+        // function_call → function_call_output. Without a flush on the
+        // catch-all, the two FunctionCalls would coalesce into a single
+        // assistant `tool_calls` list despite being different semantic turns.
+        use dynamo_protocols::types::responses::{
+            ComputerCallOutputItemParam, ComputerScreenshotImage, ComputerScreenshotImageType,
+        };
+
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "go".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: "{}".into(),
+                        call_id: "c1".into(),
+                        namespace: None,
+                        name: "f".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::ComputerCallOutput(ComputerCallOutputItemParam {
+                        call_id: "cc1".into(),
+                        output: ComputerScreenshotImage {
+                            r#type: ComputerScreenshotImageType::ComputerScreenshot,
+                            image_url: None,
+                            file_id: None,
+                        },
+                        acknowledged_safety_checks: None,
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                        arguments: "{}".into(),
+                        call_id: "c2".into(),
+                        namespace: None,
+                        name: "f".into(),
+                        id: None,
+                        status: None,
+                    })),
+                    InputItem::Item(Item::FunctionCallOutput(FunctionCallOutputItemParam {
+                        call_id: "c2".into(),
+                        output: FunctionCallOutput::Text("ok".into()),
+                        id: None,
+                        status: None,
+                    })),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        // Expected: User, Assistant(tc=[c1]), Assistant(tc=[c2]), Tool(c2)
+        // Without the catch-all flush, we'd get Assistant(tc=[c1,c2]) instead.
+        assert!(messages.len() >= 4, "catch-all must flush pending");
+        let tc_msgs: Vec<_> = messages
+            .iter()
+            .filter_map(|m| match m {
+                ChatCompletionRequestMessage::Assistant(a) => a.tool_calls.as_ref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tc_msgs.len(),
+            2,
+            "two tool-call turns must not coalesce across unsupported variant"
+        );
+        assert_eq!(tc_msgs[0].len(), 1);
+        assert_eq!(tc_msgs[0][0].id, "c1");
+        assert_eq!(tc_msgs[1].len(), 1);
+        assert_eq!(tc_msgs[1][0].id, "c2");
     }
 
     #[test]
