@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: docker.io/lambda108/epp-inference-extension-dynamo:main-token
           imagePullPolicy: IfNotPresent
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
@@ -70,7 +70,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:post-rebase
+        image: docker.io/lambda108/dynamo:main-token
         args:
           - -m
           - dynamo.frontend
@@ -78,6 +78,10 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -101,7 +105,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:post-rebase
+          image: docker.io/lambda108/dynamo:main-token
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
@@ -117,7 +121,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:post-rebase
+        image: docker.io/lambda108/dynamo:main-token
         args:
           - -m
           - dynamo.frontend
@@ -125,6 +129,10 @@ spec:
           - direct
         envFromSecret: hf-token-secret
       extraPodSpec:
+        tolerations:
+          - key: "nvidia.com/gpu"
+            operator: "Exists"
+            effect: "NoSchedule"
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -148,7 +156,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:post-rebase
+          image: docker.io/lambda108/dynamo:main-token
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1

@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
 	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 
@@ -100,13 +101,17 @@ func uniformScores(endpoints []schedtypes.Endpoint, score float64) map[schedtype
 	return out
 }
 
-// setTokenizedPrompt stores pre-computed token IDs on the LLMRequest so the
-// Dynamo frontend sidecar can skip redundant tokenization.  It sets both the
-// native TokenizedPrompt field and injects nvext.token_data into the Payload
-// (if the Payload is a PayloadMap) so the modified body is forwarded to the
-// worker.
+// setTokenizedPrompt stores pre-computed token IDs on the LLMRequest and
+// injects nvext.token_data into the PayloadMap so it is forwarded to the
+// worker in the request body.
+//
+// NOTE: The GAIE ext-proc framework serializes RawBody before scheduling
+// plugins run. For the PayloadMap mutation to reach the worker, the framework
+// must re-serialize the PayloadMap after scheduling — see
+// https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/XXXX
 func setTokenizedPrompt(req *schedtypes.LLMRequest, tokens []int64, logger logr.Logger) {
 	if req == nil || len(tokens) == 0 {
+		logger.V(logutil.DEFAULT).Info("[EPP-INJECT] No tokens to inject (empty token list)")
 		return
 	}
 
@@ -119,8 +124,8 @@ func setTokenizedPrompt(req *schedtypes.LLMRequest, tokens []int64, logger logr.
 		TokenIDs: tokenIDs,
 	}
 
-	// Also inject into the Payload so the body forwarded to the worker includes
-	// nvext.token_data.  This is only possible when the Payload is a PayloadMap.
+	// Inject into the PayloadMap so the body includes nvext.token_data.
+	payloadInjected := false
 	if req.Body != nil {
 		if pm, ok := req.Body.Payload.(schedtypes.PayloadMap); ok {
 			nvext, _ := pm["nvext"].(map[string]any)
@@ -129,11 +134,14 @@ func setTokenizedPrompt(req *schedtypes.LLMRequest, tokens []int64, logger logr.
 			}
 			nvext["token_data"] = tokenIDs
 			pm["nvext"] = nvext
+			payloadInjected = true
 		}
 	}
 
-	logger.V(5).Info("Set TokenizedPrompt and nvext.token_data on request",
-		"tokenCount", len(tokenIDs))
+	logger.V(logutil.DEFAULT).Info("[EPP-INJECT] Injected pre-computed tokens into request body nvext.token_data",
+		"tokenCount", len(tokenIDs),
+		"payloadInjected", payloadInjected,
+		"requestId", req.RequestId)
 }
 
 func getEnvBoolOrDefault(key string, def bool) bool {

@@ -569,12 +569,16 @@ impl OpenAIPreprocessor {
 
                             let (tokens_vec, skip_token_annotation) =
                                 if let Some(tokens) = token_data {
-                                    tracing::trace!(
-                                        "Using provided tokens from nvext.token_data: {} ids",
-                                        tokens.len()
+                                    tracing::info!(
+                                        token_count = tokens.len(),
+                                        first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
+                                        "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
                                     );
                                     (tokens.clone(), true)
                                 } else {
+                                    tracing::info!(
+                                        "[SIDECAR-TOKENIZE] No nvext.token_data found — performing tokenization in frontend sidecar"
+                                    );
                                     let encoding = self.encode_with_timing(&prompt, tracker)?;
                                     (encoding.token_ids().to_vec(), false)
                                 };

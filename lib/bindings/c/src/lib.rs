@@ -1132,7 +1132,14 @@ unsafe fn preprocess_request(
         }
     };
 
-    Ok(encoding.token_ids().to_vec())
+    let token_ids = encoding.token_ids().to_vec();
+    tracing::info!(
+        token_count = token_ids.len(),
+        first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
+        "[EPP-TOKENIZE] Tokenized prompt in C bindings (this is the ONLY tokenization)"
+    );
+
+    Ok(token_ids)
 }
 
 /// Parse pods JSON into an optional set of allowed worker IDs.
@@ -1223,6 +1230,11 @@ fn inject_tokens_into_body(request_json: &str, tokens: &[u32]) -> Result<String,
 fn write_modified_body_to_result(request_json: &str, tokens: &[u32], out: &mut CRoutingResult) {
     match inject_tokens_into_body(request_json, tokens) {
         Ok(modified) => {
+            tracing::info!(
+                token_count = tokens.len(),
+                body_len = modified.len(),
+                "[EPP-BODY-INJECT] Injected nvext.token_data into request body JSON"
+            );
             let c_str = match std::ffi::CString::new(modified.as_bytes()) {
                 Ok(cs) => cs,
                 Err(e) => {

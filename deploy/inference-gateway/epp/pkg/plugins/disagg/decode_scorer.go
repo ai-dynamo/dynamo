@@ -157,11 +157,12 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 
 	workerIDStr := fmt.Sprintf("%d", result.WorkerID)
 	dpRankStr := strconv.FormatUint(uint64(result.DpRank), 10)
-	logger.V(logutil.DEFAULT).Info("DynDecodeScorer: decode worker selected",
+	logger.V(logutil.DEFAULT).Info("[EPP-SCORER] FFI returned tokens from C bindings tokenization",
 		"decodeWorkerID", workerIDStr,
 		"decodeDpRank", result.DpRank,
 		"isDisaggregated", isDisaggregated,
-		"tokenCount", len(result.TokenData))
+		"tokenCount", len(result.TokenData),
+		"hasModifiedBody", result.ModifiedBody != "")
 
 	if req.Headers == nil {
 		req.Headers = map[string]string{}
