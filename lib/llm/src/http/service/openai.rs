@@ -1595,6 +1595,12 @@ async fn responses(
         service_tier: request.inner.service_tier,
         include: request.inner.include.clone(),
         truncation: request.inner.truncation,
+        // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
+        // the response serializer can default to 0.0 without hardcoding at the
+        // build site. When upstream (or our shadow) adds the fields, sourcing
+        // from the request becomes a one-line change here.
+        presence_penalty: None,
+        frequency_penalty: None,
     };
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();

@@ -833,6 +833,14 @@ pub struct ResponseParams {
     pub service_tier: Option<ServiceTier>,
     pub include: Option<Vec<IncludeEnum>>,
     pub truncation: Option<Truncation>,
+    /// OpenResponses spec requires these fields on the response body. Upstream
+    /// `CreateResponse` doesn't model them on the request yet, so for now they
+    /// pass through as `None`; the response serializer defaults to 0.0 (the
+    /// effective sglang default). Wired through `ResponseParams` anyway so
+    /// that when upstream relaxes or we shadow `CreateResponse`, threading a
+    /// real value becomes a one-line change at the request-extraction site.
+    pub presence_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
 }
 
 /// Normalize tools so that `FunctionTool.strict` is always set.
@@ -1059,8 +1067,8 @@ pub fn chat_completion_to_response(
     Ok(NvResponse {
         inner: response,
         nvext,
-        presence_penalty: 0.0,
-        frequency_penalty: 0.0,
+        presence_penalty: params.presence_penalty.unwrap_or(0.0),
+        frequency_penalty: params.frequency_penalty.unwrap_or(0.0),
         store: params.store.unwrap_or(false),
     })
 }
