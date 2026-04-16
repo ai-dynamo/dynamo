@@ -71,6 +71,9 @@ class TickSnapshot:
     prefill_engines: list[PerEngineFpm] = field(default_factory=list)
     decode_engines: list[PerEngineFpm] = field(default_factory=list)
 
+    # Throughput lower bound
+    throughput_lower_bound_decode: Optional[int] = None
+
     # Scaling decision
     scale_to_prefill: Optional[int] = None
     scale_to_decode: Optional[int] = None
@@ -88,6 +91,7 @@ class DiagnosticsRecorder:
     """
 
     config: PlannerConfig
+    max_kv_tokens: Optional[int] = None
     _snapshots: list[TickSnapshot] = field(default_factory=list)
     _last_report_s: float = 0.0
     _report_count: int = 0
@@ -177,6 +181,7 @@ class DiagnosticsRecorder:
             engine_rps_decode=diag.engine_rps_decode,
             load_decision_reason=diag.load_decision_reason,
             throughput_decision_reason=diag.throughput_decision_reason,
+            throughput_lower_bound_decode=diag.throughput_lower_bound_decode,
             prefill_engines=prefill_engines,
             decode_engines=decode_engines,
             scale_to_prefill=(
@@ -253,6 +258,19 @@ class DiagnosticsRecorder:
             row=1,
             col=1,
         )
+        tp_lower = _vals("throughput_lower_bound_decode")
+        if any(v is not None and v > 1 for v in tp_lower):
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=tp_lower,
+                    name="Throughput Lower Bound",
+                    mode="lines",
+                    line=dict(dash="dash", color="red"),
+                ),
+                row=1,
+                col=1,
+            )
 
         # 1b. Request rate
         fig.add_trace(
@@ -396,39 +414,35 @@ class DiagnosticsRecorder:
                 col=1,
             )
 
-        # 4b. Decode engine load (queued + inflight, one line each per engine)
+        # 4b. Decode engine load (queued + inflight combined per engine)
         for eid in sorted(decode_engine_ids):
-            y_queued = []
-            y_inflight = []
+            y_total = []
             for s in snaps:
-                q, f_ = None, None
+                val = None
                 for e in s.decode_engines:
                     if f"{e.worker_id}:dp{e.dp_rank}" == eid:
-                        q = e.queued_decode_kv_tokens
-                        f_ = e.inflight_decode_kv_tokens
+                        val = e.queued_decode_kv_tokens + e.inflight_decode_kv_tokens
                         break
-                y_queued.append(q)
-                y_inflight.append(f_)
+                y_total.append(val)
             fig.add_trace(
                 go.Scatter(
                     x=labels,
-                    y=y_queued,
-                    name=f"D {eid} queued",
+                    y=y_total,
+                    name=f"D {eid} total KV",
                     mode="lines+markers",
                     showlegend=False,
                 ),
                 row=4,
                 col=2,
             )
-            fig.add_trace(
-                go.Scatter(
-                    x=labels,
-                    y=y_inflight,
-                    name=f"D {eid} inflight",
-                    mode="lines",
-                    line=dict(dash="dot"),
-                    showlegend=False,
-                ),
+
+        # KV capacity line (set by adapter if available)
+        if self.max_kv_tokens is not None and self.max_kv_tokens > 0:
+            fig.add_hline(
+                y=self.max_kv_tokens,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"KV Capacity ({self.max_kv_tokens:,})",
                 row=4,
                 col=2,
             )

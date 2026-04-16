@@ -214,6 +214,8 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             predicted_osl=self._diag_predicted_osl,
             engine_rps_prefill=self._diag_engine_rps_prefill,
             engine_rps_decode=self._diag_engine_rps_decode,
+            throughput_lower_bound_prefill=self._throughput_lower_bound_p,
+            throughput_lower_bound_decode=self._throughput_lower_bound_d,
             load_decision_reason=self._diag_load_reason,
             throughput_decision_reason=self._diag_throughput_reason,
         )

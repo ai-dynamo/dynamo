@@ -137,7 +137,12 @@ class ReplayPlannerAdapter:
         self._scaling_target_decode: Optional[int] = None
 
         # Diagnostics recorder for HTML report generation
-        self._recorder = DiagnosticsRecorder(config=planner_config)
+        decode_max_kv = (
+            capabilities.decode.max_kv_tokens if capabilities and capabilities.decode else None
+        )
+        self._recorder = DiagnosticsRecorder(
+            config=planner_config, max_kv_tokens=decode_max_kv
+        )
         self._cumulative_gpu_hours: float = 0.0
         self._last_tick_s: float = 0.0
         self._last_traffic: Metrics = Metrics()
