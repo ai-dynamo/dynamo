@@ -502,7 +502,8 @@ impl DisaggRuntime {
         let input_tokens = original.tokens.len();
         let output_tokens = original.max_output_tokens;
         let latencies = self.collector.request_latencies(signal.uuid);
-        self.traffic.on_request(input_tokens, output_tokens, latencies);
+        self.traffic
+            .on_request(input_tokens, output_tokens, latencies);
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {

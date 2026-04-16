@@ -362,8 +362,11 @@ impl AggRuntime {
                 anyhow::anyhow!("offline replay missing request state for {}", signal.uuid)
             })?;
             let latencies = self.collector.request_latencies(signal.uuid);
-            self.traffic
-                .on_request(removed_state.input_tokens, removed_state.output_tokens, latencies);
+            self.traffic.on_request(
+                removed_state.input_tokens,
+                removed_state.output_tokens,
+                latencies,
+            );
             self.admission
                 .on_request_completed(signal.uuid, self.now_ms)?;
             self.progress.inc_completed();
