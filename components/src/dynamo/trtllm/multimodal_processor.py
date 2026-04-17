@@ -107,15 +107,31 @@ class MultimodalRequestProcessor:
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             try:
                 with httpx.Client(timeout=300.0) as client:
-                    resp = client.get(path)
-                    resp.raise_for_status()
-                    if len(resp.content) > self.max_file_size_bytes:
-                        raise RuntimeError(
-                            f"File size exceeds limit: "
-                            f"{len(resp.content) // (1024*1024)}MB > "
-                            f"{self.max_file_size_mb}MB"
-                        )
-                    data = safetensors_load(resp.content)
+                    with client.stream("GET", path) as resp:
+                        resp.raise_for_status()
+                        content_length = resp.headers.get("content-length")
+                        if (
+                            content_length
+                            and int(content_length) > self.max_file_size_bytes
+                        ):
+                            raise RuntimeError(
+                                f"File size exceeds limit: "
+                                f"{int(content_length) // (1024*1024)}MB > "
+                                f"{self.max_file_size_mb}MB"
+                            )
+                        chunks = []
+                        downloaded = 0
+                        for chunk in resp.iter_bytes():
+                            downloaded += len(chunk)
+                            if downloaded > self.max_file_size_bytes:
+                                raise RuntimeError(
+                                    f"File size exceeds limit: "
+                                    f"{downloaded // (1024*1024)}MB > "
+                                    f"{self.max_file_size_mb}MB"
+                                )
+                            chunks.append(chunk)
+                        content = b"".join(chunks)
+                    data = safetensors_load(content)
                     key = next(iter(data))
                     return data[key]
             except RuntimeError:
@@ -314,8 +330,7 @@ class MultimodalRequestProcessor:
                         logging.error(f"Failed to load images: {e}")
                         return None
 
-                # Load embedding files (.pt, .pth, .bin) for PD flow
-                # These are pre-computed vision encoder outputs
+                # Load pre-computed vision encoder embeddings (.safetensors) for PD flow
                 if embedding_paths:
                     try:
                         loaded_embeddings = [
