@@ -32,7 +32,7 @@ spec:
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub hf_transfer
+              pip install --no-cache-dir huggingface_hub==1.11.0 hf_transfer==0.1.9
               hf download nvidia/DeepSeek-R1-FP4 --local-dir /model-cache/deepseek-r1-fp4
               hf download deepseek-ai/DeepSeek-R1 --local-dir /model-cache/deepseek-r1
           volumeMounts:

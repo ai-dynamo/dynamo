@@ -37,7 +37,7 @@ spec:
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub hf_transfer
+              pip install --no-cache-dir huggingface_hub==1.11.0 hf_transfer==0.1.9
               hf download $MODEL_NAME
           volumeMounts:
             - name: model-cache
