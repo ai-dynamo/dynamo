@@ -485,6 +485,7 @@ impl ModelWatcher {
                     "Checksum mismatch for worker in namespace {namespace}"
                 ));
             }
+            self.resolve_card_local_files(&model_name, card);
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
             tracing::debug!(
@@ -511,6 +512,14 @@ impl ModelWatcher {
                 )
                 .await?
         {
+            self.resolve_card_local_files(&model_name, card);
+            self.manager
+                .save_model_card(&mcid.to_path(), card.clone())?;
+            tracing::debug!(
+                model_name = card.name(),
+                namespace = namespace,
+                "WorkerSet registration in progress, skipping"
+            );
             return Ok(());
         }
 
@@ -639,6 +648,22 @@ impl ModelWatcher {
             "Worker joined existing WorkerSet, skipping pipeline build"
         );
         Ok(false)
+    }
+
+    /// If an existing card for the same model has already-downloaded local files,
+    /// point this card's URL-backed files at the same local directory. This avoids
+    /// re-downloading config files for every worker that joins an existing WorkerSet.
+    fn resolve_card_local_files(&self, model_name: &str, card: &mut ModelDeploymentCard) {
+        let local_dir = self
+            .manager
+            .get_model_cards()
+            .iter()
+            .find(|c| c.name() == model_name)
+            .and_then(|c| c.local_file_dir().map(|p| p.to_path_buf()));
+
+        if let Some(dir) = local_dir {
+            card.update_dir(&dir);
+        }
     }
 
     /// Build a complete WorkerSet with all engines for this (model, namespace)

@@ -61,6 +61,14 @@ pub mod traits {
     pub trait Encoder: Send + Sync {
         fn encode(&self, input: &str) -> Result<Encoding>;
         fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>>;
+
+        fn encode_with_special_tokens(
+            &self,
+            input: &str,
+            _add_special_tokens: bool,
+        ) -> Result<Encoding> {
+            self.encode(input)
+        }
     }
 
     /// Result of decoding token IDs to text.
@@ -126,8 +134,15 @@ pub mod traits {
     }
 
     pub trait Tokenizer: Encoder + Decoder {
-        // fn get_vocab_size(&self) -> usize;
-        // fn make_unique_clone(&self) -> Box<dyn Tokenizer>;
+        fn convert_ids_to_tokens(&self, token_ids: &[TokenIdType]) -> Result<Vec<String>> {
+            token_ids
+                .iter()
+                .map(|id| {
+                    self.decode(std::slice::from_ref(id), false)
+                        .map(String::from)
+                })
+                .collect()
+        }
     }
 }
 
@@ -146,6 +161,18 @@ pub struct Tokenizer(Arc<dyn traits::Tokenizer>);
 impl Tokenizer {
     pub fn from_file(file_path: &str) -> Result<Tokenizer> {
         Ok(Tokenizer(create_tokenizer_from_file(file_path)?))
+    }
+
+    pub fn encode_with_special_tokens(
+        &self,
+        input: &str,
+        add_special_tokens: bool,
+    ) -> Result<Encoding> {
+        self.0.encode_with_special_tokens(input, add_special_tokens)
+    }
+
+    pub fn convert_ids_to_tokens(&self, token_ids: &[TokenIdType]) -> Result<Vec<String>> {
+        self.0.convert_ids_to_tokens(token_ids)
     }
 
     /// Create a stateful sequence object for decoding token_ids into text

@@ -509,8 +509,8 @@ mod tests {
     #[tokio::test]
     async fn query_engine_supports_multiple_model_bindings() {
         let bindings = Arc::new(RwLock::new(HashMap::from([
-            ("model-a".to_string(), Indexer::None),
-            ("model-b".to_string(), Indexer::None),
+            ("model-a".to_string(), Indexer::test_none()),
+            ("model-b".to_string(), Indexer::test_none()),
         ])));
         let engine = ServedIndexerQueryEngine { bindings };
         let request = SingleIn::new(IndexerQueryRequest {

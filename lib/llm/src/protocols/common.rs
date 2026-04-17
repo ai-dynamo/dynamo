@@ -514,6 +514,10 @@ pub struct OutputOptions {
     /// the tokenizer. This is useful for inspecting the behavior of prompt
     /// templates that are applied during the backend preprocessing.
     pub formatted_prompt: Option<bool>,
+
+    /// When true, logprob token fields are returned as "token_id:<id>"
+    /// instead of the decoded text.  vLLM-specific extension for NeMo-RL.
+    pub return_tokens_as_token_ids: Option<bool>,
 }
 
 // Struct for log probability information

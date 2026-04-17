@@ -1083,20 +1083,23 @@ impl KvRouter {
                 .await
                 .map_err(to_pyerr)?;
 
-            if update_indexer && !chooser.kv_router_config().use_kv_events {
-                let mut tokens_with_hashes =
-                    TokensWithHashes::new(token_ids.clone(), chooser.block_size())
-                        .with_is_eagle(chooser.is_eagle());
-                if let Some(infos) = block_mm_infos.as_ref() {
-                    tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+            if update_indexer {
+                let cfg = chooser.kv_router_config();
+                if !cfg.use_kv_events || cfg.router_predict_on_route {
+                    let mut tokens_with_hashes =
+                        TokensWithHashes::new(token_ids.clone(), chooser.block_size())
+                            .with_is_eagle(chooser.is_eagle());
+                    if let Some(infos) = block_mm_infos.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+                    }
+                    if let Some(lora_name) = lora_name.as_ref() {
+                        tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
+                    }
+                    chooser
+                        .record_routing_decision(tokens_with_hashes, best_worker)
+                        .await
+                        .map_err(to_pyerr)?;
                 }
-                if let Some(lora_name) = lora_name.as_ref() {
-                    tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
-                }
-                chooser
-                    .record_routing_decision(tokens_with_hashes, best_worker)
-                    .await
-                    .map_err(to_pyerr)?;
             }
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))

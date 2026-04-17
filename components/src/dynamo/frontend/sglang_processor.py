@@ -210,6 +210,7 @@ def _build_dynamo_preproc(
             "logprobs": logprobs_val,
             "prompt_logprobs": None,
             "skip_special_tokens": True,
+            "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],

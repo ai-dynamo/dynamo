@@ -214,6 +214,23 @@ pub struct KvRouterConfig {
     /// overlap scores remotely over the request plane by component + endpoint.
     #[serde(default)]
     pub serve_indexer: bool,
+
+    /// When `use_kv_events=true`, run a secondary approximate indexer alongside
+    /// the event-driven one. The side indexer is populated by routing decisions
+    /// with a short TTL (`router_predicted_ttl_secs`); `find_matches` queries
+    /// both indexers and returns the per-worker maximum overlap. This closes
+    /// the window between a routing decision and the engine's first "block
+    /// stored" event so sibling requests in a burst can still co-locate.
+    #[serde(default)]
+    pub router_predict_on_route: bool,
+
+    /// TTL in seconds applied to entries in the predict-on-route side indexer.
+    /// `None` falls back to `DEFAULT_PREDICTED_TTL_SECS`. Keep this short (a
+    /// few seconds) so unconfirmed predictions age out quickly. Only meaningful
+    /// when both `use_kv_events=true` and `router_predict_on_route=true`.
+    #[serde(default)]
+    #[validate(range(min = 0.0))]
+    pub router_predicted_ttl_secs: Option<f64>,
 }
 
 impl Default for KvRouterConfig {
@@ -240,6 +257,8 @@ impl Default for KvRouterConfig {
             router_queue_policy: RouterQueuePolicy::default(),
             use_remote_indexer: false,
             serve_indexer: false,
+            router_predict_on_route: false,
+            router_predicted_ttl_secs: None,
         }
     }
 }

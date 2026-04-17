@@ -597,6 +597,28 @@ impl ModelDeploymentCard {
         Ok(())
     }
 
+    /// Return the local directory that contains the model config files, if any
+    /// file has already been resolved to a local path.
+    pub(crate) fn local_file_dir(&self) -> Option<&Path> {
+        if let Some(TokenizerKind::HfTokenizerJson(cf) | TokenizerKind::TikTokenModel(cf)) =
+            &self.tokenizer
+            && let Some(dir) = cf.path().and_then(|p| p.parent())
+        {
+            return Some(dir);
+        }
+        if let Some(ModelInfoType::HfConfigJson(cf)) = &self.model_info
+            && let Some(dir) = cf.path().and_then(|p| p.parent())
+        {
+            return Some(dir);
+        }
+        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(cf)) = &self.prompt_formatter
+            && let Some(dir) = cf.path().and_then(|p| p.parent())
+        {
+            return Some(dir);
+        }
+        None
+    }
+
     /// Are all the files we need (tokenizer.json, etc) available locally?
     fn has_local_files(&self) -> bool {
         let has_model_info = self
@@ -633,7 +655,7 @@ impl ModelDeploymentCard {
     }
 
     /// Update the directory for files like tokenizer.json be in here.
-    fn update_dir(&mut self, dir: &Path) {
+    pub(crate) fn update_dir(&mut self, dir: &Path) {
         if let Some(model_info) = self.model_info.as_mut() {
             model_info.update_dir(dir);
         }
