@@ -12,15 +12,6 @@ To loosen the defaults, either build a ``UrlValidationPolicy(...)`` directly
 or call ``UrlValidationPolicy.from_env()`` to pick up the ``DYN_MM_*`` vars
 below.
 
-Environment variables
----------------------
-``DYN_MM_ALLOW_INTERNAL`` (``1``/``0``, default ``0``)
-    Allow ``http://`` and private-network / internal IP targets. Intended
-    for on-prem or local-dev setups where media lives on an internal
-    network. **Never** set this on anything public-facing.
-``DYN_MM_LOCAL_PATH`` (absolute directory path)
-    Let opted-in callers load ``file://`` and bare filesystem paths inside
-    this prefix. Empty (the default) blocks local access entirely.
 """
 
 import asyncio
@@ -81,6 +72,7 @@ _BLOCKED_HOSTS: frozenset[str] = frozenset(
         "kubernetes.default.svc",
     }
 )
+
 
 def is_blocked_ip(ip_text: str) -> bool:
     """Return True if ``ip_text`` parses as an IP inside one of the blocked ranges."""

@@ -28,7 +28,10 @@ async def test_normalize_video_url_converts_local_paths(tmp_path):
 
     policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
 
-    assert await validate_media_url(str(video_path), policy) == video_path.resolve().as_uri()
+    assert (
+        await validate_media_url(str(video_path), policy)
+        == video_path.resolve().as_uri()
+    )
 
 
 async def test_normalize_video_url_preserves_data_urls():
