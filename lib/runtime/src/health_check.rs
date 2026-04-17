@@ -5,6 +5,7 @@ use crate::DistributedRuntime;
 use crate::config::HealthStatus;
 use crate::engine::AsyncEngine;
 use crate::pipeline::SingleIn;
+use crate::protocols::maybe_error::MaybeError;
 use futures::StreamExt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -232,17 +233,21 @@ impl HealthCheckManager {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
-                        // Get the first response to verify endpoint is alive
+                        // Get the first response to verify endpoint is alive.
+                        // Check for errors rather than data presence: an Annotated
+                        // item can have data: None without being an error (e.g.,
+                        // annotation/metadata events). Only explicit errors indicate
+                        // an unhealthy endpoint.
                         let is_healthy = if let Some(response) = response_stream.next().await {
-                            if response.data.is_some() {
-                                debug!("Health check successful for {}", endpoint_subject_owned);
-                                true
-                            } else {
+                            if let Some(error) = response.err() {
                                 warn!(
-                                    "Health check got empty response from {}",
-                                    endpoint_subject_owned
+                                    "Health check error response from {}: {:?}",
+                                    endpoint_subject_owned, error
                                 );
                                 false
+                            } else {
+                                debug!("Health check successful for {}", endpoint_subject_owned);
+                                true
                             }
                         } else {
                             warn!(
