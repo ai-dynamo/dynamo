@@ -449,13 +449,19 @@ class TestAggRegressionModel:
         assert thpt == 0.0
 
 
-# ── Discovery backfill tests ────────────────────────────────────────
+# ── Connector-driven refresh tests ──────────────────────────────────
 
 
-class TestPopulateWorkerInfoFromDiscovery:
-    """Tests for NativePlannerBase._populate_worker_info_from_discovery."""
+class TestRefreshWorkerInfoFromConnector:
+    """Tests for NativePlannerBase._refresh_worker_info_from_connector.
 
-    def _make_planner(self):
+    The tick-loop refresh delegates to the connector's ``get_worker_info``,
+    which is where each connector implements its own MDC source (K8s CRDs
+    for KubernetesConnector, discovery watch for VirtualConnector).  These
+    tests exercise the shared refresh plumbing with a mock connector.
+    """
+
+    def _make_planner(self, require_prefill=False, require_decode=True):
         """Build a minimal NativePlannerBase with no_operation=True."""
         from unittest.mock import Mock, patch
 
@@ -491,81 +497,121 @@ class TestPopulateWorkerInfoFromDiscovery:
                 load_min_observations=5,
             )
             planner = NativePlannerBase(None, config)
+        planner.require_prefill = require_prefill
+        planner.require_decode = require_decode
         planner.prefill_worker_info = WorkerInfo()
         planner.decode_worker_info = WorkerInfo()
         return planner
 
-    def test_backfill_from_discovery(self):
-        """max_num_batched_tokens is populated from discovery (min across workers)."""
+    def _install_mock_connector(self, planner, **fresh_info_kwargs):
+        """Replace planner.connector with a Mock returning a fresh WorkerInfo."""
         from unittest.mock import Mock
 
+        from dynamo.planner.monitoring.worker_info import WorkerInfo
+
+        fresh = WorkerInfo(**fresh_info_kwargs)
+        mock_connector = Mock()
+        mock_connector.get_worker_info.return_value = fresh
+        planner.connector = mock_connector
+        return mock_connector
+
+    def test_refresh_populates_missing_fields(self):
+        """Connector returns a populated WorkerInfo; missing fields backfill."""
         planner = self._make_planner()
         assert planner.decode_worker_info.max_num_batched_tokens is None
 
-        mock_sub = Mock()
-        mock_sub.get_max_num_batched_tokens.return_value = 8192
-        planner._decode_fpm_sub = mock_sub
+        self._install_mock_connector(
+            planner,
+            max_num_batched_tokens=8192,
+            total_kv_blocks=1024,
+            max_num_seqs=256,
+            kv_cache_block_size=16,
+            context_length=4096,
+        )
 
-        planner._populate_worker_info_from_discovery()
+        planner._refresh_worker_info_from_connector()
         assert planner.decode_worker_info.max_num_batched_tokens == 8192
+        assert planner.decode_worker_info.total_kv_blocks == 1024
+        assert planner.decode_worker_info.max_num_seqs == 256
+        assert planner.decode_worker_info.kv_cache_block_size == 16
+        assert planner.decode_worker_info.context_length == 4096
 
     def test_noop_when_already_set(self):
-        """Does not overwrite an existing max_num_batched_tokens value."""
-        from unittest.mock import Mock
-
+        """Does not re-query once max_num_batched_tokens is populated."""
         from dynamo.planner.monitoring.worker_info import WorkerInfo
 
         planner = self._make_planner()
         planner.decode_worker_info = WorkerInfo(max_num_batched_tokens=2048)
 
-        mock_sub = Mock()
-        mock_sub.get_max_num_batched_tokens.return_value = 8192
-        planner._decode_fpm_sub = mock_sub
+        mock_connector = self._install_mock_connector(
+            planner, max_num_batched_tokens=8192
+        )
 
-        planner._populate_worker_info_from_discovery()
+        planner._refresh_worker_info_from_connector()
         assert planner.decode_worker_info.max_num_batched_tokens == 2048
+        mock_connector.get_worker_info.assert_not_called()
 
-    def test_noop_when_no_subscriber(self):
-        """Gracefully does nothing when there is no FPM subscriber."""
+    def test_noop_when_connector_lacks_get_worker_info(self):
+        """Silently does nothing if the connector does not implement get_worker_info."""
         planner = self._make_planner()
-        # Both subscribers are None by default
-        planner._populate_worker_info_from_discovery()
-        assert planner.prefill_worker_info.max_num_batched_tokens is None
+
+        class _StubConnector:
+            pass
+
+        planner.connector = _StubConnector()
+        planner._refresh_worker_info_from_connector()
         assert planner.decode_worker_info.max_num_batched_tokens is None
 
-    def test_noop_when_no_value_reported(self):
-        """Does nothing when no worker has reported max_num_batched_tokens."""
+    def test_noop_when_connector_returns_none_fields(self):
+        """Fresh WorkerInfo with None everywhere does not overwrite anything."""
+        planner = self._make_planner()
+        self._install_mock_connector(planner)  # All Nones
+        planner._refresh_worker_info_from_connector()
+        assert planner.decode_worker_info.max_num_batched_tokens is None
+
+    def test_exception_does_not_propagate(self):
+        """If connector.get_worker_info throws, refresh is a no-op."""
         from unittest.mock import Mock
 
         planner = self._make_planner()
+        mock_connector = Mock()
+        mock_connector.get_worker_info.side_effect = RuntimeError("boom")
+        planner.connector = mock_connector
 
-        mock_sub = Mock()
-        mock_sub.get_max_num_batched_tokens.return_value = None
-        planner._decode_fpm_sub = mock_sub
-
-        planner._populate_worker_info_from_discovery()
+        planner._refresh_worker_info_from_connector()  # must not raise
         assert planner.decode_worker_info.max_num_batched_tokens is None
 
     def test_updates_state_machine_capabilities(self):
         """State machine capabilities are updated via update_capabilities()."""
-        from unittest.mock import Mock
-
         planner = self._make_planner()
-        # Force state machine creation
         _ = planner.state_machine
         assert planner._state_machine is not None
-        assert (
-            planner._state_machine._capabilities.decode is None
-            or planner._state_machine._capabilities.decode.max_num_batched_tokens
-            is None
-        )
 
-        mock_sub = Mock()
-        mock_sub.get_max_num_batched_tokens.return_value = 4096
-        planner._decode_fpm_sub = mock_sub
+        self._install_mock_connector(planner, max_num_batched_tokens=4096)
 
-        planner._populate_worker_info_from_discovery()
+        planner._refresh_worker_info_from_connector()
         assert planner.decode_worker_info.max_num_batched_tokens == 4096
         assert (
             planner._state_machine._capabilities.decode.max_num_batched_tokens == 4096
         )
+
+    def test_refresh_skips_unneeded_sub_component(self):
+        """Only sub-components with require_* True are refreshed."""
+        from unittest.mock import Mock
+
+        from dynamo.planner.monitoring.worker_info import WorkerInfo
+
+        planner = self._make_planner(require_prefill=False, require_decode=True)
+
+        def _side_effect(sub_type, backend):
+            # Should only be called for DECODE.
+            assert sub_type.value == "decode"
+            return WorkerInfo(max_num_batched_tokens=4096)
+
+        mock_connector = Mock()
+        mock_connector.get_worker_info.side_effect = _side_effect
+        planner.connector = mock_connector
+
+        planner._refresh_worker_info_from_connector()
+        assert planner.prefill_worker_info.max_num_batched_tokens is None
+        assert planner.decode_worker_info.max_num_batched_tokens == 4096

@@ -906,18 +906,20 @@ class FpmEventSubscriber:
         """
         ...
 
-    def get_max_num_batched_tokens(self) -> int | None:
+    def get_model_cards(self) -> dict[str, str]:
         """
-        Return the effective ``max_num_batched_tokens`` across all known workers.
+        Snapshot of model deployment cards keyed by worker id.
 
-        The value is the **minimum** observed across workers so the planner
-        uses the most constrained capacity.
+        The snapshot is filtered against the known-workers set so entries
+        for already-removed workers are not returned.  Values are the raw
+        ``ModelDeploymentCard`` serialized as a JSON string; callers parse
+        whichever fields they need (e.g. ``runtime_config``,
+        ``display_name``).
 
         Raises RuntimeError if ``start_tracking()`` has not been called.
 
         Returns:
-            The minimum ``max_num_batched_tokens``, or ``None`` if no worker
-            has reported one.
+            dict mapping ``worker_id`` to ``card_json`` (JSON string).
         """
         ...
 
