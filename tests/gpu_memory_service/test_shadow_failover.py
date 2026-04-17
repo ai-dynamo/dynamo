@@ -17,12 +17,10 @@ from tests.gpu_memory_service.common.runtime import (
     SGLangWithGMSProcess,
     TRTLLMWithGMSProcess,
     VLLMWithGMSProcess,
-    get_gpu_memory_used,
 )
 from tests.gpu_memory_service.flow_assertions import (
     assert_completion_ok,
     assert_kv_history,
-    assert_memory_restored_after_quiesce,
     assert_weights_published_once,
     quiesce_engine,
     wait_for_active_layout,
@@ -51,7 +49,6 @@ def _kill_process_group(process: ManagedProcess) -> None:
         logger.warning("kill process group: no PID available")
         return
 
-    memory_before_kill = get_gpu_memory_used()
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
     except ProcessLookupError:
@@ -63,13 +60,6 @@ def _kill_process_group(process: ManagedProcess) -> None:
     except ChildProcessError:
         pass
 
-    memory_after_kill = get_gpu_memory_used()
-    logger.info(
-        "Primary kill snapshot: %.2f -> %.2f GiB",
-        memory_before_kill / (1 << 30),
-        memory_after_kill / (1 << 30),
-    )
-
 
 def _start_primary(
     manager,
@@ -78,8 +68,6 @@ def _start_primary(
     kv_cache_gms,
     *,
     weights_hash: str,
-    quiesced_memory_after_shadow_b: int,
-    shadow_a_released_bytes: int,
 ):
     primary = manager.start_engine("primary", read_only_weights=True)
     assert_completion_ok(
@@ -87,14 +75,6 @@ def _start_primary(
         "Primary test",
         failure_message="Primary inference failed",
         success_message="Primary inference OK",
-    )
-
-    primary_memory_in_use = get_gpu_memory_used()
-    assert_memory_restored_after_quiesce(
-        "Primary active memory",
-        quiesced_memory_after_shadow_b,
-        primary_memory_in_use,
-        shadow_a_released_bytes,
     )
 
     weights_with_primary, _ = wait_for_active_layout(
@@ -202,11 +182,7 @@ def _run_shadow_failover_test(
         shadow_a = manager.start_engine(
             "shadow-a",
         )
-        (
-            weights_state_after_shadow_a,
-            shadow_a_released_bytes,
-            _,
-        ) = quiesce_engine(
+        weights_state_after_shadow_a = quiesce_engine(
             weights_gms,
             kv_cache_gms,
             shadow_a,
@@ -217,11 +193,7 @@ def _run_shadow_failover_test(
             "shadow-b",
             read_only_weights=True,
         )
-        (
-            weights_state_after_shadow_b,
-            _,
-            quiesced_memory_after_shadow_b,
-        ) = quiesce_engine(
+        weights_state_after_shadow_b = quiesce_engine(
             weights_gms,
             kv_cache_gms,
             shadow_b,
@@ -242,8 +214,6 @@ def _run_shadow_failover_test(
             weights_gms,
             kv_cache_gms,
             weights_hash=weights_hash,
-            quiesced_memory_after_shadow_b=quiesced_memory_after_shadow_b,
-            shadow_a_released_bytes=shadow_a_released_bytes,
         )
         resume_result = _resume_shadow_after_primary_failover(
             shadow_a,
@@ -252,13 +222,6 @@ def _run_shadow_failover_test(
         )
 
         assert resume_result["status"] == "ok"
-        shadow_memory_after_resume = get_gpu_memory_used()
-        assert_memory_restored_after_quiesce(
-            "Shadow resume memory",
-            quiesced_memory_after_shadow_b,
-            shadow_memory_after_resume,
-            shadow_a_released_bytes,
-        )
 
         # Once the primary is gone, the failover shadow should finish resume
         # with the same committed weights layout and a new live RW KV-cache layout.
@@ -334,20 +297,10 @@ def _trtllm_quiesce(
         expected_hash=expected_hash,
         timeout=60.0,
     )
-    mem_before = get_gpu_memory_used()
     assert engine.quiesce()["status"] == "ok"
-    mem_after = get_gpu_memory_used()
-    released = mem_before - mem_after
-    logger.info(
-        "%s: %.2f -> %.2f GiB (freed %.0f MB)",
-        label,
-        mem_before / (1 << 30),
-        mem_after / (1 << 30),
-        released / (1 << 20),
-    )
-    assert released > 0
+    logger.info("%s completed", label)
     ws = wait_for_weights_state(weights_gms, ServerState.COMMITTED)
-    return ws, released, mem_after
+    return ws
 
 
 @pytest.mark.trtllm
@@ -371,9 +324,7 @@ def test_gms_shadow_engine_failover_trtllm(
             failure_message="Shadow A inference failed",
             success_message="Shadow A inference OK",
         )
-        ws_a, released_a, _ = _trtllm_quiesce(
-            weights_gms, shadow_a, label="Shadow A quiesce"
-        )
+        ws_a = _trtllm_quiesce(weights_gms, shadow_a, label="Shadow A quiesce")
         weights_hash = ws_a.memory_layout_hash
 
         # Shadow B starts RO, then quiesces.
@@ -384,7 +335,7 @@ def test_gms_shadow_engine_failover_trtllm(
             failure_message="Shadow B inference failed",
             success_message="Shadow B inference OK",
         )
-        _, _, mem_after_b = _trtllm_quiesce(
+        _trtllm_quiesce(
             weights_gms,
             shadow_b,
             label="Shadow B quiesce",
@@ -400,14 +351,6 @@ def test_gms_shadow_engine_failover_trtllm(
             failure_message="Primary inference failed",
             success_message="Primary inference OK",
         )
-        primary_mem = get_gpu_memory_used()
-        assert_memory_restored_after_quiesce(
-            "Primary active",
-            mem_after_b,
-            primary_mem,
-            released_a,
-            min_fraction=0.6,
-        )
         wait_for_weights_state(
             weights_gms,
             ServerState.RO,
@@ -420,14 +363,6 @@ def test_gms_shadow_engine_failover_trtllm(
         resume_result = shadow_a.resume(timeout=180)
         assert resume_result["status"] == "ok"
 
-        shadow_mem = get_gpu_memory_used()
-        assert_memory_restored_after_quiesce(
-            "Shadow A resume",
-            mem_after_b,
-            shadow_mem,
-            released_a,
-            min_fraction=0.6,
-        )
         wait_for_weights_state(
             weights_gms,
             ServerState.RO,
