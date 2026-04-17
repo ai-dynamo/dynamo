@@ -87,10 +87,27 @@ class MultimodalRequestProcessor:
             return False
         return bool(parsed.scheme and parsed.netloc)
 
-    def load_tensor_from_path_or_url(self, path: str) -> torch.Tensor:
-        """Load a tensor from either a local .safetensors path or URL.
+    def _unwrap_safetensors(
+        self, data: Dict[str, torch.Tensor]
+    ) -> "torch.Tensor | Dict[str, torch.Tensor]":
+        """Return a single tensor when the file has one key, else the full dict.
 
-        Only .safetensors format is accepted
+        Multi-key files (e.g. Maverick/Scout with mm_embeddings +
+        image_special_tokens + image_special_token_offsets) need the
+        full dict so encode_helper can extract auxiliary data.
+        """
+        if len(data) == 1:
+            return next(iter(data.values()))
+        return data
+
+    def load_tensor_from_path_or_url(
+        self, path: str
+    ) -> "torch.Tensor | Dict[str, torch.Tensor]":
+        """Load tensors from a local .safetensors path or URL.
+
+        Returns a single tensor for single-key files (e.g. LLaVA-NeXT),
+        or a dict of tensors for multi-key files (e.g. Maverick/Scout).
+        Only .safetensors format is accepted.
         """
         parsed = urlparse(path)
         lower_path = parsed.path.lower()
@@ -132,8 +149,7 @@ class MultimodalRequestProcessor:
                             chunks.append(chunk)
                         content = b"".join(chunks)
                     data = safetensors_load(content)
-                    key = next(iter(data))
-                    return data[key]
+                    return self._unwrap_safetensors(data)
             except RuntimeError:
                 raise
             except Exception as e:
@@ -168,8 +184,7 @@ class MultimodalRequestProcessor:
                         f"maximum allowed size ({self.max_file_size_bytes // (1024*1024)}MB)"
                     )
                 data = safetensors_load_file(str(resolved_path))
-                key = next(iter(data))
-                return data[key]
+                return self._unwrap_safetensors(data)
             except RuntimeError:
                 raise
             except Exception as e:
@@ -333,9 +348,15 @@ class MultimodalRequestProcessor:
                 # Load pre-computed vision encoder embeddings (.safetensors) for PD flow
                 if embedding_paths:
                     try:
-                        loaded_embeddings = [
+                        raw_loaded = [
                             self.load_tensor_from_path_or_url(path)
                             for path in embedding_paths
+                        ]
+                        loaded_embeddings = [
+                            item.get("mm_embeddings", next(iter(item.values())))
+                            if isinstance(item, dict)
+                            else item
+                            for item in raw_loaded
                         ]
                         if loaded_embeddings:
                             logging.info(
