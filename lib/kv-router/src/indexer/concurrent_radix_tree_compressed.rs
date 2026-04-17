@@ -59,13 +59,14 @@
 //! - `new_with_frequency()` is not provided
 //! - `find_matches` does not populate `OverlapScores.frequencies`
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Instant;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
 use crate::protocols::*;
@@ -85,6 +86,8 @@ type SharedNode = Arc<RwLock<Node>>;
 /// Position within the edge is resolved via `Node::edge_index` (O(1)) rather than
 /// stored here, keeping the map compact and correct across concurrent splits.
 type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedNode>;
+
+const CLEANUP_INTERVAL_MS: u64 = 5 * 60 * 1000;
 
 /// A node in the concurrent radix tree.
 ///
@@ -237,12 +240,71 @@ struct RemoveOutcome {
     stale_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
+struct CleanupEdge {
+    parent: Weak<RwLock<Node>>,
+    key: LocalBlockHash,
+    child: Weak<RwLock<Node>>,
+}
+
+struct CleanupState {
+    clock_origin: Instant,
+    last_cleanup_elapsed_ms: AtomicU64,
+    scheduled: AtomicBool,
+}
+
+impl CleanupState {
+    fn new() -> Self {
+        Self {
+            clock_origin: Instant::now(),
+            last_cleanup_elapsed_ms: AtomicU64::new(0),
+            scheduled: AtomicBool::new(false),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.clock_origin.elapsed().as_millis() as u64
+    }
+
+    fn try_schedule(&self) -> bool {
+        let now_ms = self.elapsed_ms();
+        let last_ms = self.last_cleanup_elapsed_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last_ms) < CLEANUP_INTERVAL_MS {
+            return false;
+        }
+
+        self.scheduled
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    fn cancel(&self) {
+        self.scheduled.store(false, Ordering::Release);
+    }
+}
+
+struct CleanupGuard<'a> {
+    state: &'a CleanupState,
+    completed_elapsed_ms: Option<u64>,
+}
+
+impl Drop for CleanupGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(elapsed_ms) = self.completed_elapsed_ms {
+            self.state
+                .last_cleanup_elapsed_ms
+                .store(elapsed_ms, Ordering::Relaxed);
+        }
+        self.state.scheduled.store(false, Ordering::Release);
+    }
+}
+
 /// Thread-safe radix tree (compressed trie) for concurrent KV cache lookups.
 pub struct ConcurrentRadixTreeCompressed {
     /// The root of the radix tree. Has an empty edge and only contains children.
     root: SharedNode,
 
     tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
+    cleanup: CleanupState,
 }
 
 impl Default for ConcurrentRadixTreeCompressed {
@@ -274,7 +336,71 @@ impl ConcurrentRadixTreeCompressed {
         Self {
             root: Arc::new(RwLock::new(Node::new())),
             tree_sizes: DashMap::with_hasher(FxBuildHasher),
+            cleanup: CleanupState::new(),
         }
+    }
+
+    fn cleanup_stale_children(&self) {
+        let mut queue = VecDeque::from([self.root.clone()]);
+        let mut edges = Vec::new();
+
+        while let Some(parent) = queue.pop_front() {
+            let guard = parent.read();
+            for (&key, child) in &guard.children {
+                queue.push_back(child.clone());
+                edges.push(CleanupEdge {
+                    parent: Arc::downgrade(&parent),
+                    key,
+                    child: Arc::downgrade(child),
+                });
+            }
+        }
+
+        for edge in edges.into_iter().rev() {
+            let (Some(parent), Some(child)) = (edge.parent.upgrade(), edge.child.upgrade()) else {
+                continue;
+            };
+
+            let mut parent_guard = parent.write();
+            let Some(current) = parent_guard.children.get(&edge.key) else {
+                continue;
+            };
+            if !Arc::ptr_eq(current, &child) {
+                continue;
+            }
+
+            let Some(child_guard) = child.try_write() else {
+                continue;
+            };
+            if child_guard.has_any_workers() || !child_guard.children.is_empty() {
+                continue;
+            }
+            if Arc::strong_count(&child) != 2 {
+                continue;
+            }
+
+            parent_guard.children.remove(&edge.key);
+            drop(child_guard);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_child_edge_count(&self) -> usize {
+        let mut queue = VecDeque::from([self.root.clone()]);
+        let mut count = 0usize;
+
+        while let Some(node) = queue.pop_front() {
+            let guard = node.read();
+            count += guard.children.len();
+            queue.extend(guard.children.values().cloned());
+        }
+
+        count
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_cleanup_for_test(&self) {
+        self.cleanup_stale_children();
     }
 
     // ------------------------------------------------------------------
@@ -1223,6 +1349,9 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
                     self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
                 }
+                WorkerTask::CleanupStaleChildren => {
+                    self.run_cleanup_task();
+                }
                 WorkerTask::DumpEvents(_sender) => {
                     let _ = _sender.send(Ok(Vec::new()));
                 }
@@ -1238,6 +1367,24 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
         self.find_matches_impl(sequence, early_exit)
+    }
+
+    fn try_schedule_cleanup(&self) -> bool {
+        self.cleanup.try_schedule()
+    }
+
+    fn cancel_scheduled_cleanup(&self) {
+        self.cleanup.cancel();
+    }
+
+    fn run_cleanup_task(&self) {
+        let mut cleanup_guard = CleanupGuard {
+            state: &self.cleanup,
+            completed_elapsed_ms: None,
+        };
+
+        self.cleanup_stale_children();
+        cleanup_guard.completed_elapsed_ms = Some(self.cleanup.elapsed_ms());
     }
 
     fn dump_events(&self) -> Option<Vec<RouterEvent>> {

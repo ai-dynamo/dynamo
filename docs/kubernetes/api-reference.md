@@ -1544,19 +1544,28 @@ _Underlying type:_ _string_
 GPUSKUType is the AIC hardware system identifier for a supported GPU.
 
 _Validation:_
-- Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s]
+- Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300]
 
 _Appears in:_
 - [HardwareSpec](#hardwarespec)
 
 | Field | Description |
 | --- | --- |
-| `gb200_sxm` |  |
-| `h200_sxm` |  |
-| `h100_sxm` |  |
+| `gb200_sxm` | --- Blackwell ---<br /> |
 | `b200_sxm` |  |
-| `a100_sxm` |  |
-| `l40s` |  |
+| `h200_sxm` | --- Hopper ---<br /> |
+| `h100_sxm` |  |
+| `h100_pcie` |  |
+| `a100_sxm` | --- Ampere ---<br /> |
+| `a100_pcie` |  |
+| `l40s` | --- Ada ---<br /> |
+| `l40` |  |
+| `l4` |  |
+| `v100_sxm` | --- Older NVIDIA ---<br /> |
+| `v100_pcie` |  |
+| `t4` |  |
+| `mi200` | --- AMD ---<br /> |
+| `mi300` |  |
 
 
 #### HardwareSpec
@@ -1573,10 +1582,12 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU is the AIC hardware system identifier for the GPU.<br />When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels. |  | Enum: [gb200_sxm h200_sxm h100_sxm b200_sxm a100_sxm l40s] <br />Optional: \{\} <br /> |
+| `gpuSku` _[GPUSKUType](#gpuskutype)_ | GPUSKU is the AIC hardware system identifier for the GPU.<br />When omitted, the operator auto-detects this via InferHardwareSystem from cluster GPU node labels. |  | Enum: [gb200_sxm b200_sxm h200_sxm h100_sxm h100_pcie a100_sxm a100_pcie l40s l40 l4 v100_sxm v100_pcie t4 mi200 mi300] <br />Optional: \{\} <br /> |
 | `vramMb` _float_ | VRAMMB is the VRAM per GPU in MiB. |  | Optional: \{\} <br /> |
 | `totalGpus` _integer_ | TotalGPUs is the total number of GPUs available in the cluster. |  | Optional: \{\} <br /> |
 | `numGpusPerNode` _integer_ | NumGPUsPerNode is the number of GPUs per node. |  | Optional: \{\} <br /> |
+| `interconnect` _string_ | Interconnect describes the GPU interconnect type within a node.<br />Examples: "pcie", "nvlink", "infiniband". |  | Optional: \{\} <br /> |
+| `rdma` _boolean_ | RDMA indicates whether RDMA is available on the cluster. |  | Optional: \{\} <br /> |
 
 
 
