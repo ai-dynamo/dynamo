@@ -16,14 +16,21 @@ import time
 from typing import cast
 
 import pytest
-from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-from gpu_memory_service.client.torch.module import (
-    materialize_module_from_gms,
-    register_module_tensors,
-)
-from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
-from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.server.rpc import GMSRPCServer
+
+try:
+    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+    from gpu_memory_service.client.torch.module import (
+        materialize_module_from_gms,
+        register_module_tensors,
+    )
+    from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
+    from gpu_memory_service.common.locks import RequestedLockType
+    from gpu_memory_service.server.rpc import GMSRPCServer
+except ModuleNotFoundError:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
 
 torch = pytest.importorskip("torch", reason="torch is required")
 
