@@ -296,6 +296,7 @@ where
         router_config_override: Option<&RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
@@ -312,6 +313,7 @@ where
             block_mm_infos,
             lora_name: lora_name.as_deref(),
             is_eagle: Some(self.is_eagle),
+            cache_namespace: cache_namespace.as_deref(),
         };
 
         let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
@@ -394,6 +396,7 @@ where
         expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
         router_config_override: Option<&RouterConfigOverride>,
     ) {
         let isl_tokens = tokens.len();
@@ -401,6 +404,7 @@ where
             block_mm_infos,
             lora_name: lora_name.as_deref(),
             is_eagle: Some(self.is_eagle),
+            cache_namespace: cache_namespace.as_deref(),
         };
 
         let maybe_seq_hashes = self.kv_router_config.compute_seq_hashes_for_tracking(
@@ -524,6 +528,7 @@ where
                 block_mm_infos,
                 lora_name,
                 is_eagle: Some(self.is_eagle),
+                cache_namespace: None,
             },
         );
         log_routing_input_hashes(None, self.block_size, tokens, &block_hashes);
@@ -544,6 +549,7 @@ where
             block_mm_infos,
             lora_name,
             is_eagle: Some(self.is_eagle),
+            cache_namespace: None,
         };
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, hash_options);
 
@@ -600,6 +606,7 @@ where
                         block_mm_infos.as_deref(),
                         None,
                         true,
+                        None,
                         None,
                         0.0,
                         None,

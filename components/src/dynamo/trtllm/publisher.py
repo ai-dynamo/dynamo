@@ -121,6 +121,7 @@ class ZmqKvEventPublisher:
         block_mm_infos: Optional[list[dict | None]] = None,
         attention_dp_rank: int = 0,
         lora_name: Optional[str] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         """Publish a BlockStored event.
 
@@ -143,6 +144,8 @@ class ZmqKvEventPublisher:
         }
         if lora_name is not None:
             event["lora_name"] = lora_name
+        if cache_salt is not None:
+            event["cache_salt"] = cache_salt
 
         # Add multimodal info if present
         if block_mm_infos is not None:
@@ -604,12 +607,17 @@ class Publisher:
 
             lora_name = data.get("lora_name")
 
+            # Extract cache_salt from the first block (same for all blocks in a request)
+            cache_salt = None
+            if data["blocks"]:
+                cache_salt = data["blocks"][0].get("cache_salt")
+
             # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
             # Default to 0 for backwards compatibility with older TRT-LLM versions
             attention_dp_rank = event.get("attention_dp_rank", 0)
 
             logging.debug(
-                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_name: {lora_name}, parent_hash: {parent_hash}"
+                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_name: {lora_name}, cache_salt: {cache_salt}, parent_hash: {parent_hash}"
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
@@ -623,6 +631,7 @@ class Publisher:
                     block_mm_infos,
                     attention_dp_rank,
                     lora_name,
+                    cache_salt,
                 )
             elif self.kv_event_publishers:
                 # No consolidator: publish to NATS (router subscribes directly)
@@ -636,6 +645,7 @@ class Publisher:
                         parent_hash,
                         block_mm_infos,
                         lora_name=lora_name,
+                        cache_salt=cache_salt,
                     )
                 else:
                     logging.warning(
