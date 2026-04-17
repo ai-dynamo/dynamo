@@ -35,6 +35,8 @@ NUM_WORKERS="${NUM_WORKERS:-2}"          # Number of backend workers
 # GPU memory between workers.
 SINGLE_GPU="${SINGLE_GPU:-false}"
 NUM_FRONTENDS="${NUM_FRONTENDS:-1}"           # Number of frontend replicas (>1 for parallel HF processing)
+# MM kwargs transfer mode: shm (default, same-node) or nixl (RDMA, cross-node)
+DYNAMO_MM_TRANSFER="${DYNAMO_MM_TRANSFER:-shm}"
 
 # KV cache override for parallel-safe GPU memory control
 KV_BYTES="${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:-}"
@@ -68,6 +70,7 @@ echo "NUM_FRONTENDS=${NUM_FRONTENDS}"
 echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "DYN_MM_IMAGE_CACHE_SIZE=${DYN_MM_IMAGE_CACHE_SIZE}"
+echo "DYNAMO_MM_TRANSFER=${DYNAMO_MM_TRANSFER}"
 echo "NATS_SERVER=${NATS_SERVER}"
 echo "ETCD_ENDPOINTS=${ETCD_ENDPOINTS}"
 echo "VLLM_SYSTEM_PORT_BASE=${VLLM_SYSTEM_PORT_BASE}"
@@ -188,6 +191,7 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     env "${COMMON_ENV[@]}" \
         "DYN_LOG=debug" \
         "DYN_SYSTEM_PORT=${FE_SYSTEM_PORT}" \
+        "DYNAMO_MM_TRANSFER=${DYNAMO_MM_TRANSFER}" \
         python -m dynamo.frontend \
             --http-port "${FE_HTTP_PORT}" \
             --dyn-chat-processor vllm \

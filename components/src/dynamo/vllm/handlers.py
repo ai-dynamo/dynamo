@@ -1207,6 +1207,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             "[mm-routing] _try_receive_mm_kwargs_nixl: extra_args keys=%s", ea_keys
         )
 
+        # TCP path: data is embedded in the request payload.
+        tcp_meta = extra_args.get("mm_kwargs_tcp")
+        if tcp_meta:
+            return await self._receive_mm_kwargs_tcp(request, tcp_meta)
+
         # Try SHM path first (same-node, ~1.5ms).
         # SHM only works when frontend and backend are on the same machine.
         # If SHM read fails (cross-node), fall through to normal processing.
@@ -1400,6 +1405,99 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return engine_input
         except Exception:
             logger.exception("[mm-routing] SHM receive failed, falling back")
+            _nvtx.end_range(rng)
+            return None
+
+    async def _receive_mm_kwargs_tcp(
+        self, request: Dict[str, Any], tcp_meta: Dict[str, Any]
+    ) -> Dict[str, Any] | None:
+        """Receive pre-processed mm_kwargs embedded in the TCP request payload (~1ms)."""
+        import base64
+
+        rng = _nvtx.start_range("mm_backend:tcp_receive", color="yellow")
+        extra_args = request.get("extra_args") or {}
+        mm_hashes = extra_args.get("mm_hashes")
+        mm_placeholders = extra_args.get("mm_placeholders")
+        if not mm_hashes or not mm_placeholders:
+            logger.warning(
+                "[mm-routing] TCP present but mm_hashes/mm_placeholders missing"
+            )
+            _nvtx.end_range(rng)
+            return None
+
+        try:
+            t_receive_start = time.perf_counter()
+            modality = tcp_meta.get("modality", "image")
+            items_b64 = tcp_meta.get("items_b64", [])
+            if not items_b64:
+                logger.warning("[mm-routing] TCP: no items_b64 in metadata")
+                _nvtx.end_range(rng)
+                return None
+
+            kwargs_items = []
+            total_bytes = 0
+            for i, encoded in enumerate(items_b64):
+                t0 = time.perf_counter()
+                pickled = base64.b64decode(encoded)
+                t_decode = time.perf_counter() - t0
+                total_bytes += len(pickled)
+
+                t0 = time.perf_counter()
+                item = pickle.loads(pickled)
+                t_unpickle = time.perf_counter() - t0
+
+                print(
+                    f"[TIMING][TCP-Receiver] item[{i}]: decode={t_decode*1e3:.2f}ms unpickle={t_unpickle*1e3:.2f}ms size={len(pickled)/1024:.1f}KB",
+                    flush=True,
+                )
+                if not isinstance(item, MultiModalKwargsItem):
+                    logger.warning(
+                        "[mm-routing] TCP: deserialized object is %s, expected "
+                        "MultiModalKwargsItem; falling back",
+                        type(item).__name__,
+                    )
+                    _nvtx.end_range(rng)
+                    return None
+                kwargs_items.append(item)
+
+            expanded_token_ids = extra_args.get("expanded_token_ids")
+            if not expanded_token_ids:
+                logger.warning("[mm-routing] TCP: no expanded_token_ids, falling back")
+                _nvtx.end_range(rng)
+                return None
+
+            mm_hashes_dict = {modality: mm_hashes}
+            mm_kwargs_dict = {modality: kwargs_items}
+            engine_input = {
+                "type": "multimodal",
+                "prompt_token_ids": expanded_token_ids,
+                "mm_kwargs": mm_kwargs_dict,
+                "mm_hashes": mm_hashes_dict,
+                "mm_placeholders": {
+                    modality: [
+                        PlaceholderRange(offset=off, length=length)
+                        for off, length in mm_placeholders
+                    ],
+                },
+            }
+            try:
+                self.engine_client.input_processor.inject_into_mm_cache(
+                    mm_hashes_dict, mm_kwargs_dict
+                )
+            except Exception:
+                logger.debug(
+                    "[mm-routing] Failed to inject into mm_cache", exc_info=True
+                )
+
+            t_total = (time.perf_counter() - t_receive_start) * 1e3
+            print(
+                f"[TIMING][TCP-Receiver] total={t_total:.2f}ms n_items={len(kwargs_items)} total_bytes={total_bytes/1024:.1f}KB",
+                flush=True,
+            )
+            _nvtx.end_range(rng)
+            return engine_input
+        except Exception:
+            logger.exception("[mm-routing] TCP receive failed, falling back")
             _nvtx.end_range(rng)
             return None
 

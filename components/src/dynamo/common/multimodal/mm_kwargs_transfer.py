@@ -26,10 +26,11 @@ import logging
 import multiprocessing.shared_memory as shm
 import os
 import pickle
+import time
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
-from typing import Any, Awaitable
+from typing import Any
 
 import torch
 from pydantic import BaseModel
@@ -105,8 +106,17 @@ class MmKwargsSender(ABC):
         """Release transfer resources after the backend has consumed them."""
 
 
+_DEFAULT_NIXL_SENDER_POOL_SIZE = 8
+_DEFAULT_NIXL_SENDER_MAX_ITEM_BYTES = 8 * 1024 * 1024  # 8 MB
+
+
 class MmKwargsNixlSender(MmKwargsSender):
     """Registers mm_kwargs tensors with NIXL for remote READ access.
+
+    Uses a pool of pre-registered send buffers so that NIXL registration
+    (~34ms per-request without pooling) is paid once at startup per slot.
+    Per-request cost is just a memcpy into the pre-registered buffer + metadata
+    re-serialization (~0-1ms).
 
     Usage::
 
@@ -116,8 +126,11 @@ class MmKwargsNixlSender(MmKwargsSender):
         await sender.cleanup(cleanup_items)  # wait for backend to finish reading
     """
 
-    def __init__(self) -> None:
-        # Lazy import to avoid hard dependency when NIXL is not available.
+    def __init__(
+        self,
+        pool_size: int = _DEFAULT_NIXL_SENDER_POOL_SIZE,
+        max_item_bytes: int = _DEFAULT_NIXL_SENDER_MAX_ITEM_BYTES,
+    ) -> None:
         try:
             from dynamo import nixl_connect
 
@@ -127,91 +140,168 @@ class MmKwargsNixlSender(MmKwargsSender):
         except ImportError:
             self._available = False
             logger.warning("nixl_connect not available; MmKwargsNixlSender disabled")
+            return
+
+        self._max_item_bytes = max_item_bytes
+        self._pool: Queue = Queue()
+
+        # Pre-warm the pool: pay NIXL registration once per slot at startup.
+        connection = run_async(self._connector._create_connection)
+        t0 = time.perf_counter()
+        for _ in range(pool_size):
+            slot = self._make_slot(connection, max_item_bytes)
+            self._pool.put(slot)
+        logger.info(
+            "MmKwargsNixlSender: pre-registered %d sender slots (%d bytes each) in %.0fms",
+            pool_size,
+            max_item_bytes,
+            (time.perf_counter() - t0) * 1e3,
+        )
+
+    def _make_slot(self, connection: Any, max_bytes: int) -> Any:
+        """Allocate and pre-register one sender buffer slot."""
+        nixl_connect = self._nixl_connect
+        ReadableOperation = nixl_connect.ReadableOperation
+
+        # Subclass suppresses _release() so the descriptor stays registered
+        # across multiple requests.  The pool manages the descriptor lifetime.
+        class _NonReleasingOp(ReadableOperation):
+            def _release(self) -> None:
+                pass
+
+        buf = torch.zeros(max_bytes, dtype=torch.uint8)
+        desc = nixl_connect.Descriptor(buf)
+        desc.register_with_connector(connection)  # one-time cost (~34ms)
+
+        # Creating ReadableOperation calls register_with_connector — no-op since
+        # desc is already registered.
+        op = _NonReleasingOp(connection, desc)
+        return (buf, desc, op, max_bytes)  # tuple: (buffer, descriptor, op, capacity)
+
+    def _slot_load(self, slot: Any, pickled: bytes) -> None:
+        """Copy pickled bytes into slot and reset op state for a new request."""
+        import numpy as np
+
+        buf, desc, op, _cap = slot
+        size = len(pickled)
+        # Zero-copy view of pickled bytes, then bulk copy into pre-registered buf.
+        buf.numpy()[:size] = np.frombuffer(pickled, dtype=np.uint8)
+
+        # Update size so serialized metadata reflects the actual payload.
+        desc._data_size = size
+        desc._serialized = None  # clear cached SerializedDescriptor
+        op._serialized_request = None  # force RdmaMetadata re-serialization
+        # Re-arm the status so wait_for_completion polls for the new notification.
+        op._status = self._nixl_connect.OperationStatus.INITIALIZED
+
+    def _slot_restore(self, slot: Any) -> None:
+        """Restore full-capacity size on descriptor before returning to pool."""
+        _buf, desc, _op, cap = slot
+        desc._data_size = cap
 
     async def prepare(
         self,
-        mm_features: list[Any],  # list[MultiModalFeatureSpec]
+        mm_features: list[Any],
         modality: str = "image",
     ) -> tuple[dict[str, Any] | None, list[Any]]:
-        """Register mm_kwargs tensors from mm_features with NIXL.
+        """Copy mm_kwargs into pre-registered buffers and expose via NIXL READ.
 
         Returns:
-            (extra_args_update, completion_futures) or (None, []) if no
-            tensors to transfer. Pass completion_futures to cleanup() after
-            streaming so the frontend waits for the backend to finish reading.
+            (extra_args_update, cleanup_items) or (None, []).
+            cleanup_items is a list of (slot_or_None, completion_coroutine).
         """
         if not self._available:
-            logger.debug("[NIXL-Sender] NIXL not available, skipping")
             return None, []
         if not mm_features:
-            logger.debug("[NIXL-Sender] No mm_features to send")
             return None, []
-        logger.debug(
-            "[NIXL-Sender] Preparing %d mm_features for NIXL transfer",
-            len(mm_features),
-        )
 
         tensor_specs: list[TensorTransferSpec] = []
-        completions: list[Awaitable[None]] = []
+        cleanup_items: list[Any] = []
         mm_hashes: list[str] = []
 
+        t_prepare_start = time.perf_counter()
         rng = _nvtx.start_range("mm_nixl:sender_prepare", color="magenta")
+        total_bytes = 0
+
         for i, feat in enumerate(mm_features):
             if feat.mm_hash:
                 mm_hashes.append(feat.mm_hash)
-
             if feat.data is None:
-                logger.debug("[NIXL-Sender] feature[%d]: data is None, skipping", i)
                 continue
 
-            # Pickle the kwargs item — preserves MultiModalFieldElem + field objects
+            t0 = time.perf_counter()
             with _nvtx.annotate("mm_nixl:pickle_dumps", color="magenta"):
                 pickled_item = pickle.dumps(feat.data)
-            logger.debug(
-                "[NIXL-Sender] feature[%d]: pickled kwargs_item (%d bytes)",
-                i,
-                len(pickled_item),
-            )
+            t_pickle = time.perf_counter() - t0
 
-            # Register pickled bytes as a NIXL transfer
+            t0 = time.perf_counter()
             with _nvtx.annotate("mm_nixl:register_descriptor", color="magenta"):
-                pickled_tensor = torch.frombuffer(
-                    bytearray(pickled_item), dtype=torch.uint8
-                )
-                descriptor = self._nixl_connect.Descriptor(pickled_tensor)
-                readable_op = await self._connector.create_readable(descriptor)
+                if not self._pool.empty() and len(pickled_item) <= self._max_item_bytes:
+                    # Fast path: borrow pre-registered slot, just memcpy + re-arm.
+                    slot = self._pool.get()
+                    self._slot_load(slot, pickled_item)
+                    _buf, _desc, op, _cap = slot
+                    readable_meta = op.metadata()
+                    completion = op.wait_for_completion()
+                else:
+                    # Slow path: dynamic allocation (pool exhausted or item too large).
+                    slot = None
+                    pickled_tensor = torch.frombuffer(
+                        bytearray(pickled_item), dtype=torch.uint8
+                    )
+                    descriptor = self._nixl_connect.Descriptor(pickled_tensor)
+                    readable_op = await self._connector.create_readable(descriptor)
+                    readable_meta = readable_op.metadata()
+                    completion = readable_op.wait_for_completion()
+            t_register = time.perf_counter() - t0
+
+            total_bytes += len(pickled_item)
+            print(
+                f"[TIMING][NIXL-Sender] feature[{i}]: pickle={t_pickle*1e3:.2f}ms register={t_register*1e3:.2f}ms size={len(pickled_item)/1024:.1f}KB",
+                flush=True,
+            )
 
             spec = TensorTransferSpec(
                 field_name="__pickled_kwargs_item__",
                 shape=[len(pickled_item)],
                 dtype_str="uint8",
-                serialized_request=readable_op.metadata().model_dump(),
+                serialized_request=readable_meta.model_dump(),
             )
             tensor_specs.append(spec)
-            completions.append(readable_op.wait_for_completion())
+            cleanup_items.append((slot, completion))
 
         _nvtx.end_range(rng)
+        t_prepare_total = time.perf_counter() - t_prepare_start
         if not tensor_specs:
             return None, []
+
+        print(
+            f"[TIMING][NIXL-Sender] prepare total={t_prepare_total*1e3:.2f}ms n_items={len(tensor_specs)} total_bytes={total_bytes/1024:.1f}KB",
+            flush=True,
+        )
 
         metadata = MmKwargsTransferMetadata(
             modality=modality,
             tensor_specs=tensor_specs,
             mm_hashes=mm_hashes,
         )
-        logger.debug(
-            "[NIXL-Sender] registered %d tensor(s) for transfer",
-            len(metadata.tensor_specs),
-        )
-        return {"mm_kwargs_nixl": metadata.model_dump()}, completions
+        return {"mm_kwargs_nixl": metadata.model_dump()}, cleanup_items
 
     async def cleanup(self, items: list[Any]) -> None:
-        """Await NIXL completion futures so memory regions can be deregistered."""
+        """Await NIXL completion and return pool slots."""
         if not items:
             return
         try:
-            await asyncio.gather(*items)
-            logger.debug("[NIXL-Sender] all transfers completed")
+            t0 = time.perf_counter()
+            for slot, completion in items:
+                await completion
+                if slot is not None:
+                    self._slot_restore(slot)
+                    self._pool.put(slot)
+            print(
+                f"[TIMING][NIXL-Sender] cleanup (wait_for_completion) total={(time.perf_counter()-t0)*1e3:.2f}ms n_items={len(items)}",
+                flush=True,
+            )
         except Exception:
             logger.warning("[NIXL-Sender] transfer completion failed", exc_info=True)
 
@@ -320,6 +410,7 @@ class MmKwargsReceiver:
         if not self._available:
             raise RuntimeError("NIXL not available for mm_kwargs reception")
 
+        t_receive_start = time.perf_counter()
         rng = _nvtx.start_range("mm_nixl:receiver_read", color="magenta")
         # Pre-allocate result slots to preserve spec order regardless of
         # completion order from asyncio.gather.
@@ -328,6 +419,8 @@ class MmKwargsReceiver:
         acquired: list[tuple[Any, bool, int | None]] = []
         # Store (spec_index, field_name, tensor_view, size_bytes) per task.
         task_meta: list[tuple[int, str, Any, int]] = []
+        # Per-spec timing collected inside each coroutine.
+        spec_timings: list[dict[str, float]] = [{} for _ in metadata.tensor_specs]
 
         for idx, spec in enumerate(metadata.tensor_specs):
             size_bytes = 1
@@ -344,13 +437,35 @@ class MmKwargsReceiver:
                 spec.serialized_request
             )
 
-            async def _do_read(rm=rdma_metadata, d=desc):
+            async def _do_read(rm=rdma_metadata, d=desc, i=idx, sz=size_bytes):
+                t0 = time.perf_counter()
                 read_op = await self._connector.begin_read(rm, d)
+                t_begin = time.perf_counter() - t0
+                t0 = time.perf_counter()
                 await read_op.wait_for_completion()
+                t_wait = time.perf_counter() - t0
+                spec_timings[i] = {
+                    "begin_read_ms": t_begin * 1e3,
+                    "wait_ms": t_wait * 1e3,
+                    "size_kb": sz / 1024,
+                }
 
             read_tasks.append(_do_read())
 
+        t0 = time.perf_counter()
         await asyncio.gather(*read_tasks)
+        t_gather = time.perf_counter() - t0
+
+        for i, st in enumerate(spec_timings):
+            if st:
+                print(
+                    f"[TIMING][NIXL-Receiver] spec[{i}]: begin_read={st['begin_read_ms']:.2f}ms wait={st['wait_ms']:.2f}ms size={st['size_kb']:.1f}KB",
+                    flush=True,
+                )
+        print(
+            f"[TIMING][NIXL-Receiver] gather={t_gather*1e3:.2f}ms n_specs={len(metadata.tensor_specs)} total={(time.perf_counter()-t_receive_start)*1e3:.2f}ms",
+            flush=True,
+        )
 
         # Collect results in spec order (not completion order).
         results: dict[str, Any] = {}
@@ -402,10 +517,12 @@ class MmKwargsShmSender(MmKwargsSender):
         if not mm_features:
             return None, []
 
+        t_prepare_start = time.perf_counter()
         rng = _nvtx.start_range("mm_shm:sender_prepare", color="cyan")
         items: list[dict[str, Any]] = []
         handles: list[shm.SharedMemory] = []
         mm_hashes: list[str] = []
+        total_bytes = 0
 
         for i, feat in enumerate(mm_features):
             if feat.mm_hash:
@@ -413,31 +530,39 @@ class MmKwargsShmSender(MmKwargsSender):
             if feat.data is None:
                 continue
 
+            t0 = time.perf_counter()
             with _nvtx.annotate("mm_shm:pickle_dumps", color="cyan"):
                 pickled = pickle.dumps(feat.data)
+            t_pickle = time.perf_counter() - t0
+
             name = f"mm_kwargs_{os.getpid()}_{uuid.uuid4().hex[:12]}_{i}"
+            t0 = time.perf_counter()
             with _nvtx.annotate("mm_shm:create_and_write", color="cyan"):
                 sm = shm.SharedMemory(name=name, create=True, size=len(pickled))
                 sm.buf[: len(pickled)] = pickled
+            t_write = time.perf_counter() - t0
+
+            total_bytes += len(pickled)
+            print(
+                f"[TIMING][SHM-Sender] feature[{i}]: pickle={t_pickle*1e3:.2f}ms create_write={t_write*1e3:.2f}ms size={len(pickled)/1024:.1f}KB",
+                flush=True,
+            )
             handles.append(sm)
             items.append({"name": name, "size": len(pickled)})
-            logger.debug(
-                "[SHM-Sender] feature[%d]: wrote %d bytes to shm %s",
-                i,
-                len(pickled),
-                name,
-            )
 
         _nvtx.end_range(rng)
         if not items:
             return None, []
 
+        print(
+            f"[TIMING][SHM-Sender] prepare total={(time.perf_counter()-t_prepare_start)*1e3:.2f}ms n_items={len(items)} total_bytes={total_bytes/1024:.1f}KB",
+            flush=True,
+        )
         meta: dict[str, Any] = {
             "modality": modality,
             "items": items,
             "mm_hashes": mm_hashes,
         }
-        logger.debug("[SHM-Sender] wrote %d item(s) to shared memory", len(items))
         return {"mm_kwargs_shm": meta}, handles
 
     async def cleanup(self, items: list[Any]) -> None:
@@ -453,6 +578,80 @@ class MmKwargsShmSender(MmKwargsSender):
                     "Failed to clean up shared memory handle",
                     exc_info=True,
                 )
+
+
+class MmKwargsTcpSender(MmKwargsSender):
+    """Transfers pickled mm_kwargs via Dynamo's TCP request plane.
+
+    Embeds base64-encoded pickled data directly in extra_args["mm_kwargs_tcp"].
+    No separate memory segment or RDMA channel needed — the data travels with
+    the request payload through the existing Dynamo TCP plane.
+
+    Suitable for same-node or cross-node transfers up to ~50 MB. Latency is
+    dominated by serialization (pickle + base64) and TCP framing.
+
+    Usage::
+
+        sender = MmKwargsTcpSender()
+        extra_args, _ = await sender.prepare(mm_features, "image")
+        # No cleanup needed — data lives in the request payload.
+    """
+
+    import base64 as _base64
+
+    async def prepare(
+        self,
+        mm_features: list[Any],
+        modality: str = "image",
+    ) -> tuple[dict[str, Any] | None, list[Any]]:
+        if not mm_features:
+            return None, []
+
+        import base64
+
+        t_prepare_start = time.perf_counter()
+        items_b64: list[str] = []
+        mm_hashes: list[str] = []
+        total_bytes = 0
+
+        for i, feat in enumerate(mm_features):
+            if feat.mm_hash:
+                mm_hashes.append(feat.mm_hash)
+            if feat.data is None:
+                continue
+
+            t0 = time.perf_counter()
+            pickled = pickle.dumps(feat.data)
+            t_pickle = time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            encoded = base64.b64encode(pickled).decode("ascii")
+            t_encode = time.perf_counter() - t0
+
+            total_bytes += len(pickled)
+            print(
+                f"[TIMING][TCP-Sender] feature[{i}]: pickle={t_pickle*1e3:.2f}ms encode={t_encode*1e3:.2f}ms size={len(pickled)/1024:.1f}KB",
+                flush=True,
+            )
+            items_b64.append(encoded)
+
+        if not items_b64:
+            return None, []
+
+        t_prepare_total = time.perf_counter() - t_prepare_start
+        print(
+            f"[TIMING][TCP-Sender] prepare total={t_prepare_total*1e3:.2f}ms n_items={len(items_b64)} total_bytes={total_bytes/1024:.1f}KB",
+            flush=True,
+        )
+        meta: dict[str, Any] = {
+            "modality": modality,
+            "items_b64": items_b64,
+            "mm_hashes": mm_hashes,
+        }
+        return {"mm_kwargs_tcp": meta}, []
+
+    async def cleanup(self, items: list[Any]) -> None:
+        pass  # Nothing to release — data is embedded in the request payload.
 
 
 class MmKwargsShmReceiver:
@@ -471,18 +670,27 @@ class MmKwargsShmReceiver:
         Returns:
             Dict with "__pickled_kwargs_item__" key mapping to list of bytes.
         """
+        t_receive_start = time.perf_counter()
         rng = _nvtx.start_range("mm_shm:receiver_read", color="cyan")
         results: dict[str, Any] = {}
 
-        for item in meta.get("items", []):
+        for i, item in enumerate(meta.get("items", [])):
             name = item["name"]
             size = item["size"]
+            t0 = time.perf_counter()
             with _nvtx.annotate("mm_shm:open_and_read", color="cyan"):
                 sm = shm.SharedMemory(name=name, create=False)
                 data = bytes(sm.buf[:size])
                 sm.close()
+            print(
+                f"[TIMING][SHM-Receiver] item[{i}]: open_read={(time.perf_counter()-t0)*1e3:.2f}ms size={size/1024:.1f}KB",
+                flush=True,
+            )
             results.setdefault("__pickled_kwargs_item__", []).append(data)
-            logger.debug("[SHM-Receiver] read %d bytes from shm %s", size, name)
 
+        print(
+            f"[TIMING][SHM-Receiver] total={(time.perf_counter()-t_receive_start)*1e3:.2f}ms n_items={len(meta.get('items', []))}",
+            flush=True,
+        )
         _nvtx.end_range(rng)
         return results

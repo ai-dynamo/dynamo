@@ -28,6 +28,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsNixlSender,
     MmKwargsSender,
     MmKwargsShmSender,
+    MmKwargsTcpSender,
 )
 from dynamo.common.multimodal.routing_utils import build_mm_routing_info_from_features
 from dynamo.common.utils import nvtx_utils as _nvtx
@@ -108,6 +109,7 @@ class VllmProcessor:
         #   nixl: NIXL RDMA. Works cross-node via IB.
         self.nixl_mm_enabled = os.environ.get("DYNAMO_DISABLE_NIXL_MM", "") != "1"
         transfer_mode = os.environ.get("DYNAMO_MM_TRANSFER", "shm").lower()
+        self._transfer_mode = transfer_mode
         self.use_shm_transfer = transfer_mode == "shm"
         logger.info("[mm-routing] Transfer mode: %s", transfer_mode)
 
@@ -212,11 +214,12 @@ class VllmProcessor:
                 nvtx_color = "cyan" if self.use_shm_transfer else "magenta"
                 try:
                     if self._sender is None:
-                        self._sender = (
-                            MmKwargsShmSender()
-                            if self.use_shm_transfer
-                            else MmKwargsNixlSender()
-                        )
+                        if self._transfer_mode == "tcp":
+                            self._sender = MmKwargsTcpSender()
+                        elif self.use_shm_transfer:
+                            self._sender = MmKwargsShmSender()
+                        else:
+                            self._sender = MmKwargsNixlSender()
                     with _nvtx.annotate(nvtx_label, color=nvtx_color):
                         extra_update, cleanup_items = await self._sender.prepare(
                             vllm_preproc.mm_features, modality="image"
