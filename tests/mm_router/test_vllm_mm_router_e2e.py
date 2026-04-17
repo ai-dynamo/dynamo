@@ -44,6 +44,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.model(VLLM_MM_MODEL),
 ]
 
@@ -110,7 +111,7 @@ class VLLMWorkerProcess(ManagedProcess):
                 VLLM_MM_MODEL,
                 "--enable-multimodal",
                 "--gpu-memory-utilization",
-                "0.85",
+                "0.70",
                 "--max-model-len",
                 "8192",
                 "--served-model-name",
