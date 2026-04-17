@@ -147,6 +147,23 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
+
+    fn maybe_enqueue_cleanup(&self, thread_idx: usize) {
+        if !self.backend.try_schedule_cleanup() {
+            return;
+        }
+
+        if let Err(e) =
+            self.worker_event_channels[thread_idx].send(WorkerTask::CleanupStaleChildren)
+        {
+            self.backend.cancel_scheduled_cleanup();
+            tracing::error!(
+                "Failed to send cleanup task to worker thread {}: {:?}",
+                thread_idx,
+                e
+            );
+        }
+    }
 }
 
 impl<T: SyncIndexer> Drop for ThreadPoolIndexer<T> {
@@ -217,7 +234,10 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 thread_idx,
                 e
             );
+            return;
         }
+
+        self.maybe_enqueue_cleanup(thread_idx);
     }
 
     async fn remove_worker(&self, worker_id: WorkerId) {
@@ -234,13 +254,17 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                         idx,
                         e
                     );
+                    return;
                 }
+
+                self.maybe_enqueue_cleanup(idx);
             }
             None => {
                 // Worker was never assigned a thread - broadcast to all
                 for channel in &self.worker_event_channels {
                     let _ = channel.send(WorkerTask::RemoveWorker(worker_id));
                 }
+                self.maybe_enqueue_cleanup(0);
             }
         }
     }
@@ -251,6 +275,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         for channel in &self.worker_event_channels {
             let _ = channel.send(WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank));
         }
+        self.maybe_enqueue_cleanup(0);
     }
 
     fn shutdown(&self) {
