@@ -116,8 +116,10 @@ class PdConnector(MultiConnector):
         This is required for NIXL connector to start its handshake listener
         which decode workers connect to for KV transfer coordination.
         """
-        for c in self._connectors:
-            c.set_xfer_handshake_metadata(metadata)
+        # Only pass handshake metadata to the NixlConnector (second connector).
+        # The DynamoConnector (first connector) uses its own Velo peer handshake
+        # and rejects non-VeloPeerMetadata.
+        self._connectors[1].set_xfer_handshake_metadata(metadata)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
