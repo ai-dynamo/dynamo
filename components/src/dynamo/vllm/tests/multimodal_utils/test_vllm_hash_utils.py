@@ -23,38 +23,30 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.vllm]
 # ---------------------------------------------------------------------------
 
 
-def _dimension_swap_buf() -> bytes:
-    buf = bytes(range(256)) * ((30 * 150 * 3) // 256 + 1)
-    return buf[: 30 * 150 * 3]
-
-
-def test_dimension_swap_no_collision_pil():
-    """Two RGB PIL images sharing the same flat pixel buffer but with swapped
-    (W, H) must hash to different UUIDs. PIL.Image.tobytes() emits raw pixel
-    bytes with no geometry, so the preimage must carry dimensions explicitly.
+@pytest.mark.parametrize(
+    "make_image",
+    [
+        pytest.param(
+            lambda h, w, buf: Image.frombytes("RGB", (w, h), buf),
+            id="pil",
+        ),
+        pytest.param(
+            lambda h, w, buf: np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 3),
+            id="ndarray",
+        ),
+    ],
+)
+def test_dimension_swap_no_collision(make_image):
+    """Two RGB images sharing the same flat pixel buffer but with swapped
+    (W, H) must hash to different UUIDs. Raw pixel bytes carry no geometry,
+    so the preimage must include dimensions explicitly. Covers both the PIL
+    input path (URL decode) and the ndarray path (NIXL / Rust decoder).
     """
-    buf = _dimension_swap_buf()
-    wide = Image.frombytes("RGB", (150, 30), buf)
-    tall = Image.frombytes("RGB", (30, 150), buf)
+    buf = bytes(range(256)) * ((30 * 150 * 3) // 256 + 1)
+    buf = buf[: 30 * 150 * 3]
 
-    assert wide.tobytes() == tall.tobytes(), (
-        "Precondition: images must share raw pixel bytes for this test to "
-        "exercise the geometry-in-preimage guarantee."
-    )
-
-    [wide_uuid] = compute_mm_uuids_from_images([wide])
-    [tall_uuid] = compute_mm_uuids_from_images([tall])
-
-    assert wide_uuid != tall_uuid
-
-
-def test_dimension_swap_no_collision_ndarray():
-    """Same as above but for the ndarray input path (NIXL / decoded pipeline)."""
-    flat = np.arange(30 * 150 * 3, dtype=np.uint8) % 251
-    wide = flat.reshape(30, 150, 3)
-    tall = flat.reshape(150, 30, 3)
-
-    assert wide.tobytes() == tall.tobytes()
+    wide = make_image(30, 150, buf)
+    tall = make_image(150, 30, buf)
 
     [wide_uuid] = compute_mm_uuids_from_images([wide])
     [tall_uuid] = compute_mm_uuids_from_images([tall])
@@ -86,39 +78,47 @@ def test_pil_ndarray_equivalent_inputs_match():
 # ---------------------------------------------------------------------------
 
 
-def test_rejects_non_rgb_pil():
-    img = Image.new("L", (8, 8))
-    with pytest.raises(ValueError):
-        compute_mm_uuids_from_images([img])
-
-
-def test_rejects_non_rgb_pil_rgba():
-    img = Image.new("RGBA", (8, 8))
-    with pytest.raises(ValueError):
-        compute_mm_uuids_from_images([img])
-
-
-def test_rejects_wrong_dtype_ndarray():
-    arr = np.zeros((8, 8, 3), dtype=np.float32)
-    with pytest.raises(ValueError):
-        compute_mm_uuids_from_images([arr])
-
-
-def test_rejects_wrong_shape_ndarray_2d():
-    arr = np.zeros((8, 8), dtype=np.uint8)
-    with pytest.raises(ValueError):
-        compute_mm_uuids_from_images([arr])
-
-
-def test_rejects_wrong_shape_ndarray_4ch():
-    arr = np.zeros((8, 8, 4), dtype=np.uint8)
-    with pytest.raises(ValueError):
-        compute_mm_uuids_from_images([arr])
-
-
-def test_rejects_bytes_input():
-    with pytest.raises(TypeError):
-        compute_mm_uuids_from_images([b"\x00" * (8 * 8 * 3)])
+@pytest.mark.parametrize(
+    "bad_input, exc",
+    [
+        pytest.param(
+            lambda: Image.new("L", (8, 8)),
+            ValueError,
+            id="pil_mode_L",
+        ),
+        pytest.param(
+            lambda: Image.new("RGBA", (8, 8)),
+            ValueError,
+            id="pil_mode_RGBA",
+        ),
+        pytest.param(
+            lambda: np.zeros((8, 8, 3), dtype=np.float32),
+            ValueError,
+            id="ndarray_dtype_float32",
+        ),
+        pytest.param(
+            lambda: np.zeros((8, 8), dtype=np.uint8),
+            ValueError,
+            id="ndarray_shape_2d",
+        ),
+        pytest.param(
+            lambda: np.zeros((8, 8, 4), dtype=np.uint8),
+            ValueError,
+            id="ndarray_shape_4ch",
+        ),
+        pytest.param(
+            lambda: b"\x00" * (8 * 8 * 3),
+            TypeError,
+            id="bytes",
+        ),
+    ],
+)
+def test_rejects_invalid_input(bad_input, exc):
+    """Inputs outside the RGB uint8 (H, W, 3) contract must raise before any
+    hashing work — loud failure beats silent collision.
+    """
+    with pytest.raises(exc):
+        compute_mm_uuids_from_images([bad_input()])
 
 
 def test_non_contiguous_ndarray_coerced():
