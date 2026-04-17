@@ -55,7 +55,7 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 	}
 
 	var allocated []allocatedDRADevice
-	usesDRAGPU := false
+	hasNVIDIADRAAllocation := false
 	for _, ref := range pod.Spec.ResourceClaims {
 		claimName := claimNamesByPodRef[ref.Name]
 		if claimName == "" {
@@ -64,7 +64,7 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 		}
 		claim, err := clientset.ResourceV1().ResourceClaims(podNamespace).Get(ctx, claimName, metav1.GetOptions{})
 		if err != nil {
-			return nil, pod.Spec.NodeName, usesDRAGPU, fmt.Errorf("get resource claim %s/%s: %w", podNamespace, claimName, err)
+			return nil, pod.Spec.NodeName, hasNVIDIADRAAllocation, fmt.Errorf("get resource claim %s/%s: %w", podNamespace, claimName, err)
 		}
 		if claim.Status.Allocation == nil || len(claim.Status.Allocation.Devices.Results) == 0 {
 			continue
@@ -73,7 +73,7 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 			if result.Driver != nvidiaGPUDRADriver {
 				continue
 			}
-			usesDRAGPU = true
+			hasNVIDIADRAAllocation = true
 			allocated = append(allocated, allocatedDRADevice{
 				pool:   result.Pool,
 				device: result.Device,
@@ -81,19 +81,19 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 		}
 	}
 
-	return allocated, pod.Spec.NodeName, usesDRAGPU, nil
+	return allocated, pod.Spec.NodeName, hasNVIDIADRAAllocation, nil
 }
 
 // GetGPUUUIDsViaDRAAPI resolves GPU UUIDs for a pod by querying the Kubernetes API:
 // Pod (resource claim refs) -> ResourceClaim (allocation results) -> ResourceSlice (device attributes).
 // It also reports whether the pod is using NVIDIA DRA GPU allocations at all.
 func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]string, bool, error) {
-	allocated, nodeName, usesDRAGPU, err := getAllocatedNVIDIADRADevices(ctx, clientset, podName, podNamespace, log)
+	allocated, nodeName, hasNVIDIADRAAllocation, err := getAllocatedNVIDIADRADevices(ctx, clientset, podName, podNamespace, log)
 	if err != nil {
-		return nil, usesDRAGPU, err
+		return nil, hasNVIDIADRAAllocation, err
 	}
-	if !usesDRAGPU || len(allocated) == 0 {
-		return nil, usesDRAGPU, nil
+	if !hasNVIDIADRAAllocation || len(allocated) == 0 {
+		return nil, hasNVIDIADRAAllocation, nil
 	}
 
 	slices, err := clientset.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{

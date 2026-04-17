@@ -251,6 +251,48 @@ func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
 	}
 }
 
+func TestDiscoverGPUUUIDsFallsBackToPodResourcesAfterDRAAPILookupError(t *testing.T) {
+	installTestPodResourcesServer(t, &podresourcesv1.ListPodResourcesResponse{
+		PodResources: []*podresourcesv1.PodResources{
+			{
+				Name:      "test-pod",
+				Namespace: "default",
+				Containers: []*podresourcesv1.ContainerResources{
+					{
+						Name: "main",
+						Devices: []*podresourcesv1.ContainerDevices{
+							{
+								ResourceName: nvidiaGPUResource,
+								DeviceIds:    []string{"GPU-a"},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got, err := DiscoverGPUUUIDs(
+		ctx,
+		fake.NewSimpleClientset(),
+		"test-pod",
+		"default",
+		"main",
+		"/proc",
+		123,
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("DiscoverGPUUUIDs: %v", err)
+	}
+	if len(got) != 1 || got[0] != "GPU-a" {
+		t.Fatalf("got %v, want [GPU-a]", got)
+	}
+}
+
 func TestDiscoverGPUUUIDsPrefersDRAForDRAPod(t *testing.T) {
 	previousSocketPath := podResourcesSocketPath
 	podResourcesSocketPath = filepath.Join(t.TempDir(), "missing-kubelet.sock")

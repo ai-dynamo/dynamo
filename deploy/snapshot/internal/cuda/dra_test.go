@@ -60,12 +60,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 	log := logr.Discard()
 
 	t.Run("nil clientset returns nil without error", func(t *testing.T) {
-		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, nil, "pod", "ns", log)
+		got, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, nil, "pod", "ns", log)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if usesDRAGPU {
-			t.Fatal("expected usesDRAGPU to be false")
+		if hasNVIDIADRAAllocation {
+			t.Fatal("expected hasNVIDIADRAAllocation to be false")
 		}
 		if got != nil {
 			t.Errorf("got %v, want nil", got)
@@ -74,12 +74,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 
 	t.Run("empty pod name returns nil", func(t *testing.T) {
 		client := fake.NewSimpleClientset()
-		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, "", "ns", log)
+		got, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, client, "", "ns", log)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if usesDRAGPU {
-			t.Fatal("expected usesDRAGPU to be false")
+		if hasNVIDIADRAAllocation {
+			t.Fatal("expected hasNVIDIADRAAllocation to be false")
 		}
 		if got != nil {
 			t.Errorf("got %v, want nil", got)
@@ -152,12 +152,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 		}
 
 		client := fake.NewSimpleClientset(pod, claim, slice)
-		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
+		got, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
 		if err != nil {
 			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
 		}
-		if !usesDRAGPU {
-			t.Fatal("expected usesDRAGPU to be true")
+		if !hasNVIDIADRAAllocation {
+			t.Fatal("expected hasNVIDIADRAAllocation to be true")
 		}
 		want := []string{uuid1, uuid2}
 		if len(got) != len(want) {
@@ -227,12 +227,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 		}
 
 		client := fake.NewSimpleClientset(pod, claim, slice)
-		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
+		got, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
 		if err != nil {
 			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
 		}
-		if !usesDRAGPU {
-			t.Fatal("expected usesDRAGPU to be true")
+		if !hasNVIDIADRAAllocation {
+			t.Fatal("expected hasNVIDIADRAAllocation to be true")
 		}
 		want := []string{uuid1}
 		if len(got) != len(want) {
@@ -259,12 +259,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 		}
 
 		client := fake.NewSimpleClientset(pod)
-		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", log)
+		got, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", log)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if usesDRAGPU {
-			t.Fatal("expected usesDRAGPU to be false")
+		if hasNVIDIADRAAllocation {
+			t.Fatal("expected hasNVIDIADRAAllocation to be false")
 		}
 		if got != nil {
 			t.Errorf("got %v, want nil", got)
@@ -352,12 +352,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 		}
 
 		client := fake.NewSimpleClientset(pod, directClaim, generatedClaim, slice)
-		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
+		got, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
 		if err != nil {
 			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
 		}
-		if !usesDRAGPU {
-			t.Fatal("expected usesDRAGPU to be true")
+		if !hasNVIDIADRAAllocation {
+			t.Fatal("expected hasNVIDIADRAAllocation to be true")
 		}
 		want := []string{uuid1, uuid2}
 		if len(got) != len(want) {
@@ -376,12 +376,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 			Spec:       corev1.PodSpec{NodeName: "node-1"},
 		}
 		client := fake.NewSimpleClientset(pod)
-		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", log)
+		got, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", log)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if usesDRAGPU {
-			t.Fatal("expected usesDRAGPU to be false")
+		if hasNVIDIADRAAllocation {
+			t.Fatal("expected hasNVIDIADRAAllocation to be false")
 		}
 		if got != nil {
 			t.Errorf("got %v, want nil", got)
