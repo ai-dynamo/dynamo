@@ -43,9 +43,19 @@ class ImageLoader:
         enable_frontend_decoding: bool = False,
         url_policy: UrlValidationPolicy | None = None,
     ):
-        """Initialize the ImageLoader with caching, HTTP settings, and optional frontend NIXL RDMA decoding.
+        """
+        Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for
+        receiving frontend decoding.
 
-        ``url_policy`` defaults to ``UrlValidationPolicy.from_env()``.
+        Args:
+            cache_size: Maximum number of images to store in the in-memory LRU cache.
+                Defaults to CACHE_SIZE_MAXIMUM.
+            http_timeout: Timeout in seconds for HTTP requests when fetching remote images.
+                Defaults to 30.0 seconds.
+            enable_frontend_decoding: If True, enables NIXL RDMA for transferring
+                decoded images directly from frontend memory, bypassing standard
+                network transport. Defaults to False.
+            url_policy: Policy for validating URLs. Defaults to UrlValidationPolicy.from_env().
         """
         self._http_timeout = http_timeout
         self._cache_size = cache_size
