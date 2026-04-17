@@ -1,130 +1,297 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""
-Dynamo Release Version Bump Script.
+"""Dynamo release version bump script.
 
-Discovery-based version bumper that scans the entire repo for Dynamo version
-references and updates them to the new release version. Used by both Phase 1
-(release branch prep) and Phase 2 (port to main) workflows.
+A single rule-driven engine that finds every Dynamo version reference in the
+repo and updates it to the new release version. Used by both Phase 1 (release
+branch prep) and Phase 2 (port to main) workflows.
+
+Design:
+    - A single :data:`RULES` table declares every version reference type
+      (regex + replacement + target format + scope + file filter). The engine
+      walks the repo once, applying every rule that matches. Adding a new
+      reference type = one row in :data:`RULES`.
+    - A :class:`Version` type owns format conversion (Python PEP 440 form vs.
+      Cargo/Helm semver form vs. URL-safe dashed form).
+    - Per-file opt-out via the ``bump-version: ignore`` comment marker.
+    - ``--check`` is just a dry-run against the expected version: any change
+      the engine would make = a stale reference.
+    - ``--dry-run`` previews without writing.
+    - ``--skip-core/containers/helm/docs`` gate which rule categories fire.
 
 Usage:
-    # Full release: bump all versions to 1.0.0 with backend metadata
-    python3 .github/scripts/bump_version.py \\
-        --new-version 1.0.0 \\
-        --vllm-version 0.15.1 \\
-        --sglang-version 0.5.7 \\
-        --trtllm-version 1.3.0rc1 \\
-        --nixl-version 0.9.0 \\
-        --cuda-versions-vllm 12.9,13.0 \\
-        --cuda-versions-sglang 12.9,13.0 \\
-        --cuda-versions-trtllm 13.0 \\
+    # Full release: bump all versions to 1.0.0
+    python3 .github/scripts/bump_version.py --new-version 1.0.0 \\
+        --vllm-version 0.19.0 --sglang-version 0.5.7 \\
+        --trtllm-version 1.3.0rc1 --nixl-version 0.10.1 \\
         --release-date "Feb 15, 2026"
 
-    # Post-release: Helm-only patch (skip containers, wheels, etc.)
-    python3 .github/scripts/bump_version.py \\
-        --new-version 0.9.0.post1 \\
+    # Post-release: Helm-only patch
+    python3 .github/scripts/bump_version.py --new-version 0.9.0.post1 \\
         --skip-core --skip-containers --skip-docs
 
-    # Dry run (print changes without writing)
+    # Dry run
     python3 .github/scripts/bump_version.py --new-version 1.0.0 --dry-run
 
-    # Check for stale versions (CI mode)
-    python3 .github/scripts/bump_version.py --check --expected-version 0.9.0
+    # Check for stale versions (CI)
+    python3 .github/scripts/bump_version.py --check
 
 Version format conventions:
     Python / container tags / git:  0.9.0.post1  (PEP 440, dot separator)
     Rust crates / Helm charts:      0.9.0-post1  (semver, hyphen separator)
-    The script accepts the Python format and auto-converts for Cargo/Helm.
+    URL slugs:                      0-9-0-post1  (all dashes)
 """
 
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
+
+# Per-file opt-out: any file containing this marker is skipped entirely.
+# Use it in test fixtures / historical artifacts that must stay on an old version.
+IGNORE_MARKER = "bump-version: ignore"
+
 
 # ---------------------------------------------------------------------------
-# Version format helpers
+# Version type
 # ---------------------------------------------------------------------------
 
 
-def to_semver(version: str) -> str:
-    """Convert Python PEP 440 post-release to semver format for Cargo/Helm.
+@dataclass(frozen=True, order=True)
+class Version:
+    """A Dynamo release version.
 
-    0.9.0.post1 -> 0.9.0-post1
-    1.0.0       -> 1.0.0       (no change for non-post versions)
+    Knows its three canonical string forms:
+      - :meth:`python`:  ``0.9.0`` / ``0.9.0.post1`` (PEP 440, for Python/images/git)
+      - :meth:`semver`:  ``0.9.0`` / ``0.9.0-post1`` (for Cargo/Helm)
+      - :meth:`dashed`:  ``0-9-0`` / ``0-9-0-post1`` (for URL slugs)
     """
-    return re.sub(r"\.post(\d+)$", r"-post\1", version)
 
+    major: int
+    minor: int
+    patch: int
+    post: int | None = None
 
-def is_post_release(version: str) -> bool:
-    """Check if version is a post-release (e.g., 0.9.0.post1)."""
-    return bool(re.search(r"\.post\d+$", version))
+    _PARSE_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:[.-]post(\d+))?$")
+
+    @classmethod
+    def parse(cls, s: str) -> Version:
+        m = cls._PARSE_RE.match(s)
+        if not m:
+            raise argparse.ArgumentTypeError(
+                f"Not a valid version: {s!r}. Expected X.Y.Z or X.Y.Z.postN."
+            )
+        maj, min_, pat, post = m.groups()
+        return cls(
+            int(maj), int(min_), int(pat), int(post) if post is not None else None
+        )
+
+    def python(self) -> str:
+        base = f"{self.major}.{self.minor}.{self.patch}"
+        return f"{base}.post{self.post}" if self.post is not None else base
+
+    def semver(self) -> str:
+        base = f"{self.major}.{self.minor}.{self.patch}"
+        return f"{base}-post{self.post}" if self.post is not None else base
+
+    def dashed(self) -> str:
+        return self.python().replace(".", "-")
+
+    @property
+    def is_post(self) -> bool:
+        return self.post is not None
+
+    def __str__(self) -> str:
+        return self.python()
 
 
 # ---------------------------------------------------------------------------
-# Regex patterns that identify Dynamo version references
+# Scope
 # ---------------------------------------------------------------------------
-# Version number pattern: X.Y.Z with optional .postN or -postN suffix
+
+
+class Scope(Enum):
+    CORE = "core"  # pyproject, Cargo, setup.py
+    CONTAINERS = "containers"  # image tags, git refs, wheel pins, operator samples
+    HELM = "helm"  # Chart.yaml, values.yaml
+    DOCS = "docs"  # support-matrix, feature-matrix, release-artifacts
+
+
+# ---------------------------------------------------------------------------
+# Rule table
+# ---------------------------------------------------------------------------
+
+# Version token: X.Y.Z with optional .postN or -postN suffix.
 _VER = r"\d+\.\d+\.\d+(?:[.-]post\d+)?"
 
-# Container image tags: ai-dynamo/<any-image>:X.Y.Z
-# Broad match — catches any image name under ai-dynamo/ so new images
-# (epp-image, snapshot-agent, etc.) are picked up automatically.
-IMAGE_TAG_RE = re.compile(
-    r"((?:nvcr\.io/nvidia/)?ai-dynamo/[a-z][a-z0-9-]*)" rf":({_VER})"
+
+def _always(_: Path) -> bool:
+    return True
+
+
+def _name_is(*names: str) -> Callable[[Path], bool]:
+    allowed = set(names)
+    return lambda p: p.name in allowed
+
+
+def _endswith(*suffixes: str) -> Callable[[Path], bool]:
+    return lambda p: any(p.as_posix().endswith(s) for s in suffixes)
+
+
+@dataclass(frozen=True)
+class Rule:
+    """A single version-reference update rule.
+
+    ``replacement`` may use the placeholders ``{python}``, ``{semver}``, and
+    ``{dashed}`` — these expand from the :class:`Version` being applied.
+    Standard regex backreferences (``\\1``, ``\\g<1>``) are preserved.
+    """
+
+    name: str
+    scope: Scope
+    pattern: re.Pattern[str]
+    replacement: str
+    file_filter: Callable[[Path], bool] = _always
+
+    def apply(self, content: str, version: Version) -> str:
+        repl = (
+            self.replacement.replace("{python}", version.python())
+            .replace("{semver}", version.semver())
+            .replace("{dashed}", version.dashed())
+        )
+        return self.pattern.sub(repl, content)
+
+
+RULES: tuple[Rule, ...] = (
+    # -- Core version files ---------------------------------------------------
+    Rule(
+        "pyproject_project_version",
+        Scope.CORE,
+        re.compile(rf'(^version\s*=\s*"){_VER}(")', re.MULTILINE),
+        r"\g<1>{python}\g<2>",
+        _name_is("pyproject.toml"),
+    ),
+    Rule(
+        "pyproject_ai_dynamo_pin",
+        Scope.CORE,
+        # ai-dynamo / ai_dynamo / ai-dynamo-runtime / ai-dynamo[vllm] == X.Y.Z
+        re.compile(rf"(ai[_-]dynamo(?:[_-]runtime)?(?:\[[^\]]*\])?==){_VER}"),
+        r"\g<1>{python}",
+        _name_is("pyproject.toml"),
+    ),
+    Rule(
+        "cargo_package_version",
+        Scope.CORE,
+        re.compile(rf'(^version\s*=\s*"){_VER}(")', re.MULTILINE),
+        r"\g<1>{semver}\g<2>",
+        _name_is("Cargo.toml"),
+    ),
+    Rule(
+        "gpu_memory_setup_version",
+        Scope.CORE,
+        re.compile(rf'(version\s*=\s*"){_VER}(")'),
+        r"\g<1>{python}\g<2>",
+        _endswith("lib/gpu_memory_service/setup.py"),
+    ),
+    # -- Helm charts ----------------------------------------------------------
+    Rule(
+        "helm_chart_version",
+        Scope.HELM,
+        re.compile(rf"(^version:\s*){_VER}", re.MULTILINE),
+        r"\g<1>{semver}",
+        _name_is("Chart.yaml"),
+    ),
+    Rule(
+        "helm_chart_appVersion",
+        Scope.HELM,
+        re.compile(rf'(^appVersion:\s*"){_VER}(")', re.MULTILINE),
+        r"\g<1>{semver}\g<2>",
+        _name_is("Chart.yaml"),
+    ),
+    Rule(
+        "helm_dependency_dynamo_operator",
+        Scope.HELM,
+        re.compile(rf"(- name: dynamo-operator\n\s+version:\s*){_VER}"),
+        r"\g<1>{semver}",
+        _name_is("Chart.yaml"),
+    ),
+    Rule(
+        "helm_snapshot_values_tag",
+        Scope.HELM,
+        re.compile(
+            rf"(repository:\s*nvcr\.io/nvidia/ai-dynamo/snapshot-agent\n\s*tag:\s*){_VER}"
+        ),
+        r"\g<1>{semver}",
+        _endswith("deploy/helm/charts/snapshot/values.yaml"),
+    ),
+    # -- Container image tags (broad, self-healing) ---------------------------
+    Rule(
+        "image_tag_ai_dynamo_ns",
+        Scope.CONTAINERS,
+        re.compile(rf"((?:nvcr\.io/nvidia/)?ai-dynamo/[a-z][a-z0-9-]*):{_VER}"),
+        r"\g<1>:{python}",
+    ),
+    Rule(
+        "image_tag_short_dynamo",
+        Scope.CONTAINERS,
+        re.compile(
+            r"((?:vllm|sglang|tensorrtllm)-runtime"
+            r"|dynamo-frontend|kubernetes-operator|frontend"
+            rf"|epp-image|snapshot-agent):{_VER}"
+        ),
+        r"\g<1>:{python}",
+    ),
+    # Wheel filenames and pip install specs in docs/Dockerfiles/shell
+    Rule(
+        "pip_wheel_or_pin",
+        Scope.CONTAINERS,
+        re.compile(rf"(ai[_-]dynamo(?:[_-]runtime)?(?:\[[^\]]*\])?)(==|-){_VER}"),
+        r"\g<1>\g<2>{python}",
+    ),
+    # Operator sample YAML dynamoVersion: "X.Y.Z"
+    Rule(
+        "operator_dynamoVersion_field",
+        Scope.CONTAINERS,
+        re.compile(rf'(dynamoVersion:\s*"){_VER}(")'),
+        r"\g<1>{python}\g<2>",
+    ),
+    # git checkout release/X.Y.Z
+    Rule(
+        "git_checkout_release_branch",
+        Scope.CONTAINERS,
+        re.compile(rf"(git checkout release/){_VER}"),
+        r"\g<1>{python}",
+    ),
+    # pip git URLs: git+https://...@release/X.Y.Z
+    Rule(
+        "git_url_release_ref",
+        Scope.CONTAINERS,
+        re.compile(rf"(@release/){_VER}"),
+        r"\g<1>{python}",
+    ),
+    # DYNAMO_VERSION=X.Y.Z env-var assignment
+    Rule(
+        "env_dynamo_version",
+        Scope.CONTAINERS,
+        re.compile(rf"(DYNAMO_VERSION=){_VER}"),
+        r"\g<1>{python}",
+    ),
 )
 
-# Wheel filenames and pip install specs:
-#   ai_dynamo_runtime-0.7.0-cp310-..., ai-dynamo==0.8.1, ai-dynamo[vllm]==0.8.1.post1
-WHEEL_FILE_RE = re.compile(
-    r"(ai[_-]dynamo(?:[_-]runtime)?(?:\[[^\]]*\])?)" rf"(==|-)({_VER})"
-)
 
-# dynamoVersion: "0.6.0" or "0.9.0.post1" in operator samples
-DYNAMO_VERSION_FIELD_RE = re.compile(rf'(dynamoVersion:\s*")({_VER})(")')
-
-# git checkout release/X.Y.Z or release/X.Y.Z.post1
-GIT_CHECKOUT_RE = re.compile(rf"(git checkout release/)({_VER})")
-
-# git+https://...@release/X.Y.Z (pip git install URLs)
-GIT_REF_RE = re.compile(rf"(@release/)({_VER})")
-
-# DYNAMO_VERSION=X.Y.Z in shell snippets and docs
-DYNAMO_VERSION_ENV_RE = re.compile(rf"(DYNAMO_VERSION=)({_VER})")
-
-# Standalone Dynamo image tags without full registry path (e.g., vllm-runtime:0.8.0)
-# Kept as an explicit list (unlike IMAGE_TAG_RE) to avoid false positives
-# without the ai-dynamo/ prefix as a disambiguator.
-SHORT_IMAGE_TAG_RE = re.compile(
-    r"((?:vllm|sglang|tensorrtllm)-runtime"
-    r"|dynamo-frontend|kubernetes-operator|frontend"
-    r"|epp-image|snapshot-agent)"
-    rf":({_VER})"
-)
-
-# Unified pattern table used by both scan_and_replace and check_stale_versions.
-# (regex, replacement_template, version_group_index, track_spans_for_dedup)
-_VERSION_PATTERNS: list[tuple[re.Pattern, str, int, bool]] = [
-    (IMAGE_TAG_RE, r"\1:{ver}", 2, True),
-    (SHORT_IMAGE_TAG_RE, r"\1:{ver}", 2, True),
-    (WHEEL_FILE_RE, r"\1\g<2>{ver}", 3, False),
-    (DYNAMO_VERSION_FIELD_RE, r"\g<1>{ver}\3", 2, False),
-    (GIT_CHECKOUT_RE, r"\g<1>{ver}", 2, False),
-    (GIT_REF_RE, r"\g<1>{ver}", 2, False),
-    (DYNAMO_VERSION_ENV_RE, r"\g<1>{ver}", 2, False),
-]
-
-# ---------------------------------------------------------------------------
-# Paths excluded from the catch-all discovery scan
-# ---------------------------------------------------------------------------
-EXCLUDE_PATTERNS = [
+# Files excluded from scanning entirely. These are either auto-generated
+# (regenerated by CRD/helm-docs), binary, or lockfiles. Per-file opt-out via
+# the IGNORE_MARKER comment is preferred for any new cases.
+EXCLUDE_GLOBS: tuple[str, ...] = (
+    # Lockfiles / generated / vendored
     "**/*.lock",
     "**/go.sum",
     "**/go.mod",
@@ -133,6 +300,7 @@ EXCLUDE_PATTERNS = [
     "**/node_modules/**",
     "**/.venv/**",
     "**/*.pyc",
+    # Binary assets
     "**/*.png",
     "**/*.jpg",
     "**/*.gif",
@@ -140,764 +308,570 @@ EXCLUDE_PATTERNS = [
     "**/*.ttf",
     "**/*.ico",
     "**/*.pdf",
-    # Auto-generated files handled by regen steps
+    # Auto-generated by regen steps in the workflow
     "deploy/operator/config/crd/bases/**",
     "deploy/helm/charts/crds/templates/**",
     "deploy/helm/charts/platform/README.md",
     "docs/kubernetes/api-reference.md",
     "deploy/operator/api/v1alpha1/zz_generated.deepcopy.go",
-    # Test fixtures with intentional old versions
-    "deploy/operator/internal/**/*_test.go",
-    "deploy/operator/internal/checkpoint/**",
-    "deploy/operator/internal/dynamo/graph_test.go",
-    "tests/**",
-    # The bump script itself
-    ".github/scripts/bump_version.py",
-    # Error classification (separate package, has its own version)
+    # Separately-versioned sub-package
     "error_classification/**",
-]
-
-# Files that get targeted edits (not catch-all replacement).
-# The catch-all scanner skips these; dedicated functions handle them.
-TARGETED_EDIT_FILES = frozenset(
-    {
-        "docs/reference/release-artifacts.md",
-        "docs/reference/support-matrix.md",
-        "docs/reference/feature-matrix.md",
-        "pyproject.toml",
-        "Cargo.toml",
-        "lib/bindings/python/Cargo.toml",
-        "lib/gpu_memory_service/setup.py",
-        "deploy/helm/charts/crds/Chart.yaml",
-        "deploy/helm/charts/platform/Chart.yaml",
-        "deploy/helm/charts/platform/components/operator/Chart.yaml",
-        "deploy/helm/charts/snapshot/Chart.yaml",
-        "deploy/helm/charts/snapshot/values.yaml",
-        # Operator Go source and samples are handled by update_operator_source()
-        "deploy/operator/api/v1alpha1/dynamographdeploymentrequest_types.go",
-        "deploy/operator/config/samples/nvidia.com_v1alpha1_dynamographdeploymentrequest.yaml",
-        "deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml",
-    }
+    # The bump script itself (it contains version patterns)
+    ".github/scripts/bump_version.py",
 )
 
 
-def _matches_exclude(rel_path: str) -> bool:
-    """Robust exclusion check using pathlib-style matching."""
-    p = Path(rel_path)
-    for pattern in EXCLUDE_PATTERNS:
-        if p.match(pattern):
+# ---------------------------------------------------------------------------
+# File iteration
+# ---------------------------------------------------------------------------
+
+
+def _is_binary(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return b"\x00" in f.read(8192)
+    except OSError:
+        return True
+
+
+def _excluded(rel: Path) -> bool:
+    for pat in EXCLUDE_GLOBS:
+        if rel.match(pat):
             return True
-        # Handle ** prefix patterns
-        if pattern.startswith("**/"):
-            suffix = pattern[3:]
-            if fnmatch.fnmatch(rel_path, f"*{suffix}") or fnmatch.fnmatch(
-                p.name, suffix
-            ):
-                return True
-        if fnmatch.fnmatch(rel_path, pattern):
+        # Also accept "**/foo" → match "foo" anywhere in path.
+        if pat.startswith("**/") and rel.match(pat[3:]):
             return True
     return False
 
 
-def is_binary(filepath: Path) -> bool:
-    """Quick check if a file is binary."""
-    try:
-        with open(filepath, "rb") as f:
-            chunk = f.read(8192)
-            return b"\x00" in chunk
-    except (OSError, PermissionError):
-        return True
+def iter_repo_files(repo: Path) -> Iterator[tuple[Path, Path, str]]:
+    """Yield (abspath, relpath, content) for every text file to consider.
 
-
-def _iter_version_files(
-    repo: Path,
-    extra_skip: frozenset[str] = frozenset(),
-) -> Iterator[tuple[str, Path, str]]:
-    """Yield (rel_path, filepath, content) for all version-relevant files."""
+    Skips binary files, excluded paths, non-UTF-8 files, and files carrying
+    the :data:`IGNORE_MARKER` opt-out comment.
+    """
     for dirpath, dirnames, filenames in os.walk(repo):
-        dirnames[:] = [
+        # Prune hidden / noise directories in-place so we don't descend.
+        dirnames[:] = sorted(
             d
             for d in dirnames
             if not d.startswith(".")
-            and d not in ("node_modules", "__pycache__", ".venv")
-        ]
+            and d not in {"node_modules", "__pycache__", ".venv", "target"}
+        )
         for filename in filenames:
-            filepath = Path(dirpath) / filename
-            rel_path = str(filepath.relative_to(repo))
-            if _matches_exclude(rel_path) or rel_path in extra_skip:
+            path = Path(dirpath) / filename
+            rel = path.relative_to(repo)
+            if _excluded(rel):
                 continue
-            if is_binary(filepath):
+            if _is_binary(path):
                 continue
             try:
-                content = filepath.read_text(encoding="utf-8", errors="surrogateescape")
+                content = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
+                # Not valid UTF-8 => definitely not a version-relevant text file.
                 continue
-            yield rel_path, filepath, content
+            if IGNORE_MARKER in content:
+                continue
+            yield path, rel, content
 
 
-# ===================================================================
-# Category 1: Core version files (targeted edits)
-# ===================================================================
+# ---------------------------------------------------------------------------
+# Engine: apply rules
+# ---------------------------------------------------------------------------
 
 
-def update_pyproject_toml(
-    repo: Path, old_ver: str, new_ver: str, dry_run: bool
-) -> list[str]:
-    """Update version in pyproject.toml."""
-    filepath = repo / "pyproject.toml"
-    changes = []
-    content = filepath.read_text()
-    new_content = content
-
-    # version = "X.Y.Z"
-    new_content = re.sub(
-        rf'(version\s*=\s*"){re.escape(old_ver)}"',
-        rf'\g<1>{new_ver}"',
-        new_content,
-    )
-    # ai-dynamo-runtime==X.Y.Z
-    new_content = re.sub(
-        rf"(ai-dynamo-runtime==){re.escape(old_ver)}",
-        rf"\g<1>{new_ver}",
-        new_content,
-    )
-
-    if new_content != content:
-        changes.append(f"pyproject.toml: version {old_ver} -> {new_ver}")
-        if not dry_run:
-            filepath.write_text(new_content)
-    return changes
+@dataclass
+class Change:
+    path: Path  # relative to repo root
+    scope: Scope
+    rules: list[str] = field(default_factory=list)
 
 
-def update_cargo_toml(
-    repo: Path, old_ver: str, new_ver: str, dry_run: bool
-) -> list[str]:
-    """Auto-discover and update Cargo.toml files containing the old version.
+def apply_rules(
+    repo: Path,
+    version: Version,
+    active_scopes: set[Scope],
+    dry_run: bool = False,
+) -> list[Change]:
+    """Walk the repo, apply every matching rule, collect :class:`Change` records.
 
-    Scans all Cargo.toml files in the repo (excluding target/ and vendored
-    directories) so newly added workspaces are picked up automatically.
-    Uses semver format (0.9.0-post1) for Cargo files.
+    When ``dry_run`` is True, files are not written — used by both ``--dry-run``
+    and ``--check`` modes.
     """
-    changes = []
-    old_semver = to_semver(old_ver)
-    new_semver = to_semver(new_ver)
-
-    skip_dirs = {"target", ".git", "node_modules", "__pycache__", ".venv"}
-    for dirpath, dirnames, filenames in os.walk(repo):
-        dirnames[:] = [d for d in dirnames if d not in skip_dirs]
-        if "Cargo.toml" not in filenames:
-            continue
-        filepath = Path(dirpath) / "Cargo.toml"
-        rel_path = str(filepath.relative_to(repo))
-        content = filepath.read_text()
-        new_content = re.sub(
-            rf'(version\s*=\s*"){re.escape(old_semver)}"',
-            rf'\g<1>{new_semver}"',
-            content,
-        )
-        if new_content != content:
-            changes.append(f"{rel_path}: version {old_semver} -> {new_semver}")
-            if not dry_run:
-                filepath.write_text(new_content)
-    return changes
-
-
-def update_gpu_memory_setup(
-    repo: Path, old_ver: str, new_ver: str, dry_run: bool
-) -> list[str]:
-    """Update version in lib/gpu_memory_service/setup.py."""
-    filepath = repo / "lib/gpu_memory_service/setup.py"
-    if not filepath.exists():
-        return []
-    content = filepath.read_text()
-    new_content = re.sub(
-        rf'(version\s*=\s*"){re.escape(old_ver)}"',
-        rf'\g<1>{new_ver}"',
-        content,
-    )
-    if new_content != content:
-        if not dry_run:
-            filepath.write_text(new_content)
-        return [f"lib/gpu_memory_service/setup.py: version {old_ver} -> {new_ver}"]
-    return []
-
-
-# ===================================================================
-# Category 2: Helm charts (targeted edits)
-# ===================================================================
-
-
-def update_helm_charts(
-    repo: Path, old_ver: str, new_ver: str, dry_run: bool
-) -> list[str]:
-    """Update version fields in Helm Chart.yaml files.
-
-    Handles exact old version, dev-suffixed versions (1.0.0-dev), and
-    post-release versions (0.9.0-post1). Uses semver format for Helm.
-    """
-    changes = []
-    new_semver = to_semver(new_ver)
-    ver_pattern = r"\d+\.\d+\.\d+(?:-(?:dev|post\d+))?"
-
-    # Chart.yaml files: (relative_path, update_appVersion)
-    chart_configs = [
-        ("deploy/helm/charts/crds/Chart.yaml", False),
-        ("deploy/helm/charts/platform/Chart.yaml", False),
-        ("deploy/helm/charts/platform/components/operator/Chart.yaml", True),
-        ("deploy/helm/charts/snapshot/Chart.yaml", True),
-    ]
-
-    for rel_path, update_app_version in chart_configs:
-        filepath = repo / rel_path
-        if not filepath.exists():
-            continue
-        content = filepath.read_text()
-        new_content = re.sub(
-            rf"(^version:\s*){ver_pattern}",
-            rf"\g<1>{new_semver}",
-            content,
-            count=1,
-            flags=re.MULTILINE,
-        )
-        if update_app_version:
-            new_content = re.sub(
-                rf'(^appVersion:\s*"){ver_pattern}"',
-                rf'\g<1>{new_semver}"',
-                new_content,
-                flags=re.MULTILINE,
-            )
-        if new_content != content:
-            changes.append(f"{rel_path}: version -> {new_semver}")
-            if not dry_run:
-                filepath.write_text(new_content)
-
-    # Platform chart: dynamo-operator dependency version
-    platform_chart = repo / "deploy/helm/charts/platform/Chart.yaml"
-    if platform_chart.exists():
-        content = platform_chart.read_text()
-        new_content = re.sub(
-            rf"(  - name: dynamo-operator\n    version:\s*){ver_pattern}",
-            rf"\g<1>{new_semver}",
-            content,
-        )
-        if new_content != content and not dry_run:
-            platform_chart.write_text(new_content)
-
-    # Snapshot values.yaml: image tag
-    snapshot_values = repo / "deploy/helm/charts/snapshot/values.yaml"
-    if snapshot_values.exists():
-        content = snapshot_values.read_text()
-        new_content = re.sub(
-            rf"(repository:\s*nvcr\.io/nvidia/ai-dynamo/snapshot-agent\n\s*tag:\s*){ver_pattern}",
-            rf"\g<1>{new_semver}",
-            content,
-        )
-        if new_content != content:
-            changes.append(
-                "deploy/helm/charts/snapshot/values.yaml: tag -> " + new_semver
-            )
-            if not dry_run:
-                snapshot_values.write_text(new_content)
-
-    return changes
-
-
-# ===================================================================
-# Category 2b: Operator Go source and samples (targeted edits)
-# ===================================================================
-
-
-def update_operator_source(repo: Path, new_ver: str, dry_run: bool) -> list[str]:
-    """Update version references in operator Go source and sample files."""
-    changes = []
-
-    targets = [
-        "deploy/operator/api/v1alpha1/dynamographdeploymentrequest_types.go",
-        "deploy/operator/config/samples/nvidia.com_v1alpha1_dynamographdeploymentrequest.yaml",
-        "deploy/operator/config/samples/nvidia.com_v1alpha1_dynamocheckpoint.yaml",
-    ]
-
-    for rel in targets:
-        filepath = repo / rel
-        if not filepath.exists():
-            continue
-        content = filepath.read_text()
+    changes: list[Change] = []
+    for abs_path, rel_path, content in iter_repo_files(repo):
         new_content = content
-
-        # Replace any Dynamo image tags
-        new_content = IMAGE_TAG_RE.sub(rf"\1:{new_ver}", new_content)
-        new_content = SHORT_IMAGE_TAG_RE.sub(rf"\1:{new_ver}", new_content)
-        # Replace dynamoVersion: "X.Y.Z"
-        new_content = DYNAMO_VERSION_FIELD_RE.sub(rf"\g<1>{new_ver}\3", new_content)
-
+        hit_by_scope: dict[Scope, list[str]] = {}
+        for rule in RULES:
+            if rule.scope not in active_scopes:
+                continue
+            if not rule.file_filter(rel_path):
+                continue
+            updated = rule.apply(new_content, version)
+            if updated != new_content:
+                hit_by_scope.setdefault(rule.scope, []).append(rule.name)
+                new_content = updated
         if new_content != content:
-            changes.append(f"{rel}: updated version references -> {new_ver}")
+            for scope, rule_names in hit_by_scope.items():
+                changes.append(Change(rel_path, scope, rule_names))
             if not dry_run:
-                filepath.write_text(new_content)
-
+                abs_path.write_text(new_content, encoding="utf-8")
     return changes
 
 
-# ===================================================================
-# Category 3: Reference documentation (targeted edits)
-# ===================================================================
+# ---------------------------------------------------------------------------
+# Backend metadata (consumed by DOCS specialised functions)
+# ---------------------------------------------------------------------------
 
 
-def update_feature_matrix(repo: Path, new_ver: str, dry_run: bool) -> list[str]:
-    """Update the 'Updated for Dynamo vX.Y.Z' line in feature-matrix.md."""
-    filepath = repo / "docs/reference/feature-matrix.md"
-    if not filepath.exists():
+@dataclass
+class BackendVersions:
+    vllm: str | None = None
+    sglang: str | None = None
+    trtllm: str | None = None
+    nixl: str | None = None
+
+    def all_set(self) -> bool:
+        return all([self.vllm, self.sglang, self.trtllm, self.nixl])
+
+    def any_set(self) -> bool:
+        return any([self.vllm, self.sglang, self.trtllm, self.nixl])
+
+
+# ---------------------------------------------------------------------------
+# DOCS specialised updates (table-row insertion / section-scoped edits)
+# ---------------------------------------------------------------------------
+
+
+def update_feature_matrix(repo: Path, version: Version, dry_run: bool) -> list[Change]:
+    path = repo / "docs/reference/feature-matrix.md"
+    if not path.exists():
         return []
-    content = filepath.read_text()
-    new_content = re.sub(
+    content = path.read_text(encoding="utf-8")
+    updated = re.sub(
         r"\*Updated for Dynamo v[\d.]+(?:\.post\d+)?\*",
-        f"*Updated for Dynamo v{new_ver}*",
+        f"*Updated for Dynamo v{version.python()}*",
         content,
     )
-    if new_content != content:
-        if not dry_run:
-            filepath.write_text(new_content)
-        return [f"feature-matrix.md: updated version tag -> v{new_ver}"]
-    return []
+    if updated == content:
+        return []
+    if not dry_run:
+        path.write_text(updated, encoding="utf-8")
+    return [
+        Change(
+            Path("docs/reference/feature-matrix.md"),
+            Scope.DOCS,
+            ["feature_matrix_tag"],
+        )
+    ]
 
 
 def update_support_matrix(
     repo: Path,
-    new_ver: str,
+    version: Version,
+    backends: BackendVersions,
     dry_run: bool,
-    backend_versions: dict[str, str | None] | None = None,
-) -> list[str]:
-    """Update support-matrix.md for a new release.
-
-    - Removes '*(in progress)*' from the version row
-    - Updates the "At a Glance" latest stable release line
-    - Adds a new row to the Backend Dependencies table
-    """
-    filepath = repo / "docs/reference/support-matrix.md"
-    if not filepath.exists():
+) -> list[Change]:
+    path = repo / "docs/reference/support-matrix.md"
+    if not path.exists():
         return []
-    content = filepath.read_text()
+    content = path.read_text(encoding="utf-8")
     original = content
-    changes = []
-    bv = backend_versions or {}
+    rules_hit: list[str] = []
 
-    # Remove "*(in progress)*" from the released version row
+    # Remove "*(in progress)*" from the version row being released.
+    before = content
     content = re.sub(
-        rf"(\*\*v{re.escape(new_ver)}\*\*)\s*\*\(in progress\)\*",
-        r"\1",
+        rf"(\*\*v{re.escape(version.python())}\*\*)\s*\*\(in progress\)\*",
+        r"\g<1>",
         content,
     )
+    if content != before:
+        rules_hit.append("support_matrix_in_progress")
 
-    if all(bv.get(k) for k in ("sglang", "trtllm", "vllm", "nixl")):
-        # Update "At a Glance" latest stable release line
+    if backends.all_set():
+        before = content
         content = re.sub(
             r"(\*\*Latest stable release:\*\* \[v)[\d.]+\S*"
             r"(\]\(https://github\.com/ai-dynamo/dynamo/releases/tag/v)[\d.]+\S*"
             r"(\) --).*",
-            rf"\g<1>{new_ver}\g<2>{new_ver}\3"
-            rf' SGLang `{bv["sglang"]}` |'
-            rf' TensorRT-LLM `{bv["trtllm"]}` |'
-            rf' vLLM `{bv["vllm"]}` |'
-            rf' NIXL `{bv["nixl"]}`',
+            (
+                rf"\g<1>{version.python()}\g<2>{version.python()}\g<3>"
+                rf" SGLang `{backends.sglang}` |"
+                rf" TensorRT-LLM `{backends.trtllm}` |"
+                rf" vLLM `{backends.vllm}` |"
+                rf" NIXL `{backends.nixl}`"
+            ),
             content,
         )
-        changes.append(f"support-matrix.md: updated At a Glance for v{new_ver}")
+        if content != before:
+            rules_hit.append("support_matrix_at_a_glance")
 
-        # Add new row to Backend Dependencies table (after main ToT row)
-        if f"| **v{new_ver}**" not in content:
+        row_marker = f"| **v{version.python()}**"
+        if row_marker not in content:
             new_row = (
-                f"| **v{new_ver}** "
-                f'| `{bv["sglang"]}` '
-                f'| `{bv["trtllm"]}` '
-                f'| `{bv["vllm"]}` '
-                f'| `{bv["nixl"]}` |'
+                f"| **v{version.python()}** "
+                f"| `{backends.sglang}` "
+                f"| `{backends.trtllm}` "
+                f"| `{backends.vllm}` "
+                f"| `{backends.nixl}` |"
             )
+            before = content
             content = re.sub(
                 r"(\| \*\*main \(ToT\)\*\* \|[^\n]+\n)",
-                rf"\1{new_row}\n",
+                rf"\g<1>{new_row}\n",
                 content,
             )
-            changes.append(
-                f"support-matrix.md: added v{new_ver} to Backend Dependencies"
-            )
+            if content != before:
+                rules_hit.append("support_matrix_backend_row")
 
-    if content != original:
-        if not dry_run:
-            filepath.write_text(content)
-    return changes
+    if content == original:
+        return []
+    if not dry_run:
+        path.write_text(content, encoding="utf-8")
+    return [Change(Path("docs/reference/support-matrix.md"), Scope.DOCS, rules_hit)]
 
 
 def update_release_artifacts(
     repo: Path,
-    new_ver: str,
+    version: Version,
     release_date: str | None,
+    backends: BackendVersions,
     dry_run: bool,
-    backend_versions: dict[str, str | None] | None = None,
-) -> list[str]:
-    """Update the Current Release section and add history rows in release-artifacts.md."""
-    filepath = repo / "docs/reference/release-artifacts.md"
-    if not filepath.exists():
+) -> list[Change]:
+    path = repo / "docs/reference/release-artifacts.md"
+    if not path.exists():
         return []
-    content = filepath.read_text()
+    content = path.read_text(encoding="utf-8")
     original = content
-    changes = []
+    rules_hit: list[str] = []
 
-    # Update "Current Release: Dynamo vX.Y.Z" header
+    # Header
+    before = content
     content = re.sub(
         r"(## Current Release: Dynamo v)[\d.]+\S*",
-        rf"\g<1>{new_ver}",
+        rf"\g<1>{version.python()}",
         content,
     )
+    if content != before:
+        rules_hit.append("release_artifacts_header")
 
-    # Update GitHub Release link in current release section
+    # GitHub Release link
     content = re.sub(
-        r"(\*\*GitHub Release:\*\* \[v)[\d.]+\S*(\]\(https://github\.com/ai-dynamo/dynamo/releases/tag/v)[\d.]+\S*(\))",
-        rf"\g<1>{new_ver}\g<2>{new_ver}\3",
+        r"(\*\*GitHub Release:\*\* \[v)[\d.]+\S*"
+        r"(\]\(https://github\.com/ai-dynamo/dynamo/releases/tag/v)[\d.]+\S*(\))",
+        rf"\g<1>{version.python()}\g<2>{version.python()}\g<3>",
         content,
     )
 
-    # Update Docs link in current release section
-    ver_dashed = new_ver.replace(".", "-")
+    # Docs link
     content = re.sub(
-        r"(\*\*Docs:\*\* \[v)[\d.]+\S*(\]\(https://docs\.nvidia\.com/dynamo/v-)[\d-]+\S*(/?\))",
-        rf"\g<1>{new_ver}\g<2>{ver_dashed}\3",
+        r"(\*\*Docs:\*\* \[v)[\d.]+\S*"
+        r"(\]\(https://docs\.nvidia\.com/dynamo/v-)[\d-]+\S*(/?\))",
+        rf"\g<1>{version.python()}\g<2>{version.dashed()}\g<3>",
         content,
     )
 
-    # Add row to GitHub Releases table if not already present
-    if f"| `v{new_ver}`" not in content:
+    # New row in the GitHub Releases table
+    row_marker = f"| `v{version.python()}`"
+    if row_marker not in content:
         date_str = release_date or datetime.now().strftime("%b %d, %Y")
         new_row = (
-            f"| `v{new_ver}` | {date_str} "
-            f"| [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v{new_ver}) "
-            f"| [Docs](https://docs.nvidia.com/dynamo/v-{ver_dashed}/) |"
+            f"| `v{version.python()}` | {date_str} "
+            f"| [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v{version.python()}) "
+            f"| [Docs](https://docs.nvidia.com/dynamo/v-{version.dashed()}/) |"
         )
-        # Insert after the table header row
         table_pattern = r"(### GitHub Releases\n\n\| Version \|.*\n\|[-| ]+\n)"
         if re.search(table_pattern, content):
-            content = re.sub(
-                table_pattern,
-                rf"\1{new_row}\n",
-                content,
-            )
-            changes.append(
-                f"release-artifacts.md: added v{new_ver} to GitHub Releases table"
-            )
+            content = re.sub(table_pattern, rf"\g<1>{new_row}\n", content)
+            rules_hit.append("release_artifacts_table_row")
         else:
-            print(
-                "WARNING: Could not find GitHub Releases table pattern in "
-                "release-artifacts.md. Skipping table row insertion.",
-                file=sys.stderr,
+            # Fail loud: the doc structure changed and we'd silently skip the row.
+            raise RuntimeError(
+                "release-artifacts.md: could not find the GitHub Releases table "
+                "header. The doc structure changed — update this script."
             )
 
-    # Update backend versions in Current Release Container Images table
-    # Scoped to "## Current Release" section to avoid touching history tables
-    bv = backend_versions or {}
+    # Backend versions inside the Current Release section only.
     backend_labels = {"vllm": "vLLM", "sglang": "SGLang", "trtllm": "TRT-LLM"}
     cr_start = content.find("## Current Release")
-    if cr_start >= 0:
-        # Find the next H2 section after Current Release
+    if cr_start >= 0 and backends.any_set():
         next_h2 = content.find("\n## ", cr_start + 1)
         if next_h2 < 0:
             next_h2 = len(content)
         section = content[cr_start:next_h2]
+        before = section
         for key, label in backend_labels.items():
-            ver = bv.get(key)
-            if ver:
-                section = re.sub(rf"({label} `)v[^`]+(`)", rf"\g<1>v{ver}\2", section)
-        content = content[:cr_start] + section + content[next_h2:]
-        if bv:
-            changes.append(
-                "release-artifacts.md: updated backend versions in Current Release"
-            )
-
-    if content != original:
-        changes.append(f"release-artifacts.md: updated Current Release to v{new_ver}")
-        if not dry_run:
-            filepath.write_text(content)
-
-    return changes
-
-
-# ===================================================================
-# Category 4: Discovery-based catch-all scan
-# ===================================================================
-
-
-def scan_and_replace(repo: Path, new_ver: str, dry_run: bool) -> list[str]:
-    """Walk the repo and replace all Dynamo version patterns with new_ver."""
-    changes = []
-    for rel_path, filepath, content in _iter_version_files(
-        repo, extra_skip=TARGETED_EDIT_FILES
-    ):
-        new_content = content
-        for regex, repl_template, _, _ in _VERSION_PATTERNS:
-            new_content = regex.sub(repl_template.format(ver=new_ver), new_content)
-        if new_content != content:
-            changes.append(f"{rel_path}: updated version references -> {new_ver}")
-            if not dry_run:
-                filepath.write_text(
-                    new_content, encoding="utf-8", errors="surrogateescape"
+            val = getattr(backends, key)
+            if val:
+                section = re.sub(
+                    rf"({re.escape(label)} `)v[^`]+(`)",
+                    rf"\g<1>v{val}\g<2>",
+                    section,
                 )
-    return changes
+        if section != before:
+            content = content[:cr_start] + section + content[next_h2:]
+            rules_hit.append("release_artifacts_backend_versions")
+
+    if content == original:
+        return []
+    if not dry_run:
+        path.write_text(content, encoding="utf-8")
+    return [Change(Path("docs/reference/release-artifacts.md"), Scope.DOCS, rules_hit)]
 
 
-# ===================================================================
-# --check mode: scan for stale versions
-# ===================================================================
+# ---------------------------------------------------------------------------
+# Detect current version
+# ---------------------------------------------------------------------------
 
 
-def check_stale_versions(repo: Path, expected_ver: str) -> list[str]:
-    """Scan repo for Dynamo version patterns that don't match expected_ver.
-
-    Returns list of stale reference descriptions. Empty list = all clean.
-    """
-    stale = []
-    skip_files = frozenset(
-        {
-            "docs/reference/release-artifacts.md",
-            "docs/reference/support-matrix.md",
-        }
-    )
-    for rel_path, _, content in _iter_version_files(repo, extra_skip=skip_files):
-        for lineno, line in enumerate(content.splitlines(), 1):
-            reported_spans: set[tuple[int, int]] = set()
-            for regex, _, ver_group, track_spans in _VERSION_PATTERNS:
-                for m in regex.finditer(line):
-                    if track_spans and any(
-                        m.start() >= s and m.end() <= e for s, e in reported_spans
-                    ):
-                        continue
-                    ver = m.group(ver_group)
-                    if ver != expected_ver and not ver.startswith(expected_ver + "."):
-                        stale.append(
-                            f"STALE: {rel_path}:{lineno} -- {m.group(0)} (expected {expected_ver})"
-                        )
-                    if track_spans:
-                        reported_spans.add((m.start(), m.end()))
-    return stale
-
-
-# ===================================================================
-# Auto-detect current version from pyproject.toml
-# ===================================================================
-
-
-def detect_current_version(repo: Path) -> str:
-    """Read the current version from pyproject.toml."""
+def detect_current_version(repo: Path) -> Version:
     pyproject = repo / "pyproject.toml"
-    content = pyproject.read_text()
-    m = re.search(r'^version\s*=\s*"([^"]+)"', content, re.MULTILINE)
+    m = re.search(
+        r'^version\s*=\s*"([^"]+)"',
+        pyproject.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
     if not m:
-        print("ERROR: Could not detect version from pyproject.toml", file=sys.stderr)
-        sys.exit(1)
-    return m.group(1)
+        raise SystemExit("ERROR: could not detect current version from pyproject.toml")
+    return Version.parse(m.group(1))
 
 
-# ===================================================================
-# Main
-# ===================================================================
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Dynamo release version bump script",
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--new-version", help="Target version (e.g., 1.0.0 or 0.9.0.post1)"
+    p.add_argument(
+        "--new-version",
+        type=Version.parse,
+        help="Target version (e.g. 1.0.0 or 0.9.0.post1)",
     )
-    parser.add_argument(
-        "--old-version", help="Current version to replace (auto-detected if omitted)"
+    p.add_argument(
+        "--old-version",
+        type=Version.parse,
+        help="Current version to replace (auto-detected from pyproject.toml if omitted)",
     )
-    parser.add_argument(
-        "--repo-root", default=".", help="Repository root (default: cwd)"
-    )
+    p.add_argument("--repo-root", default=".", help="Repository root (default: cwd)")
 
-    # Backend metadata — accepted for forward-compatibility with the release
-    # workflow (which always passes them) but not yet consumed by this script.
-    # Future work: auto-populate support-matrix rows from these values.
-    parser.add_argument("--vllm-version", help="vLLM version (reserved, not yet used)")
-    parser.add_argument(
-        "--sglang-version", help="SGLang version (reserved, not yet used)"
-    )
-    parser.add_argument(
-        "--trtllm-version", help="TRT-LLM version (reserved, not yet used)"
-    )
-    parser.add_argument("--nixl-version", help="NIXL version (reserved, not yet used)")
-    parser.add_argument(
-        "--cuda-versions-vllm", help="CUDA versions for vLLM (reserved, not yet used)"
-    )
-    parser.add_argument(
-        "--cuda-versions-sglang",
-        help="CUDA versions for SGLang (reserved, not yet used)",
-    )
-    parser.add_argument(
-        "--cuda-versions-trtllm",
-        help="CUDA versions for TRT-LLM (reserved, not yet used)",
-    )
-    parser.add_argument("--release-date", help="Release date (e.g., 'Feb 15, 2026')")
+    # Backend metadata consumed by DOCS functions
+    p.add_argument("--vllm-version", help="vLLM backend version (e.g. 0.19.0)")
+    p.add_argument("--sglang-version", help="SGLang backend version")
+    p.add_argument("--trtllm-version", help="TensorRT-LLM backend version")
+    p.add_argument("--nixl-version", help="NIXL backend version")
+    p.add_argument("--release-date", help="Release date (e.g. 'Feb 15, 2026')")
 
     # Modes
-    parser.add_argument(
-        "--dry-run", action="store_true", help="Print changes without writing"
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print changes without writing",
     )
-    parser.add_argument(
-        "--check", action="store_true", help="Check for stale versions (CI mode)"
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Check for stale version references (exit 1 if any). "
+        "Uses --expected-version or auto-detects from pyproject.toml.",
     )
-    parser.add_argument("--expected-version", help="Expected version for --check mode")
+    p.add_argument(
+        "--expected-version",
+        type=Version.parse,
+        help="Expected current version for --check mode",
+    )
 
-    # Scope controls (for post-releases or selective bumps)
-    parser.add_argument(
+    # Scope gating
+    p.add_argument(
         "--skip-core",
         action="store_true",
         help="Skip core version files (pyproject.toml, Cargo.toml, setup.py)",
     )
-    parser.add_argument(
+    p.add_argument(
         "--skip-containers",
         action="store_true",
-        help="Skip discovery-based container image tag scan (docs, recipes, examples)",
+        help="Skip container image tags, git refs, operator samples, wheel pins",
     )
-    parser.add_argument(
+    p.add_argument(
         "--skip-helm",
         action="store_true",
-        help="Skip Helm Chart.yaml version updates",
+        help="Skip Helm Chart.yaml and values.yaml updates",
     )
-    parser.add_argument(
+    p.add_argument(
         "--skip-docs",
         action="store_true",
-        help="Skip reference doc updates (support-matrix, feature-matrix, release-artifacts)",
+        help="Skip reference docs (support-matrix, feature-matrix, release-artifacts)",
     )
 
-    args = parser.parse_args()
-    repo = Path(args.repo_root).resolve()
+    # Verbosity
+    p.add_argument("-v", "--verbose", action="store_true", help="Log every rule hit")
+    p.add_argument(
+        "-q", "--quiet", action="store_true", help="Log only the final summary"
+    )
 
-    # --check mode
-    if args.check:
-        expected = args.expected_version
-        if not expected:
-            expected = detect_current_version(repo)
-        print(f"Checking for stale version references (expected: {expected})...")
-        stale = check_stale_versions(repo, expected)
-        if stale:
-            for s in stale:
-                print(s)
-            print(f"\nFound {len(stale)} stale version reference(s).")
-            sys.exit(1)
-        else:
-            print("All version references are up to date.")
-            sys.exit(0)
+    # Machine-readable output
+    p.add_argument(
+        "--summary-file",
+        help="Write a markdown summary of changes to this path (e.g. $GITHUB_STEP_SUMMARY)",
+    )
+    return p
 
-    # Bump mode
-    if not args.new_version:
-        parser.error("--new-version is required (unless using --check)")
 
-    new_ver = args.new_version
-    old_ver = args.old_version or detect_current_version(repo)
-
-    if old_ver == new_ver:
-        print(
-            f"WARNING: old version ({old_ver}) == new version ({new_ver}). "
-            "Nothing to bump.",
-            file=sys.stderr,
-        )
-        sys.exit(0)
-
-    if args.dry_run:
-        print(f"DRY RUN: Would bump {old_ver} -> {new_ver}")
-    else:
-        print(f"Bumping version: {old_ver} -> {new_ver}")
-
-    if is_post_release(new_ver):
-        print(f"  Post-release detected: Python={new_ver}, Semver={to_semver(new_ver)}")
-
-    skip_flags = []
+def _active_scopes(args: argparse.Namespace) -> set[Scope]:
+    scopes = set(Scope)
     if args.skip_core:
-        skip_flags.append("core")
+        scopes.discard(Scope.CORE)
     if args.skip_containers:
-        skip_flags.append("containers")
+        scopes.discard(Scope.CONTAINERS)
     if args.skip_helm:
-        skip_flags.append("helm")
+        scopes.discard(Scope.HELM)
     if args.skip_docs:
-        skip_flags.append("docs")
-    if skip_flags:
-        print(f"  Skipping: {', '.join(skip_flags)}")
+        scopes.discard(Scope.DOCS)
+    return scopes
 
-    backend_versions = {
-        "vllm": args.vllm_version,
-        "sglang": args.sglang_version,
-        "trtllm": args.trtllm_version,
-        "nixl": args.nixl_version,
-    }
 
-    all_changes: list[str] = []
+def _log(args: argparse.Namespace, level: str, msg: str) -> None:
+    if args.quiet and level != "summary":
+        return
+    if level == "verbose" and not args.verbose:
+        return
+    print(msg)
 
-    # Category 1: Core version files
-    if not args.skip_core:
-        print("\n=== Category 1: Core version files ===")
-        all_changes.extend(update_pyproject_toml(repo, old_ver, new_ver, args.dry_run))
-        all_changes.extend(update_cargo_toml(repo, old_ver, new_ver, args.dry_run))
-        all_changes.extend(
-            update_gpu_memory_setup(repo, old_ver, new_ver, args.dry_run)
+
+def _format_summary(
+    version: Version,
+    old: Version | None,
+    changes: list[Change],
+    active_scopes: set[Scope],
+    dry_run: bool,
+) -> str:
+    lines = []
+    header = f"Bumped {old} -> {version}" if old else f"Bumped to {version}"
+    if dry_run:
+        header = f"[dry-run] {header}"
+    lines.append(f"## Version bump: {header}")
+    lines.append("")
+    lines.append(f"**Scopes:** {', '.join(sorted(s.value for s in active_scopes))}")
+    lines.append("")
+    lines.append(f"**Changed files:** {len(changes)}")
+    lines.append("")
+    if changes:
+        lines.append("| File | Scope | Rules |")
+        lines.append("|---|---|---|")
+        for ch in sorted(changes, key=lambda c: (c.scope.value, c.path.as_posix())):
+            lines.append(
+                f"| `{ch.path.as_posix()}` | {ch.scope.value} | {', '.join(ch.rules)} |"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _run_check(args: argparse.Namespace, repo: Path) -> int:
+    expected = args.expected_version or detect_current_version(repo)
+    _log(
+        args, "info", f"Checking for stale version references (expected: {expected})..."
+    )
+    active = _active_scopes(args)
+    # Rerun the engine with the expected version — anything that would change is stale.
+    stale = apply_rules(repo, expected, active, dry_run=True)
+    if not stale:
+        _log(args, "summary", "All version references are up to date.")
+        return 0
+    for ch in stale:
+        _log(
+            args,
+            "info",
+            f"STALE: {ch.path.as_posix()} ({ch.scope.value}: {', '.join(ch.rules)})",
         )
-    else:
-        print("\n=== Category 1: Core version files [SKIPPED] ===")
+    _log(args, "summary", f"Found {len(stale)} stale version reference(s).")
+    return 1
 
-    # Category 2: Helm charts
-    if not args.skip_helm:
-        print("\n=== Category 2: Helm charts ===")
-        all_changes.extend(update_helm_charts(repo, old_ver, new_ver, args.dry_run))
-    else:
-        print("\n=== Category 2: Helm charts [SKIPPED] ===")
 
-    # Category 2b: Operator Go source and samples
-    # Part of the CRD regen chain -- update image tags and dynamoVersion fields
-    # in Go doc comments and sample YAMLs before CRD regeneration.
-    if not args.skip_containers:
-        print("\n=== Category 2b: Operator Go source and samples ===")
-        all_changes.extend(update_operator_source(repo, new_ver, args.dry_run))
-    else:
-        print("\n=== Category 2b: Operator Go source and samples [SKIPPED] ===")
+def _run_bump(args: argparse.Namespace, repo: Path) -> int:
+    if not args.new_version:
+        raise SystemExit("ERROR: --new-version is required (unless using --check)")
 
-    # Category 3: Reference documentation
-    if not args.skip_docs:
-        print("\n=== Category 3: Reference documentation ===")
-        all_changes.extend(update_feature_matrix(repo, new_ver, args.dry_run))
-        all_changes.extend(
-            update_support_matrix(repo, new_ver, args.dry_run, backend_versions)
+    new_ver: Version = args.new_version
+    old_ver: Version = args.old_version or detect_current_version(repo)
+    if old_ver == new_ver:
+        _log(
+            args,
+            "summary",
+            f"WARNING: old ({old_ver}) == new ({new_ver}). Nothing to bump.",
         )
-        all_changes.extend(
+        return 0
+
+    active = _active_scopes(args)
+    _log(
+        args,
+        "info",
+        f"{'DRY RUN: Would bump' if args.dry_run else 'Bumping'} "
+        f"{old_ver} -> {new_ver}  (scopes: {', '.join(sorted(s.value for s in active))})",
+    )
+    if new_ver.is_post:
+        _log(
+            args,
+            "info",
+            f"  Post-release formats: python={new_ver.python()} semver={new_ver.semver()}",
+        )
+
+    backends = BackendVersions(
+        vllm=args.vllm_version,
+        sglang=args.sglang_version,
+        trtllm=args.trtllm_version,
+        nixl=args.nixl_version,
+    )
+
+    changes: list[Change] = []
+    # Rule-based scopes (core, containers, helm, + any text-pattern DOCS rules)
+    changes.extend(apply_rules(repo, new_ver, active, dry_run=args.dry_run))
+    # Specialised DOCS functions (table-row insertion / sectioned edits)
+    if Scope.DOCS in active:
+        changes.extend(update_feature_matrix(repo, new_ver, args.dry_run))
+        changes.extend(update_support_matrix(repo, new_ver, backends, args.dry_run))
+        changes.extend(
             update_release_artifacts(
-                repo, new_ver, args.release_date, args.dry_run, backend_versions
+                repo, new_ver, args.release_date, backends, args.dry_run
             )
         )
-    else:
-        print("\n=== Category 3: Reference documentation [SKIPPED] ===")
 
-    # Category 4: Discovery-based catch-all scan
-    if not args.skip_containers:
-        print("\n=== Category 4: Discovery-based scan (docs, recipes, examples) ===")
-        all_changes.extend(scan_and_replace(repo, new_ver, args.dry_run))
-    else:
-        print("\n=== Category 4: Discovery-based scan [SKIPPED] ===")
-
-    # Summary
-    print(f"\n{'=' * 60}")
-    print(
-        f"{'DRY RUN ' if args.dry_run else ''}Summary: {len(all_changes)} file(s) changed"
+    _log(
+        args,
+        "summary",
+        f"{'[dry-run] ' if args.dry_run else ''}Changed {len(changes)} file(s)",
     )
-    print(f"{'=' * 60}")
-    for change in all_changes:
-        print(f"  {'[DRY] ' if args.dry_run else '✅ '}{change}")
-
-    if not all_changes:
-        print(
-            "WARNING: No files were changed. This may indicate the old version "
-            f"({old_ver}) was not found in any target files, or all categories "
-            "were skipped.",
-            file=sys.stderr,
+    for ch in sorted(changes, key=lambda c: (c.scope.value, c.path.as_posix())):
+        _log(
+            args,
+            "info",
+            f"  {ch.scope.value}: {ch.path.as_posix()}  ({', '.join(ch.rules)})",
         )
+
+    if args.summary_file:
+        Path(args.summary_file).write_text(
+            _format_summary(new_ver, old_ver, changes, active, args.dry_run),
+            encoding="utf-8",
+        )
+
+    if not changes:
+        _log(
+            args,
+            "summary",
+            f"WARNING: no changes produced. The old version ({old_ver}) may not "
+            "appear in any files, or every scope was skipped.",
+        )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    repo = Path(args.repo_root).resolve()
+    if args.check:
+        return _run_check(args, repo)
+    return _run_bump(args, repo)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
