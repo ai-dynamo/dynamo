@@ -15,11 +15,13 @@ import (
 )
 
 const (
-	VLLMPort                 = "6379"
-	dataParallelRPCPort      = "13445"
-	tensorParallelSizeFlag   = "--tensor-parallel-size"
-	pipelineParallelSizeFlag = "--pipeline-parallel-size"
-	dataParallelSizeFlag     = "--data-parallel-size"
+	VLLMPort                  = "6379"
+	dataParallelRPCPort       = "13445"
+	tensorParallelSizeFlag    = "--tensor-parallel-size"
+	pipelineParallelSizeFlag  = "--pipeline-parallel-size"
+	dataParallelSizeFlag      = "--data-parallel-size"
+	dataParallelSizeLocalFlag = "--data-parallel-size-local"
+	enableElasticEPFlag       = "--enable-elastic-ep"
 )
 
 type VLLMBackend struct {
@@ -200,6 +202,17 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 		return
 	}
 
+	// Elastic EP workers use a Ray cluster, not the MP coordinator. The worker
+	// command (injected by injectElasticEPRayLaunchFlags) already contains an
+	// inline health gate that polls DynamoSystemPort (9090) before joining Ray.
+	// The MP init container waits on VLLMMpMasterPort (29500), which never opens
+	// in the elastic EP path — injecting it would cause the worker to hang forever.
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
+		if hasFlag(getExpandedArgs(component.ExtraPodSpec.MainContainer), enableElasticEPFlag) {
+			return
+		}
+	}
+
 	if len(podSpec.Containers) == 0 || b.ParentGraphDeploymentName == "" {
 		return
 	}
@@ -253,6 +266,18 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
 	} else if needsDistributed {
 		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
+	} else if hasFlag(expandedArgs, enableElasticEPFlag) {
+		// Elastic EP requires a single Ray cluster spanning all nodes.
+		// The operator's RPC-based DP coordination (--data-parallel-hybrid-lb) is
+		// explicitly incompatible with elastic EP — vLLM raises NotImplementedError
+		// if both are present. Instead we set up a cross-node Ray cluster:
+		//   Leader: ray start --head --block & <tcp-poll-ray-ready> && <vllm cmd>
+		//   Worker: <poll /live until 200> && ray start --address=<leader>:6379 --block
+		// Note: --data-parallel-size-local is intentionally NOT injected. With the
+		// worker's health-gate delaying its Ray join until dynamo.vllm is fully ready,
+		// only the leader node is in the Ray cluster when create_dp_placement_groups runs,
+		// so vLLM naturally places all initial DP workers on the leader node.
+		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
 	} else if needsDataParallelMultinodeLaunch(expandedArgs, resources) {
 		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
 	} else {
@@ -349,6 +374,94 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 	container.Command = []string{"/bin/sh", "-c"} // ensure cmd is a shell
 }
 
+// injectElasticEPRayLaunchFlags sets up a cross-node Ray cluster for elastic EP.
+//
+// Elastic EP requires --data-parallel-backend ray so that vLLM's Ray executor
+// manages dynamic worker lifecycle. It is explicitly incompatible with
+// --data-parallel-hybrid-lb (the operator's normal multinode DP path), because
+// elastic EP needs a single API server and core client to coordinate scale up/down.
+//
+// We reuse the Ray TP/PP topology: leader starts the Ray head and runs vLLM,
+// workers join the Ray cluster and expose their GPUs as idle resources.
+//
+// Worker health-gate: the worker deliberately waits until the leader's /live
+// endpoint (DynamoSystemPort 9090) returns HTTP 200 before joining Ray. This is
+// critical for correct DP placement:
+//   - Port 9090 (system status server) opens EARLY in vLLM startup, before
+//     create_dp_placement_groups runs.
+//   - GET /live returns 503 during initialization and 200 only after the engine
+//     is fully ready (create_dp_placement_groups done, model loaded).
+//   - If the worker joins Ray before /live → 200, vLLM's create_dp_placement_groups
+//     sees all cluster GPUs (leader + worker) and creates too many placement groups,
+//     causing: "AssertionError: Created N DP placement groups, expected dp_size".
+//   - Waiting for HTTP 200 ensures the worker joins AFTER placement groups are
+//     set, so the leader's GPUs hold all initial DP workers (warm standby).
+//
+// Note: --data-parallel-size-local is intentionally NOT injected. With the
+// health-gate ensuring only the leader is in Ray at vLLM startup, vLLM
+// naturally places all --data-parallel-size workers on the leader node.
+//
+// Leader: ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
+// Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
+func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
+	switch role {
+	case RoleLeader:
+		quotedCmd := make([]string, len(container.Command))
+		for i, tok := range container.Command {
+			quotedCmd[i] = shellQuoteForBashC(tok)
+		}
+		quotedArgs := make([]string, len(container.Args))
+		for i, arg := range container.Args {
+			quotedArgs[i] = shellQuoteForBashC(arg)
+		}
+		// Poll Ray head readiness with a bounded retry loop (150 × 2 s = 5 min max).
+		// An unbounded `until` loop would spin forever if `ray start --head` crashes
+		// silently or the port never opens.
+		container.Args = []string{fmt.Sprintf(
+			`ray start --head --port=%s --block & `+
+				`i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
+				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s %s`,
+			VLLMPort,
+			VLLMPort,
+			strings.Join(quotedCmd, " "),
+			strings.Join(quotedArgs, " "),
+		)}
+	case RoleWorker:
+		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
+		// Health-gate: poll GET /live on DynamoSystemPort (9090) until HTTP 200.
+		// /live returns 503 during vLLM initialization and 200 when the engine is
+		// fully ready. This ensures the worker joins Ray AFTER create_dp_placement_groups
+		// has run (which requires only the leader's GPUs to be in the cluster).
+		// Uses Python's urllib (always available) instead of curl.
+		// Bounded at 720 × 15s = 3 hours to cover large models with slow disk I/O.
+		// Without a bound, a permanently broken leader leaves the worker looping
+		// forever with no Kubernetes liveness probe to detect it (probes are removed
+		// at the UpdatePodSpec level for elastic EP workers).
+		healthGate := fmt.Sprintf(
+			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
+				`2>/dev/null; do `+
+				`i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; `+
+				`echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done`,
+			leaderHostname, commonconsts.DynamoSystemPort,
+		)
+		container.Args = []string{fmt.Sprintf(
+			"%s && ray start --address=%s:%s --block",
+			healthGate, leaderHostname, VLLMPort,
+		)}
+	}
+	container.Command = []string{"/bin/sh", "-c"}
+}
+
+// hasFlag returns true if flag exists in expandedArgs.
+func hasFlag(expandedArgs []string, flag string) bool {
+	for _, arg := range expandedArgs {
+		if arg == flag {
+			return true
+		}
+	}
+	return false
+}
+
 func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *v1alpha1.Resources, numberOfNodes int32) {
 	expandedArgs := getExpandedArgs(container)
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
@@ -367,27 +480,17 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 	var flags []string
 	needsShell := false
 
-	// Helper to check if flag already exists in args
-	hasFlag := func(flag string) bool {
-		for _, arg := range expandedArgs {
-			if arg == flag {
-				return true
-			}
-		}
-		return false
-	}
-
 	switch role {
 	case RoleLeader:
 		// Leader runs API server + coordinator + local engines
 		// Hybrid LB mode: local DP coordination within node, Dynamo routes between nodes
 		flags = []string{"--data-parallel-hybrid-lb"}
 		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
-		if !hasFlag("--data-parallel-size") {
-			flags = append(flags, "--data-parallel-size", strconv.FormatInt(totalDPSize, 10))
+		if !hasFlag(expandedArgs, dataParallelSizeFlag) {
+			flags = append(flags, dataParallelSizeFlag, strconv.FormatInt(totalDPSize, 10))
 		}
 		flags = append(flags,
-			"--data-parallel-size-local", strconv.FormatInt(dataParallelSizeLocal, 10),
+			dataParallelSizeLocalFlag, strconv.FormatInt(dataParallelSizeLocal, 10),
 			"--data-parallel-start-rank", "0",
 			"--data-parallel-address", leaderHostname,
 			"--data-parallel-rpc-port", dataParallelRPCPort,
@@ -402,11 +505,11 @@ func injectDataParallelLaunchFlags(container *corev1.Container, role Role, servi
 
 		flags = []string{"--data-parallel-hybrid-lb"}
 		// Only inject --data-parallel-size if not already present (avoids duplicates from profiler)
-		if !hasFlag("--data-parallel-size") {
-			flags = append(flags, "--data-parallel-size", strconv.FormatInt(totalDPSize, 10))
+		if !hasFlag(expandedArgs, dataParallelSizeFlag) {
+			flags = append(flags, dataParallelSizeFlag, strconv.FormatInt(totalDPSize, 10))
 		}
 		flags = append(flags,
-			"--data-parallel-size-local", strconv.FormatInt(dataParallelSizeLocal, 10),
+			dataParallelSizeLocalFlag, strconv.FormatInt(dataParallelSizeLocal, 10),
 			"--data-parallel-start-rank", startRank,
 			"--data-parallel-address", leaderHostname,
 			"--data-parallel-rpc-port", dataParallelRPCPort,
