@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -16,6 +17,25 @@ from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+# Escape hatch: set to "1" (or any truthy value) to allow top_logprobs_num >= 1.
+# Default-off because SGLang's tokenizer manager detokenizes top-k tokens
+# per-position serially (O(N) per generated token), causing severe latency
+# degradation. Flip once upstream batches detokenize_top_logprobs_tokens.
+_ALLOW_TOP_LOGPROBS_ENV = "DYN_SGL_ALLOW_TOP_LOGPROBS"
+
+_TOP_LOGPROBS_UNSUPPORTED_MSG = (
+    "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
+    "an O(N) per-position detokenization in the upstream sglang tokenizer "
+    "manager. Use logprobs=0 for chosen-token logprobs, or set "
+    "DYN_SGL_ALLOW_TOP_LOGPROBS=1 to override at your own risk. "
+    "Track the upstream fix at https://github.com/sgl-project/sglang/issues/."
+)
+
+
+def _top_logprobs_allowed() -> bool:
+    """Return True if the DYN_SGL_ALLOW_TOP_LOGPROBS escape hatch is enabled."""
+    return os.environ.get(_ALLOW_TOP_LOGPROBS_ENV, "").lower() not in ("", "0", "false")
 
 
 def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | None:
@@ -149,48 +169,50 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if not output_options:
             return kwargs
 
-        logprobs_value = output_options.get("logprobs")
-        if logprobs_value is not None:
+        allow_top = _top_logprobs_allowed()
+
+        def _parse(name: str, value: Any) -> Optional[int]:
             try:
-                parsed = int(logprobs_value)
-                if parsed < 0:
-                    logging.warning(
-                        f"Invalid logprobs value: {logprobs_value} "
-                        "(must be non-negative), ignoring"
-                    )
-                else:
-                    kwargs["return_logprob"] = True
-                    kwargs["top_logprobs_num"] = parsed
+                parsed = int(value)
             except (ValueError, TypeError):
                 logging.warning(
-                    f"Invalid logprobs value: {logprobs_value} "
-                    "(must be integer), ignoring"
+                    f"Invalid {name} value: {value} (must be integer), ignoring"
                 )
+                return None
+            if parsed < 0:
+                logging.warning(
+                    f"Invalid {name} value: {value} (must be non-negative), ignoring"
+                )
+                return None
+            if parsed >= 1 and not allow_top:
+                raise ValueError(_TOP_LOGPROBS_UNSUPPORTED_MSG)
+            return parsed
+
+        logprobs_value = output_options.get("logprobs")
+        if logprobs_value is not None:
+            parsed = _parse("logprobs", logprobs_value)
+            if parsed is not None:
+                kwargs["return_logprob"] = True
+                kwargs["top_logprobs_num"] = parsed
 
         prompt_logprobs_value = output_options.get("prompt_logprobs")
         if prompt_logprobs_value is not None:
-            try:
-                parsed = int(prompt_logprobs_value)
-                if parsed < 0:
-                    logging.warning(
-                        f"Invalid prompt_logprobs value: {prompt_logprobs_value} "
-                        "(must be non-negative), ignoring"
-                    )
-                else:
-                    kwargs["return_logprob"] = True
-                    # SGLang has a single top_logprobs_num for both prompt
-                    # and output tokens, so take the max of the two.
-                    kwargs["top_logprobs_num"] = max(
-                        kwargs.get("top_logprobs_num", 0), parsed
-                    )
-                    # logprob_start_len=0 computes from prompt start;
-                    # omitting it (or -1) computes output tokens only.
-                    kwargs["logprob_start_len"] = 0
-            except (ValueError, TypeError):
-                logging.warning(
-                    f"Invalid prompt_logprobs value: {prompt_logprobs_value} "
-                    "(must be integer), ignoring"
+            parsed = _parse("prompt_logprobs", prompt_logprobs_value)
+            if parsed is not None:
+                kwargs["return_logprob"] = True
+                # SGLang has a single top_logprobs_num for both prompt
+                # and output tokens, so take the max of the two.
+                kwargs["top_logprobs_num"] = max(
+                    kwargs.get("top_logprobs_num", 0), parsed
                 )
+                # logprob_start_len=0 computes from prompt start;
+                # omitting it (or -1) computes output tokens only.
+                kwargs["logprob_start_len"] = 0
+
+        # Belt-and-suspenders: if return_logprob was requested and the gate is
+        # not open, pin top_logprobs_num=0 so no future code path can flip it on.
+        if kwargs.get("return_logprob") and not allow_top:
+            kwargs["top_logprobs_num"] = 0
 
         return kwargs
 
