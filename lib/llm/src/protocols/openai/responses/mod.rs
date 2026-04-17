@@ -35,7 +35,7 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
     /// Flattened CreateResponse fields (model, input, temperature, etc.)
     #[serde(flatten)]
@@ -44,6 +44,62 @@ pub struct NvCreateResponse {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+}
+
+// Upstream `async-openai` defines `InputImageContent.detail: ImageDetail` without
+// `#[serde(default)]`, and the enclosing `InputParam`/`InputItem`/`MessageItem` enums
+// are `#[serde(untagged)]`. Untagged variant probing does not apply field defaults,
+// so a missing `detail` causes the whole request to fail with a "did not match any
+// variant" error. The OpenAI spec says `detail` defaults to `"auto"`, so we inject
+// it when absent before handing the JSON to serde.
+fn normalize_input_image_details(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if matches!(
+                map.get("type"),
+                Some(serde_json::Value::String(t)) if t == "input_image"
+            ) && !map.contains_key("detail")
+            {
+                map.insert(
+                    "detail".to_string(),
+                    serde_json::Value::String("auto".into()),
+                );
+            }
+            for v in map.values_mut() {
+                normalize_input_image_details(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                normalize_input_image_details(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+impl<'de> Deserialize<'de> for NvCreateResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct NvCreateResponseDe {
+            #[serde(flatten)]
+            inner: dynamo_protocols::types::responses::CreateResponse,
+            #[serde(default)]
+            nvext: Option<NvExt>,
+        }
+
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        normalize_input_image_details(&mut value);
+        let de: NvCreateResponseDe =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(NvCreateResponse {
+            inner: de.inner,
+            nvext: de.nvext,
+        })
+    }
 }
 
 #[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
@@ -1730,5 +1786,127 @@ thinking
 
         // nvext should be omitted when None
         assert!(json.get("nvext").is_none());
+    }
+
+    #[test]
+    fn test_deserialize_input_image_without_detail() {
+        // Reproduces DYN-2720: upstream `InputImageContent.detail` has no serde
+        // default, so omitting it previously failed with
+        // `data did not match any variant of untagged enum InputParam`.
+        let body = serde_json::json!({
+            "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What do you see?"},
+                        {"type": "input_image", "image_url": "http://example.com/x.jpg"}
+                    ]
+                }
+            ],
+            "max_output_tokens": 500,
+        });
+
+        let req: NvCreateResponse =
+            serde_json::from_value(body).expect("missing detail must parse");
+
+        let items = match &req.inner.input {
+            InputParam::Items(items) => items,
+            other => panic!("expected Items, got {:?}", other),
+        };
+        assert_eq!(items.len(), 1);
+        let content = match &items[0] {
+            InputItem::Item(Item::Message(MessageItem::Input(m))) => &m.content,
+            other => panic!("expected structured input message, got {:?}", other),
+        };
+        let image = match &content[1] {
+            InputContent::InputImage(img) => img,
+            other => panic!("expected InputImage, got {:?}", other),
+        };
+        assert_eq!(
+            serde_json::to_value(&image.detail).unwrap(),
+            serde_json::Value::String("auto".into())
+        );
+        assert_eq!(image.image_url.as_deref(), Some("http://example.com/x.jpg"));
+    }
+
+    #[test]
+    fn test_deserialize_input_image_with_explicit_detail_preserved() {
+        let body = serde_json::json!({
+            "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "hi"},
+                        {
+                            "type": "input_image",
+                            "detail": "high",
+                            "image_url": "http://example.com/x.jpg"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let req: NvCreateResponse = serde_json::from_value(body).unwrap();
+        let items = match &req.inner.input {
+            InputParam::Items(items) => items,
+            _ => panic!("expected Items"),
+        };
+        let content = match &items[0] {
+            InputItem::Item(Item::Message(MessageItem::Input(m))) => &m.content,
+            _ => panic!("expected structured input message"),
+        };
+        let image = match &content[1] {
+            InputContent::InputImage(img) => img,
+            _ => panic!("expected InputImage"),
+        };
+        assert_eq!(
+            serde_json::to_value(&image.detail).unwrap(),
+            serde_json::Value::String("high".into())
+        );
+    }
+
+    #[test]
+    fn test_deserialize_input_image_in_easy_message() {
+        // EasyInputMessage path (no "type" on the outer item). The normalizer
+        // walks the whole JSON tree, so the missing-`detail` fix still applies.
+        let body = serde_json::json!({
+            "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "hi"},
+                        {"type": "input_image", "image_url": "http://example.com/x.jpg"}
+                    ]
+                }
+            ]
+        });
+
+        let req: NvCreateResponse =
+            serde_json::from_value(body).expect("easy-message form must parse");
+        let items = match &req.inner.input {
+            InputParam::Items(items) => items,
+            _ => panic!("expected Items"),
+        };
+        assert_eq!(items.len(), 1);
+        // Round-trip and check that the nested input_image carries detail=auto
+        // regardless of which untagged InputItem variant was chosen.
+        let v = serde_json::to_value(&items[0]).unwrap();
+        let detail = v
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("input_image"))
+            })
+            .and_then(|e| e.get("detail"))
+            .and_then(|d| d.as_str())
+            .expect("detail must be present after round-trip");
+        assert_eq!(detail, "auto");
     }
 }
