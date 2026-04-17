@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 os.environ.setdefault("DYNAMO_SKIP_PYTHON_LOG_INIT", "1")
 
+from dynamo.common.forward_pass_metrics import (
+    ForwardPassMetrics,
+    ScheduledRequestMetrics,
+)
 from dynamo.llm import AicPerfConfig, KvRouterConfig, MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
@@ -123,35 +127,22 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
     )
 
 
-def _generate_aic_benchmark_fpms(
+def _generate_aic_prefill_fpms(
     aic_session,
     engine_args: MockEngineArgs,
     granularity: int = 8,
-) -> tuple[list, list]:
-    """Generate benchmark FPMs using AIC predictions.
+) -> list[ForwardPassMetrics]:
+    """Generate prefill benchmark FPMs using AIC predictions.
 
-    Returns (prefill_fpms, decode_fpms) with accurate batch-size-aware timing
-    from the AI Configurator SDK. Works correctly with both agg and disagg
-    regression models.
+    Sweeps ISL at batch_size=1 within the engine's per-pass token budget
+    (``max_num_batched_tokens``); a single forward pass physically cannot
+    process more than that, so the regression shouldn't see larger sums.
+    For longer ISL, callers use chunked TTFT estimation.
     """
-    from dynamo.common.forward_pass_metrics import (
-        ForwardPassMetrics,
-        ScheduledRequestMetrics,
-    )
-
-    max_kv_tokens = engine_args.num_gpu_blocks * engine_args.block_size
-    if max_kv_tokens <= 0:
-        max_kv_tokens = 16384 * 16
-
-    # Prefill regression operates on sum_prefill_tokens observed in a single
-    # forward pass, so the sweep should not exceed max_num_batched_tokens --
-    # one pass physically cannot process more than that.  For longer ISL, the
-    # caller uses chunked TTFT estimation.
     prefill_max = engine_args.max_num_batched_tokens or 8192
     prefill_step = max(1, (prefill_max - 100) // granularity)
 
-    # Prefill: sweep ISL at batch_size=1 within the per-pass token budget
-    prefill_fpms = []
+    prefill_fpms: list[ForwardPassMetrics] = []
     for isl in range(100, prefill_max + 1, prefill_step):
         ttft_ms = aic_session.predict_prefill(1, isl, 0)
         if ttft_ms > 0:
@@ -164,19 +155,30 @@ def _generate_aic_benchmark_fpms(
                     ),
                 )
             )
+    return prefill_fpms
 
-    # Decode: sweep batch_size x context_length.
-    # ``granularity`` controls the number of sample points per axis; the
-    # batch-size ceiling comes from the engine's ``max_num_seqs`` so the
-    # regression sees realistic concurrency, not an artificial cap at the
-    # sweep density.
-    decode_fpms = []
+
+def _generate_aic_decode_fpms(
+    aic_session,
+    engine_args: MockEngineArgs,
+    granularity: int = 8,
+) -> list[ForwardPassMetrics]:
+    """Generate decode benchmark FPMs using AIC predictions.
+
+    Sweeps (batch_size x context_length). ``granularity`` controls the
+    number of sample points per axis; the batch-size ceiling comes from
+    the engine's ``max_num_seqs`` so the regression sees realistic
+    concurrency, not an artificial cap at the sweep density.
+    """
+    max_kv_tokens = engine_args.num_gpu_blocks * engine_args.block_size
+    if max_kv_tokens <= 0:
+        max_kv_tokens = 16384 * 16
+
+    decode_fpms: list[ForwardPassMetrics] = []
     ctx_lengths = [500, 2000, 4000, 8000]
     bs_max = engine_args.max_num_seqs or 256
+    bs_step = max(1, bs_max // granularity)
     for ctx_len in ctx_lengths:
-        # Spread ``granularity`` points between 1 and bs_max (geometric-ish
-        # so low batch sizes are well-sampled too).
-        bs_step = max(1, bs_max // granularity)
         for bs in range(1, bs_max + 1, bs_step):
             sum_kv = bs * ctx_len
             if sum_kv > max_kv_tokens:
@@ -192,8 +194,7 @@ def _generate_aic_benchmark_fpms(
                         ),
                     )
                 )
-
-    return prefill_fpms, decode_fpms
+    return decode_fpms
 
 
 def _run_planner_replay(
@@ -322,13 +323,29 @@ def _run_planner_replay(
                 )
                 aic_session = None
 
-            # Generate benchmark FPMs and load into regression.  AIC's
+            # Generate benchmark FPMs and load into regression.  Disagg
+            # prefill and decode engines typically have different
+            # max_num_seqs and KV cache sizes, so each sweep uses its own
+            # engine args.  Agg has a single engine so uses one set.  AIC's
             # predict_* can raise on unsupported model/system combos or
             # numerical edge cases; log and fall back in those cases.
             if aic_session is not None:
+                p_args = (
+                    extra_engine_args
+                    if planner_config.mode == "agg"
+                    else prefill_engine_args
+                ) or ref_args
+                d_args = (
+                    extra_engine_args
+                    if planner_config.mode == "agg"
+                    else decode_engine_args
+                ) or ref_args
                 try:
-                    prefill_fpms, decode_fpms = _generate_aic_benchmark_fpms(
-                        aic_session, ref_args, benchmark_granularity
+                    prefill_fpms = _generate_aic_prefill_fpms(
+                        aic_session, p_args, benchmark_granularity
+                    )
+                    decode_fpms = _generate_aic_decode_fpms(
+                        aic_session, d_args, benchmark_granularity
                     )
                 except (RuntimeError, ValueError, KeyError, ArithmeticError) as e:
                     sys.stderr.write(
