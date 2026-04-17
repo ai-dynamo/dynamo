@@ -312,11 +312,14 @@ impl ConnectorLeader {
                         .unwrap_or(0);
 
                     // Always process offload - may have completed blocks from previous allocations
-                    // even if no new block IDs were allocated this step
-                    match self.process_request_offload(
+                    // even if no new block IDs were allocated this step.
+                    // Pass num_computed_tokens so evaluated_tokens can catch up when blocks
+                    // are pre-allocated (e.g., TRT-LLM) and re-paired after token extension.
+                    match self.process_request_offload_with_computed(
                         &req.req_id,
                         &mut slot,
                         num_scheduled_tokens,
+                        req.num_computed_tokens,
                         forward_pass_handle,
                     ) {
                         Ok(OffloadAction::NoAction) => {
@@ -648,6 +651,32 @@ impl ConnectorLeader {
         num_scheduled_tokens: usize,
         precondition: Option<EventHandle>,
     ) -> Result<OffloadAction> {
+        self.process_request_offload_with_computed(
+            req_id,
+            slot,
+            num_scheduled_tokens,
+            0, // no catch-up for new requests / full block application
+            precondition,
+        )
+    }
+
+    /// Process offload with optional catch-up using the framework's computed position.
+    ///
+    /// When blocks are pre-allocated (TRT-LLM) and re-paired after token extension,
+    /// `evaluated_tokens` may lag behind the actual computed position. Using
+    /// `num_computed_tokens` allows catching up in a single iteration instead of
+    /// crawling by `num_scheduled_tokens` (1 during decode).
+    ///
+    /// For vLLM this has no effect: blocks are allocated incrementally so
+    /// `evaluated_tokens` never falls behind.
+    fn process_request_offload_with_computed(
+        &self,
+        req_id: &str,
+        slot: &mut RequestSlot,
+        num_scheduled_tokens: usize,
+        num_computed_tokens: usize,
+        precondition: Option<EventHandle>,
+    ) -> Result<OffloadAction> {
         // Skip if slot is marked for deletion or finished evaluating
         if slot.is_marked_for_deletion() || slot.is_finished_evaluating() {
             return Ok(OffloadAction::NoAction);
@@ -664,7 +693,10 @@ impl ConnectorLeader {
         // which can happen due to a 1-iteration lag between token extension
         // (via update_slot) and block assignment (via scheduler_output).
         let max_tokens_with_blocks = slot.assigned_block_count() * slot.block_size();
-        let desired_tokens = slot.evaluated_tokens() + num_scheduled_tokens;
+        // Use the maximum of incremental advance and the framework's computed position.
+        // This allows catch-up when evaluated_tokens was frozen due to the cap and
+        // blocks were later re-paired (e.g., TRT-LLM pre-allocation + decode offload).
+        let desired_tokens = (slot.evaluated_tokens() + num_scheduled_tokens).max(num_computed_tokens);
         let capped_tokens = desired_tokens.min(max_tokens_with_blocks);
         let actual_advance = capped_tokens.saturating_sub(slot.evaluated_tokens());
         slot.advance_evaluated_tokens(actual_advance);

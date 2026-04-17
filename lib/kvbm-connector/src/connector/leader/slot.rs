@@ -801,6 +801,28 @@ impl RequestSlot {
         self.sequence
             .extend(tokens)
             .map_err(|e| anyhow::anyhow!("Failed to extend tokens: {}", e))?;
+
+        // Re-pair unassigned blocks with newly created token blocks.
+        //
+        // When tokens are extended, new TokenBlocks (with sequence hashes) may
+        // be created. If there are pre-allocated blocks sitting in
+        // unassigned_blocks (e.g., TRT-LLM allocates all blocks at prefill),
+        // this pairs them with the new token blocks so they become eligible
+        // for offload evaluation.
+        //
+        // For vLLM this is a no-op: blocks are allocated incrementally and
+        // applied via process_scheduler_output, so unassigned_blocks is empty
+        // at this point.
+        let range = self
+            .block_matches
+            .apply_new_blocks(vec![], self.sequence.blocks());
+        if !range.is_empty() {
+            tracing::debug!(
+                newly_assigned = range.len(),
+                "extend_tokens: re-paired unassigned blocks with new token blocks"
+            );
+        }
+
         Ok(())
     }
 

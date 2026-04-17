@@ -156,6 +156,23 @@ impl PyConnectorWorker {
             .map_err(to_pyerr)
     }
 
+    /// Signal forward pass completion from an external callable.
+    ///
+    /// This is the fallback for when `save_kv_layer` layer hooks don't fire
+    /// during CUDA graph replay. Called by `register_forward_pass_callable`'s
+    /// callback, which runs outside the graph after every forward pass.
+    ///
+    /// Idempotent: if `save_kv_layer` already signaled this iteration (eager
+    /// mode), this is a no-op.
+    ///
+    /// Args:
+    ///     stream_handle: Raw CUDA stream handle (u64) from Python's current stream
+    pub fn signal_forward_pass_complete(&self, stream_handle: u64) -> PyResult<()> {
+        self.inner
+            .signal_forward_pass_complete(stream_handle)
+            .map_err(to_pyerr)
+    }
+
     /// Wait for the intra-pass offload to complete.
     ///
     /// This is a blocking call; however, we might choose to make it non-blocking

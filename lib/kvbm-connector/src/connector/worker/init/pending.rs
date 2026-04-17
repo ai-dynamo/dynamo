@@ -34,6 +34,19 @@ use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::TransferManager;
 use kvbm_physical::layout::{BlockDimension, LayoutConfig, PhysicalLayoutBuilder};
 
+/// Determines how the G1 (device) physical layout is constructed.
+///
+/// - `LayerSeparate`: One tensor per layer (vLLM). Uses `PhysicalLayoutBuilder::layer_separate()`.
+/// - `FullyContiguous`: Single stacked tensor for all layers (TRT-LLM).
+///   Uses `PhysicalLayoutBuilder::fully_contiguous()`.
+#[derive(Debug, Clone)]
+pub enum DeviceLayoutKind {
+    /// One tensor per layer, each contiguous. Block dimension varies by framework.
+    LayerSeparate(BlockDimension),
+    /// Single tensor covering all layers: `[num_blocks, num_layers, 2, flat_block]`.
+    FullyContiguous,
+}
+
 /// Cached state from `register_kv_caches` for deferred initialization.
 ///
 /// This struct holds all the information needed to complete NIXL registration
@@ -62,7 +75,13 @@ pub struct PendingWorkerState {
     pub layout_config: LayoutConfig,
 
     /// Block dimension (first or second dimension).
+    /// Used only for `DeviceLayoutKind::LayerSeparate`.
     pub block_dim: BlockDimension,
+
+    /// How the G1 (device) physical layout should be constructed.
+    /// Defaults to `LayerSeparate` (vLLM). TRT-LLM uses `FullyContiguous`.
+    #[builder(default = "DeviceLayoutKind::LayerSeparate(BlockDimension::BlockIsFirstDim)")]
+    pub device_layout_kind: DeviceLayoutKind,
 }
 
 impl PendingWorkerStateBuilder {
@@ -172,11 +191,22 @@ impl PendingWorkerState {
         );
 
         // 3. Build PhysicalLayout with NIXL registration
-        let physical_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
-            .with_config(self.layout_config.clone())
-            .layer_separate(self.block_dim)
-            .with_external_device_regions(self.tensors)?
-            .build()?;
+        let physical_layout = match &self.device_layout_kind {
+            DeviceLayoutKind::LayerSeparate(block_dim) => {
+                PhysicalLayoutBuilder::new(nixl_agent.clone())
+                    .with_config(self.layout_config.clone())
+                    .layer_separate(*block_dim)
+                    .with_external_device_regions(self.tensors)?
+                    .build()?
+            }
+            DeviceLayoutKind::FullyContiguous => {
+                PhysicalLayoutBuilder::new(nixl_agent.clone())
+                    .with_config(self.layout_config.clone())
+                    .fully_contiguous()
+                    .with_external_device_regions(self.tensors)?
+                    .build()?
+            }
+        };
 
         tracing::debug!("Built physical layout with NIXL-registered memory");
         created_layouts.push(LogicalLayoutHandle::G1);
@@ -184,7 +214,7 @@ impl PendingWorkerState {
         // 4. Register layout with TransferManager → get G1 handle
         tracing::info!(
             num_blocks = self.num_device_blocks,
-            "Registering G1 (device) layout - external tensors from vLLM"
+            "Registering G1 (device) layout - external tensors"
         );
         let g1_handle = transfer_manager.register_layout(physical_layout)?;
         tracing::info!(?g1_handle, "G1 (device) layout registered successfully");
