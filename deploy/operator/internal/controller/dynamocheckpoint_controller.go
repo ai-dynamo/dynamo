@@ -207,10 +207,7 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 		}
 		gpuQty := ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]
 		gpuCount := int(gpuQty.Value())
-		deviceClassName := ""
-		if ckpt.Spec.GPUMemoryService != nil {
-			deviceClassName = ckpt.Spec.GPUMemoryService.DeviceClassName
-		}
+		deviceClassName := ckpt.Spec.GPUMemoryService.DeviceClassName
 		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
 		_, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
 			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, ckpt.Namespace, gpuCount, deviceClassName)
