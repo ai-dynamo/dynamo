@@ -36,10 +36,12 @@ spec:
     #       # gpuType: gpu.nvidia.com/h100
     #   failover:
     #     enabled: true
-    #     numShadows: 20        # 1 primary + 1 shadow = 2 engine pods per PCSG replica
+    #     mode: interPod
+    #     numShadows: 2        # 1 primary + 1 shadow = 2 engine pods per PCSG replica
     #   extraPodSpec:
     #     mainContainer:
-    #       image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+    #       # image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+    #       image: dynamoci.azurecr.io/ai-dynamo/dynamo:5af359d4ce3d843d6b9f7e6e8ed5226ed9b6abd0-vllm-runtime-cuda13
     #       command: ["python3", "-m", "dynamo.vllm"]
     #       args: ["--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "1", "--enforce-eager", "--gpu-memory-utilization", "0.85"]
     #   sharedMemory:
@@ -58,10 +60,12 @@ spec:
           # gpuType: gpu.nvidia.com/h100
       failover:
         enabled: true
+        mode: interPod
         numShadows: 1       # 1 primary + 1 shadow = 2 engine pods per rank
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+          # image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:5af359d4ce3d843d6b9f7e6e8ed5226ed9b6abd0-vllm-runtime-cuda13
           command: ["python3", "-m", "dynamo.vllm"]
           # args: ["--model", "Qwen/Qwen3-235B-A22B", "--tensor-parallel-size", "8", "--enforce-eager", "--gpu-memory-utilization", "0.85"]
           args: ["--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2", "--enforce-eager", "--gpu-memory-utilization", "0.85"]
@@ -76,5 +80,6 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+          # image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:5af359d4ce3d843d6b9f7e6e8ed5226ed9b6abd0-vllm-runtime-cuda13
           # command: ["python3", "-m", "dynamo.frontend"]
