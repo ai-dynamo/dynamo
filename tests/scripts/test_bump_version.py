@@ -427,6 +427,54 @@ def test_check_autodetects_from_pyproject(bv, tmp_path):
     assert rc == 0  # everything IS at 0.9.0 (the detected current version)
 
 
+def test_check_mode_detects_stale_docs(bv, tmp_path):
+    """--check must catch staleness in the DOCS specialised functions too.
+
+    The support-matrix / release-artifacts / feature-matrix files carry the
+    bump-version: ignore marker, so apply_rules() skips them entirely. Without
+    a separate dry-run pass through the DOCS helpers, --check would miss a
+    stale "Updated for Dynamo vX.Y.Z" tag (and the support-matrix /
+    release-artifacts equivalents) — regression guard for that blind spot.
+    """
+    _make_fake_repo(tmp_path, "1.0.0")
+    # Plant a stale DOCS-only reference: feature-matrix tag still on the old
+    # version. apply_rules() can't see it (the file is ignore-marked), but the
+    # update_feature_matrix() helper can.
+    fm = tmp_path / "docs" / "reference" / "feature-matrix.md"
+    fm.parent.mkdir(parents=True, exist_ok=True)
+    fm.write_text(
+        "<!-- bump-version: ignore -->\n*Updated for Dynamo v0.9.0*\n",
+        encoding="utf-8",
+    )
+    # Sanity check: with --skip-docs the stale tag is invisible to --check.
+    assert (
+        bv.main(
+            [
+                "--check",
+                "--expected-version",
+                "1.0.0",
+                "--repo-root",
+                str(tmp_path),
+                "--skip-docs",
+            ]
+        )
+        == 0
+    )
+    # Now without --skip-docs it must be flagged.
+    assert (
+        bv.main(
+            [
+                "--check",
+                "--expected-version",
+                "1.0.0",
+                "--repo-root",
+                str(tmp_path),
+            ]
+        )
+        == 1
+    )
+
+
 def test_summary_file_is_written(bv, tmp_path):
     _make_fake_repo(tmp_path, "0.9.0")
     summary = tmp_path / "summary.md"
