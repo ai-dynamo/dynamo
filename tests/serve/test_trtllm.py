@@ -465,7 +465,7 @@ trtllm_configs = {
             )
         ],
         env={
-            "AGG_ENGINE_ARGS": "$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml",
+            "AGG_ENGINE_ARGS": "/workspace/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml",
             "DYN_TRTLLM_FRONTEND_DECODING": "true",
         },
     ),

@@ -352,12 +352,18 @@ class MultimodalRequestProcessor:
                             self.load_tensor_from_path_or_url(path)
                             for path in embedding_paths
                         ]
-                        loaded_embeddings = [
-                            item.get("mm_embeddings", next(iter(item.values())))
-                            if isinstance(item, dict)
-                            else item
-                            for item in raw_loaded
-                        ]
+                        loaded_embeddings = []
+                        for item in raw_loaded:
+                            if isinstance(item, dict):
+                                emb = item.get("mm_embeddings")
+                                if emb is None:
+                                    logging.error(
+                                        "Dictionary embeddings missing 'mm_embeddings' key"
+                                    )
+                                    return None
+                                loaded_embeddings.append(emb)
+                            else:
+                                loaded_embeddings.append(item)
                         if loaded_embeddings:
                             logging.info(
                                 f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"
