@@ -1,13 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared cleanup machinery for concurrent radix trees.
+//! Shared stale-child cleanup machinery for rooted tree structures.
 //!
 //! Provides a throttled, one-in-flight sweep that unlinks empty child nodes
-//! from their parent. Both [`ConcurrentRadixTree`](super::concurrent_radix_tree)
-//! and
+//! from their parent. It is used by [`ConcurrentRadixTree`](super::concurrent_radix_tree),
 //! [`ConcurrentRadixTreeCompressed`](super::concurrent_radix_tree_compressed)
-//! embed a [`CleanupState`] and implement [`CleanableNode`] for their node type.
+//! and the sequence-side
+//! [`PromptMembershipTrie`](super::sequences::prompt_membership_trie::PromptMembershipTrie),
+//! each of which embeds a [`CleanupState`] and implements [`CleanableNode`]
+//! for its node type.
 //!
 //! # Sweep semantics
 //!
