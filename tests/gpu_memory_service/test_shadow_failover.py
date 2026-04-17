@@ -289,7 +289,7 @@ def _trtllm_quiesce(
     label: str,
     expected_hash: str | None = None,
 ):
-    """Quiesce a weights-only TRT-LLM engine and return state tuple."""
+    """Quiesce a weights-only TRT-LLM engine and return the weights state."""
     wait_for_weights_state(
         weights_gms,
         ServerState.RO,
