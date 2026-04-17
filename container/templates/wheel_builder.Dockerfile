@@ -280,6 +280,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
     ldconfig && \
     mkdir -p /usr/local/src/ffmpeg && \
+    # Remove build artifacts (config.log, etc.) before preserving the source.
+    find /tmp/ffmpeg-${FFMPEG_VERSION} -name config.log -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
 
 # Build and install UCX
