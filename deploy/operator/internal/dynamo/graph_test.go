@@ -1493,7 +1493,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												Lifecycle: &corev1.Lifecycle{
 													PreStop: &corev1.LifecycleHandler{
 														Exec: &corev1.ExecAction{
-															Command: []string{"sh", "-c", "sleep 10"},
+															Command: []string{"sh", "-c", "sleep 5"},
 														},
 													},
 												},
@@ -2498,7 +2498,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												Lifecycle: &corev1.Lifecycle{
 													PreStop: &corev1.LifecycleHandler{
 														Exec: &corev1.ExecAction{
-															Command: []string{"sh", "-c", "sleep 10"},
+															Command: []string{"sh", "-c", "sleep 5"},
 														},
 													},
 												},
@@ -3503,7 +3503,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												Lifecycle: &corev1.Lifecycle{
 													PreStop: &corev1.LifecycleHandler{
 														Exec: &corev1.ExecAction{
-															Command: []string{"sh", "-c", "sleep 10"},
+															Command: []string{"sh", "-c", "sleep 5"},
 														},
 													},
 												},

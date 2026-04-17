@@ -15,6 +15,63 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
+func TestComputeFrontendPreStopSeconds(t *testing.T) {
+	tests := []struct {
+		name               string
+		gracePeriodSeconds int64
+		wantSleep          int64
+	}{
+		{
+			name:               "default grace period (60s) caps at 10s",
+			gracePeriodSeconds: 60,
+			wantSleep:          10,
+		},
+		{
+			name:               "high grace period still caps at 10s",
+			gracePeriodSeconds: 120,
+			wantSleep:          10,
+		},
+		{
+			name:               "grace period 20s gives exactly 10s",
+			gracePeriodSeconds: 20,
+			wantSleep:          10,
+		},
+		{
+			name:               "grace period 10s gives 5s (half budget)",
+			gracePeriodSeconds: 10,
+			wantSleep:          5,
+		},
+		{
+			name:               "grace period 6s gives 3s",
+			gracePeriodSeconds: 6,
+			wantSleep:          3,
+		},
+		{
+			name:               "grace period 2s gives 1s",
+			gracePeriodSeconds: 2,
+			wantSleep:          1,
+		},
+		{
+			name:               "grace period 1s gives 0 (integer division)",
+			gracePeriodSeconds: 1,
+			wantSleep:          0,
+		},
+		{
+			name:               "zero grace period gives 0",
+			gracePeriodSeconds: 0,
+			wantSleep:          0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ComputeFrontendPreStopSeconds(tt.gracePeriodSeconds)
+			if got != tt.wantSleep {
+				t.Errorf("ComputeFrontendPreStopSeconds(%d) = %d, want %d", tt.gracePeriodSeconds, got, tt.wantSleep)
+			}
+		})
+	}
+}
+
 func TestFrontendDefaults_GetBaseContainer(t *testing.T) {
 	type fields struct {
 		BaseComponentDefaults *BaseComponentDefaults
@@ -27,7 +84,7 @@ func TestFrontendDefaults_GetBaseContainer(t *testing.T) {
 		wantErr          bool
 	}{
 		{
-			name: "default frontend container includes preStop hook",
+			name: "default frontend container",
 			fields: fields{
 				BaseComponentDefaults: &BaseComponentDefaults{},
 			},
@@ -47,13 +104,6 @@ func TestFrontendDefaults_GetBaseContainer(t *testing.T) {
 						Protocol:      corev1.ProtocolTCP,
 						Name:          commonconsts.DynamoContainerPortName,
 						ContainerPort: int32(commonconsts.DynamoServicePort),
-					},
-				},
-				Lifecycle: &corev1.Lifecycle{
-					PreStop: &corev1.LifecycleHandler{
-						Exec: &corev1.ExecAction{
-							Command: []string{"sh", "-c", "sleep 10"},
-						},
 					},
 				},
 				LivenessProbe: &corev1.Probe{

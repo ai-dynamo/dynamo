@@ -39,21 +39,6 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 		},
 	}
 
-	// Add a default preStop hook to allow time for endpoint propagation during
-	// rolling updates. Without this, the frontend process begins shutdown on SIGTERM
-	// while proxies (e.g., Kong, NGINX) still route traffic to the terminating pod,
-	// causing 502 errors on non-streaming requests and mid-stream truncations on
-	// streaming ones. The 10-second sleep gives kube-proxy / endpoint controllers
-	// enough time to remove the pod from service endpoints before shutdown begins.
-	// Users can override this via extraPodSpec.mainContainer.lifecycle.
-	container.Lifecycle = &corev1.Lifecycle{
-		PreStop: &corev1.LifecycleHandler{
-			Exec: &corev1.ExecAction{
-				Command: []string{"sh", "-c", "sleep 10"},
-			},
-		},
-	}
-
 	// Add frontend-specific defaults
 	container.LivenessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
@@ -98,4 +83,18 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	}...)
 
 	return container, nil
+}
+
+// maxPreStopSeconds is the upper bound for the frontend preStop sleep duration.
+const maxPreStopSeconds = int64(10)
+
+// ComputeFrontendPreStopSeconds returns the preStop sleep duration for frontend
+// containers based on the pod's TerminationGracePeriodSeconds.
+//
+// The formula min(10, gracePeriod/2) ensures that:
+//   - At least half the grace budget remains for actual graceful shutdown
+//   - The sleep never exceeds 10 seconds (sufficient for endpoint propagation)
+//   - A zero or negative grace period produces 0 (no preStop hook)
+func ComputeFrontendPreStopSeconds(gracePeriodSeconds int64) int64 {
+	return max(0, min(maxPreStopSeconds, gracePeriodSeconds/2))
 }
