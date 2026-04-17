@@ -302,6 +302,13 @@ impl ModelWatcher {
                     });
                     // If a duplicate Added event arrives while the first task is still
                     // in-flight, abort the old task to cancel redundant work.
+                    //
+                    // `instance_key` is `mcid.to_path()` = "{ns}/{component}/{endpoint}/{instance_id:x}",
+                    // so this is keyed per-worker-instance, NOT per-model. Two different workers
+                    // registering the same model produce two different keys and run independently.
+                    // The only case that hits this branch is the etcd watch replaying the same
+                    // worker's Added event (reconnect or re-sync) — where cancelling the earlier
+                    // redundant task is exactly what we want.
                     if let Some((_, old_handle)) = self.pending_puts.remove(&instance_key) {
                         old_handle.abort();
                     }
