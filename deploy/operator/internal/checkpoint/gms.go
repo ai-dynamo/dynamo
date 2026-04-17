@@ -27,10 +27,20 @@ const (
 	envCheckpointDir = "GMS_CHECKPOINT_DIR"
 )
 
-// EnsureGMSRestoreSidecars adds GMS server + loader containers to the pod spec
-// for a checkpoint restore. The server runs as a regular container (not init)
-// because the CRIU-restored main process already has GPU memory mapped and
-// all containers must start in parallel.
+// EnsureGMSRestoreSidecars adds GMS server + loader containers to the pod
+// spec for a checkpoint restore.
+//
+// Precondition: the upstream DGD path has already run EnsureServerSidecar,
+// which adds the GMS server as a blocking init container (so socket
+// readiness gates the workload). The restore path does not need the
+// server to block startup because the CRIU-restored workload brings its
+// GPU memory back mapped and all init sidecars must start in parallel.
+// This function therefore:
+//
+//  1. Removes the existing init gms-server added by EnsureServerSidecar.
+//  2. Re-adds it as an always-restarting init sidecar together with the
+//     gms-loader, which hydrates the server from the checkpoint artifact
+//     directory on the snapshot PVC.
 func EnsureGMSRestoreSidecars(
 	podSpec *corev1.PodSpec,
 	mainContainer *corev1.Container,

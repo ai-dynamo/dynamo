@@ -1410,12 +1410,15 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			t.Fatalf("generatePodTemplateSpec failed: %v", err)
 		}
 
-		find := func(name string) *corev1.Container {
+		findRegular := func(name string) *corev1.Container {
 			for i := range podTemplateSpec.Spec.Containers {
 				if podTemplateSpec.Spec.Containers[i].Name == name {
 					return &podTemplateSpec.Spec.Containers[i]
 				}
 			}
+			return nil
+		}
+		findInit := func(name string) *corev1.Container {
 			for i := range podTemplateSpec.Spec.InitContainers {
 				if podTemplateSpec.Spec.InitContainers[i].Name == name {
 					return &podTemplateSpec.Spec.InitContainers[i]
@@ -1424,10 +1427,15 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			return nil
 		}
 
-		gmsServer := find(gms.ServerContainerName)
-		require.NotNil(t, gmsServer)
-		loader := find(checkpoint.GMSLoaderContainer)
-		require.NotNil(t, loader)
+		// GMS server and loader must be init sidecars so they start before the
+		// workload and are restarted under the pod's init restart policy.
+		require.Nil(t, findRegular(gms.ServerContainerName), "gms-server must not be a regular container")
+		require.Nil(t, findRegular(checkpoint.GMSLoaderContainer), "gms-loader must not be a regular container")
+
+		gmsServer := findInit(gms.ServerContainerName)
+		require.NotNil(t, gmsServer, "gms-server must be an init container")
+		loader := findInit(checkpoint.GMSLoaderContainer)
+		require.NotNil(t, loader, "gms-loader must be an init container")
 
 		mounts := map[string]string{}
 		for _, mount := range loader.VolumeMounts {
