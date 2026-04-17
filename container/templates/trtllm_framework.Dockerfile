@@ -11,9 +11,6 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS pytorch_base
 FROM alpine:3.20 AS trtllm_wheel_image_empty
 RUN mkdir -p /app/tensorrt_llm
 
-# Resolve TRTLLM wheel image (can be a stage name or a registry image)
-FROM ${TRTLLM_WHEEL_IMAGE} AS trtllm_wheel_image
-
 ##################################################
 ########## Framework Builder Stage ##############
 ##################################################
@@ -106,7 +103,6 @@ ARG GITHUB_TRTLLM_COMMIT
 # Copy only wheel files and commit info from trtllm_wheel stage from build_context
 COPY --from=trtllm_wheel / /trtllm_wheel/
 {%- endif %}
-COPY --from=trtllm_wheel_image /app/tensorrt_llm /trtllm_wheel_image/
 
 # Cache uv downloads; uv handles its own locking for this cache.
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -138,10 +134,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
         fi; \
-    elif [ -n "$(find /trtllm_wheel_image -name "*.whl" | head -n 1)" ]; then \
-        # Install from wheel embedded in the TRTLLM release image
-        WHEEL_FILE="$(find /trtllm_wheel_image -name "*.whl" | head -n 1)"; \
-        uv pip install "$WHEEL_FILE"; \
     else \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         # TRTLLM 1.2.0rc6.post2 has issues installing from pypi with uv, installing from direct wheel link works best
