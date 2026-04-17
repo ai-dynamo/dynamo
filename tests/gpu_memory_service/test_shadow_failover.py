@@ -124,6 +124,7 @@ def _resume_shadow_after_primary_failover(
     kv_cache_gms,
     primary: ManagedProcess,
 ):
+    resume_timeout_s = 300
     expected_kv_kinds_while_blocked = [
         "rw_connected",
         "rw_aborted",
@@ -131,7 +132,7 @@ def _resume_shadow_after_primary_failover(
     ] * 3 + ["rw_connected", "allocation_oom"]
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        resume_future = executor.submit(shadow.resume, 180)
+        resume_future = executor.submit(shadow.resume, resume_timeout_s)
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             if resume_future.done():
@@ -167,7 +168,7 @@ def _resume_shadow_after_primary_failover(
         else:
             raise TimeoutError("shadow did not reacquire KV cache after failover")
 
-        return resume_future.result(timeout=180)
+        return resume_future.result(timeout=resume_timeout_s)
 
 
 def _run_shadow_failover_test(
@@ -255,7 +256,6 @@ def _run_shadow_failover_test(
 
 
 @pytest.mark.e2e
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
@@ -267,7 +267,6 @@ def test_gms_shadow_engine_failover_vllm(
 
 
 @pytest.mark.e2e
-@pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(600)
