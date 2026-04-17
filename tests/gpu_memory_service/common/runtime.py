@@ -360,7 +360,7 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
         read_only_weights: bool = False,
         override_engine_args: str | None = None,
     ):
-        reserved_ports = allocate_ports(1)
+        reserved_ports = allocate_ports(1, DefaultPort.SYSTEM1.value)
         self._override_engine_args = override_engine_args
         try:
             super().__init__(
