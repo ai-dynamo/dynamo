@@ -59,6 +59,14 @@ class PdConnectorMetadata(MultiKVConnectorMetadata):
     pass
 
 
+@dataclass
+class PdHandshakeMetadata(KVConnectorHandshakeMetadata):
+    """Composite handshake metadata wrapping both child connectors' metadata."""
+
+    dynamo_metadata: Optional[KVConnectorHandshakeMetadata]
+    nixl_metadata: Optional[KVConnectorHandshakeMetadata]
+
+
 class PdConnector(MultiConnector):
     """
     A wrapper for using KV offloading Connectors (e.g. KVBM or LMCache) and NIXL Connector for PD disaggregated serving.
@@ -111,36 +119,48 @@ class PdConnector(MultiConnector):
         self, metadata: dict[int, KVConnectorHandshakeMetadata]
     ) -> None:
         """
-        Propagate handshake metadata to child connectors.
+        Unpack composite handshake metadata and route to each child connector.
 
-        This is required for NIXL connector to start its handshake listener
-        which decode workers connect to for KV transfer coordination.
+        Each worker exports a PdHandshakeMetadata wrapping both the
+        DynamoConnector metadata (VeloPeerMetadata, if v2) and NixlConnector
+        metadata (NixlHandshakePayload). We split them into per-connector
+        dicts and forward only to connectors that produced non-None metadata.
         """
-        # Only pass handshake metadata to the NixlConnector (second connector).
-        # The DynamoConnector (first connector) uses its own Velo peer handshake
-        # and rejects non-VeloPeerMetadata.
-        self._connectors[1].set_xfer_handshake_metadata(metadata)
+        dynamo_meta: dict[int, KVConnectorHandshakeMetadata] = {}
+        nixl_meta: dict[int, KVConnectorHandshakeMetadata] = {}
+
+        for rank, composite in metadata.items():
+            if isinstance(composite, PdHandshakeMetadata):
+                if composite.dynamo_metadata is not None:
+                    dynamo_meta[rank] = composite.dynamo_metadata
+                if composite.nixl_metadata is not None:
+                    nixl_meta[rank] = composite.nixl_metadata
+            else:
+                # Fallback: assume it's NIXL-only metadata (backwards compat)
+                nixl_meta[rank] = composite
+
+        if dynamo_meta:
+            self._connectors[0].set_xfer_handshake_metadata(dynamo_meta)
+        if nixl_meta:
+            self._connectors[1].set_xfer_handshake_metadata(nixl_meta)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
-        Get the KVConnector handshake metadata from the NIXL connector.
+        Collect handshake metadata from both child connectors.
 
-        This metadata is used for out-of-band connector handshake between
-        P/D workers. The NIXL connector (second connector) provides this
-        metadata so decode workers can connect for KV transfer coordination.
-
-        Returns:
-            NixlHandshakePayload from the NIXL connector, or None if not available.
+        Returns a PdHandshakeMetadata wrapping each connector's metadata
+        so that set_xfer_handshake_metadata can route them correctly.
         """
-        # Get handshake metadata from the NIXL connector (second connector)
-        nixl_connector = self._connectors[1]
-        metadata = nixl_connector.get_handshake_metadata()
-        if metadata is not None and not isinstance(metadata, NixlHandshakePayload):
-            raise TypeError(
-                f"Expected NixlHandshakePayload from NIXL connector, "
-                f"got {type(metadata).__name__}"
-            )
-        return metadata
+        dynamo_metadata = self._connectors[0].get_handshake_metadata()
+        nixl_metadata = self._connectors[1].get_handshake_metadata()
+
+        if dynamo_metadata is None and nixl_metadata is None:
+            return None
+
+        return PdHandshakeMetadata(
+            dynamo_metadata=dynamo_metadata,
+            nixl_metadata=nixl_metadata,
+        )
 
     def bind_connector_metadata(self, connector_metadata: PdConnectorMetadata) -> None:
         # Must call super() to set _connector_metadata so has_connector_metadata() returns True
