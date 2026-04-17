@@ -846,13 +846,22 @@ async fn handler_chat_completions(
     // RL field promotion: wire `tokens` and `return_token_ids` when provided on the standard
     // chat completions endpoint. This eliminates the need for the rl_admin Python proxy to
     // intercept and rewrite these fields.
+    //
+    // If `return_token_ids` is true, request completion_token_ids in the response.
+    // Auto-enable when DYN_ENABLE_RL is set -- ensures token IDs flow even if the
+    // client forgets to request them.
+    let rl_want_token_ids = request
+        .return_token_ids
+        .take()
+        .unwrap_or_else(|| dynamo_runtime::config::env_is_truthy("DYN_ENABLE_RL"));
+    if rl_want_token_ids {
+        tracing::info!("RL: want_token_ids=true, will promote nvext.extra_fields");
+    }
     {
         // If `tokens` is provided, inject into nvext.token_data (pre-tokenized prompt path).
         let token_data = request.tokens.take();
-        // If `return_token_ids` is true, request completion_token_ids in the response.
-        let want_token_ids = request.return_token_ids.take().unwrap_or(false);
 
-        if token_data.is_some() || want_token_ids {
+        if token_data.is_some() || rl_want_token_ids {
             let mut nvext = request.nvext.take().unwrap_or_default();
 
             if let Some(ids) = token_data {
@@ -879,7 +888,7 @@ async fn handler_chat_completions(
                 }
             }
 
-            if want_token_ids {
+            if rl_want_token_ids {
                 let mut extra_fields = nvext.extra_fields.take().unwrap_or_default();
                 for field in &["token_ids", "completion_token_ids"] {
                     if !extra_fields.contains(&field.to_string()) {
@@ -1181,6 +1190,14 @@ async fn chat_completions(
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
 
+    // RL: save messages for post-response prompt tokenization (needed for prompt_token_ids).
+    let rl_saved_messages = if dynamo_runtime::config::env_is_truthy("DYN_ENABLE_RL") && !streaming
+    {
+        Some(request.inner.messages.clone())
+    } else {
+        None
+    };
+
     // Apply template values first to resolve the model before creating metrics guards
     if let Some(template) = template {
         if request.inner.model.is_empty() {
@@ -1387,6 +1404,23 @@ async fn chat_completions(
         if ctx.is_killed() {
             inflight_guard.mark_error(ErrorType::Cancelled);
         }
+
+        // RL post-processing: when DYN_ENABLE_RL is active, promote
+        // token IDs to the top-level locations that Prime-RL / verifiers expects:
+        //   response.prompt_token_ids      (from tokenizing the prompt)
+        //   response.choices[i].token_ids  (from nvext.completion_token_ids)
+        let response = if let Some(ref messages) = rl_saved_messages {
+            let mut response = response;
+            response.prompt_token_ids = rl_tokenize_prompt(&state, &model, messages);
+            if let Ok(mut json_val) = serde_json::to_value(&response) {
+                rl_promote_token_ids_in_response(&mut json_val);
+                return Ok(Json(json_val).into_response());
+            }
+            response
+        } else {
+            response
+        };
+
         Ok(Json(response).into_response())
     }
 }
@@ -2993,6 +3027,84 @@ async fn rl_weight_version(State(state): State<Arc<RlState>>) -> impl IntoRespon
                 "workers": results
             })),
         )
+    }
+}
+
+/// Promote token IDs from the Dynamo `nvext` response object to the top-level
+/// locations that Prime-RL / verifiers expects:
+///
+///   response.nvext.completion_token_ids  →  response.choices[i].token_ids
+///
+/// Tokenize chat messages using the model's tokenizer and return prompt token IDs.
+/// Used by the RL post-processing path to populate `response.prompt_token_ids`.
+fn rl_tokenize_prompt(
+    state: &Arc<service_v2::State>,
+    model: &str,
+    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
+) -> Option<Vec<u32>> {
+    if messages.is_empty() {
+        return None;
+    }
+    let (_, card) = resolve_model_card(state, Some(model)).ok()?;
+    let tokenizer = card.tokenizer().ok()?;
+    let formatter = crate::preprocessor::prompt::PromptFormatter::from_mdc(&card).ok()?;
+    let inner_request = dynamo_protocols::types::CreateChatCompletionRequest {
+        model: model.to_string(),
+        messages: messages.to_vec(),
+        ..Default::default()
+    };
+    let wrapped = crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest {
+        inner: inner_request,
+        common: Default::default(),
+        nvext: None,
+        chat_template_args: None,
+        media_io_kwargs: None,
+        tokens: None,
+        return_token_ids: None,
+        unsupported_fields: Default::default(),
+    };
+    let prompt = match formatter {
+        crate::preprocessor::prompt::PromptFormatter::OAI(f) => f.render(&wrapped),
+    }
+    .ok()?;
+    let encoding = tokenizer.encode_with_special_tokens(&prompt, true).ok()?;
+    Some(encoding.token_ids().to_vec())
+}
+
+/// This lets Prime-RL read `choice.token_ids` without knowing about the `nvext`
+/// extension structure. Called on non-streaming responses when RL token ID mode
+/// is active.
+fn rl_promote_token_ids_in_response(json_val: &mut serde_json::Value) {
+    // Move completion_token_ids from response-level nvext to each choice.
+    // Prime-RL / verifiers expects:
+    //   response.choices[i].token_ids  (not response.nvext.completion_token_ids)
+    let has_nvext = json_val.get("nvext").is_some();
+    let has_completion_ids = json_val
+        .get("nvext")
+        .and_then(|nv| nv.get("completion_token_ids"))
+        .is_some();
+
+    tracing::debug!(
+        has_nvext,
+        has_completion_ids,
+        "rl_promote_token_ids_in_response: inspecting response"
+    );
+
+    if let Some(nvext) = json_val.get("nvext") {
+        if let Some(completion_ids) = nvext.get("completion_token_ids").cloned() {
+            let n = completion_ids.as_array().map(|a| a.len()).unwrap_or(0);
+            tracing::info!(
+                n_completion_ids = n,
+                "rl_promote: copying completion_token_ids to choices[].token_ids"
+            );
+            if let Some(choices) = json_val.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                for choice in choices.iter_mut() {
+                    if let Some(obj) = choice.as_object_mut() {
+                        obj.insert("token_ids".to_string(), completion_ids.clone());
+                    }
+                }
+            }
+        }
     }
 }
 

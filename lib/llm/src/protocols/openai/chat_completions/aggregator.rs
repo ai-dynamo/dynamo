@@ -278,6 +278,7 @@ impl DeltaAggregator {
                 service_tier: aggregator.service_tier,
             },
             nvext: aggregator.nvext,
+            prompt_token_ids: None,
         };
 
         Ok(response)

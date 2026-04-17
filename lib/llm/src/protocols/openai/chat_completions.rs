@@ -83,6 +83,10 @@ pub struct NvCreateChatCompletionResponse {
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// RL: Prompt token IDs for Prime-RL/verifiers alignment.
+    /// Populated when `DYN_ENABLE_RL=true` or `return_token_ids=true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_token_ids: Option<Vec<u32>>,
 }
 
 /// A response structure for streamed chat completions, embedding OpenAI's
