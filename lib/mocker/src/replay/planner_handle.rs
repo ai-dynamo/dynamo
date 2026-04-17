@@ -162,8 +162,12 @@ impl PlannerReplayHandle {
 
     /// Drain accumulated traffic metrics since the last drain.
     ///
-    /// Call this only on throughput-scaling ticks so the window covers the full
-    /// `throughput_adjustment_interval`, not just the gap between load ticks.
+    /// Call this only on throughput-scaling ticks so the window covers the
+    /// full `throughput_adjustment_interval`, not just the gap between load
+    /// ticks. The returned [`TrafficStats::avg_kv_hit_rate`] is aggregated
+    /// across router admissions in the window (``Σoverlap_blocks /
+    /// Σisl_blocks``), matching the real router's per-request histogram
+    /// semantics.
     pub fn drain_traffic(&mut self) -> TrafficStats {
         match &mut self.runtime {
             RuntimeKind::Agg(rt) => rt.drain_traffic(),

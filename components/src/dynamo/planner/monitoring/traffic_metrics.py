@@ -42,6 +42,7 @@ class Metrics:
     request_duration: Optional[float] = None
     p_load: Optional[float] = None
     d_load: Optional[float] = None
+    kv_hit_rate: Optional[float] = None
 
     def is_valid(self) -> bool:
         """Check if all required metrics are valid (not None and not NaN)."""
@@ -300,6 +301,24 @@ class PrometheusAPIClient:
             "avg output sequence tokens",
             model_name,
         )
+
+    def get_avg_kv_hit_rate(self, interval: str, model_name: str) -> Optional[float]:
+        """Average predicted KV cache hit rate (0.0-1.0) from the router.
+
+        Only available when metrics_source == "router" (the histogram lives on
+        the LocalRouter component). In disagg deployments the scrape is
+        namespace-filtered, so if the planner's ``dynamo_namespace`` matches
+        the prefill pool, the returned value pools only prefill-router
+        observations. Returns ``None`` for frontend sources since the
+        frontend doesn't publish an equivalent aggregate.
+        """
+        if self.metrics_source == "router":
+            return self._get_average_metric(
+                f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}",
+                interval,
+                "avg kv hit rate",
+            )
+        return None
 
     def warn_if_router_not_scraped(self) -> None:
         """Warn if Prometheus is not scraping any dynamo_component_router_* series.

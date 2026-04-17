@@ -458,9 +458,14 @@ class NativePlannerBase:
         m.osl = self.prometheus_traffic_client.get_avg_output_sequence_tokens(
             interval_str, self.model_name
         )
+        m.kv_hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
+            interval_str, self.model_name
+        )
 
+        hit_rate_str = f"{m.kv_hit_rate:.3f}" if m.kv_hit_rate is not None else "n/a"
         logger.info(
-            f"Observed num_req: {m.num_req:.2f} isl: {m.isl:.2f} osl: {m.osl:.2f}"
+            f"Observed num_req: {m.num_req:.2f} isl: {m.isl:.2f} osl: {m.osl:.2f} "
+            f"kv_hit_rate: {hit_rate_str}"
         )
 
         if self.prometheus_port != 0:
@@ -483,6 +488,7 @@ class NativePlannerBase:
             num_req=m.num_req,
             isl=m.isl,
             osl=m.osl,
+            kv_hit_rate=m.kv_hit_rate,
         )
 
     def _collect_fpm(self) -> FpmObservations:

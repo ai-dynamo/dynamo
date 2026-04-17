@@ -94,6 +94,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             self._num_req_predictor = predictor_cls(config)
             self._isl_predictor = predictor_cls(config)
             self._osl_predictor = predictor_cls(config)
+            # KV hit rate has no good offline-trace proxy, so it is NOT warmed
+            # via ``warm_load_predictors``; it learns only from live observations.
+            self._kv_hit_rate_predictor = predictor_cls(config)
 
         self._num_p_workers: int = 0
         self._num_d_workers: int = 0
@@ -102,6 +105,12 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
 
         self._throughput_lower_bound_p: int = 1
         self._throughput_lower_bound_d: int = 1
+
+        # Most recent observed KV hit rate from the router. Used by load-scaling
+        # to discount queued/avg prefill tokens in ``estimate_next_ttft``. Sticky
+        # across ticks because load-scaling and throughput-scaling cadences
+        # may differ. ``None`` means "no observation yet" -> no discount.
+        self._last_kv_hit_rate: Optional[float] = None
 
         self._next_load_s: float = float("inf")
         self._next_throughput_s: float = float("inf")
@@ -112,6 +121,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_predicted_num_req: Optional[float] = None
         self._diag_predicted_isl: Optional[float] = None
         self._diag_predicted_osl: Optional[float] = None
+        self._diag_predicted_kv_hit_rate: Optional[float] = None
         self._diag_engine_rps_prefill: Optional[float] = None
         self._diag_engine_rps_decode: Optional[float] = None
         self._diag_load_reason: Optional[str] = None
@@ -216,6 +226,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._diag_predicted_num_req = None
         self._diag_predicted_isl = None
         self._diag_predicted_osl = None
+        self._diag_predicted_kv_hit_rate = None
         self._diag_engine_rps_prefill = None
         self._diag_engine_rps_decode = None
         self._diag_load_reason = None
@@ -232,6 +243,7 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             predicted_num_req=self._diag_predicted_num_req,
             predicted_isl=self._diag_predicted_isl,
             predicted_osl=self._diag_predicted_osl,
+            predicted_kv_hit_rate=self._diag_predicted_kv_hit_rate,
             engine_rps_prefill=self._diag_engine_rps_prefill,
             engine_rps_decode=self._diag_engine_rps_decode,
             throughput_lower_bound_prefill=self._throughput_lower_bound_p,
@@ -315,6 +327,9 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         self._num_req_predictor.add_data_point(traffic.num_req)
         self._isl_predictor.add_data_point(traffic.isl)
         self._osl_predictor.add_data_point(traffic.osl)
+        if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):
+            self._last_kv_hit_rate = traffic.kv_hit_rate
+            self._kv_hit_rate_predictor.add_data_point(traffic.kv_hit_rate)
 
     # ------------------------------------------------------------------
     # Budget

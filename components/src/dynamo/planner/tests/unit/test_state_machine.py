@@ -426,6 +426,130 @@ class TestThroughputScaling:
         assert effects.next_tick.at_s == 120.0
 
 
+class TestKvHitRatePlumbing:
+    def test_observe_traffic_updates_last_kv_hit_rate(self):
+        core = _make_core()
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.3
+            )
+        )
+        assert core._last_kv_hit_rate == 0.3
+
+    def test_none_kv_hit_rate_leaves_last_value_unchanged(self):
+        core = _make_core()
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.42
+            )
+        )
+        # Subsequent observation without a hit rate (scrape failure / frontend
+        # source) must not clobber the sticky value -- the planner keeps
+        # using the most recent valid reading.
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=None
+            )
+        )
+        assert core._last_kv_hit_rate == 0.42
+
+    def test_nan_kv_hit_rate_is_ignored(self):
+        core = _make_core()
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.5
+            )
+        )
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60,
+                num_req=100,
+                isl=1000,
+                osl=150,
+                kv_hit_rate=float("nan"),
+            )
+        )
+        assert core._last_kv_hit_rate == 0.5
+
+    def test_warm_load_predictors_skips_kv_hit_rate(self):
+        """kv_hit_rate has no good offline-trace proxy, so it must not
+        receive warmup data (only live observations feed it)."""
+        core = _make_core()
+        observations = [
+            TrafficObservation(
+                duration_s=60, num_req=50 * i, isl=1000, osl=150, kv_hit_rate=0.1 * i
+            )
+            for i in range(1, 4)
+        ]
+        core.warm_load_predictors(observations)
+        # Other predictors accumulated their respective series
+        assert len(core._num_req_predictor.data_buffer) == 3
+        assert len(core._isl_predictor.data_buffer) == 3
+        assert len(core._osl_predictor.data_buffer) == 3
+        # kv_hit_rate predictor stayed cold
+        assert core._kv_hit_rate_predictor.data_buffer == []
+
+    def test_throughput_diagnostics_include_predicted_kv_hit_rate(self):
+        core = _make_core(
+            mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
+        )
+        _train_prefill_regression(core)
+        core._observe_traffic(
+            TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.4
+            )
+        )
+        tick = TickInput(
+            now_s=60.0,
+            traffic=TrafficObservation(
+                duration_s=60, num_req=100, isl=1000, osl=150, kv_hit_rate=0.4
+            ),
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects = core.on_tick(_tick_for(tick), tick)
+        # ConstantPredictor predicts the last value it saw
+        assert effects.diagnostics.predicted_kv_hit_rate == 0.4
+
+    def test_high_predicted_hit_rate_reduces_prefill_replicas(self):
+        """With the same demand + regression, a high predicted hit rate
+        should yield fewer (or at worst equal) prefill replicas than no
+        reuse."""
+        core_base = _make_core(
+            mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
+        )
+        _train_prefill_regression(core_base)
+        core_hit = _make_core(
+            mode="prefill", enable_load_scaling=False, enable_throughput_scaling=True
+        )
+        _train_prefill_regression(core_hit)
+
+        # Feed several observations so the (constant) predictor locks in.
+        traffic_base = TrafficObservation(
+            duration_s=60, num_req=500, isl=4000, osl=150, kv_hit_rate=0.0
+        )
+        traffic_hit = TrafficObservation(
+            duration_s=60, num_req=500, isl=4000, osl=150, kv_hit_rate=0.8
+        )
+        core_base._observe_traffic(traffic_base)
+        core_hit._observe_traffic(traffic_hit)
+
+        tick_base = TickInput(
+            now_s=60.0,
+            traffic=traffic_base,
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        tick_hit = TickInput(
+            now_s=60.0,
+            traffic=traffic_hit,
+            worker_counts=WorkerCounts(ready_num_prefill=1),
+        )
+        effects_base = core_base.on_tick(_tick_for(tick_base), tick_base)
+        effects_hit = core_hit.on_tick(_tick_for(tick_hit), tick_hit)
+        assert effects_base.scale_to is not None
+        assert effects_hit.scale_to is not None
+        assert effects_hit.scale_to.num_prefill <= effects_base.scale_to.num_prefill
+
+
 # ── FPM reconciliation ───────────────────────────────────────────────
 
 

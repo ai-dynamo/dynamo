@@ -35,6 +35,16 @@ use crate::replay::router_shared::{
 
 type ReplayQueueKey = <RouterSchedulingPolicy as SchedulingPolicy>::Key;
 
+/// Internal result of a successful ``admit_request`` call: the chosen
+/// worker plus the router's view of prefix-cache overlap, so callers can
+/// forward the overlap stats to the traffic accumulator.
+#[derive(Debug, Clone, Copy)]
+struct AdmitOutcome {
+    worker_idx: usize,
+    overlap_blocks: u32,
+    isl_blocks: u32,
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OfflinePendingRequestSnapshot {
@@ -252,12 +262,16 @@ impl OfflineReplayRouter {
             return Ok(RouterEffects::default());
         }
 
+        let uuid = request
+            .uuid
+            .expect("offline replay requests must have UUIDs before router submission");
+        let outcome = self.admit_request(pending, decay_now)?;
         Ok(RouterEffects {
             admissions: vec![WorkerAdmission {
-                uuid: request
-                    .uuid
-                    .expect("offline replay requests must have UUIDs before router submission"),
-                worker_idx: self.admit_request(pending, decay_now)?,
+                uuid,
+                worker_idx: outcome.worker_idx,
+                overlap_blocks: outcome.overlap_blocks,
+                isl_blocks: outcome.isl_blocks,
             }],
         })
     }
@@ -279,11 +293,7 @@ impl OfflineReplayRouter {
             .mark_prefill_completed(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
         Ok(RouterEffects {
-            admissions: self
-                .drain_pending(decay_now)?
-                .into_iter()
-                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
-                .collect(),
+            admissions: self.drain_pending(decay_now)?,
         })
     }
 
@@ -297,11 +307,7 @@ impl OfflineReplayRouter {
             .free(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
         Ok(RouterEffects {
-            admissions: self
-                .drain_pending(decay_now)?
-                .into_iter()
-                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
-                .collect(),
+            admissions: self.drain_pending(decay_now)?,
         })
     }
 
@@ -310,11 +316,7 @@ impl OfflineReplayRouter {
     pub(crate) fn try_drain_pending(&mut self, now_ms: f64) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
         Ok(RouterEffects {
-            admissions: self
-                .drain_pending(decay_now)?
-                .into_iter()
-                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
-                .collect(),
+            admissions: self.drain_pending(decay_now)?,
         })
     }
 
@@ -359,11 +361,7 @@ impl OfflineReplayRouter {
         }
         let decay_now = self.decay_now(now_ms);
         Ok(RouterEffects {
-            admissions: self
-                .drain_pending(decay_now)?
-                .into_iter()
-                .map(|(uuid, worker_idx)| WorkerAdmission { uuid, worker_idx })
-                .collect(),
+            admissions: self.drain_pending(decay_now)?,
         })
     }
 
@@ -486,7 +484,11 @@ impl OfflineReplayRouter {
         })
     }
 
-    fn admit_request(&mut self, request: PendingRequest, decay_now: Instant) -> Result<usize> {
+    fn admit_request(
+        &mut self,
+        request: PendingRequest,
+        decay_now: Instant,
+    ) -> Result<AdmitOutcome> {
         let (decode_blocks, prefill_tokens) = self
             .slots
             .potential_blocks_and_tokens_with_prefill_tracking(
@@ -511,6 +513,10 @@ impl OfflineReplayRouter {
             request.track_prefill_tokens,
         );
 
+        let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
+            .unwrap_or(u32::MAX);
+        let overlap_blocks = selection.overlap_blocks;
+
         self.slots
             .add_request(
                 SequenceRequest {
@@ -528,10 +534,14 @@ impl OfflineReplayRouter {
             )
             .map_err(anyhow::Error::from)?;
 
-        Ok(worker_idx)
+        Ok(AdmitOutcome {
+            worker_idx,
+            overlap_blocks,
+            isl_blocks,
+        })
     }
 
-    fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<(Uuid, usize)>> {
+    fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         let Some(threshold) = self.queue_threshold else {
             return Ok(Vec::new());
         };
@@ -542,8 +552,13 @@ impl OfflineReplayRouter {
                 break;
             };
             let uuid = request.uuid;
-            let worker_idx = self.admit_request(request, decay_now)?;
-            admissions.push((uuid, worker_idx));
+            let outcome = self.admit_request(request, decay_now)?;
+            admissions.push(WorkerAdmission {
+                uuid,
+                worker_idx: outcome.worker_idx,
+                overlap_blocks: outcome.overlap_blocks,
+                isl_blocks: outcome.isl_blocks,
+            });
         }
 
         Ok(admissions)
@@ -785,6 +800,8 @@ mod tests {
             vec![WorkerAdmission {
                 uuid: Uuid::from_u128(1),
                 worker_idx: 3,
+                overlap_blocks: 0,
+                isl_blocks: 1,
             }]
         );
     }
@@ -837,6 +854,8 @@ mod tests {
             vec![WorkerAdmission {
                 uuid: Uuid::from_u128(2),
                 worker_idx: 1,
+                overlap_blocks: 0,
+                isl_blocks: 1,
             }]
         );
         assert_eq!(router.pending_count(), 0);

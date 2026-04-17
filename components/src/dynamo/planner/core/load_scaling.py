@@ -368,11 +368,13 @@ class LoadScalingMixin:
             self._diag_load_reason = "insufficient_data"
             return None
 
+        kv_hit_rate = self._last_kv_hit_rate
         estimates: list[float] = []
         for (wid, dp), fpm in fpm_stats.items():
             est = self._prefill_regression.estimate_next_ttft(
                 queued_prefill_tokens=fpm.queued_requests.sum_prefill_tokens,
                 max_num_batched_tokens=max_tokens,
+                kv_hit_rate=kv_hit_rate,
             )
             if est is not None:
                 est_ms = est * 1000
@@ -380,7 +382,8 @@ class LoadScalingMixin:
                 logger.info(
                     f"Prefill engine {wid}:dp{dp}: estimated TTFT {est_ms:.2f}ms "
                     f"(queued={fpm.queued_requests.sum_prefill_tokens}, "
-                    f"avg_isl={self._prefill_regression.avg_isl:.1f})"
+                    f"avg_isl={self._prefill_regression.avg_isl:.1f}, "
+                    f"kv_hit_rate={kv_hit_rate if kv_hit_rate is not None else 'n/a'})"
                 )
 
         if estimates:
@@ -432,12 +435,14 @@ class LoadScalingMixin:
         num_workers: int,
         max_tokens: int,
     ) -> Optional[int]:
+        kv_hit_rate = self._last_kv_hit_rate
         estimates: list[float] = []
         for fpm in fpm_stats.values():
             est = self._agg_regression.estimate_next_ttft(
                 queued_prefill_tokens=fpm.queued_requests.sum_prefill_tokens,
                 max_num_batched_tokens=max_tokens,
                 current_decode_kv=fpm.scheduled_requests.sum_decode_kv_tokens,
+                kv_hit_rate=kv_hit_rate,
             )
             if est is not None:
                 estimates.append(est * 1000)
