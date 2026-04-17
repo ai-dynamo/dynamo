@@ -7,6 +7,7 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
 use crate::protocols::WorkerWithDpRank;
 
 type SharedNode = Arc<RwLock<PromptTrieNode>>;
@@ -30,11 +31,6 @@ impl PromptTrieNode {
             full_edge_workers: FxHashSet::default(),
             children: FxHashMap::default(),
         }
-    }
-
-    #[cfg(any(test, feature = "bench"))]
-    fn has_any_workers(&self) -> bool {
-        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
     }
 
     fn current_cutoff(&self, worker: WorkerWithDpRank) -> usize {
@@ -114,12 +110,29 @@ impl PromptTrieNode {
     }
 }
 
+impl CleanableNode for PromptTrieNode {
+    type ChildKey = SequenceHash;
+
+    fn has_any_workers(&self) -> bool {
+        !self.full_edge_workers.is_empty() || !self.worker_cutoffs.is_empty()
+    }
+
+    fn children(&self) -> &FxHashMap<SequenceHash, SharedNode> {
+        &self.children
+    }
+
+    fn remove_child(&mut self, key: &SequenceHash) {
+        self.children.remove(key);
+    }
+}
+
 struct RemoveOutcome {
     stale_hashes: Vec<SequenceHash>,
 }
 
 pub(super) struct PromptMembershipTrie {
     root: SharedNode,
+    cleanup: CleanupState,
 }
 
 impl Default for PromptMembershipTrie {
@@ -149,7 +162,22 @@ impl PromptMembershipTrie {
     pub(super) fn new() -> Self {
         Self {
             root: Arc::new(RwLock::new(PromptTrieNode::new())),
+            cleanup: CleanupState::new(),
         }
+    }
+
+    /// Run the stale-child sweep if the throttle interval has elapsed.
+    ///
+    /// Safe to call from any write path; the sweep is a no-op until
+    /// [`CLEANUP_INTERVAL_MS`](crate::cleanup::CLEANUP_INTERVAL_MS) has passed
+    /// since the last completion, and only one sweep runs at a time.
+    pub(super) fn maybe_cleanup(&self) {
+        if !self.cleanup.try_schedule() {
+            return;
+        }
+        let mut guard = CleanupGuard::new(&self.cleanup);
+        cleanup::sweep_stale_children(&self.root);
+        guard.mark_completed();
     }
 
     fn find_in_subtree(start: &SharedNode, hash: SequenceHash) -> Option<SharedNode> {

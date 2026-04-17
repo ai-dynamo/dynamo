@@ -80,6 +80,7 @@ impl PromptRegistry {
                 .store_chain(worker, lookup, store.parent, &store.hashes);
         }
         self.loads.insert(worker, load);
+        self.membership.maybe_cleanup();
     }
 
     pub(super) fn apply_topology_change(&self, change: WorkerTopologyChange) {
@@ -92,6 +93,7 @@ impl PromptRegistry {
         for worker in change.added {
             self.loads.entry(worker).or_default();
         }
+        self.membership.maybe_cleanup();
     }
 
     #[expect(clippy::too_many_arguments)]
