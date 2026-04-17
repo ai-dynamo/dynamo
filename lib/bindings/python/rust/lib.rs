@@ -306,8 +306,12 @@ fn register_model<'p>(
 
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
-    let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
-    let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
+    // Only embed router_config in the MDC when the caller explicitly provided router_mode.
+    // This preserves backward-compat: workers that don't specify router_mode continue to
+    // fall back to the frontend-level global router config via the watcher.
+    let explicit_router_config = router_mode
+        .map(|rm| RouterConfig::new(rm.into(), KvRouterConfig::default()));
+    let router_config_for_local = explicit_router_config.clone().unwrap_or_default();
 
     // Early validation of custom template path
     let custom_template_path_owned = custom_template_path
@@ -361,6 +365,7 @@ fn register_model<'p>(
             if let Some(cfg) = runtime_config {
                 card.runtime_config = cfg.inner;
             }
+            card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
             let discovery = endpoint.inner.drt().discovery();
@@ -396,7 +401,7 @@ fn register_model<'p>(
             .model_name(model_name.clone())
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
-            .router_config(Some(router_config))
+            .router_config(Some(router_config_for_local))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
@@ -404,6 +409,7 @@ fn register_model<'p>(
             .media_fetcher(media_fetcher.map(|m| m.inner));
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
+        local_model.set_card_router_config(explicit_router_config);
 
         // Convert lora_identifier (Option<String>) to Option<LoraInfo>
         let lora_info = lora_identifier

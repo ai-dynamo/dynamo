@@ -157,7 +157,8 @@ where
     _phantom: PhantomData<(T, U)>,
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RouterMode {
     #[default]
     RoundRobin,

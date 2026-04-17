@@ -402,6 +402,10 @@ impl LocalModel {
         &self.router_config
     }
 
+    pub fn set_card_router_config(&mut self, router_config: Option<RouterConfig>) {
+        self.card.router_config = router_config;
+    }
+
     pub fn runtime_config(&self) -> &ModelRuntimeConfig {
         &self.runtime_config
     }
