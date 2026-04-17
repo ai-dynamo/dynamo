@@ -7,6 +7,7 @@ use std::time::Instant;
 use super::unified_client::RequestPlaneClient;
 use super::*;
 use crate::component::Instance;
+use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use crate::error::{DynamoError, ErrorType};
@@ -173,20 +174,21 @@ impl AddressedPushRouter {
     /// Delegates to [`TcpStreamServer::cancel_instance_streams`]. Called by the
     /// discovery-driven watcher when an instance is removed from the service registry.
     ///
-    /// The `endpoint` parameter scopes the cancellation to a specific endpoint
-    /// on the backend runtime, preventing sibling endpoints from being affected.
-    pub async fn cancel_instance_streams(&self, endpoint: &str, instance_id: u64) -> usize {
+    /// The full [`EndpointInstanceId`] scopes the cancellation to one concrete
+    /// service instance, even when different namespaces/components reuse the
+    /// same endpoint name and backend runtime.
+    pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
         self.resp_transport
-            .cancel_instance_streams(endpoint, instance_id)
+            .cancel_instance_streams(instance_id)
             .await
     }
 
     /// Clear the tombstone for an instance that has come back in the discovery set.
     ///
     /// Delegates to [`TcpStreamServer::clear_instance_tombstone`].
-    pub async fn clear_instance_tombstone(&self, endpoint: &str, instance_id: u64) {
+    pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
         self.resp_transport
-            .clear_instance_tombstone(endpoint, instance_id)
+            .clear_instance_tombstone(instance_id)
             .await
     }
 }
@@ -245,13 +247,11 @@ where
         // associate_instance returns false and the subject is already cancelled --
         // skip the send_request round trip and fail fast with a migratable error.
         //
-        // The composite key (endpoint, instance_id) prevents sibling endpoints on
-        // the same backend runtime (which share a connection_id) from having their
-        // subjects cancelled when only one endpoint is removed.
         if let (Some(subject), Some(inst)) = (&recv_subject, &instance_info) {
+            let endpoint_instance_id = inst.endpoint_instance_id();
             if !self
                 .resp_transport
-                .associate_instance(subject, &inst.endpoint, inst.instance_id)
+                .associate_instance(subject, &endpoint_instance_id)
                 .await
             {
                 return Err(anyhow::anyhow!(
