@@ -3,7 +3,9 @@
 
 use async_trait::async_trait;
 
-use super::{KvRouterError, WorkerTask};
+use std::sync::Arc;
+
+use super::{KvIndexerMetrics, KvRouterError, WorkerTask};
 use crate::protocols::*;
 
 #[async_trait]
@@ -107,10 +109,25 @@ pub trait KvIndexerInterface {
 /// - Sticky event routing to N worker threads
 /// - Inline reads on the caller's thread (no channel dispatch for find_matches)
 pub trait SyncIndexer: Send + Sync + 'static {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()>;
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()>;
 
     /// Find matches for a sequence of block hashes.
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores;
+
+    /// Returns true when a maintenance task should be enqueued.
+    fn try_schedule_cleanup(&self) -> bool {
+        false
+    }
+
+    /// Rolls back a scheduled cleanup when enqueueing the task fails.
+    fn cancel_scheduled_cleanup(&self) {}
+
+    /// Executes a maintenance task on a worker thread.
+    fn run_cleanup_task(&self) {}
 
     /// Dump events directly from the shared structure, bypassing worker channels.
     /// Returns `Some(events)` for backends whose tree state is fully shared (e.g.

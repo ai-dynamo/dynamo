@@ -297,6 +297,8 @@ pub enum WorkerTask {
     RemoveWorker(WorkerId),
     /// Remove a single dp_rank for a worker.
     RemoveWorkerDpRank(WorkerId, DpRank),
+    /// Best-effort maintenance task for shared-state backends.
+    CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
     Terminate,
 }

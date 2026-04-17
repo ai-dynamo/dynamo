@@ -12,7 +12,6 @@ import sys
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
 
-import pynvml
 import requests
 
 from tests.gpu_memory_service.common.gms import GMSServer
@@ -25,15 +24,6 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 logger = logging.getLogger(__name__)
 
 
-def get_gpu_memory_used(device: int = 0) -> int:
-    pynvml.nvmlInit()
-    try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
-        return pynvml.nvmlDeviceGetMemoryInfo(handle).used
-    finally:
-        pynvml.nvmlShutdown()
-
-
 class GMSProcessManager:
     """Start the shared GMS daemons and frontend for one test scenario."""
 
@@ -43,10 +33,12 @@ class GMSProcessManager:
         engine_cls,
         *,
         read_only_weights: bool = False,
+        tags: tuple[str, ...] = ("weights", "kv_cache"),
     ):
         self._request = request
         self._engine_cls = engine_cls
         self._read_only_weights = read_only_weights
+        self._tags = tags
         self._stack: ExitStack | None = None
         self.frontend_port: int | None = None
         self.weights_gms = None
@@ -57,8 +49,14 @@ class GMSProcessManager:
     def __enter__(self):
         stack = ExitStack()
         try:
-            self.weights_gms = stack.enter_context(GMSServer(device=0, tag="weights"))
-            self.kv_cache_gms = stack.enter_context(GMSServer(device=0, tag="kv_cache"))
+            if "weights" in self._tags:
+                self.weights_gms = stack.enter_context(
+                    GMSServer(device=0, tag="weights")
+                )
+            if "kv_cache" in self._tags:
+                self.kv_cache_gms = stack.enter_context(
+                    GMSServer(device=0, tag="kv_cache")
+                )
             frontend = stack.enter_context(
                 DynamoFrontendProcess(
                     self._request,
@@ -288,7 +286,7 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             "--max-num-seqs",
             "1",
             "--gpu-memory-utilization",
-            "0.9",
+            "0.8",
             "--kv-events-config",
             kv_events_cfg,
         ]
@@ -304,6 +302,96 @@ class VLLMWithGMSProcess(GMSEngineProcess):
 
     def quiesce_payload(self) -> dict:
         return {"level": 2}
+
+
+class TRTLLMWithGMSProcess(GMSEngineProcess):
+    """TensorRT-LLM engine with GMS weights + sleep/wake enabled."""
+
+    quiesce_route = "release_memory_occupation"
+    resume_route = "resume_memory_occupation"
+
+    # Override via environment variables for CI or custom setups.
+    TRTLLM_GMS_MODEL_NAME = os.environ.get(
+        "TRTLLM_GMS_MODEL_NAME", FAULT_TOLERANCE_MODEL_NAME
+    )
+    TRTLLM_GMS_FREE_GPU_MEMORY_FRACTION = os.environ.get(
+        "TRTLLM_GMS_FREE_GPU_MEMORY_FRACTION", "0.9"
+    )
+    TRTLLM_GMS_MAX_SEQ_LEN = os.environ.get("TRTLLM_GMS_MAX_SEQ_LEN", "256")
+    TRTLLM_GMS_MAX_NUM_TOKENS = os.environ.get("TRTLLM_GMS_MAX_NUM_TOKENS", "256")
+    TRTLLM_GMS_OVERRIDE_ENGINE_ARGS = os.environ.get(
+        "TRTLLM_GMS_OVERRIDE_ENGINE_ARGS", ""
+    )
+
+    def __init__(
+        self,
+        request,
+        frontend_port: int,
+        *,
+        engine_id: str,
+        read_only_weights: bool = False,
+        override_engine_args: str | None = None,
+    ):
+        reserved_ports = allocate_ports(1, DefaultPort.SYSTEM1.value)
+        self._override_engine_args = override_engine_args
+        try:
+            super().__init__(
+                request,
+                engine_id,
+                reserved_ports[0],
+                frontend_port,
+                reserved_ports,
+                read_only_weights=read_only_weights,
+            )
+        except Exception:
+            deallocate_ports(reserved_ports)
+            raise
+
+    def env_updates(self) -> dict[str, str]:
+        env = {
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+            "TLLM_WORKER_USE_SINGLE_PROCESS": "1",
+            "MPI4PY_MPIABI": "openmpi",
+            "OMPI_MCA_coll_ucc_enable": "0",
+        }
+        venv = os.environ.get("VIRTUAL_ENV")
+        if venv:
+            venv_lib = os.path.join(venv, "lib")
+            existing = os.environ.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{venv_lib}:{existing}" if existing else venv_lib
+        return env
+
+    def command(self) -> list[str]:
+        command = [
+            sys.executable,
+            "-m",
+            "dynamo.trtllm",
+            "--model",
+            self.TRTLLM_GMS_MODEL_NAME,
+            "--gpus-per-node",
+            "1",
+            "--load-format",
+            "gms",
+            "--free-gpu-memory-fraction",
+            self.TRTLLM_GMS_FREE_GPU_MEMORY_FRACTION,
+            "--max-seq-len",
+            self.TRTLLM_GMS_MAX_SEQ_LEN,
+            "--max-num-tokens",
+            self.TRTLLM_GMS_MAX_NUM_TOKENS,
+        ]
+        effective_override = self._override_engine_args
+        if effective_override is None:
+            effective_override = self.TRTLLM_GMS_OVERRIDE_ENGINE_ARGS
+        if effective_override:
+            command.extend(["--override-engine-args", effective_override])
+
+        extra_config = self.model_loader_extra_config()
+        if extra_config is not None:
+            command.extend(["--model-loader-extra-config", extra_config])
+        return command
+
+    def quiesce_payload(self) -> dict:
+        return {}
 
 
 class SGLangWithGMSProcess(GMSEngineProcess):
@@ -345,7 +433,7 @@ class SGLangWithGMSProcess(GMSEngineProcess):
             "--enable-memory-saver",
             "--disable-cuda-graph",
             "--mem-fraction-static",
-            "0.9",
+            "0.8",
             "--port",
             str(self.serve_port),
         ]

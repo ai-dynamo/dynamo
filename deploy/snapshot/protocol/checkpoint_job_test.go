@@ -11,6 +11,17 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func requireCheckpointContainer(t *testing.T, containers []corev1.Container, name string) *corev1.Container {
+	t.Helper()
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	t.Fatalf("container %q not found", name)
+	return nil
+}
+
 func TestNewCheckpointJob(t *testing.T) {
 	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -86,6 +97,78 @@ func TestNewCheckpointJob(t *testing.T) {
 		t.Fatalf("unexpected ttlSecondsAfterFinished: %#v", job.Spec.TTLSecondsAfterFinished)
 	}
 }
+
+func TestNewCheckpointJobWrapsFirstContainer(t *testing.T) {
+	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "worker", Command: []string{"python3", "-m", "dynamo.vllm"}, Args: []string{"--model", "Qwen"}},
+				{Name: "sidecar", Command: []string{"sleep"}, Args: []string{"infinity"}},
+			},
+		},
+	}, CheckpointJobOptions{
+		Namespace:             "test-ns",
+		CheckpointID:          "hash",
+		ArtifactVersion:       "2",
+		Name:                  "test-job",
+		TTLSecondsAfterFinish: ptr.To(int32(300)),
+		WrapLaunchJob:         true,
+	})
+	if err != nil {
+		t.Fatalf("expected checkpoint job, got error: %v", err)
+	}
+
+	worker := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "worker")
+	if len(worker.Command) != 1 || worker.Command[0] != "cuda-checkpoint" {
+		t.Fatalf("expected first container to be wrapped, got %#v", worker.Command)
+	}
+	expectedArgs := []string{"--launch-job", "python3", "-m", "dynamo.vllm", "--model", "Qwen"}
+	if len(worker.Args) != len(expectedArgs) {
+		t.Fatalf("expected launch-job args %#v, got %#v", expectedArgs, worker.Args)
+	}
+	for i := range expectedArgs {
+		if worker.Args[i] != expectedArgs[i] {
+			t.Fatalf("expected launch-job args %#v, got %#v", expectedArgs, worker.Args)
+		}
+	}
+
+	sidecar := requireCheckpointContainer(t, job.Spec.Template.Spec.Containers, "sidecar")
+	if len(sidecar.Command) != 1 || sidecar.Command[0] != "sleep" {
+		t.Fatalf("expected sidecar command to remain unchanged, got %#v", sidecar.Command)
+	}
+	if len(sidecar.Args) != 1 || sidecar.Args[0] != "infinity" {
+		t.Fatalf("expected sidecar args to remain unchanged, got %#v", sidecar.Args)
+	}
+}
+
+func TestNewCheckpointJobAllowsSingleNonMainContainer(t *testing.T) {
+	job, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "worker",
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "Qwen"},
+			}},
+		},
+	}, CheckpointJobOptions{
+		Namespace:             "test-ns",
+		CheckpointID:          "hash",
+		ArtifactVersion:       "2",
+		Name:                  "test-job",
+		TTLSecondsAfterFinish: ptr.To(int32(300)),
+		WrapLaunchJob:         true,
+	})
+	if err != nil {
+		t.Fatalf("expected checkpoint job, got error: %v", err)
+	}
+
+	container := &job.Spec.Template.Spec.Containers[0]
+	if len(container.Command) != 1 || container.Command[0] != "cuda-checkpoint" {
+		t.Fatalf("expected single container to be wrapped, got %#v", container.Command)
+	}
+}
+
+
 
 func TestGetCheckpointJobName(t *testing.T) {
 	name := GetCheckpointJobName("abc123def4567890", "2")
