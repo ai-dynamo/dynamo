@@ -66,6 +66,15 @@ impl NvCreateChatCompletionRequest {
             })
             .unwrap_or(false);
 
+        let enable_completion_token_ids = self
+            .nvext()
+            .map(|nv| {
+                nv.extra_fields
+                    .as_ref()
+                    .is_some_and(|fields| fields.iter().any(|f| f == "completion_token_ids"))
+            })
+            .unwrap_or(false);
+
         let options = DeltaGeneratorOptions {
             enable_usage: self
                 .inner
@@ -82,6 +91,7 @@ impl NvCreateChatCompletionRequest {
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
             enable_tracking,
+            enable_completion_token_ids,
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -100,6 +110,10 @@ pub struct DeltaGeneratorOptions {
     pub enable_logprobs: bool,
     /// Determines whether request tracking (timing, KV hit rate) should be enabled.
     pub enable_tracking: bool,
+    /// Determines whether completion token IDs should be accumulated and returned
+    /// in `nvext.completion_token_ids`. Enabled when client requests
+    /// `extra_fields: ["completion_token_ids"]`.
+    pub enable_completion_token_ids: bool,
 
     pub runtime_config: ModelRuntimeConfig,
 }
@@ -125,6 +139,10 @@ pub struct DeltaGenerator {
     options: DeltaGeneratorOptions,
     /// Optional request tracker for per-request metrics (shared with PreprocessedRequest).
     tracker: Option<Arc<RequestTracker>>,
+    /// Accumulated output token IDs across chunks. Only used when
+    /// `options.enable_completion_token_ids` is true. Emitted in `nvext.completion_token_ids`
+    /// on the final (finish_reason-bearing) chunk.
+    accumulated_completion_token_ids: Vec<TokenIdType>,
 }
 
 impl DeltaGenerator {
@@ -172,6 +190,7 @@ impl DeltaGenerator {
             msg_counter: 0,
             options,
             tracker,
+            accumulated_completion_token_ids: Vec::new(),
         }
     }
 
@@ -365,6 +384,12 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 
         self.usage.completion_tokens += token_length;
 
+        // Accumulate output token IDs for completion_token_ids if requested.
+        if self.options.enable_completion_token_ids && !delta.token_ids.is_empty() {
+            self.accumulated_completion_token_ids
+                .extend_from_slice(&delta.token_ids);
+        }
+
         // If backend provides completion_usage, use it to update usage stats
         // This is critical for prompt embeddings where prompt_tokens comes from
         // the embedding sequence length computed by the worker
@@ -438,18 +463,27 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             None
         };
 
-        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
+        // Emit accumulated completion_token_ids on the final chunk (when finish_reason is set).
+        let completion_token_ids =
+            if self.options.enable_completion_token_ids && finish_reason.is_some() {
+                Some(self.accumulated_completion_token_ids.clone())
+            } else {
+                None
+            };
+
+        // Inject nvext if we have worker_id, token_ids, timing, routed experts, or completion_token_ids.
         if worker_id_info.is_some()
             || token_ids.is_some()
             || timing_info.is_some()
             || routed_experts.is_some()
+            || completion_token_ids.is_some()
         {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
                 timing: timing_info,
                 token_ids: token_ids.clone(),
                 routed_experts,
-                completion_token_ids: None,
+                completion_token_ids,
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
