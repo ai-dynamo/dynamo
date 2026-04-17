@@ -55,9 +55,10 @@ env:
 
 jobs:
   # ============================================================================
-  # VERSION BUMP (Phase 1): Bump all version references on the release branch
+  # VERSION BUMP (Phase 1): Bump all version references on the release branch.
   # Only runs on workflow_dispatch with action=version-bump.
-  # Uses automated-release environment to bypass branch protection.
+  # Opens a PR to the release/* branch instead of pushing directly, so the
+  # mechanical changes get a human review before they land.
   # ============================================================================
   version-bump:
     name: Version Bump (Release Branch Prep)
@@ -65,8 +66,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: automated-release
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      YQ_VERSION: '4.52.2'
+      CONTROLLER_GEN_VERSION: 'v0.16.5'
+      HELM_DOCS_VERSION: '1.14.2'
     steps:
       - name: Validate branch
+        id: ctx
         run: |
           set -euo pipefail
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
@@ -75,8 +84,13 @@ jobs:
             exit 1
           fi
           VERSION="${BRANCH_NAME#release/}"
-          echo "version=$VERSION" >> $GITHUB_ENV
-          echo "branch=$BRANCH_NAME" >> $GITHUB_ENV
+          # Slug for git branch names: drop '.' in .postN → -post (PR branches can't have dots in sloppy places).
+          SLUG="${VERSION//./-}"
+          {
+            echo "version=$VERSION"
+            echo "branch=$BRANCH_NAME"
+            echo "slug=$SLUG"
+          } >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION, Branch: $BRANCH_NAME"
 
       - name: Checkout release branch
@@ -94,19 +108,13 @@ jobs:
         with:
           go-version-file: deploy/operator/go.mod
 
-      - name: Install tools (yq, controller-gen, helm-docs)
+      - name: Install tools (yq, controller-gen, helm-docs; all pinned)
         run: |
           set -euo pipefail
-          # yq
-          YQ_VERSION="4.52.2"
-          sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
+          sudo wget -qO /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
           sudo chmod +x /usr/local/bin/yq
-
-          # controller-gen
-          cd deploy/operator && make controller-gen && cd ../..
-
-          # helm-docs
-          HELM_DOCS_VERSION="1.14.2"
+          go install sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION}
           curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" \
             | tar -xzf - helm-docs
           sudo mv helm-docs /usr/local/bin/
@@ -116,36 +124,32 @@ jobs:
         run: |
           set -euo pipefail
           CTX="container/context.yaml"
-
           VLLM_VER=$(yq '.vllm.vllm_ref' "$CTX" | sed 's/^v//')
-          echo "vllm_version=$VLLM_VER" >> $GITHUB_OUTPUT
-
           SGLANG_TAG=$(yq '.sglang."cuda12.9".runtime_image_tag // .sglang.runtime_image_tag // ""' "$CTX")
           SGLANG_VER=$(echo "$SGLANG_TAG" | sed 's/^v//; s/-cu[0-9]*-runtime$//; s/-runtime$//')
-          echo "sglang_version=$SGLANG_VER" >> $GITHUB_OUTPUT
-
           TRTLLM_WHEEL=$(yq '.trtllm.pip_wheel' "$CTX")
           TRTLLM_VER=$(echo "$TRTLLM_WHEEL" | sed 's/.*==//')
-          echo "trtllm_version=$TRTLLM_VER" >> $GITHUB_OUTPUT
-
           NIXL_VER=$(yq '.dynamo.nixl_ref' "$CTX")
-          echo "nixl_version=$NIXL_VER" >> $GITHUB_OUTPUT
-
-          CUDA_VLLM=$(yq '[.vllm | keys | .[] | select(test("^cuda"))] | map(sub("^cuda"; "")) | join(",")' "$CTX")
-          echo "cuda_versions_vllm=$CUDA_VLLM" >> $GITHUB_OUTPUT
-
-          CUDA_SGLANG=$(yq '[.sglang | keys | .[] | select(test("^cuda"))] | map(sub("^cuda"; "")) | join(",")' "$CTX")
-          echo "cuda_versions_sglang=$CUDA_SGLANG" >> $GITHUB_OUTPUT
-
-          TRTLLM_RUNTIME_TAG=$(yq '.trtllm.runtime_image_tag' "$CTX")
-          CUDA_TRTLLM=$(echo "$TRTLLM_RUNTIME_TAG" | grep -oP 'cuda\K[\d.]+')
-          echo "cuda_versions_trtllm=$CUDA_TRTLLM" >> $GITHUB_OUTPUT
-
           RELEASE_DATE=$(date "+%b %d, %Y")
-          echo "release_date=$RELEASE_DATE" >> $GITHUB_OUTPUT
+          {
+            echo "vllm_version=$VLLM_VER"
+            echo "sglang_version=$SGLANG_VER"
+            echo "trtllm_version=$TRTLLM_VER"
+            echo "nixl_version=$NIXL_VER"
+            echo "release_date=$RELEASE_DATE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Backend: vLLM=$VLLM_VER SGLang=$SGLANG_VER TRT-LLM=$TRTLLM_VER NIXL=$NIXL_VER  Released=$RELEASE_DATE"
 
-          echo "=== Backend Metadata ==="
-          echo "  vLLM: $VLLM_VER | SGLang: $SGLANG_VER | TRT-LLM: $TRTLLM_VER | NIXL: $NIXL_VER"
+      - name: Create version-bump branch
+        id: branch
+        env:
+          SLUG: ${{ steps.ctx.outputs.slug }}
+          BASE: ${{ steps.ctx.outputs.branch }}
+        run: |
+          set -euo pipefail
+          BRANCH="chore/bump-version-${SLUG}-on-${BASE##*/}"
+          git checkout -b "$BRANCH"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Build skip flags
         id: flags
@@ -157,41 +161,44 @@ jobs:
         run: |
           set -euo pipefail
           SKIP_FLAGS=""
-          if [ "$UPDATE_CORE" = "false" ]; then SKIP_FLAGS="$SKIP_FLAGS --skip-core"; fi
-          if [ "$UPDATE_CONTAINERS" = "false" ]; then SKIP_FLAGS="$SKIP_FLAGS --skip-containers"; fi
-          if [ "$UPDATE_HELM" = "false" ]; then SKIP_FLAGS="$SKIP_FLAGS --skip-helm"; fi
-          if [ "$UPDATE_DOCS" = "false" ]; then SKIP_FLAGS="$SKIP_FLAGS --skip-docs"; fi
-          echo "skip_flags=$SKIP_FLAGS" >> $GITHUB_OUTPUT
+          [ "$UPDATE_CORE" = "false" ]       && SKIP_FLAGS="$SKIP_FLAGS --skip-core" || true
+          [ "$UPDATE_CONTAINERS" = "false" ] && SKIP_FLAGS="$SKIP_FLAGS --skip-containers" || true
+          [ "$UPDATE_HELM" = "false" ]       && SKIP_FLAGS="$SKIP_FLAGS --skip-helm" || true
+          [ "$UPDATE_DOCS" = "false" ]       && SKIP_FLAGS="$SKIP_FLAGS --skip-docs" || true
+          echo "skip_flags=$SKIP_FLAGS" >> "$GITHUB_OUTPUT"
           echo "Skip flags: ${SKIP_FLAGS:-none (full update)}"
 
       - name: Run version bump script
         env:
-          BUMP_SKIP_FLAGS: ${{ steps.flags.outputs.skip_flags }}
+          VERSION: ${{ steps.ctx.outputs.version }}
+          VLLM: ${{ steps.metadata.outputs.vllm_version }}
+          SGLANG: ${{ steps.metadata.outputs.sglang_version }}
+          TRTLLM: ${{ steps.metadata.outputs.trtllm_version }}
+          NIXL: ${{ steps.metadata.outputs.nixl_version }}
+          RELEASE_DATE: ${{ steps.metadata.outputs.release_date }}
+          FLAGS: ${{ steps.flags.outputs.skip_flags }}
         run: |
           set -euo pipefail
           python3 .github/scripts/bump_version.py \
-            --new-version "${{ env.version }}" \
-            --vllm-version "${{ steps.metadata.outputs.vllm_version }}" \
-            --sglang-version "${{ steps.metadata.outputs.sglang_version }}" \
-            --trtllm-version "${{ steps.metadata.outputs.trtllm_version }}" \
-            --nixl-version "${{ steps.metadata.outputs.nixl_version }}" \
-            --cuda-versions-vllm "${{ steps.metadata.outputs.cuda_versions_vllm }}" \
-            --cuda-versions-sglang "${{ steps.metadata.outputs.cuda_versions_sglang }}" \
-            --cuda-versions-trtllm "${{ steps.metadata.outputs.cuda_versions_trtllm }}" \
-            --release-date "${{ steps.metadata.outputs.release_date }}" \
-            $BUMP_SKIP_FLAGS
+            --new-version "$VERSION" \
+            --vllm-version "$VLLM" \
+            --sglang-version "$SGLANG" \
+            --trtllm-version "$TRTLLM" \
+            --nixl-version "$NIXL" \
+            --release-date "$RELEASE_DATE" \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            $FLAGS
 
       - name: Set up Rust
-        run: |
-          set -euo pipefail
-          rustup show active-toolchain
+        if: inputs.update_core != false
+        run: rustup show active-toolchain
 
       - name: Regenerate Cargo.lock
-        run: |
-          set -euo pipefail
-          cargo update --workspace
+        if: inputs.update_core != false
+        run: cargo update --workspace
 
       - name: Regenerate CRDs
+        if: inputs.update_containers != false
         working-directory: deploy/operator
         run: |
           set -euo pipefail
@@ -199,24 +206,77 @@ jobs:
           make manifests
 
       - name: Regenerate Helm docs
+        if: inputs.update_helm != false
         working-directory: deploy/helm/charts/platform
-        run: |
-          set -euo pipefail
-          helm-docs
+        run: helm-docs
 
-      - name: Commit and push
+      - name: Commit
+        id: commit
+        env:
+          VERSION: ${{ steps.ctx.outputs.version }}
+          FLAGS: ${{ steps.flags.outputs.skip_flags }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -s -m "chore: bump version references to ${{ env.version }}"
-            git push
-            echo "Version bump committed to ${{ env.branch }}"
+            echo "::notice::No changes produced — nothing to commit."
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          printf -v MSG '%s\n' \
+            "Automated release branch prep for v${VERSION}." \
+            "" \
+            "Scope flags: ${FLAGS:-all scopes}"
+          git commit -s -m "chore: bump version references to ${VERSION}" -m "$MSG"
+
+      - name: Push branch
+        if: steps.commit.outputs.no_changes != 'true'
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git push origin --delete "$BRANCH"
+          fi
+          git push -u origin "$BRANCH"
+
+      - name: Open PR into release branch
+        if: steps.commit.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ctx.outputs.version }}
+          BASE: ${{ steps.ctx.outputs.branch }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          FLAGS: ${{ steps.flags.outputs.skip_flags }}
+          VLLM: ${{ steps.metadata.outputs.vllm_version }}
+          SGLANG: ${{ steps.metadata.outputs.sglang_version }}
+          TRTLLM: ${{ steps.metadata.outputs.trtllm_version }}
+          NIXL: ${{ steps.metadata.outputs.nixl_version }}
+        run: |
+          set -euo pipefail
+          printf -v BODY '%s\n' \
+            "## Summary" \
+            "" \
+            "Automated Phase 1 version bump for release \`v${VERSION}\`." \
+            "Targets the release branch \`${BASE}\` — merge here kicks off the RC publish flow." \
+            "" \
+            "**Backend versions** (from \`container/context.yaml\`):" \
+            "- vLLM: \`${VLLM}\`" \
+            "- SGLang: \`${SGLANG}\`" \
+            "- TRT-LLM: \`${TRTLLM}\`" \
+            "- NIXL: \`${NIXL}\`" \
+            "" \
+            "**Scope flags:** \`${FLAGS:-all scopes}\`" \
+            "" \
+            "See the workflow run summary for the per-file / per-rule change table."
+          gh pr create \
+            --base "$BASE" \
+            --head "$BRANCH" \
+            --title "chore: bump version references to ${VERSION}" \
+            --body "$BODY" \
+            --label release --label chore
 
   # ============================================================================
   # GATE: Version Extraction
