@@ -909,6 +909,37 @@ class TestPreprocessChatRequest:
             with_auto.prompt_token_ids
         ), "tool_choice=none with flag off should keep tools in template"
 
+    def test_named_tool_choice_missing_function_raises(self, tokenizer):
+        """Named tool_choice referencing a function absent from tools raises ValueError."""
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "does_not_exist"},
+            },
+        }
+        with pytest.raises(ValueError, match="does_not_exist"):
+            preprocess_chat_request(
+                request,
+                tokenizer=tokenizer,
+                tool_call_parser_name="hermes",
+                reasoning_parser_name=None,
+            )
+
     def test_init_worker_propagates_exclude_flag_true(self):
         """_init_worker sets the worker-global exclude_tools flag to True."""
         _init_worker(MODEL, None, None, exclude_tools_when_tool_choice_none=True)

@@ -225,6 +225,20 @@ def preprocess_chat_request(
     # Convert tools to SGLang format (done once, shared with parser creation)
     sglang_tools = convert_tools(request.get("tools"))
 
+    # Reject a named tool_choice whose function is missing from tools —
+    # otherwise the chat template would render with zero tools while
+    # guided decoding still constrains the output to that function's
+    # schema, producing confusing model behavior.
+    tool_choice = request.get("tool_choice", "auto")
+    if _is_named_tool_choice(tool_choice):
+        chosen_name = tool_choice["function"]["name"]
+        available_names = {t.function.name for t in (sglang_tools or [])}
+        if chosen_name not in available_names:
+            raise ValueError(
+                f"tool_choice names function {chosen_name!r}, but it is not "
+                f"present in tools (available: {sorted(available_names) or 'none'})"
+            )
+
     # Build template kwargs -- single call for rendering + tokenization
     template_kwargs: dict[str, Any] = {
         "add_generation_prompt": True,
@@ -234,7 +248,6 @@ def preprocess_chat_request(
     # see them and generate raw XML tool calls in its response.
     # When tool_choice names a specific function, only include that tool
     # in the template so the model doesn't see irrelevant definitions.
-    tool_choice = request.get("tool_choice", "auto")
     if sglang_tools and not (
         exclude_tools_when_tool_choice_none and tool_choice == "none"
     ):
