@@ -147,7 +147,14 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 			return nil, fmt.Errorf("failed to get target GPU UUIDs: %w", err)
 		}
 		if len(targetGPUUUIDs) == 0 {
-			log.Info("PodResources API returned no target GPU UUIDs, falling back to nvidia-smi", "pid", placeholderPID)
+			log.Info("PodResources API returned no target GPU UUIDs, trying DRA API lookup", "pod", req.PodNamespace+"/"+req.PodName)
+			targetGPUUUIDs, err = cuda.GetGPUUUIDsViaDRAAPI(ctx, req.Clientset, req.PodName, req.PodNamespace, log)
+			if err != nil {
+				return nil, fmt.Errorf("DRA API target GPU UUID lookup failed: %w", err)
+			}
+		}
+		if len(targetGPUUUIDs) == 0 {
+			log.Info("DRA API returned no target GPU UUIDs, falling back to nvidia-smi", "pid", placeholderPID)
 			targetGPUUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, snapshotruntime.HostProcPath, placeholderPID)
 			if err != nil {
 				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed for restore target: %w", err)

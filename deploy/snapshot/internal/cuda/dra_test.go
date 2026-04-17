@@ -161,6 +161,78 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 		}
 	})
 
+	t.Run("pod with template-backed DRA claims resolves UUIDs via pod status", func(t *testing.T) {
+		nodeName := "node-1"
+		poolName := "pool-node-1"
+		namespace := "default"
+		podName := "test-pod"
+		generatedClaimName := "generated-gpu-claim"
+		uuid1 := "GPU-cccccccc-1111-2222-3333-444444444444"
+
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+			Spec: corev1.PodSpec{
+				NodeName: nodeName,
+				ResourceClaims: []corev1.PodResourceClaim{
+					{
+						Name: "gpu",
+					},
+				},
+			},
+			Status: corev1.PodStatus{
+				ResourceClaimStatuses: []corev1.PodResourceClaimStatus{
+					{
+						Name:              "gpu",
+						ResourceClaimName: ptr(generatedClaimName),
+					},
+				},
+			},
+		}
+		claim := &resourcev1.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: generatedClaimName, Namespace: namespace},
+			Status: resourcev1.ResourceClaimStatus{
+				Allocation: &resourcev1.AllocationResult{
+					Devices: resourcev1.DeviceAllocationResult{
+						Results: []resourcev1.DeviceRequestAllocationResult{
+							{Driver: nvidiaGPUDRADriver, Pool: poolName, Device: "gpu-0", Request: "gpu"},
+						},
+					},
+				},
+			},
+		}
+		slice := &resourcev1.ResourceSlice{
+			ObjectMeta: metav1.ObjectMeta{Name: poolName + "-gpu.nvidia.com-xxx"},
+			Spec: resourcev1.ResourceSliceSpec{
+				Driver:   nvidiaGPUDRADriver,
+				NodeName: &nodeName,
+				Pool:     resourcev1.ResourcePool{Name: poolName},
+				Devices: []resourcev1.Device{
+					{
+						Name: "gpu-0",
+						Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+							resourcev1.QualifiedName("uuid"): {StringValue: &uuid1},
+						},
+					},
+				},
+			},
+		}
+
+		client := fake.NewSimpleClientset(pod, claim, slice)
+		got, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
+		if err != nil {
+			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
+		}
+		want := []string{uuid1}
+		if len(got) != len(want) {
+			t.Fatalf("got %v (len %d), want %v (len %d)", got, len(got), want, len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
 	t.Run("pod with no resource claims returns nil", func(t *testing.T) {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{Name: "pod", Namespace: "default"},

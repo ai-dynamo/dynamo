@@ -196,7 +196,14 @@ func inspectContainer(ctx context.Context, ctrd *containerd.Client, log logr.Log
 			return nil, fmt.Errorf("failed to discover source GPU UUIDs: %w", err)
 		}
 		if len(gpuUUIDs) == 0 {
-			log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
+			log.Info("PodResources API returned no GPU UUIDs, trying DRA API lookup", "pod", req.PodNamespace+"/"+req.PodName)
+			gpuUUIDs, err = cuda.GetGPUUUIDsViaDRAAPI(ctx, req.Clientset, req.PodName, req.PodNamespace, log)
+			if err != nil {
+				return nil, fmt.Errorf("DRA API GPU UUID lookup failed: %w", err)
+			}
+		}
+		if len(gpuUUIDs) == 0 {
+			log.Info("DRA API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
 			gpuUUIDs, err = cuda.GetGPUUUIDsViaNvidiaSmi(ctx, snapshotruntime.HostProcPath, pid)
 			if err != nil {
 				return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
