@@ -611,7 +611,7 @@ async def init_llm_worker(
             media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
             media_fetcher = MediaFetcher()
             media_fetcher.timeout_ms(30000)
-            media_fetcher.allow_direct_port(True)
+            media_fetcher.allow_direct_port(False)
 
         # Register the model with runtime config
         # Encode workers do NOT register - they're internal workers only
