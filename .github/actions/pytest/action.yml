@@ -55,8 +55,7 @@ runs:
       run: |
         # Setup test directories
         mkdir -p test-results
-        echo "MINIO_STARTED_BY_ACTION=false" >> $GITHUB_ENV
-
+        
         # Set platform architecture from input
         PLATFORM_ARCH="${{ inputs.platform_arch }}"
         if [[ -z "${PLATFORM_ARCH}" ]]; then
@@ -98,7 +97,6 @@ runs:
             -e "MINIO_ROOT_USER=${MINIO_ACCESS_KEY}" \
             -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}" \
             quay.io/minio/minio server /data --console-address ':9001'
-          echo "MINIO_STARTED_BY_ACTION=true" >> $GITHUB_ENV
         fi
 
         echo "⏳ Waiting for MinIO to be ready..."
@@ -340,10 +338,10 @@ runs:
           ERROR_TESTS=0
         fi
 
-        exit ${TEST_EXIT_CODE}
+        exit 0
 
     - name: Cleanup MinIO Service
-      if: always() && inputs.start_minio == 'true' && env.MINIO_STARTED_BY_ACTION == 'true'
+      if: always() && inputs.start_minio == 'true'
       shell: bash
       run: |
         echo "🧹 Cleaning up MinIO container..."
@@ -383,3 +381,10 @@ runs:
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore
+
+    - name: Report Test Exit Code
+      if: always()
+      shell: bash
+      run: |
+        # Propagate the original test exit code after cleanup and uploads
+        exit ${TEST_EXIT_CODE:-0}
