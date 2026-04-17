@@ -198,7 +198,12 @@ jobs:
         run: cargo update --workspace
 
       - name: Regenerate CRDs
-        if: inputs.update_containers != false
+        # CRDs are generated from Go types under deploy/operator/, so they belong
+        # to the core/operator scope, not container image tags. Gate on
+        # update_core to keep the manifests in sync with operator code changes
+        # even when --skip-containers is set. Mirrors the gating in
+        # release-version-bump.yml.
+        if: inputs.update_core != false
         working-directory: deploy/operator
         run: |
           set -euo pipefail
