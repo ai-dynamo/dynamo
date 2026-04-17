@@ -2736,6 +2736,24 @@ func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
 			wantRequests: 0,
 		},
 		{
+			name: "PCSG with non-controller PodCliqueSet ownerRef returns no requests",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pcsg-with-non-controller-ref",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+							Kind:       "PodCliqueSet",
+							Name:       "some-pcs",
+							// Controller flag omitted: metav1.GetControllerOf must ignore this ref.
+						},
+					},
+				},
+			},
+			wantRequests: 0,
+		},
+		{
 			name: "PCSG with non-PodCliqueSet ownerRef returns no requests",
 			obj: &grovev1alpha1.PodCliqueScalingGroup{
 				ObjectMeta: metav1.ObjectMeta{

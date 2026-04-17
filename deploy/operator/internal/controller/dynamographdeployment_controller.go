@@ -1763,20 +1763,20 @@ func (r *DynamoGraphDeploymentReconciler) mapPodCliqueScalingGroupToRequests(ctx
 		return nil
 	}
 
-	groveAPIVersion := grovev1alpha1.SchemeGroupVersion.String()
-	for _, ownerRef := range pcsg.GetOwnerReferences() {
-		if ownerRef.Kind == "PodCliqueSet" && ownerRef.APIVersion == groveAPIVersion {
-			return []ctrl.Request{{
-				NamespacedName: types.NamespacedName{
-					Name:      ownerRef.Name,
-					Namespace: pcsg.Namespace,
-				},
-			}}
-		}
+	controllerRef := metav1.GetControllerOf(pcsg)
+	if controllerRef == nil ||
+		controllerRef.Kind != "PodCliqueSet" ||
+		controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() {
+		log.FromContext(ctx).V(1).Info("PodCliqueScalingGroup missing PodCliqueSet controller ownerReference",
+			"podCliqueScalingGroup", pcsg.Name,
+			"namespace", pcsg.Namespace)
+		return nil
 	}
 
-	log.FromContext(ctx).V(1).Info("PodCliqueScalingGroup missing PodCliqueSet ownerReference",
-		"podCliqueScalingGroup", pcsg.Name,
-		"namespace", pcsg.Namespace)
-	return nil
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{
+			Name:      controllerRef.Name,
+			Namespace: pcsg.Namespace,
+		},
+	}}
 }
