@@ -48,32 +48,31 @@ const (
 	gmsPermFixInitName  = "fix-gms-perms"
 )
 
-// gmsWrapperScript generates a bash script that launches one GMS subprocess
-// per GPU device, waits for any to exit, then tears down the process group.
-func gmsWrapperScript(gpuCount int) string {
-	devList := make([]string, gpuCount)
-	for i := range gpuCount {
-		devList[i] = strconv.Itoa(i)
-	}
+// gmsWrapperScript generates a bash script that launches the GMS server
+// (gpu_memory_service.cli.server), which auto-discovers DRA-allocated GPUs
+// and exposes both "weights" and "kv_cache" UDS sockets per device. The
+// wrapper cleans up stale sockets from a previous run, forwards SIGTERM/SIGINT
+// to the process group, and exits when the server process exits so Kubernetes
+// can restart the pod.
+func gmsWrapperScript() string {
 	return fmt.Sprintf(
 		`rm -f %s/gms_*.sock
 cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
 trap cleanup SIGTERM SIGINT
-for dev in %s; do
-  python3 -m gpu_memory_service --device "$dev" &
-  echo "Started GMS device=$dev pid=$!"
-done
+python3 -m %s &
+echo "Started GMS server pid=$!"
 wait -n
-echo "A GMS subprocess exited, shutting down"
-cleanup`, gmsSharedMountPath, strings.Join(devList, " "))
+echo "GMS server exited, shutting down"
+cleanup`, gmsSharedMountPath, gmsruntime.ServerModule)
 }
 
-// gmsStartupProbeCommand returns the exec probe command that verifies the
-// expected number of GMS UDS sockets exist on the shared volume.
+// gmsStartupProbeCommand returns the exec probe command that verifies the GMS
+// server has opened both the weights and kv_cache UDS sockets for every
+// allocated GPU (2 sockets per device).
 func gmsStartupProbeCommand(gpuCount int) []string {
 	return []string{
 		"sh", "-c",
-		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsSharedMountPath, gpuCount),
+		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsSharedMountPath, 2*gpuCount),
 	}
 }
 
@@ -102,7 +101,7 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 
 	c := &podSpec.Containers[0]
 	c.Command = []string{"bash", "-c"}
-	c.Args = []string{gmsWrapperScript(gpuCount)}
+	c.Args = []string{gmsWrapperScript()}
 
 	c.StartupProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
@@ -116,7 +115,7 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 	c.ReadinessProbe = nil
 
 	c.Env = append(c.Env, corev1.EnvVar{
-		Name:  "TMPDIR",
+		Name:  gmsruntime.EnvSocketDir,
 		Value: gmsSharedMountPath,
 	})
 
@@ -137,7 +136,7 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 				},
 			},
 		},
-		{Name: "TMPDIR", Value: gmsSharedMountPath},
+		{Name: gmsruntime.EnvSocketDir, Value: gmsSharedMountPath},
 		{Name: "FAILOVER_LOCK_PATH", Value: gmsSharedMountPath + "/" + gmsFailoverLockFile},
 		{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},

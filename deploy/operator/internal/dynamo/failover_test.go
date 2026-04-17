@@ -70,8 +70,7 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 
 	assert.Equal(t, []string{"bash", "-c"}, c.Command, "should use bash")
 	require.Len(t, c.Args, 1)
-	assert.Contains(t, c.Args[0], "gpu_memory_service", "should run gpu_memory_service")
-	assert.Contains(t, c.Args[0], "--device", "should pass --device flag")
+	assert.Contains(t, c.Args[0], gms.ServerModule, "should run gpu_memory_service.cli.server")
 	assert.Nil(t, c.LivenessProbe, "liveness probe should be nil")
 	assert.Nil(t, c.ReadinessProbe, "readiness probe should be nil")
 	assert.NotNil(t, c.StartupProbe, "startup probe should be set")
@@ -83,7 +82,7 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 	assert.True(t, hasToleration(result, "nvidia.com/gpu"), "should have GPU toleration")
 	assert.True(t, hasVolume(result, gmsSharedVolumeName), "should have shared volume")
 	assert.True(t, hasVolumeMount(c, gmsSharedMountPath), "should have shared volume mount")
-	assert.True(t, hasEnvVar(c, "TMPDIR", gmsSharedMountPath), "should set TMPDIR")
+	assert.True(t, hasEnvVar(c, gms.EnvSocketDir, gmsSharedMountPath), "should set GMS_SOCKET_DIR")
 
 	require.Len(t, result.InitContainers, 1, "should have perm-fix init container")
 	initC := result.InitContainers[0]
@@ -142,7 +141,7 @@ func TestAugmentEngineForGMS(t *testing.T) {
 	c := podSpec.Containers[0]
 
 	assert.True(t, hasEnvVar(c, "ENGINE_ID", ""), "ENGINE_ID should be set (via Downward API)")
-	assert.True(t, hasEnvVar(c, "TMPDIR", gmsSharedMountPath))
+	assert.True(t, hasEnvVar(c, gms.EnvSocketDir, gmsSharedMountPath))
 	assert.True(t, hasEnvVar(c, "FAILOVER_LOCK_PATH", gmsSharedMountPath+"/"+gmsFailoverLockFile))
 	assert.True(t, hasEnvVar(c, "DYN_VLLM_GMS_SHADOW_MODE", "true"))
 	assert.True(t, hasEnvVar(c, "DYN_SYSTEM_STARTING_HEALTH_STATUS", "notready"))
@@ -269,7 +268,7 @@ func TestGmsEngineEnvVars(t *testing.T) {
 	}
 
 	assert.True(t, names["ENGINE_ID"])
-	assert.True(t, names["TMPDIR"])
+	assert.True(t, names[gms.EnvSocketDir])
 	assert.True(t, names["FAILOVER_LOCK_PATH"])
 	assert.True(t, names["DYN_VLLM_GMS_SHADOW_MODE"])
 	assert.True(t, names["DYN_SYSTEM_STARTING_HEALTH_STATUS"])
