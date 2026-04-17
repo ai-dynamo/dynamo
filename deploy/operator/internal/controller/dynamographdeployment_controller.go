@@ -623,7 +623,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 			continue
 		}
 
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsGMSEnabled()
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodFailoverEnabled()
 		resourceName := fmt.Sprintf("%s-%d-%s", dynamoDeployment.Name, replicaIndex, strings.ToLower(serviceName))
 
 		if usesPCSG {

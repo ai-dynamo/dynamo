@@ -185,8 +185,8 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 		if !exists {
 			continue
 		}
-		oldGMS := oldService.IsGMSEnabled()
-		newGMS := newService.IsGMSEnabled()
+		oldGMS := oldService.IsInterPodFailoverEnabled()
+		newGMS := newService.IsInterPodFailoverEnabled()
 		if oldGMS != newGMS {
 			errs = append(errs, fmt.Errorf(
 				"spec.services[%s].failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
@@ -305,7 +305,7 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 // Returns warnings and error.
 func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
 	// GMS failover requires the Grove pathway
-	if service.IsGMSEnabled() && !v.isGrovePathway() {
+	if service.IsInterPodFailoverEnabled() && !v.isGrovePathway() {
 		return nil, fmt.Errorf("spec.services[%s]: GMS failover requires the Grove pathway (nvidia.com/enable-grove must not be \"false\")", serviceName)
 	}
 
@@ -349,7 +349,7 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 	lowerServiceName := strings.ToLower(serviceName)
 
 	isMultinode := service.GetNumberOfNodes() > 1
-	isGMS := service.IsGMSEnabled()
+	isInterPodFailover := service.IsInterPodFailoverEnabled()
 
 	// Determine the longest PodClique name that will be generated.
 	// Grove validates: len(PCS name) + len(PCSG name) + len(PCLQ name) <= 45
@@ -357,7 +357,7 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 	var pcsgName string
 
 	switch {
-	case isGMS:
+	case isInterPodFailover:
 		// GMS services always get a PCSG named after the service.
 		// Longest PCLQ name is "serviceName-gms-0" (len + 6) or "serviceName-wkr-N".
 		pcsgName = lowerServiceName

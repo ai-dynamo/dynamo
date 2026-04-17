@@ -285,21 +285,21 @@ func TestGmsEngineEnvVars(t *testing.T) {
 
 func TestGroveMultinodeDeployer_GMS(t *testing.T) {
 	t.Run("GetNodeRank returns static rank for GMS", func(t *testing.T) {
-		d := &GroveMultinodeDeployer{IsGMS: true, Rank: 2}
+		d := &GroveMultinodeDeployer{IsInterPodFailover: true, Rank: 2}
 		rank, isShellExpr := d.GetNodeRank()
 		assert.Equal(t, "2", rank)
 		assert.False(t, isShellExpr, "GMS rank should be static, not a shell expression")
 	})
 
 	t.Run("GetNodeRank returns shell expr for non-GMS", func(t *testing.T) {
-		d := &GroveMultinodeDeployer{IsGMS: false}
+		d := &GroveMultinodeDeployer{IsInterPodFailover: false}
 		rank, isShellExpr := d.GetNodeRank()
 		assert.Contains(t, rank, "GROVE_PCLQ_POD_INDEX")
 		assert.True(t, isShellExpr)
 	})
 
 	t.Run("GetHostNames for GMS multinode", func(t *testing.T) {
-		d := &GroveMultinodeDeployer{IsGMS: true, Rank: 0}
+		d := &GroveMultinodeDeployer{IsInterPodFailover: true, Rank: 0}
 		hostnames := d.GetHostNames("svc", 3)
 		assert.Len(t, hostnames, 3)
 		assert.Contains(t, hostnames[0], "ldr-$(GROVE_PCLQ_POD_INDEX)")
@@ -308,7 +308,7 @@ func TestGroveMultinodeDeployer_GMS(t *testing.T) {
 	})
 
 	t.Run("GetHostNames for non-GMS multinode", func(t *testing.T) {
-		d := &GroveMultinodeDeployer{IsGMS: false}
+		d := &GroveMultinodeDeployer{IsInterPodFailover: false}
 		hostnames := d.GetHostNames("svc", 3)
 		assert.Len(t, hostnames, 3)
 		assert.Contains(t, hostnames[0], "ldr")

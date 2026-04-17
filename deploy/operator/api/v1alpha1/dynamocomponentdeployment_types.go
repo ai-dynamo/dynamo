@@ -345,12 +345,16 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 	return 1
 }
 
-func (s *DynamoComponentDeploymentSharedSpec) IsGMSEnabled() bool {
+// IsInterPodFailoverEnabled reports whether failover is configured for the
+// inter-pod architecture (separate GMS weight server pod + engine pods per rank,
+// sharing GPUs via DRA). Returns false for intra-pod failover, which clones
+// containers within a single pod instead.
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodFailoverEnabled() bool {
 	return s.Failover != nil && s.Failover.Enabled && s.Failover.Mode == GMSModeInterPod
 }
 
 func (s *DynamoComponentDeploymentSharedSpec) GetNumShadows() int32 {
-	if !s.IsGMSEnabled() {
+	if !s.IsInterPodFailoverEnabled() {
 		return 0
 	}
 	if s.Failover.NumShadows < 1 {

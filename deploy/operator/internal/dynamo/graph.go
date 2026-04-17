@@ -533,10 +533,10 @@ func applyCliqueStartupDependencies(
 	roles []ServiceRole,
 	backendFramework BackendFramework,
 	numberOfNodes int32,
-	isGMS bool,
+	isInterPodFailover bool,
 ) {
 	enabledMultinode := backendFramework == BackendFrameworkTRTLLM && numberOfNodes > 1
-	if !enabledMultinode && !isGMS {
+	if !enabledMultinode && !isInterPodFailover {
 		return
 	}
 
@@ -577,7 +577,7 @@ func applyCliqueStartupDependencies(
 		var startsAfter []string
 
 		// GMS dependencies: engine PCLQs start after their rank's GMS PCLQ
-		if isGMS && cliqueRole != RoleGMS {
+		if isInterPodFailover && cliqueRole != RoleGMS {
 			if gmsName, ok := gmsCliqueByRank[cliqueRank]; ok {
 				startsAfter = append(startsAfter, gmsName)
 			}
@@ -850,15 +850,15 @@ type ServiceRole struct {
 }
 
 func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfNodes int32, component *v1alpha1.DynamoComponentDeploymentSharedSpec) []ServiceRole {
-	isGMS := component.IsGMSEnabled()
+	isInterPodFailover := component.IsInterPodFailoverEnabled()
 	isMultinode := numberOfNodes > 1
 
 	switch {
-	case isMultinode && isGMS:
+	case isMultinode && isInterPodFailover:
 		return expandMultinodeGMSRoles(serviceName, numberOfNodes, component.GetTotalEnginePods())
 	case isMultinode:
 		return expandMultinodeRoles(serviceName, numberOfNodes)
-	case isGMS:
+	case isInterPodFailover:
 		return expandSingleNodeGMSRoles(serviceName, component.GetTotalEnginePods())
 	default:
 		return expandSingleNodeRoles(serviceName, serviceReplicas)
@@ -1442,7 +1442,7 @@ type cliqueParams struct {
 	checkpointInfo             *checkpoint.CheckpointInfo
 	isMultinode                bool
 	usesPCSG                   bool
-	isGMS                      bool
+	isInterPodFailover                      bool
 	discoveryBackend           configv1alpha1.DiscoveryBackend
 	discoveryContext           DiscoveryContext
 	restartState               *RestartState
@@ -1495,7 +1495,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate labels: %w", err)
 	}
 	clique.Labels = labels
-	if p.isGMS && p.r.Role != RoleGMS {
+	if p.isInterPodFailover && p.r.Role != RoleGMS {
 		clique.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
 	}
 	if p.discoveryBackend == configv1alpha1.DiscoveryBackendKubernetes && (p.r.Role == RoleMain || p.r.Role == RoleLeader) {
@@ -1610,8 +1610,8 @@ func GenerateGrovePodCliqueSet(
 
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
-		isGMS := component.IsGMSEnabled()
-		usesPCSG := isMultinode || isGMS
+		isInterPodFailover := component.IsInterPodFailoverEnabled()
+		usesPCSG := isMultinode || isInterPodFailover
 		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes, component)
 		var cliqueNames []string
 
@@ -1629,7 +1629,7 @@ func GenerateGrovePodCliqueSet(
 				checkpointInfo:             checkpointInfo,
 				isMultinode:                isMultinode,
 				usesPCSG:                   usesPCSG,
-				isGMS:                      isGMS,
+				isInterPodFailover:                      isInterPodFailover,
 				discoveryBackend:           discoveryBackend,
 				discoveryContext:           discoveryContext,
 				restartState:               restartState,
@@ -1645,9 +1645,9 @@ func GenerateGrovePodCliqueSet(
 			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}
 
-		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes, isGMS)
+		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes, isInterPodFailover)
 
-		if isGMS {
+		if isInterPodFailover {
 			resourceClaimTemplates = append(resourceClaimTemplates, gmsResourceClaimTemplateConfigs(serviceName, component.Resources, roles)...)
 		}
 
@@ -1659,7 +1659,7 @@ func GenerateGrovePodCliqueSet(
 				MinAvailable:       ptr.To(int32(1)),
 				TopologyConstraint: toGroveTopologyConstraint(component.TopologyConstraint),
 			}
-			if isGMS {
+			if isInterPodFailover {
 				pcsg.ResourceSharing = gmsResourceSharingEntries(serviceName, roles)
 			}
 			scalingGroups = append(scalingGroups, pcsg)
@@ -1688,7 +1688,7 @@ func generatePodSpecForRole(
 	serviceName string,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) (*corev1.PodSpec, error) {
-	isGMS := component.IsGMSEnabled()
+	isInterPodFailover := component.IsInterPodFailoverEnabled()
 
 	if r.Role == RoleGMS {
 		// GMS weight server: generate a base engine spec then transform it
@@ -1705,8 +1705,8 @@ func generatePodSpecForRole(
 
 	// Engine pod (or non-GMS pod): optionally use a rank-aware deployer for multinode GMS
 	var deployer MultinodeDeployer
-	if isGMS && numberOfNodes > 1 {
-		deployer = &GroveMultinodeDeployer{IsGMS: true, Rank: r.Rank}
+	if isInterPodFailover && numberOfNodes > 1 {
+		deployer = &GroveMultinodeDeployer{IsInterPodFailover: true, Rank: r.Rank}
 	}
 
 	podSpec, err := GeneratePodSpecForComponent(
@@ -1718,7 +1718,7 @@ func generatePodSpecForRole(
 		return nil, err
 	}
 
-	if isGMS {
+	if isInterPodFailover {
 		augmentEngineForGMS(podSpec, r.Rank)
 	}
 

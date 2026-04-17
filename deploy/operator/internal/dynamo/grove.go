@@ -23,12 +23,15 @@ import (
 
 type GroveMultinodeDeployer struct {
 	MultinodeDeployer
-	IsGMS bool  // true when used for GMS engine PCLQs
-	Rank  int32 // explicit node rank (used when IsGMS is true)
+	// IsInterPodFailover is true when this deployer produces pod specs for an
+	// engine PCLQ that participates in inter-pod GMS failover (one engine pod
+	// per rank, per shadow, with a dedicated GMS weight server pod).
+	IsInterPodFailover bool
+	Rank               int32 // explicit node rank (used when IsInterPodFailover is true)
 }
 
 func (d *GroveMultinodeDeployer) GetLeaderHostname(serviceName string) string {
-	if d.IsGMS {
+	if d.IsInterPodFailover {
 		// GMS: each PCLQ has multiple replicas; pods at the same index across
 		// ranks form a communication group, so use the dynamic pod index.
 		return fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-$(GROVE_PCLQ_POD_INDEX).$(GROVE_HEADLESS_SERVICE)",
@@ -39,7 +42,7 @@ func (d *GroveMultinodeDeployer) GetLeaderHostname(serviceName string) string {
 }
 
 func (d *GroveMultinodeDeployer) GetNodeRank() (string, bool) {
-	if d.IsGMS {
+	if d.IsInterPodFailover {
 		return fmt.Sprintf("%d", d.Rank), false
 	}
 	return "$((GROVE_PCLQ_POD_INDEX + 1))", true
@@ -53,7 +56,7 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 	hostnames := make([]string, 0, numberOfNodes)
 	hostnames = append(hostnames, d.GetLeaderHostname(serviceName))
 
-	if d.IsGMS {
+	if d.IsInterPodFailover {
 		for rank := int32(1); rank < numberOfNodes; rank++ {
 			hostname := fmt.Sprintf("$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-%s-%s-%d-$(GROVE_PCLQ_POD_INDEX).$(GROVE_HEADLESS_SERVICE)",
 				strings.ToLower(serviceName), commonconsts.GroveRoleSuffixWorker, rank)
@@ -80,7 +83,7 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 	serviceStatuses := make(map[string]v1alpha1.ServiceReplicaStatus, len(dgd.Spec.Services))
 
 	for serviceName, component := range dgd.Spec.Services {
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsGMSEnabled()
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodFailoverEnabled()
 		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
 
 		if usesPCSG {

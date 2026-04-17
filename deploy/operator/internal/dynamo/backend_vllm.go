@@ -27,7 +27,7 @@ type VLLMBackend struct {
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	if component.IsGMSEnabled() {
+	if component.IsInterPodFailoverEnabled() {
 		injectFlagsIntoContainerCommand(container, "--load-format gms", false, "vllm")
 	}
 
