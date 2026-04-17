@@ -70,18 +70,13 @@ class TensorRTLLMEngine:
     async def initialize(self) -> None:
         if not self._llm:
             if self._model_express_url:
-                if self._has_existing_sources():
-                    self._setup_modelexpress_loader()
-                    os.environ["MODEL_EXPRESS_TARGET"] = "1"
-                else:
-                    os.environ["MODEL_EXPRESS_URL"] = self._model_express_url
-                    os.environ.setdefault(
-                        "MODEL_NAME",
-                        self.engine_args.get("model", "unknown"),
-                    )
-                    logger.info(
-                        "ModelExpress auto-detect: no sources found, this worker will load from disk and publish",
-                    )
+                self.engine_args["checkpoint_format"] = "MX"
+                os.environ.setdefault("MODEL_EXPRESS_URL",
+                                      self._model_express_url)
+                logger.info(
+                    "ModelExpress P2P enabled: checkpoint_format=MX, server=%s",
+                    self._model_express_url,
+                )
 
             if self.disaggregation_mode == DisaggregationMode.ENCODE:
                 # Initialize the multimodal encoder for full EPD
@@ -135,45 +130,6 @@ class TensorRTLLMEngine:
         enable_attention_dp = getattr(self.llm.args, "enable_attention_dp", False)
         tensor_parallel_size = getattr(self.llm.args, "tensor_parallel_size", 1)
         return tensor_parallel_size if enable_attention_dp else 1
-
-    def _has_existing_sources(self) -> bool:
-        try:
-            from modelexpress.client import MxClient
-
-            mx_client = MxClient(self._model_express_url)
-            try:
-                resp = mx_client.list_sources()
-                return len(resp.instances) > 0
-            finally:
-                mx_client.close()
-        except Exception:
-            return False
-
-    def _setup_modelexpress_loader(self) -> None:
-        """Configure ModelExpress for P2P weight transfer.
-
-        Uses TRT-LLM's MxCheckpointLoader (registered as checkpoint_format="MX")
-        which auto-detects source/target by probing the MX server.
-        """
-        os.environ["MODEL_EXPRESS_URL"] = self._model_express_url
-        os.environ.setdefault(
-            "MODEL_NAME",
-            self.engine_args.get("model", "unknown"),
-        )
-
-        try:
-            from tensorrt_llm._torch.models.checkpoints.mx import MxCheckpointLoader
-
-            self.engine_args["checkpoint_loader"] = MxCheckpointLoader(
-                mx_server_url=self._model_express_url
-            )
-        except ImportError:
-            self.engine_args["checkpoint_format"] = "MX"
-
-        logger.info(
-            "ModelExpress P2P enabled: server=%s",
-            self._model_express_url,
-        )
 
     @staticmethod
     def _prune_engine_args_for_autodeploy(engine_args) -> None:
