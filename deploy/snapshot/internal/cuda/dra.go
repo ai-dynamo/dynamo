@@ -84,7 +84,10 @@ func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Inte
 	return allocated, pod.Spec.NodeName, usesDRAGPU, nil
 }
 
-func resolveGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]string, bool, error) {
+// GetGPUUUIDsViaDRAAPI resolves GPU UUIDs for a pod by querying the Kubernetes API:
+// Pod (resource claim refs) -> ResourceClaim (allocation results) -> ResourceSlice (device attributes).
+// It also reports whether the pod is using NVIDIA DRA GPU allocations at all.
+func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]string, bool, error) {
 	allocated, nodeName, usesDRAGPU, err := getAllocatedNVIDIADRADevices(ctx, clientset, podName, podNamespace, log)
 	if err != nil {
 		return nil, usesDRAGPU, err
@@ -133,14 +136,6 @@ func resolveGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interfac
 		log.Info("resolved GPU UUIDs via DRA API", "uuids", uuids)
 	}
 	return uuids, true, nil
-}
-
-// GetGPUUUIDsViaDRAAPI resolves GPU UUIDs for a pod by querying the Kubernetes API:
-// Pod (resource claim refs) -> ResourceClaim (allocation results) -> ResourceSlice (device attributes).
-// Returns nil without error if the pod has no DRA claims or the driver is not gpu.nvidia.com.
-func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]string, error) {
-	uuids, _, err := resolveGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
-	return uuids, err
 }
 
 func deviceUUIDFromAttributes(attrs map[resourcev1.QualifiedName]resourcev1.DeviceAttribute) string {

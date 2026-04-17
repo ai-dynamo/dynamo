@@ -108,7 +108,7 @@ func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) 
 // DRA-backed pods use the DRA API, classic nvidia.com/gpu pods use PodResources,
 // and nvidia-smi remains the last fallback for either path.
 func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
-	gpuUUIDs, usesDRAGPU, err := resolveGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
+	gpuUUIDs, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
 	if err != nil && usesDRAGPU {
 		log.Error(err, "DRA API GPU UUID lookup failed, falling back to nvidia-smi", "pod", podNamespace+"/"+podName)
 		gpuUUIDs = nil

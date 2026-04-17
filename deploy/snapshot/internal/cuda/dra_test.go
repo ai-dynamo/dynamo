@@ -60,9 +60,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 	log := logr.Discard()
 
 	t.Run("nil clientset returns nil without error", func(t *testing.T) {
-		got, err := GetGPUUUIDsViaDRAAPI(ctx, nil, "pod", "ns", log)
+		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, nil, "pod", "ns", log)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if usesDRAGPU {
+			t.Fatal("expected usesDRAGPU to be false")
 		}
 		if got != nil {
 			t.Errorf("got %v, want nil", got)
@@ -71,9 +74,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 
 	t.Run("empty pod name returns nil", func(t *testing.T) {
 		client := fake.NewSimpleClientset()
-		got, err := GetGPUUUIDsViaDRAAPI(ctx, client, "", "ns", log)
+		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, "", "ns", log)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if usesDRAGPU {
+			t.Fatal("expected usesDRAGPU to be false")
 		}
 		if got != nil {
 			t.Errorf("got %v, want nil", got)
@@ -82,7 +88,7 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 
 	t.Run("pod not found returns error", func(t *testing.T) {
 		client := fake.NewSimpleClientset()
-		_, err := GetGPUUUIDsViaDRAAPI(ctx, client, "missing", "default", log)
+		_, _, err := GetGPUUUIDsViaDRAAPI(ctx, client, "missing", "default", log)
 		if err == nil {
 			t.Fatal("expected error when pod not found")
 		}
@@ -146,9 +152,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 		}
 
 		client := fake.NewSimpleClientset(pod, claim, slice)
-		got, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
+		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
 		if err != nil {
 			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
+		}
+		if !usesDRAGPU {
+			t.Fatal("expected usesDRAGPU to be true")
 		}
 		want := []string{uuid1, uuid2}
 		if len(got) != len(want) {
@@ -218,9 +227,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 		}
 
 		client := fake.NewSimpleClientset(pod, claim, slice)
-		got, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
+		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
 		if err != nil {
 			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
+		}
+		if !usesDRAGPU {
+			t.Fatal("expected usesDRAGPU to be true")
 		}
 		want := []string{uuid1}
 		if len(got) != len(want) {
@@ -247,9 +259,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 		}
 
 		client := fake.NewSimpleClientset(pod)
-		got, err := GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", log)
+		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", log)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if usesDRAGPU {
+			t.Fatal("expected usesDRAGPU to be false")
 		}
 		if got != nil {
 			t.Errorf("got %v, want nil", got)
@@ -337,9 +352,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 		}
 
 		client := fake.NewSimpleClientset(pod, directClaim, generatedClaim, slice)
-		got, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
+		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, podName, namespace, log)
 		if err != nil {
 			t.Fatalf("GetGPUUUIDsViaDRAAPI: %v", err)
+		}
+		if !usesDRAGPU {
+			t.Fatal("expected usesDRAGPU to be true")
 		}
 		want := []string{uuid1, uuid2}
 		if len(got) != len(want) {
@@ -358,9 +376,12 @@ func TestGetGPUUUIDsViaDRAAPI(t *testing.T) {
 			Spec:       corev1.PodSpec{NodeName: "node-1"},
 		}
 		client := fake.NewSimpleClientset(pod)
-		got, err := GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", log)
+		got, usesDRAGPU, err := GetGPUUUIDsViaDRAAPI(ctx, client, "pod", "default", log)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		if usesDRAGPU {
+			t.Fatal("expected usesDRAGPU to be false")
 		}
 		if got != nil {
 			t.Errorf("got %v, want nil", got)
