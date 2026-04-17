@@ -7205,6 +7205,65 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 	assert.True(t, sawEngine, "test setup should produce at least one engine clique")
 }
 
+// TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant pins
+// the contract that per-rank engine cliques in an inter-pod failover cohort
+// use MinAvailable=1 even when multinode (numberOfNodes > 1). Replicas here
+// represent (primary + shadows) AT THAT RANK — redundant hot spares of each
+// other, NOT NCCL peers. Gang-scheduling them (MinAvailable = Replicas) would
+// require every shadow at every rank to be Ready before Grove considered the
+// clique available, which defeats failover. See the minAvailable comment in
+// renderClique for the full rationale.
+func TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant(t *testing.T) {
+	const numberOfNodes int32 = 2
+	const numShadows int32 = 1
+	const totalEnginePods = numShadows + 1 // primary + shadows per rank
+
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(1)),
+					Multinode:     &v1alpha1.MultinodeSpec{NodeCount: numberOfNodes},
+					Resources:     &v1alpha1.Resources{Limits: &v1alpha1.ResourceItem{GPU: "1"}},
+					Failover:      &v1alpha1.FailoverSpec{Enabled: true, Mode: v1alpha1.GMSModeInterPod, NumShadows: numShadows},
+				},
+			},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{
+			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
+			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
+		},
+		&controller_common.RuntimeConfig{DRAEnabled: true},
+		nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	var sawEngineClique bool
+	for _, clique := range got.Spec.Template.Cliques {
+		require.NotNil(t, clique.Spec.MinAvailable, "clique %q has nil MinAvailable", clique.Name)
+		if strings.Contains(clique.Name, "gms") {
+			assert.EqualValues(t, 1, *clique.Spec.MinAvailable, "GMS clique %q MinAvailable", clique.Name)
+			assert.EqualValues(t, 1, clique.Spec.Replicas, "GMS clique %q Replicas", clique.Name)
+			continue
+		}
+		sawEngineClique = true
+		assert.EqualValues(t, totalEnginePods, clique.Spec.Replicas,
+			"multinode failover engine clique %q Replicas should be primary+shadows=%d", clique.Name, totalEnginePods)
+		assert.EqualValues(t, 1, *clique.Spec.MinAvailable,
+			"multinode failover engine clique %q MinAvailable must be 1 (shadows are redundant hot spares, NOT NCCL peers)", clique.Name)
+	}
+	assert.True(t, sawEngineClique, "test setup should produce at least one engine (non-GMS) clique")
+}
+
 func TestIsWorkerComponent(t *testing.T) {
 	workers := []string{commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode}
 	nonWorkers := []string{commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner, commonconsts.ComponentTypeEPP, "custom", ""}

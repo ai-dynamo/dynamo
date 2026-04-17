@@ -1472,19 +1472,36 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 
 	// minAvailable controls Grove gang-scheduling: the clique is only considered
-	// available when at least this many replicas are Ready.
+	// available when at least this many replicas are Ready. The three axes that
+	// determine the right value are (1) whether the clique's replicas are NCCL-
+	// connected and (2) whether inter-pod failover is in play.
 	//
-	// Multinode cliques (NCCL-connected ranks of the same engine) are gang-
-	// scheduled — losing any replica breaks the collective, so minAvailable
+	// Plain multinode (no failover): a worker clique collapses all non-leader
+	// ranks into a single clique with Replicas = numberOfNodes - 1. Those pods
+	// ARE NCCL peers; losing any one breaks the collective, so minAvailable
 	// must equal Replicas.
 	//
-	// Single-node cliques (including inter-pod failover, where Replicas =
-	// primary + shadows) tolerate minAvailable = 1: shadows are by definition
-	// redundant hot spares and any one of them can service traffic alone. Do
-	// NOT "unify" this to Replicas for failover cliques — that would defeat
-	// the purpose of the shadows and block recovery.
+	// Single-node non-failover: Replicas is typically 1 (or DP factor via the
+	// outer PCSG), and minAvailable = 1 is correct.
+	//
+	// Single-node inter-pod failover: Replicas = primary + shadows. Shadows
+	// are redundant hot spares of the primary; any one Ready pod can serve
+	// traffic, so minAvailable = 1.
+	//
+	// Multinode inter-pod failover: each per-rank engine clique has
+	// Replicas = primary + shadows AT THAT RANK. Those replicas are NOT NCCL
+	// peers of each other — the primary at rank R belongs to the primary's
+	// distributed group (primary at R, primary at R+1, …); each shadow at R
+	// belongs to an INDEPENDENT group spanning its own peers across ranks.
+	// So within a rank, only one Ready pod is required (the runtime
+	// coordinates which cohort actually serves). Setting minAvailable =
+	// Replicas here would require every shadow at every rank to be Ready
+	// before Grove considered the clique available, defeating failover.
+	//
+	// Summary: gang-schedule only the one case where clique replicas are
+	// NCCL-connected — plain multinode without failover.
 	minAvailable := int32(1)
-	if p.isMultinode {
+	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
 	}
 
