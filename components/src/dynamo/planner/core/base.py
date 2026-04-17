@@ -24,7 +24,7 @@ import aiohttp.web
 from prometheus_client import start_http_server
 
 from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
-from dynamo.planner.config.defaults import TargetReplica
+from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
@@ -259,6 +259,10 @@ class NativePlannerBase:
         )
         await self.connector.wait_for_deployment_ready(include_planner=False)
 
+        # Resolve WorkerInfo once from the connector.  For K8s this populates
+        # runtime_config fields from MDC CRDs; for Virtual it returns backend
+        # defaults (subscribers aren't attached yet) which is enough to
+        # construct the FPM endpoint.
         await self._init_worker_info()
 
         if self.runtime is not None:
@@ -266,6 +270,15 @@ class NativePlannerBase:
                 await self._init_fpm_subscriber("prefill")
             if self.require_decode:
                 await self._init_fpm_subscriber("decode")
+
+        # VirtualConnector reads MDC from the FPM subscriber's discovery watch;
+        # hand it the subscribers now that they exist.  The tick-loop refresh
+        # will backfill runtime_config fields once discovery sees the workers.
+        if isinstance(self.connector, VirtualConnector):
+            self.connector.set_mdc_subscribers(
+                prefill=self._prefill_fpm_sub,
+                decode=self._decode_fpm_sub,
+            )
 
         await self._bootstrap_regression()
 
@@ -331,6 +344,73 @@ class NativePlannerBase:
     async def _bootstrap_regression(self) -> None:
         """Override in subclasses to bootstrap regression models."""
         pass
+
+    # ------------------------------------------------------------------
+    # Discovery refresh
+    # ------------------------------------------------------------------
+
+    _MDC_REFRESH_FIELDS = (
+        "total_kv_blocks",
+        "kv_cache_block_size",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "context_length",
+    )
+
+    def _refresh_worker_info_from_connector(self) -> None:
+        """Re-query the connector for any sub-component whose WorkerInfo is
+        still missing runtime-config fields.
+
+        This handles the cold-start path where workers haven't registered
+        their model cards yet when ``_init_worker_info`` first runs.  It is
+        a no-op for K8s mode once CRDs are present, and drives the
+        VirtualConnector's discovery-sourced population once cards arrive.
+        """
+        if not hasattr(self.connector, "get_worker_info"):
+            return
+
+        targets: list[tuple[WorkerInfo, SubComponentType]] = []
+        if self.require_prefill:
+            targets.append((self.prefill_worker_info, SubComponentType.PREFILL))
+        if self.require_decode:
+            targets.append((self.decode_worker_info, SubComponentType.DECODE))
+
+        changed = False
+        for worker_info, sub_type in targets:
+            if worker_info.max_num_batched_tokens is not None:
+                continue
+            try:
+                fresh = self.connector.get_worker_info(sub_type, self.config.backend)
+            except Exception as e:
+                logger.debug(
+                    f"get_worker_info refresh for {sub_type.value} failed: {e}"
+                )
+                continue
+
+            updated = False
+            for field_name in self._MDC_REFRESH_FIELDS:
+                fresh_val = getattr(fresh, field_name)
+                if (
+                    fresh_val is not None
+                    and getattr(worker_info, field_name) != fresh_val
+                ):
+                    setattr(worker_info, field_name, fresh_val)
+                    updated = True
+            if updated:
+                changed = True
+                logger.info(
+                    f"Refreshed {sub_type.value} WorkerInfo from connector: "
+                    f"{worker_info.summary()}"
+                )
+
+        if changed and self._state_machine is not None:
+            self._state_machine.update_capabilities(
+                build_worker_capabilities(
+                    self.config,
+                    self.prefill_worker_info,
+                    self.decode_worker_info,
+                )
+            )
 
     # ------------------------------------------------------------------
     # Data collection (runtime I/O)
@@ -679,6 +759,8 @@ class NativePlannerBase:
                 if now < next_tick.at_s:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue
+
+                self._refresh_worker_info_from_connector()
 
                 tick_input = await self._gather_tick_input(next_tick)
                 effects = self.state_machine.on_tick(next_tick, tick_input)
