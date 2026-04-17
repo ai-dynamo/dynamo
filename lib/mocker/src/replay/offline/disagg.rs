@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub(super) use super::components::ReplayMode;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-    ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
+    ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
 use super::progress::ReplayProgress;
@@ -519,7 +519,9 @@ impl DisaggRuntime {
         let original = state.original_request()?;
         let input_tokens = original.tokens.len();
         let output_tokens = original.max_output_tokens;
-        self.traffic.on_request(input_tokens, output_tokens);
+        let latencies = self.collector.request_latencies(signal.uuid);
+        self.traffic
+            .on_request(input_tokens, output_tokens, latencies);
         self.state_mut(signal.uuid)?.mark_done();
         #[cfg(test)]
         {
@@ -831,7 +833,7 @@ impl DisaggRuntime {
     }
 
     /// Drain accumulated traffic stats since the last drain.
-    pub(in crate::replay) fn drain_traffic(&mut self) -> (f64, usize, f64, f64) {
+    pub(in crate::replay) fn drain_traffic(&mut self) -> TrafficStats {
         self.traffic.drain(self.now_ms)
     }
 
