@@ -1426,6 +1426,114 @@ func propagateDGDSpecMetadata(annotations, labels map[string]string, component *
 }
 
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
+// cliqueParams groups the context needed to build a single PodClique template
+// from a ServiceRole. All fields come from the enclosing GenerateGrovePodCliqueSet
+// loop iteration and are read-only.
+type cliqueParams struct {
+	r                          ServiceRole
+	component                  *v1alpha1.DynamoComponentDeploymentSharedSpec
+	backendFramework           BackendFramework
+	secretsRetriever           SecretsRetriever
+	dynamoDeployment           *v1alpha1.DynamoGraphDeployment
+	numberOfNodes              int32
+	operatorConfig             *configv1alpha1.OperatorConfiguration
+	runtimeConfig              *controller_common.RuntimeConfig
+	serviceName                string
+	checkpointInfo             *checkpoint.CheckpointInfo
+	isMultinode                bool
+	usesPCSG                   bool
+	isGMS                      bool
+	discoveryBackend           configv1alpha1.DiscoveryBackend
+	discoveryContext           DiscoveryContext
+	restartState               *RestartState
+	existingRestartAnnotations map[string]string
+	validatedQueueName         string
+	kubeClient                 ctrlclient.Reader
+	ctx                        context.Context
+}
+
+// buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
+// injecting labels, annotations, checkpoint config, and scheduler settings.
+func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
+	podSpec, err := generatePodSpecForRole(
+		p.r, p.component, p.backendFramework, p.secretsRetriever,
+		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.serviceName, p.checkpointInfo,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
+	}
+
+	if p.operatorConfig.Checkpoint.Enabled {
+		if err := checkpoint.InjectCheckpointIntoPodSpec(
+			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
+		); err != nil {
+			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
+		}
+	}
+
+	minAvailable := int32(1)
+	if p.isMultinode {
+		minAvailable = p.r.Replicas
+	}
+
+	clique := &grovev1alpha1.PodCliqueTemplateSpec{
+		Name: strings.ToLower(p.r.Name),
+		Spec: grovev1alpha1.PodCliqueSpec{
+			RoleName:     strings.ToLower(p.r.Name),
+			Replicas:     p.r.Replicas,
+			MinAvailable: ptr.To(minAvailable),
+			PodSpec:      *podSpec,
+		},
+	}
+
+	if !p.usesPCSG {
+		clique.TopologyConstraint = toGroveTopologyConstraint(p.component.TopologyConstraint)
+	}
+
+	labels, err := generateLabels(p.component, p.dynamoDeployment, p.serviceName, p.discoveryContext)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate labels: %w", err)
+	}
+	clique.Labels = labels
+	if p.isGMS && p.r.Role != RoleGMS {
+		clique.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
+	}
+	if p.discoveryBackend == configv1alpha1.DiscoveryBackendKubernetes && (p.r.Role == RoleMain || p.r.Role == RoleLeader) {
+		clique.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
+		clique.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	}
+
+	annotations, err := generateAnnotations(p.component)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate annotations: %w", err)
+	}
+	checkpoint.ApplyRestorePodMetadata(labels, annotations, p.checkpointInfo)
+	annotations = applyRestartAnnotation(annotations, p.serviceName, p.restartState, p.existingRestartAnnotations)
+	clique.Annotations = annotations
+
+	injectKaiSchedulerIfEnabled(clique, p.runtimeConfig, p.validatedQueueName)
+	return clique, nil
+}
+
+// applyRestartAnnotation adds the restart annotation to the map if needed,
+// creating the map when it is nil.
+func applyRestartAnnotation(annotations map[string]string, serviceName string, restartState *RestartState, existingRestartAnnotations map[string]string) map[string]string {
+	if restartState.ShouldAnnotateService(serviceName) {
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+	} else if existingRestartAnnotations != nil {
+		if existingTimestamp, ok := existingRestartAnnotations[serviceName]; ok {
+			if annotations == nil {
+				annotations = make(map[string]string)
+			}
+			annotations[commonconsts.RestartAnnotation] = existingTimestamp
+		}
+	}
+	return annotations
+}
+
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
@@ -1508,81 +1616,31 @@ func GenerateGrovePodCliqueSet(
 		var cliqueNames []string
 
 		for _, r := range roles {
-			podSpec, err := generatePodSpecForRole(
-				r, component, backendFramework, secretsRetriever,
-				dynamoDeployment, numberOfNodes, operatorConfig, serviceName, checkpointInfo,
-			)
+			clique, err := buildCliqueForRole(cliqueParams{
+				r:                          r,
+				component:                  component,
+				backendFramework:           backendFramework,
+				secretsRetriever:           secretsRetriever,
+				dynamoDeployment:           dynamoDeployment,
+				numberOfNodes:              numberOfNodes,
+				operatorConfig:             operatorConfig,
+				runtimeConfig:              runtimeConfig,
+				serviceName:                serviceName,
+				checkpointInfo:             checkpointInfo,
+				isMultinode:                isMultinode,
+				usesPCSG:                   usesPCSG,
+				isGMS:                      isGMS,
+				discoveryBackend:           discoveryBackend,
+				discoveryContext:           discoveryContext,
+				restartState:               restartState,
+				existingRestartAnnotations: existingRestartAnnotations,
+				validatedQueueName:         validatedQueueName,
+				kubeClient:                 kubeClient,
+				ctx:                        ctx,
+			})
 			if err != nil {
-				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
+				return nil, err
 			}
-
-			if operatorConfig.Checkpoint.Enabled {
-				if err := checkpoint.InjectCheckpointIntoPodSpec(
-					ctx,
-					kubeClient,
-					dynamoDeployment.Namespace,
-					podSpec,
-					checkpointInfo,
-				); err != nil {
-					return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", r.Name, err)
-				}
-			}
-
-			minAvailable := int32(1)
-			if isMultinode {
-				minAvailable = r.Replicas
-			}
-
-			clique := &grovev1alpha1.PodCliqueTemplateSpec{
-				Name: strings.ToLower(r.Name),
-				Spec: grovev1alpha1.PodCliqueSpec{
-					RoleName:     strings.ToLower(r.Name),
-					Replicas:     r.Replicas,
-					MinAvailable: ptr.To(minAvailable),
-					PodSpec:      *podSpec,
-				},
-			}
-
-			// Topology constraint goes on PCSG when using scaling groups,
-			// directly on clique only for plain single-node services.
-			if !usesPCSG {
-				clique.TopologyConstraint = toGroveTopologyConstraint(component.TopologyConstraint)
-			}
-			labels, err := generateLabels(component, dynamoDeployment, serviceName, discoveryContext)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate labels: %w", err)
-			}
-			clique.Labels = labels
-			if isGMS && r.Role != RoleGMS {
-				clique.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
-			}
-			if discoveryBackend == configv1alpha1.DiscoveryBackendKubernetes && (r.Role == RoleMain || r.Role == RoleLeader) {
-				clique.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
-				clique.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
-			}
-			annotations, err := generateAnnotations(component)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate annotations: %w", err)
-			}
-			checkpoint.ApplyRestorePodMetadata(labels, annotations, checkpointInfo)
-
-			if restartState.ShouldAnnotateService(serviceName) {
-				if annotations == nil {
-					annotations = make(map[string]string)
-				}
-				annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
-			} else if existingRestartAnnotations != nil {
-				if existingTimestamp, ok := existingRestartAnnotations[serviceName]; ok {
-					if annotations == nil {
-						annotations = make(map[string]string)
-					}
-					annotations[commonconsts.RestartAnnotation] = existingTimestamp
-				}
-			}
-			clique.Annotations = annotations
-
-			injectKaiSchedulerIfEnabled(clique, runtimeConfig, validatedQueueName)
-
 			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}

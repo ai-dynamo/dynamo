@@ -35,16 +35,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-const cascadeTestNamespace = "test-ns"
+const (
+	cascadeTestNamespace = "test-ns"
+	cascadeTestPCSG      = "my-pcsg"
+)
 
-func newFailoverPod(name string, phase corev1.PodPhase, pcsg, replicaIdx, podIdx string) *corev1.Pod {
+func newFailoverPod(name string, phase corev1.PodPhase, replicaIdx, podIdx string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: cascadeTestNamespace,
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
-				groveLabelPCSG:             pcsg,
+				groveLabelPCSG:             cascadeTestPCSG,
 				groveLabelPCSGReplicaIndex: replicaIdx,
 				groveLabelPodIndex:         podIdx,
 			},
@@ -68,9 +71,9 @@ func newCascadeReconciler(objs ...client.Object) (*FailoverCascadeReconciler, cl
 
 func TestFailoverCascade_FailedPodDeletesEntireGroup(t *testing.T) {
 
-	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
-	sibling1 := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
-	sibling2 := newFailoverPod("wkr-1-0", corev1.PodRunning, "my-pcsg", "0", "0")
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "0", "0")
+	sibling1 := newFailoverPod("gms-0-0", corev1.PodRunning, "0", "0")
+	sibling2 := newFailoverPod("wkr-1-0", corev1.PodRunning, "0", "0")
 
 	r, c := newCascadeReconciler(failedPod, sibling1, sibling2)
 
@@ -87,8 +90,8 @@ func TestFailoverCascade_FailedPodDeletesEntireGroup(t *testing.T) {
 
 func TestFailoverCascade_SucceededPodDeletesEntireGroup(t *testing.T) {
 
-	succeededPod := newFailoverPod("ldr-0", corev1.PodSucceeded, "my-pcsg", "0", "0")
-	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
+	succeededPod := newFailoverPod("ldr-0", corev1.PodSucceeded, "0", "0")
+	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "0", "0")
 
 	r, c := newCascadeReconciler(succeededPod, sibling)
 
@@ -105,8 +108,8 @@ func TestFailoverCascade_SucceededPodDeletesEntireGroup(t *testing.T) {
 
 func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 
-	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
-	differentGroup := newFailoverPod("ldr-1", corev1.PodRunning, "my-pcsg", "0", "1")
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "0", "0")
+	differentGroup := newFailoverPod("ldr-1", corev1.PodRunning, "0", "1")
 
 	r, c := newCascadeReconciler(failedPod, differentGroup)
 
@@ -123,9 +126,9 @@ func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
 
 func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {
 
-	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
-	alsoFailed := newFailoverPod("wkr-1-0", corev1.PodFailed, "my-pcsg", "0", "0")
-	running := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "0", "0")
+	alsoFailed := newFailoverPod("wkr-1-0", corev1.PodFailed, "0", "0")
+	running := newFailoverPod("gms-0-0", corev1.PodRunning, "0", "0")
 
 	r, c := newCascadeReconciler(failedPod, alsoFailed, running)
 
@@ -160,8 +163,8 @@ func TestFailoverCascade_PodWithoutLabelIgnored(t *testing.T) {
 
 func TestFailoverCascade_NonFailedPodIsNoop(t *testing.T) {
 
-	runningPod := newFailoverPod("ldr-0", corev1.PodRunning, "my-pcsg", "0", "0")
-	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
+	runningPod := newFailoverPod("ldr-0", corev1.PodRunning, "0", "0")
+	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "0", "0")
 
 	r, c := newCascadeReconciler(runningPod, sibling)
 
@@ -193,7 +196,7 @@ func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
 			Namespace: cascadeTestNamespace,
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
-				groveLabelPCSG:                            "my-pcsg",
+				groveLabelPCSG: "my-pcsg",
 			},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodFailed},
@@ -210,8 +213,8 @@ func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
 
 func TestFailoverCascade_DifferentPCSGReplicaUnaffected(t *testing.T) {
 
-	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
-	differentReplica := newFailoverPod("ldr-r1-0", corev1.PodRunning, "my-pcsg", "1", "0")
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "0", "0")
+	differentReplica := newFailoverPod("ldr-r1-0", corev1.PodRunning, "1", "0")
 
 	r, c := newCascadeReconciler(failedPod, differentReplica)
 
@@ -230,11 +233,11 @@ func TestFailoverCascade_DeletingPodIsSkipped(t *testing.T) {
 
 	now := metav1.Now()
 
-	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
+	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "0", "0")
 	failedPod.DeletionTimestamp = &now
 	failedPod.DeletionGracePeriodSeconds = ptr.To(int64(0))
 	failedPod.Finalizers = []string{"test-finalizer"}
-	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "my-pcsg", "0", "0")
+	sibling := newFailoverPod("gms-0-0", corev1.PodRunning, "0", "0")
 
 	r, c := newCascadeReconciler(failedPod, sibling)
 
@@ -251,8 +254,8 @@ func TestFailoverCascade_DeletingPodIsSkipped(t *testing.T) {
 
 func TestFailoverCascade_ConcurrentReconcileIsIdempotent(t *testing.T) {
 
-	pod1 := newFailoverPod("ldr-0", corev1.PodFailed, "my-pcsg", "0", "0")
-	pod2 := newFailoverPod("wkr-1-0", corev1.PodFailed, "my-pcsg", "0", "0")
+	pod1 := newFailoverPod("ldr-0", corev1.PodFailed, "0", "0")
+	pod2 := newFailoverPod("wkr-1-0", corev1.PodFailed, "0", "0")
 
 	r, c := newCascadeReconciler(pod1, pod2)
 

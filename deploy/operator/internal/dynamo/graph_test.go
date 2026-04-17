@@ -5601,9 +5601,9 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 						Args:    []string{"-m", "dynamo.worker"},
 						Env: []corev1.EnvVar{
 							{Name: "ANOTHER_COMPONENTENV", Value: "true"},
-						{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
-						{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
-						{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
+							{Name: "ANOTHER_CONTAINER_ENV", Value: "true"},
+							{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
+							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
