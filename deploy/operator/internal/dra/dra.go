@@ -28,13 +28,14 @@ const (
 	defaultDeviceClassName = "gpu.nvidia.com"
 )
 
-// ApplyClaim replaces the first container's nvidia.com/gpu resources with a
+// ApplyClaim replaces the target container's nvidia.com/gpu resources with a
 // shared DRA ResourceClaim. Every container that references this claim name
 // will share the same physical GPUs. The function is idempotent — calling it
-// on a pod that already has the claim is a no-op.
-func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
-	if len(podSpec.Containers) == 0 {
-		return fmt.Errorf("pod spec must have at least one container for DRA claim")
+// on a pod that already has the claim is a no-op. Pass the workload container
+// explicitly; the caller owns main-container resolution.
+func ApplyClaim(podSpec *corev1.PodSpec, target *corev1.Container, claimTemplateName string) error {
+	if target == nil {
+		return fmt.Errorf("DRA claim target container is required")
 	}
 
 	// Skip if the pod-level claim already exists (idempotent).
@@ -46,9 +47,9 @@ func ApplyClaim(podSpec *corev1.PodSpec, claimTemplateName string) error {
 
 	// Replace nvidia.com/gpu with the shared DRA claim.
 	gpuResource := corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)
-	delete(podSpec.Containers[0].Resources.Limits, gpuResource)
-	delete(podSpec.Containers[0].Resources.Requests, gpuResource)
-	podSpec.Containers[0].Resources.Claims = append(podSpec.Containers[0].Resources.Claims, corev1.ResourceClaim{
+	delete(target.Resources.Limits, gpuResource)
+	delete(target.Resources.Requests, gpuResource)
+	target.Resources.Claims = append(target.Resources.Claims, corev1.ResourceClaim{
 		Name: ClaimName,
 	})
 
