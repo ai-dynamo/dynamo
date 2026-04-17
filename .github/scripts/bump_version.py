@@ -811,6 +811,30 @@ def _run_check(args: argparse.Namespace, repo: Path) -> int:
     active = _active_scopes(args)
     # Rerun the engine with the expected version — anything that would change is stale.
     stale = apply_rules(repo, expected, active, dry_run=True)
+    # The DOCS specialised functions own table-row insertion and section-scoped
+    # edits in support-matrix.md / release-artifacts.md / feature-matrix.md.
+    # Those files now carry the bump-version: ignore marker, so apply_rules() no
+    # longer touches them; without this dry-run pass --check would have a blind
+    # spot for stale "Current Release" headers, "Latest stable release" lines,
+    # missing release-row entries, and stale "Updated for vX.Y.Z" tags.
+    # Backend versions / release date are usually not passed to --check; the
+    # all_set/any_set guards inside the DOCS helpers keep the
+    # backend-dependent rewrites no-ops in that case, while still catching the
+    # version-only staleness signals.
+    if Scope.DOCS in active:
+        backends = BackendVersions(
+            vllm=args.vllm_version,
+            sglang=args.sglang_version,
+            trtllm=args.trtllm_version,
+            nixl=args.nixl_version,
+        )
+        stale.extend(update_feature_matrix(repo, expected, dry_run=True))
+        stale.extend(update_support_matrix(repo, expected, backends, dry_run=True))
+        stale.extend(
+            update_release_artifacts(
+                repo, expected, args.release_date, backends, dry_run=True
+            )
+        )
     if not stale:
         _log(args, "summary", "All version references are up to date.")
         return 0
