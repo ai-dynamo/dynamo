@@ -199,6 +199,68 @@ class TestKimiToolCallIds:
             "functions.search_gutenberg_books:4",
         ]
 
+    def test_kimi_reparse_uses_sequential_index_not_tool_index(self):
+        """kimi_k2 IDs after re-parse use the output position, not tool_index.
+
+        ``FunctionCallParser.parse_non_stream`` can return
+        ``ToolCallItem.tool_index`` values that reflect the tool-definition
+        position rather than the call's sequential position.  IDs must
+        align with the emitted ``index`` field, so they are built from
+        the post-processor's ``seq_idx``.
+        """
+
+        class DummyTokenizer:
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "".join(chr(x) for x in token_ids)
+
+        class DummyToolCall:
+            def __init__(self, tool_index, name, parameters):
+                self.tool_index = tool_index
+                self.name = name
+                self.parameters = parameters
+
+        class DummyParser:
+            tool_call_parser = "kimi_k2"
+            detector = type("Detector", (), {"_buffer": ""})()
+
+            def parse_stream_chunk(self, text):
+                # Streaming misses both calls — forces the re-parse path.
+                return "", []
+
+            def has_tool_call(self, text):
+                return True
+
+            def parse_non_stream(self, text):
+                # Non-sequential tool_index values, as parse_non_stream
+                # sometimes returns tool-definition positions.
+                return "", [
+                    DummyToolCall(5, "get_weather", '{"city":"Paris"}'),
+                    DummyToolCall(2, "search_gutenberg_books", '{"q":"Joyce"}'),
+                ]
+
+        post = SglangStreamingPostProcessor(
+            tokenizer=DummyTokenizer(),
+            tool_call_parser=DummyParser(),
+            reasoning_parser=None,
+            history_tool_calls_count=3,
+            tool_call_parser_name="kimi_k2",
+        )
+
+        choice = post.process_output(
+            {
+                "token_ids": [ord("x")],
+                "finish_reason": "stop",
+            }
+        )
+
+        tc = choice["delta"]["tool_calls"]
+        # IDs must use seq_idx (0, 1) + history (3), not tool_index (5, 2).
+        assert [item["id"] for item in tc] == [
+            "functions.get_weather:3",
+            "functions.search_gutenberg_books:4",
+        ]
+        assert [item["index"] for item in tc] == [0, 1]
+
 
 # ---------------------------------------------------------------------------
 # No reasoning parser

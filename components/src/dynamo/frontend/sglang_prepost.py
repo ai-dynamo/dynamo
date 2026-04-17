@@ -302,16 +302,22 @@ def _get_history_tool_calls_count(messages: list[dict[str, Any]]) -> int:
 
 def _tool_call_id_for_parser(
     parser_name: str | None,
-    tool_call: Any,
+    name: str,
+    index: int,
     history_tool_calls_count: int,
 ) -> str:
-    """Match native SGLang tool-call ID behavior for parser-specific formats."""
+    """Match native SGLang tool-call ID behavior for parser-specific formats.
+
+    ``index`` is the sequential position of this call within the current
+    response — callers must pass the same index they use as the dict key
+    for the call, so the ID stays consistent with the emitted ``index``
+    field.  For ``parse_non_stream`` output, ``ToolCallItem.tool_index``
+    can instead reflect the tool-definition position, so it is not safe
+    to read here directly.
+    """
     if parser_name != "kimi_k2":
         return _random_call_id()
-
-    name = getattr(tool_call, "name", "") or ""
-    tool_index = getattr(tool_call, "tool_index", 0) or 0
-    return f"functions.{name}:{history_tool_calls_count + tool_index}"
+    return f"functions.{name or ''}:{history_tool_calls_count + index}"
 
 
 def _parse_json_array_buffer(buffer: str) -> list[ToolCallItem]:
@@ -423,10 +429,11 @@ class SglangStreamingPostProcessor:
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
 
-    def _tool_call_id(self, tool_call: Any) -> str:
+    def _tool_call_id(self, name: str, index: int) -> str:
         return _tool_call_id_for_parser(
             self._tool_call_parser_name,
-            tool_call,
+            name,
+            index,
             self.history_tool_calls_count,
         )
 
@@ -530,7 +537,7 @@ class SglangStreamingPostProcessor:
             for tc in tool_calls:
                 idx = tc.tool_index
                 if idx not in self._tool_call_ids:
-                    self._tool_call_ids[idx] = self._tool_call_id(tc)
+                    self._tool_call_ids[idx] = self._tool_call_id(tc.name or "", idx)
                 if tc.name:
                     self._tool_call_names[idx] = tc.name
                 if tc.parameters:
@@ -660,7 +667,9 @@ class SglangStreamingPostProcessor:
                     self._tool_call_names.clear()
                     self._tool_call_args.clear()
                     for seq_idx, tc in enumerate(final_calls):
-                        self._tool_call_ids[seq_idx] = self._tool_call_id(tc)
+                        self._tool_call_ids[seq_idx] = self._tool_call_id(
+                            tc.name or "", seq_idx
+                        )
                         if tc.name:
                             self._tool_call_names[seq_idx] = tc.name
                         if tc.parameters:
