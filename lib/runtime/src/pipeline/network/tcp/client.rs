@@ -271,13 +271,17 @@ async fn handle_reader(
                         // TCP RST from peer (e.g. server crash) or a protocol decode
                         // error — both mean the stream is unrecoverable.  Break so
                         // only this connection is torn down; other requests are not
-                        // affected.
+                        // affected. `context.kill()` preserves the downstream signal
+                        // the old `panic!` used to deliver via `JoinError::Panic`:
+                        // without it, the engine keeps processing requests whose
+                        // responses can no longer be delivered.
                         tracing::warn!(
                             "tcp stream read error, closing connection: {e:?}"
                         );
                         if let Some(counter) = &cancellation_counter && !cancellation_counted {
                             counter.inc();
                         }
+                        context.kill();
                         break;
                     }
                     None => {
@@ -364,7 +368,7 @@ mod tests {
     use bytes::Bytes;
     use futures::StreamExt;
     use std::sync::Arc;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::codec::FramedRead;
@@ -993,6 +997,40 @@ mod tests {
         assert!(
             controller.is_killed(),
             "Controller should be killed after receiving Kill message"
+        );
+    }
+
+    /// Test that handle_reader calls context.kill() on a TCP stream read error,
+    /// preserving the downstream signal the original `panic!` delivered via
+    /// `JoinError::Panic`.
+    #[tokio::test]
+    async fn test_handle_reader_kills_context_on_read_error() {
+        let ReaderHarness {
+            framed_server,
+            framed_reader,
+            alive_tx,
+            alive_rx: _alive_rx,
+            controller,
+        } = reader_harness().await;
+
+        let controller_clone = controller.clone();
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(framed_reader, controller_clone, alive_tx, None).await
+        });
+
+        // Bypass the codec and write a partial TwoPartCodec header (codec needs
+        // >=24 bytes), then close. FramedRead's default decode_eof with a
+        // non-empty buffer at EOF returns Err, driving handle_reader into the
+        // read-error arm that this test covers.
+        let mut raw_writer = framed_server.into_inner();
+        raw_writer.write_all(&[0u8; 8]).await.unwrap();
+        raw_writer.shutdown().await.unwrap();
+
+        let _ = reader_handle.await.unwrap();
+
+        assert!(
+            controller.is_killed(),
+            "Controller should be killed after TCP stream read error"
         );
     }
 }
