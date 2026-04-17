@@ -63,9 +63,15 @@ COPY --from=dynamo lib/ lib/
 # build artifacts so incremental Docker rebuilds are fast.
 # Cache IDs are keyed by TARGETARCH so multi-platform builds don't collide.
 # Artifacts are copied to /out/ because the target/ cache mount is ephemeral.
+#
+# Workspace crates are cleaned before build: BuildKit's COPY sets deterministic
+# mtimes that can be older than cached artifacts, so cargo's fingerprint check
+# may skip recompilation even when source changed. External dep compilation
+# stays cached via the registry mount.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH} \
     --mount=type=cache,target=/dynamo/target,id=cargo-target-${TARGETARCH} \
+    cargo clean --release -p libdynamo_llm -p dynamo-llm -p dynamo-kv-router -p dynamo-runtime && \
     cargo build --release -p libdynamo_llm && \
     mkdir -p /out && \
     cp target/release/libdynamo_llm_capi.a /out/ && \

@@ -38,6 +38,8 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_queue_policy",
     "use_remote_indexer",
     "serve_indexer",
+    "router_predict_on_route",
+    "router_predicted_ttl_secs",
 )
 
 
@@ -64,6 +66,8 @@ class KvRouterConfigBase(ConfigBase):
     router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
+    router_predict_on_route: bool = False
+    router_predicted_ttl_secs: Optional[float] = None
 
     def kv_router_kwargs(self) -> dict:
         """Return a dict suitable for ``KvRouterConfig(**kwargs)``."""
@@ -298,4 +302,31 @@ class KvRouterArgGroup(ArgGroup):
                 "component via the request plane instead of maintaining a local radix tree."
             ),
             dest="use_remote_indexer",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-predict-on-route",
+            env_var="DYN_ROUTER_PREDICT_ON_ROUTE",
+            default=False,
+            dest="router_predict_on_route",
+            help=(
+                "KV Router: Speculatively insert a request's blocks into the indexer at "
+                "routing time so sibling requests arriving before the engine emits a KV "
+                "event still see the prefix. Works with or without --router-kv-events: "
+                "when both are on, the engine's real KV event (default long TTL) promotes "
+                "the speculative entry."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--router-predicted-ttl-secs",
+            env_var="DYN_ROUTER_PREDICTED_TTL_SECS",
+            default=None,
+            help=(
+                "KV Router: TTL in seconds applied to --router-predict-on-route "
+                "insertions. Unset uses the indexer default (--router-ttl-secs, 120s). "
+                "Short values (e.g. 2-5s) let predictions expire quickly if the engine "
+                "never confirms them."
+            ),
+            arg_type=float,
         )
