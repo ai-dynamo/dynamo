@@ -87,9 +87,6 @@ _BLOCKED_HOSTS: frozenset[str] = frozenset(
     }
 )
 
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
-
-
 def is_blocked_ip(ip_text: str) -> bool:
     """Return True if ``ip_text`` parses as an IP inside one of the blocked ranges."""
     try:
@@ -110,7 +107,7 @@ class UrlValidationPolicy:
     @classmethod
     def from_env(cls) -> "UrlValidationPolicy":
         """Build a policy by reading the ``DYN_MM_*`` environment variables."""
-        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "").lower() in _TRUTHY
+        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
         return cls(
             allow_http=allow_internal,
             allow_private_ips=allow_internal,
