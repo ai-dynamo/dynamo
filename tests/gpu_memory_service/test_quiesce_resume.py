@@ -26,7 +26,7 @@ from tests.gpu_memory_service.flow_assertions import (
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.nightly, pytest.mark.fault_tolerance]
+pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
 
 # Event flow under test:
 # 1. Weights are published once as a committed layout.
@@ -117,6 +117,7 @@ def _run_quiesce_resume_test(
 
 
 @pytest.mark.e2e
+@pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(300)
@@ -130,6 +131,7 @@ def test_gms_basic_quiesce_resume_vllm(
 
 
 @pytest.mark.e2e
+@pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.timeout(300)
