@@ -1442,7 +1442,7 @@ type cliqueParams struct {
 	checkpointInfo             *checkpoint.CheckpointInfo
 	isMultinode                bool
 	usesPCSG                   bool
-	isInterPodFailover                      bool
+	isInterPodFailover         bool
 	discoveryBackend           configv1alpha1.DiscoveryBackend
 	discoveryContext           DiscoveryContext
 	restartState               *RestartState
@@ -1629,7 +1629,7 @@ func GenerateGrovePodCliqueSet(
 				checkpointInfo:             checkpointInfo,
 				isMultinode:                isMultinode,
 				usesPCSG:                   usesPCSG,
-				isInterPodFailover:                      isInterPodFailover,
+				isInterPodFailover:         isInterPodFailover,
 				discoveryBackend:           discoveryBackend,
 				discoveryContext:           discoveryContext,
 				restartState:               restartState,
