@@ -34,9 +34,10 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
+
+use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
 
 use crate::llm::local_model::ModelRuntimeConfig;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
@@ -263,7 +264,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -274,7 +275,7 @@ fn register_model<'p>(
     model_name: Option<&str>,
     context_length: Option<u32>,
     kv_cache_block_size: Option<u32>,
-    router_mode: Option<RouterMode>,
+    router_config: Option<PyRouterConfig>,
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
@@ -306,12 +307,10 @@ fn register_model<'p>(
 
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
-    // Only embed router_config in the MDC when the caller explicitly provided router_mode.
-    // This preserves backward-compat: workers that don't specify router_mode continue to
+    // Only embed router_config in the MDC when the caller explicitly provided it.
+    // This preserves backward-compat: workers that don't specify router_config continue to
     // fall back to the frontend-level global router config via the watcher.
-    let explicit_router_config = router_mode
-        .map(|rm| RouterConfig::new(rm.into(), KvRouterConfig::default()));
-    let router_config_for_local = explicit_router_config.clone().unwrap_or_default();
+    let explicit_router_config: Option<RouterConfig> = router_config.map(|rc| rc.into());
 
     // Early validation of custom template path
     let custom_template_path_owned = custom_template_path
@@ -401,7 +400,7 @@ fn register_model<'p>(
             .model_name(model_name.clone())
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
-            .router_config(Some(router_config_for_local))
+            .router_config(explicit_router_config.clone())
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
