@@ -1,0 +1,345 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Phase 2: Port a version bump to main after a GitHub release is published.
+#
+# Full releases (vX.Y.Z):
+#   Auto-triggered on release:published. Updates all version references and
+#   opens a PR to main.
+#
+# Post-releases (vX.Y.Z.postN):
+#   Auto-trigger performs a minimal bump by default (Helm + core only — full
+#   image-tag churn is usually not wanted for post-releases). Use
+#   workflow_dispatch with the component checkboxes for full control.
+#
+# Phase 1 (release branch prep) lives in release.yml.
+
+name: Release Version Bump
+
+on:
+  release:
+    types: [published]
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0 or v0.9.0.post1)'
+        required: true
+        type: string
+      update_core:
+        description: 'Update core version files (pyproject.toml, Cargo.toml, setup.py)'
+        required: false
+        type: boolean
+        default: true
+      update_containers:
+        description: 'Update container image tags across docs, recipes, examples'
+        required: false
+        type: boolean
+        default: true
+      update_helm:
+        description: 'Update Helm Chart.yaml and values.yaml versions'
+        required: false
+        type: boolean
+        default: true
+      update_docs:
+        description: 'Update reference docs (support-matrix, feature-matrix, release-artifacts)'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Pinned tool versions — bump deliberately, not via `latest`.
+env:
+  YQ_VERSION: '4.52.2'
+  CONTROLLER_GEN_VERSION: 'v0.16.5'
+  HELM_DOCS_VERSION: '1.14.2'
+
+jobs:
+  version-bump-to-main:
+    name: Open PR to main
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Determine tag and release kind
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "release" ]; then
+            TAG="$RELEASE_TAG"
+          else
+            TAG="$INPUT_TAG"
+          fi
+
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
+            echo "::error::Invalid tag format: $TAG. Must be vX.Y.Z or vX.Y.Z.postN"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          IS_POST="false"
+          if [[ "$TAG" =~ \.post[0-9]+$ ]]; then
+            IS_POST="true"
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "is_post=$IS_POST"
+          } >> "$GITHUB_OUTPUT"
+          echo "Tag: $TAG, Version: $VERSION, Post-release: $IS_POST"
+
+      - name: Checkout release tag
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          path: release-ref
+
+      - name: Install yq
+        run: |
+          set -euo pipefail
+          sudo wget -qO /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Extract backend metadata from context.yaml
+        id: metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_CREATED_AT: ${{ github.event.release.created_at }}
+        run: |
+          set -euo pipefail
+          CTX="release-ref/container/context.yaml"
+
+          VLLM_VER=$(yq '.vllm.vllm_ref' "$CTX" | sed 's/^v//')
+          SGLANG_TAG=$(yq '.sglang."cuda12.9".runtime_image_tag // .sglang.runtime_image_tag // ""' "$CTX")
+          SGLANG_VER=$(echo "$SGLANG_TAG" | sed 's/^v//; s/-cu[0-9]*-runtime$//; s/-runtime$//')
+          TRTLLM_WHEEL=$(yq '.trtllm.pip_wheel' "$CTX")
+          TRTLLM_VER=$(echo "$TRTLLM_WHEEL" | sed 's/.*==//')
+          NIXL_VER=$(yq '.dynamo.nixl_ref' "$CTX")
+
+          if [ "$EVENT_NAME" = "release" ]; then
+            RELEASE_DATE=$(date -d "$RELEASE_CREATED_AT" "+%b %d, %Y" 2>/dev/null || date "+%b %d, %Y")
+          else
+            RELEASE_DATE=$(date "+%b %d, %Y")
+          fi
+
+          {
+            echo "vllm_version=$VLLM_VER"
+            echo "sglang_version=$SGLANG_VER"
+            echo "trtllm_version=$TRTLLM_VER"
+            echo "nixl_version=$NIXL_VER"
+            echo "release_date=$RELEASE_DATE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Backend: vLLM=$VLLM_VER SGLang=$SGLANG_VER TRT-LLM=$TRTLLM_VER NIXL=$NIXL_VER  Released=$RELEASE_DATE"
+
+      - name: Checkout main
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: main
+          fetch-depth: 0
+          path: main-checkout
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: main-checkout/deploy/operator/go.mod
+
+      - name: Set up Rust
+        working-directory: main-checkout
+        run: |
+          set -euo pipefail
+          # Uses rust-toolchain.toml — `rustup show` is what triggers the install.
+          rustup show active-toolchain
+
+      - name: Install controller-gen (pinned)
+        run: |
+          set -euo pipefail
+          go install sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION}
+
+      - name: Install helm-docs (pinned)
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xzf - helm-docs
+          sudo mv helm-docs /usr/local/bin/
+
+      - name: Create version-bump branch
+        id: branch
+        working-directory: main-checkout
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          BRANCH="chore/bump-version-to-${VERSION}"
+          git checkout -b "$BRANCH"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve scope flags
+        id: flags
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_POST: ${{ steps.tag.outputs.is_post }}
+          UPDATE_CORE: ${{ inputs.update_core }}
+          UPDATE_CONTAINERS: ${{ inputs.update_containers }}
+          UPDATE_HELM: ${{ inputs.update_helm }}
+          UPDATE_DOCS: ${{ inputs.update_docs }}
+        run: |
+          set -euo pipefail
+
+          # Default per event type:
+          #   workflow_dispatch  -> honour the checkbox inputs
+          #   release (full)     -> all scopes enabled
+          #   release (post)     -> minimal: core + helm only (no image-tag churn)
+          CORE=true; CONTAINERS=true; HELM=true; DOCS=true
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            CORE="$UPDATE_CORE"
+            CONTAINERS="$UPDATE_CONTAINERS"
+            HELM="$UPDATE_HELM"
+            DOCS="$UPDATE_DOCS"
+          elif [ "$IS_POST" = "true" ]; then
+            # Minimal post-release bump: bump declared versions but leave docs
+            # and image-tag text alone since post-releases re-use the same
+            # images with different dynamo wheels.
+            CONTAINERS=false
+            DOCS=false
+          fi
+
+          FLAGS=""
+          [ "$CORE" = "true" ]       || FLAGS="$FLAGS --skip-core"
+          [ "$CONTAINERS" = "true" ] || FLAGS="$FLAGS --skip-containers"
+          [ "$HELM" = "true" ]       || FLAGS="$FLAGS --skip-helm"
+          [ "$DOCS" = "true" ]       || FLAGS="$FLAGS --skip-docs"
+
+          {
+            echo "skip_flags=$FLAGS"
+            echo "core=$CORE"
+            echo "containers=$CONTAINERS"
+            echo "helm=$HELM"
+            echo "docs=$DOCS"
+          } >> "$GITHUB_OUTPUT"
+          echo "Scope flags: ${FLAGS:-all scopes enabled}"
+
+      - name: Run version bump
+        working-directory: main-checkout
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          VLLM: ${{ steps.metadata.outputs.vllm_version }}
+          SGLANG: ${{ steps.metadata.outputs.sglang_version }}
+          TRTLLM: ${{ steps.metadata.outputs.trtllm_version }}
+          NIXL: ${{ steps.metadata.outputs.nixl_version }}
+          RELEASE_DATE: ${{ steps.metadata.outputs.release_date }}
+          FLAGS: ${{ steps.flags.outputs.skip_flags }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/bump_version.py \
+            --new-version "$VERSION" \
+            --vllm-version "$VLLM" \
+            --sglang-version "$SGLANG" \
+            --trtllm-version "$TRTLLM" \
+            --nixl-version "$NIXL" \
+            --release-date "$RELEASE_DATE" \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            $FLAGS
+
+      - name: Regenerate Cargo.lock
+        if: steps.flags.outputs.core == 'true'
+        working-directory: main-checkout
+        run: cargo update --workspace
+
+      - name: Regenerate CRDs
+        if: steps.flags.outputs.containers == 'true'
+        working-directory: main-checkout/deploy/operator
+        run: |
+          set -euo pipefail
+          make generate
+          make manifests
+
+      - name: Regenerate Helm docs
+        if: steps.flags.outputs.helm == 'true'
+        working-directory: main-checkout/deploy/helm/charts/platform
+        run: helm-docs
+
+      - name: Commit
+        working-directory: main-checkout
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::notice::No changes produced — nothing to commit."
+            echo "no_changes=true" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          printf -v MSG '%s\n' \
+            "Automated version bump from release v${VERSION}." \
+            "" \
+            "Updates are driven by .github/scripts/bump_version.py with scope" \
+            "flags: ${{ steps.flags.outputs.skip_flags || 'all scopes' }}."
+          git commit -s -m "chore: bump version to ${VERSION}" -m "$MSG"
+
+      - name: Push branch
+        if: env.no_changes != 'true'
+        working-directory: main-checkout
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          set -euo pipefail
+          # Replace any stale remote branch from a previous run.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git push origin --delete "$BRANCH"
+          fi
+          git push -u origin "$BRANCH"
+
+      - name: Open PR
+        if: env.no_changes != 'true'
+        working-directory: main-checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          IS_POST: ${{ steps.tag.outputs.is_post }}
+          SKIP_FLAGS: ${{ steps.flags.outputs.skip_flags }}
+          VLLM: ${{ steps.metadata.outputs.vllm_version }}
+          SGLANG: ${{ steps.metadata.outputs.sglang_version }}
+          TRTLLM: ${{ steps.metadata.outputs.trtllm_version }}
+          NIXL: ${{ steps.metadata.outputs.nixl_version }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          set -euo pipefail
+          if [ "$IS_POST" = "true" ]; then
+            TITLE="chore: bump version to ${VERSION} (post-release)"
+          else
+            TITLE="chore: bump version to ${VERSION}"
+          fi
+          printf -v BODY '%s\n' \
+            "## Summary" \
+            "" \
+            "Automated version bump from release \`v${VERSION}\`." \
+            "" \
+            "**Backend versions** (from \`container/context.yaml\` on the release tag):" \
+            "- vLLM: \`${VLLM}\`" \
+            "- SGLang: \`${SGLANG}\`" \
+            "- TRT-LLM: \`${TRTLLM}\`" \
+            "- NIXL: \`${NIXL}\`" \
+            "" \
+            "**Scope flags:** \`${SKIP_FLAGS:-all scopes}\`" \
+            "" \
+            "See the workflow run summary for the per-file / per-rule change table."
+          gh pr create --head "$BRANCH" --base main --title "$TITLE" --body "$BODY" \
+            --label release --label chore

@@ -5,6 +5,17 @@ title: Support Matrix
 subtitle: Hardware, software, and build compatibility for Dynamo
 ---
 
+<!--
+  bump-version: ignore
+  This file contains historical version rows whose backend pins must NOT be
+  rewritten by the broad container-image / pip-pin rules in
+  .github/scripts/bump_version.py. The bump script's specialised
+  update_support_matrix() function reads this file directly (bypassing
+  iter_repo_files), so the marker only suppresses the broad rule sweep
+  while still allowing targeted edits to the "At a Glance" line and the
+  new backend table row.
+-->
+
 **See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support
 
 ## At a Glance

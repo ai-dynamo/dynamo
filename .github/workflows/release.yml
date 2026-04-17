@@ -6,14 +6,43 @@ name: Release Pipeline
 on:
   workflow_dispatch:
     inputs:
-      commit_sha:
-        description: 'Git commit SHA whose post-merge CI images to publish (full 40-char SHA).'
+      action:
+        description: 'Action to perform: release-publish (default) runs RC tag + NGC publish; version-bump runs the version bump script only.'
         required: true
-        type: string
-      rc_number:
-        description: 'RC number (e.g., 0 for rc0). Leave empty to auto-increment.'
+        type: choice
+        options:
+          - release-publish
+          - version-bump
+        default: release-publish
+      commit_sha:
+        description: 'Git commit SHA whose post-merge CI images to publish (full 40-char SHA). Only used with release-publish action.'
         required: false
         type: string
+      rc_number:
+        description: 'RC number (e.g., 0 for rc0). Leave empty to auto-increment. Only used with release-publish action.'
+        required: false
+        type: string
+      # Component scope controls for version-bump action (post-releases)
+      update_core:
+        description: 'Update core version files (pyproject.toml, Cargo.toml, setup.py). Only used with version-bump action.'
+        required: false
+        type: boolean
+        default: true
+      update_containers:
+        description: 'Update container image tags across docs, recipes, examples. Only used with version-bump action.'
+        required: false
+        type: boolean
+        default: true
+      update_helm:
+        description: 'Update Helm Chart.yaml versions. Only used with version-bump action.'
+        required: false
+        type: boolean
+        default: true
+      update_docs:
+        description: 'Update reference docs (support-matrix, feature-matrix, release-artifacts). Only used with version-bump action.'
+        required: false
+        type: boolean
+        default: true
 
 # Note: workflow_dispatch can only be triggered from release/* branches
 # This is enforced in the prepare-release job via branch validation
@@ -26,11 +55,241 @@ env:
 
 jobs:
   # ============================================================================
+  # VERSION BUMP (Phase 1): Bump all version references on the release branch.
+  # Only runs on workflow_dispatch with action=version-bump.
+  # Opens a PR to the release/* branch instead of pushing directly, so the
+  # mechanical changes get a human review before they land.
+  # ============================================================================
+  version-bump:
+    name: Version Bump (Release Branch Prep)
+    if: inputs.action == 'version-bump'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: automated-release
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      YQ_VERSION: '4.52.2'
+      CONTROLLER_GEN_VERSION: 'v0.16.5'
+      HELM_DOCS_VERSION: '1.14.2'
+    steps:
+      - name: Validate branch
+        id: ctx
+        run: |
+          set -euo pipefail
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]]; then
+            echo "::error::version-bump can only run on release/* branches (current: $BRANCH_NAME)"
+            exit 1
+          fi
+          VERSION="${BRANCH_NAME#release/}"
+          # Slug for git branch names: drop '.' in .postN → -post (PR branches can't have dots in sloppy places).
+          SLUG="${VERSION//./-}"
+          {
+            echo "version=$VERSION"
+            echo "branch=$BRANCH_NAME"
+            echo "slug=$SLUG"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION, Branch: $BRANCH_NAME"
+
+      - name: Checkout release branch
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00  # v6.0.0
+        with:
+          go-version-file: deploy/operator/go.mod
+
+      - name: Install tools (yq, controller-gen, helm-docs; all pinned)
+        run: |
+          set -euo pipefail
+          sudo wget -qO /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+          go install sigs.k8s.io/controller-tools/cmd/controller-gen@${CONTROLLER_GEN_VERSION}
+          curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}/helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xzf - helm-docs
+          sudo mv helm-docs /usr/local/bin/
+
+      - name: Extract backend metadata from context.yaml
+        id: metadata
+        run: |
+          set -euo pipefail
+          CTX="container/context.yaml"
+          VLLM_VER=$(yq '.vllm.vllm_ref' "$CTX" | sed 's/^v//')
+          SGLANG_TAG=$(yq '.sglang."cuda12.9".runtime_image_tag // .sglang.runtime_image_tag // ""' "$CTX")
+          SGLANG_VER=$(echo "$SGLANG_TAG" | sed 's/^v//; s/-cu[0-9]*-runtime$//; s/-runtime$//')
+          TRTLLM_WHEEL=$(yq '.trtllm.pip_wheel' "$CTX")
+          TRTLLM_VER=$(echo "$TRTLLM_WHEEL" | sed 's/.*==//')
+          NIXL_VER=$(yq '.dynamo.nixl_ref' "$CTX")
+          RELEASE_DATE=$(date "+%b %d, %Y")
+          {
+            echo "vllm_version=$VLLM_VER"
+            echo "sglang_version=$SGLANG_VER"
+            echo "trtllm_version=$TRTLLM_VER"
+            echo "nixl_version=$NIXL_VER"
+            echo "release_date=$RELEASE_DATE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Backend: vLLM=$VLLM_VER SGLang=$SGLANG_VER TRT-LLM=$TRTLLM_VER NIXL=$NIXL_VER  Released=$RELEASE_DATE"
+
+      - name: Create version-bump branch
+        id: branch
+        env:
+          SLUG: ${{ steps.ctx.outputs.slug }}
+          BASE: ${{ steps.ctx.outputs.branch }}
+        run: |
+          set -euo pipefail
+          BRANCH="chore/bump-version-${SLUG}-on-${BASE##*/}"
+          git checkout -b "$BRANCH"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Build skip flags
+        id: flags
+        env:
+          UPDATE_CORE: ${{ inputs.update_core }}
+          UPDATE_CONTAINERS: ${{ inputs.update_containers }}
+          UPDATE_HELM: ${{ inputs.update_helm }}
+          UPDATE_DOCS: ${{ inputs.update_docs }}
+        run: |
+          set -euo pipefail
+          SKIP_FLAGS=""
+          [ "$UPDATE_CORE" = "false" ]       && SKIP_FLAGS="$SKIP_FLAGS --skip-core" || true
+          [ "$UPDATE_CONTAINERS" = "false" ] && SKIP_FLAGS="$SKIP_FLAGS --skip-containers" || true
+          [ "$UPDATE_HELM" = "false" ]       && SKIP_FLAGS="$SKIP_FLAGS --skip-helm" || true
+          [ "$UPDATE_DOCS" = "false" ]       && SKIP_FLAGS="$SKIP_FLAGS --skip-docs" || true
+          echo "skip_flags=$SKIP_FLAGS" >> "$GITHUB_OUTPUT"
+          echo "Skip flags: ${SKIP_FLAGS:-none (full update)}"
+
+      - name: Run version bump script
+        env:
+          VERSION: ${{ steps.ctx.outputs.version }}
+          VLLM: ${{ steps.metadata.outputs.vllm_version }}
+          SGLANG: ${{ steps.metadata.outputs.sglang_version }}
+          TRTLLM: ${{ steps.metadata.outputs.trtllm_version }}
+          NIXL: ${{ steps.metadata.outputs.nixl_version }}
+          RELEASE_DATE: ${{ steps.metadata.outputs.release_date }}
+          FLAGS: ${{ steps.flags.outputs.skip_flags }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/bump_version.py \
+            --new-version "$VERSION" \
+            --vllm-version "$VLLM" \
+            --sglang-version "$SGLANG" \
+            --trtllm-version "$TRTLLM" \
+            --nixl-version "$NIXL" \
+            --release-date "$RELEASE_DATE" \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            $FLAGS
+
+      - name: Set up Rust
+        if: inputs.update_core != false
+        run: rustup show active-toolchain
+
+      - name: Regenerate Cargo.lock
+        if: inputs.update_core != false
+        run: cargo update --workspace
+
+      - name: Regenerate CRDs
+        # CRDs are generated from Go types under deploy/operator/, so they belong
+        # to the core/operator scope, not container image tags. Gate on
+        # update_core to keep the manifests in sync with operator code changes
+        # even when --skip-containers is set. Mirrors the gating in
+        # release-version-bump.yml.
+        if: inputs.update_core != false
+        working-directory: deploy/operator
+        run: |
+          set -euo pipefail
+          make generate
+          make manifests
+
+      - name: Regenerate Helm docs
+        if: inputs.update_helm != false
+        working-directory: deploy/helm/charts/platform
+        run: helm-docs
+
+      - name: Commit
+        id: commit
+        env:
+          VERSION: ${{ steps.ctx.outputs.version }}
+          FLAGS: ${{ steps.flags.outputs.skip_flags }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "::notice::No changes produced — nothing to commit."
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf -v MSG '%s\n' \
+            "Automated release branch prep for v${VERSION}." \
+            "" \
+            "Scope flags: ${FLAGS:-all scopes}"
+          git commit -s -m "chore: bump version references to ${VERSION}" -m "$MSG"
+
+      - name: Push branch
+        if: steps.commit.outputs.no_changes != 'true'
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git push origin --delete "$BRANCH"
+          fi
+          git push -u origin "$BRANCH"
+
+      - name: Open PR into release branch
+        if: steps.commit.outputs.no_changes != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ctx.outputs.version }}
+          BASE: ${{ steps.ctx.outputs.branch }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          FLAGS: ${{ steps.flags.outputs.skip_flags }}
+          VLLM: ${{ steps.metadata.outputs.vllm_version }}
+          SGLANG: ${{ steps.metadata.outputs.sglang_version }}
+          TRTLLM: ${{ steps.metadata.outputs.trtllm_version }}
+          NIXL: ${{ steps.metadata.outputs.nixl_version }}
+        run: |
+          set -euo pipefail
+          printf -v BODY '%s\n' \
+            "## Summary" \
+            "" \
+            "Automated Phase 1 version bump for release \`v${VERSION}\`." \
+            "Targets the release branch \`${BASE}\` — merge here kicks off the RC publish flow." \
+            "" \
+            "**Backend versions** (from \`container/context.yaml\`):" \
+            "- vLLM: \`${VLLM}\`" \
+            "- SGLang: \`${SGLANG}\`" \
+            "- TRT-LLM: \`${TRTLLM}\`" \
+            "- NIXL: \`${NIXL}\`" \
+            "" \
+            "**Scope flags:** \`${FLAGS:-all scopes}\`" \
+            "" \
+            "See the workflow run summary for the per-file / per-rule change table."
+          gh pr create \
+            --base "$BASE" \
+            --head "$BRANCH" \
+            --title "chore: bump version references to ${VERSION}" \
+            --body "$BODY" \
+            --label release --label chore
+
+  # ============================================================================
   # GATE: Version Extraction
   # ============================================================================
 
   prepare-release:
     name: Prepare Release
+    if: inputs.action != 'version-bump'
     runs-on: prod-default-small-v2
     outputs:
       version: ${{ steps.extract.outputs.version }}

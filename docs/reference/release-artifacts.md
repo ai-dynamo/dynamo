@@ -4,6 +4,17 @@
 title: Release Artifacts
 ---
 
+<!--
+  bump-version: ignore
+  This file contains historical release rows whose versions must NOT be
+  rewritten by the broad container-image / pip-pin rules in
+  .github/scripts/bump_version.py. The bump script's specialised
+  update_release_artifacts() function reads this file directly (bypassing
+  iter_repo_files), so the marker only suppresses the broad rule sweep
+  while still allowing targeted edits to the "Current Release" section
+  and the new GitHub Releases table row.
+-->
+
 This document provides a comprehensive inventory of all Dynamo release artifacts including container images, Python wheels, Helm charts, and Rust crates.
 
 > **See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](feature-matrix.md) for backend feature support
