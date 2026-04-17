@@ -139,6 +139,18 @@ class OmniStageWorker:
                     prompt=tokens_prompt,
                     params=params,
                 )
+                # Pre-built EngineCoreRequests skip the output processor
+                # registration in _build_add_request_message.  Register
+                # manually so that the engine's output processor can
+                # match the response back to this request.
+                prompt.external_req_id = prompt.request_id
+                self.engine.engine.output_processors[0].add_request(
+                    request=prompt,
+                    prompt=None,
+                    parent_req=None,
+                    request_index=0,
+                    queue=None,
+                )
         elif req.request_id is not None:
             # Stage 0 via router: raw request forwarded with request_id — parse it.
             parsed = parse_omni_request(
@@ -172,7 +184,7 @@ class OmniStageWorker:
 
         try:
             async for chunk in self.engine.generate(
-                prompt, request_id, sampling_params_list=sp
+                prompt, request_id=request_id, sampling_params_list=sp
             ):
                 last_result = chunk
         except Exception as e:
