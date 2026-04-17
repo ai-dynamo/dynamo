@@ -96,7 +96,7 @@ pub enum InputOutputMessageContent {
 /// `id`/`status`.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct InputOutputMessage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
     pub content: Vec<InputOutputMessageContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -153,6 +153,11 @@ pub enum Item {
     ShellCallOutput(FunctionShellCallOutputItemParam),
     ApplyPatchCall(ApplyPatchToolCallItemParam),
     ApplyPatchCallOutput(ApplyPatchToolCallOutputItemParam),
+    McpListTools(MCPListTools),
+    McpApprovalRequest(MCPApprovalRequest),
+    McpApprovalResponse(MCPApprovalResponse),
+    McpCall(MCPToolCall),
+    CustomToolCallOutput(CustomToolCallOutput),
     CustomToolCall(CustomToolCall),
 }
 
@@ -285,6 +290,40 @@ mod tests {
             }
             other => panic!("expected Item::Message(Output), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn assistant_message_with_explicit_null_content_deserializes() {
+        // Mirrors the `annotations: null` case: some serializers emit JSON null
+        // for absent fields instead of omitting them. `Vec::deserialize` rejects
+        // null, so `content` also needs `deserialize_null_as_empty_vec`.
+        let json = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": null
+        });
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        match item {
+            InputItem::Item(Item::Message(MessageItem::Output(out))) => {
+                assert!(out.content.is_empty());
+            }
+            other => panic!("expected Item::Message(Output), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_call_item_deserializes() {
+        // Guards against Item variant drift vs upstream — MCP item types were
+        // added after the initial owned `Item` chain landed.
+        let json = serde_json::json!({
+            "type": "mcp_call",
+            "id": "mcp_1",
+            "server_label": "srv",
+            "name": "t",
+            "arguments": "{}"
+        });
+        let item: InputItem = serde_json::from_value(json).unwrap();
+        assert!(matches!(item, InputItem::Item(Item::McpCall(_))));
     }
 
     #[test]
