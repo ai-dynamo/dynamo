@@ -1480,6 +1480,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         embedding_sequence_length = None
 
         if "prompt_embeds" in request and request["prompt_embeds"]:
+            if not self.config.engine_args.enable_prompt_embeds:
+                msg = (
+                    "Set `--enable-prompt-embeds` to allow `prompt_embeds` in request."
+                )
+                logger.error(
+                    f"Rejected prompt_embeds for {log_prefix.lower().strip() or 'request'} "
+                    f"{request_id}: {msg}"
+                )
+                return (
+                    None,
+                    None,
+                    {
+                        "finish_reason": f"error: Invalid prompt_embeds: {msg}",
+                        "token_ids": [],
+                    },
+                )
             try:
                 (
                     prompt,
