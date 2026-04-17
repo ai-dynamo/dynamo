@@ -5,8 +5,10 @@ use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::{
     component::{
-        Client, DeviceType, Endpoint, RoutingOccupancyState, get_or_create_routing_occupancy_state,
+        Client, DeviceType, Endpoint, Instance, RoutingOccupancyState,
+        get_or_create_routing_occupancy_state,
     },
+    discovery::EndpointInstanceId,
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::STAGE_DURATION_SECONDS,
@@ -14,7 +16,7 @@ use crate::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
     },
-    protocols::maybe_error::MaybeError,
+    protocols::{EndpointId, maybe_error::MaybeError},
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
@@ -256,6 +258,130 @@ fn device_aware_candidate_group(
     }
 }
 
+/// Per-endpoint guard: ensures at most one `list_and_watch` control-plane
+/// connection is opened per endpoint, regardless of how many `PushRouter`
+/// instances are created for it.  The entry is removed when the watcher
+/// task exits (cancel_token fired or discovery stream closed) so that a
+/// subsequent router creation can re-arm the watcher.
+static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
+    std::sync::OnceLock::new();
+
+/// Background task that watches the discovery plane for instance removals and
+/// cancels all pending response-stream registrations for removed instances.
+///
+/// This is the core fix for the postmortem: when a worker is killed while
+/// requests are queued (ACK'd but not yet picked up), the oneshot senders
+/// are dropped, unblocking waiting frontends with a migratable `Disconnected`
+/// error.
+///
+/// Uses the raw `list_and_watch` discovery stream (not a coalesced snapshot
+/// diff) so that a rapid remove→re-add of the same Kubernetes pod — which
+/// keeps the same hash-stable instance_id — is never silently swallowed.
+///
+/// Cancellation is keyed by the full `EndpointInstanceId` (namespace +
+/// component + endpoint + instance_id) to prevent services from different
+/// namespaces/components that happen to share an endpoint name and
+/// pod-backed instance_id from cancelling each other's pending streams.
+fn spawn_instance_removal_watcher(
+    endpoint: Endpoint,
+    addressed: Arc<AddressedPushRouter>,
+    cancel_token: tokio_util::sync::CancellationToken,
+) {
+    use crate::discovery::{
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+    };
+    use tokio_stream::StreamExt as _;
+
+    // One watcher per endpoint: if one is already running, skip.
+    let guard = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+    let endpoint_id = endpoint.id();
+    if guard.insert(endpoint_id.clone(), ()).is_some() {
+        tracing::debug!(
+            ?endpoint_id,
+            "Instance removal watcher already running for this endpoint, skipping"
+        );
+        return;
+    }
+
+    let endpoint_name = endpoint.name().to_string();
+
+    tokio::spawn(async move {
+        let namespace = endpoint.component().namespace().name();
+        let component = endpoint.component().name().to_string();
+        let query = DiscoveryQuery::Endpoint {
+            namespace,
+            component,
+            endpoint: endpoint_name.clone(),
+        };
+
+        let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(
+                    endpoint = %endpoint_name,
+                    "Failed to start instance removal watcher: {e}"
+                );
+                guard.remove(&endpoint_id);
+                return;
+            }
+        };
+
+        loop {
+            tokio::select! {
+                event = stream.next() => {
+                    match event {
+                        Some(Ok(DiscoveryEvent::Removed(id))) => {
+                            // Only act on endpoint-type removals; pass the
+                            // full EndpointInstanceId so cancellation is
+                            // scoped to exactly one service identity.
+                            if let DiscoveryInstanceId::Endpoint(eid) = &id {
+                                let n = addressed.cancel_instance_streams(eid).await;
+                                if n > 0 {
+                                    tracing::warn!(
+                                        namespace = %eid.namespace,
+                                        component = %eid.component,
+                                        endpoint = %eid.endpoint,
+                                        instance_id = eid.instance_id,
+                                        cancelled = n,
+                                        "Cancelled pending response streams for removed \
+                                         instance (discovery-driven cleanup)"
+                                    );
+                                }
+                            }
+                        }
+                        Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
+                            // Clear tombstone so new requests for this identity are
+                            // tracked normally after a pod restart.
+                            let eid: EndpointInstanceId = inst.endpoint_instance_id();
+                            addressed.clear_instance_tombstone(&eid).await;
+                        }
+                        Some(Ok(_)) => {
+                            // Ignore non-endpoint events (Model, EventChannel).
+                        }
+                        Some(Err(e)) => {
+                            tracing::warn!(
+                                endpoint = %endpoint_name,
+                                "Instance removal watcher stream error: {e}"
+                            );
+                        }
+                        None => {
+                            // Stream ended — discovery plane shut down.
+                            break;
+                        }
+                    }
+                }
+                _ = cancel_token.cancelled() => {
+                    break;
+                }
+            }
+        }
+
+        // Release the guard so the next router creation can re-arm the watcher.
+        guard.remove(&endpoint_id);
+        tracing::debug!(endpoint = %endpoint_name, "Instance removal watcher exiting");
+    });
+}
+
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
     let manager = endpoint.drt().network_manager();
@@ -302,6 +428,16 @@ where
             None
         };
 
+        // Even with fault detection disabled (no report_instance_down on errors),
+        // we still need the discovery-driven watcher to cancel pending response-stream
+        // registrations when workers die. Otherwise the bare .await on the oneshot
+        // receiver hangs forever for queued-but-never-started requests.
+        spawn_instance_removal_watcher(
+            client.endpoint.clone(),
+            addressed.clone(),
+            client.endpoint.drt().primary_token(),
+        );
+
         Ok(PushRouter {
             client,
             addressed,
@@ -339,6 +475,17 @@ where
         } else {
             None
         };
+
+        // Spawn a background task that watches the discovery plane for instance
+        // removals and cancels pending response-stream registrations for removed
+        // instances. This is the primary mechanism for unblocking requests that
+        // were ACK'd on the request plane but never picked up by the worker pool
+        // before the worker was killed.
+        spawn_instance_removal_watcher(
+            client.endpoint.clone(),
+            addressed.clone(),
+            client.endpoint.drt().primary_token(),
+        );
 
         let router = PushRouter {
             client,
@@ -697,7 +844,11 @@ where
         // If the selected instance disappeared between selection and dispatch
         // (e.g. deregistered during scale-down), fall back to another available
         // instance rather than returning a spurious 500.
-        let (address, _transport_kind) = {
+        //
+        // resolve_transport returns (address, transport_kind, Instance) so that
+        // the full Instance (carrying endpoint name + instance_id) can be
+        // threaded through to AddressedRequest for endpoint-scoped cancellation.
+        let (address, _transport_kind, instance) = {
             use crate::component::TransportType;
 
             let resolve_transport = |id: u64| {
@@ -705,31 +856,34 @@ where
                 instances
                     .iter()
                     .find(|i| i.instance_id == id)
-                    .map(|instance| match &instance.transport {
-                        TransportType::Http(http_endpoint) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                http_endpoint = %http_endpoint,
-                                "Using HTTP transport for instance"
-                            );
-                            (http_endpoint.clone(), "transport.http.request")
-                        }
-                        TransportType::Tcp(tcp_endpoint) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                tcp_endpoint = %tcp_endpoint,
-                                "Using TCP transport for instance"
-                            );
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                subject = %subject,
-                                "Using NATS transport for instance"
-                            );
-                            (subject.clone(), "transport.nats.request")
-                        }
+                    .map(|instance| {
+                        let (addr, kind) = match &instance.transport {
+                            TransportType::Http(http_endpoint) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    http_endpoint = %http_endpoint,
+                                    "Using HTTP transport for instance"
+                                );
+                                (http_endpoint.clone(), "transport.http.request")
+                            }
+                            TransportType::Tcp(tcp_endpoint) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    tcp_endpoint = %tcp_endpoint,
+                                    "Using TCP transport for instance"
+                                );
+                                (tcp_endpoint.clone(), "transport.tcp.request")
+                            }
+                            TransportType::Nats(subject) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    subject = %subject,
+                                    "Using NATS transport for instance"
+                                );
+                                (subject.clone(), "transport.nats.request")
+                            }
+                        };
+                        (addr, kind, instance.clone())
                     })
             };
 
@@ -768,7 +922,7 @@ where
             }
         };
 
-        let request = request.map(|req| AddressedRequest::new(req, address));
+        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
             .with_label_values(&["route"])

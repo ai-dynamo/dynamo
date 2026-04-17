@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::component::{
-    self, Component, ComponentBuilder, Endpoint, Instance, Namespace, RoutingOccupancyState,
+    self, Component, ComponentBuilder, Endpoint, EndpointDiscoverySource, Instance, Namespace,
+    RoutingOccupancyState,
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
@@ -36,7 +37,7 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-type InstanceMap = HashMap<Endpoint, Weak<Receiver<Vec<Instance>>>>;
+type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
@@ -66,7 +67,7 @@ pub struct DistributedRuntime {
     // paths in etcd to a minimum.
     component_registry: component::Registry,
 
-    instance_sources: Arc<tokio::sync::Mutex<InstanceMap>>,
+    endpoint_discovery_sources: Arc<tokio::sync::Mutex<EndpointDiscoverySourceMap>>,
     routing_occupancy_states: Arc<tokio::sync::Mutex<RoutingOccupancyMap>>,
 
     // Health Status
@@ -193,7 +194,7 @@ impl DistributedRuntime {
             discovery_client,
             discovery_metadata,
             component_registry,
-            instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
             routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
@@ -423,8 +424,8 @@ impl DistributedRuntime {
         self.runtime.graceful_shutdown_tracker()
     }
 
-    pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
-        self.instance_sources.clone()
+    pub(crate) fn endpoint_discovery_sources(&self) -> Arc<Mutex<EndpointDiscoverySourceMap>> {
+        self.endpoint_discovery_sources.clone()
     }
 
     pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {

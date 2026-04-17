@@ -78,19 +78,66 @@ pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
 /// an awaitable receiver which will the `T` which is either a stream writer for a request stream
 /// or a stream reader for a response stream.
 ///
-/// make this an raii object linked to some stream provider
-/// if the object has not been awaited an the type T unwrapped, the registered stream
-/// on the stream provider will be informed and can clean up a stream that will never
-/// be connected.
-#[derive(Debug)]
+/// RAII cleanup: if this object is dropped without calling [`into_parts()`], the
+/// optional `cleanup_on_drop` closure fires, removing the orphaned registration
+/// from the stream server's internal maps. This prevents HashMap leaks when
+/// a registered stream is never consumed (e.g., early error in the request path).
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
+    cleanup_on_drop: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl<T> std::fmt::Debug for RegisteredStream<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisteredStream")
+            .field("connection_info", &self.connection_info)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> RegisteredStream<T> {
+    pub(crate) fn new(connection_info: ConnectionInfo, stream_provider: StreamProvider<T>) -> Self {
+        Self {
+            connection_info,
+            stream_provider,
+            cleanup_on_drop: None,
+        }
+    }
+
+    pub(crate) fn with_cleanup<F>(mut self, cleanup: F) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.cleanup_on_drop = Some(Box::new(cleanup));
+        self
+    }
+
+    /// Consume the registration, returning the connection info and stream provider.
+    ///
+    /// This **disarms** the RAII cleanup -- the caller takes responsibility for
+    /// cleaning up the registration if the stream provider is never awaited.
     pub fn into_parts(self) -> (ConnectionInfo, StreamProvider<T>) {
-        (self.connection_info, self.stream_provider)
+        // Use ManuallyDrop to prevent Drop from running, then move the fields out.
+        let mut this = std::mem::ManuallyDrop::new(self);
+        this.cleanup_on_drop.take();
+
+        // SAFETY: `ManuallyDrop` prevents `Drop` from running, so moving these
+        // fields out is sound as long as each field is read exactly once.
+        unsafe {
+            (
+                std::ptr::read(&this.connection_info),
+                std::ptr::read(&this.stream_provider),
+            )
+        }
+    }
+}
+
+impl<T> Drop for RegisteredStream<T> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup_on_drop.take() {
+            cleanup();
+        }
     }
 }
 
