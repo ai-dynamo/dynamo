@@ -39,7 +39,7 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
 		pod.Annotations = map[string]string{}
 	}
 	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
-	container := resolveWorkerContainer(&pod.Spec)
+	container := ResolveMainContainer(&pod.Spec)
 	if container == nil {
 		return nil
 	}
@@ -47,15 +47,6 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
 	pod.Namespace = opts.Namespace
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
 	return pod
-}
-
-// resolveWorkerContainer returns the workload container, which is always
-// Containers[0]. GMS sidecars are appended after the workload.
-func resolveWorkerContainer(podSpec *corev1.PodSpec) *corev1.Container {
-	if podSpec == nil || len(podSpec.Containers) == 0 {
-		return nil
-	}
-	return &podSpec.Containers[0]
 }
 
 func PrepareRestorePodSpec(
@@ -105,7 +96,7 @@ func ValidateRestorePodSpec(
 	if podSpec == nil {
 		return fmt.Errorf("pod spec is nil")
 	}
-	container := resolveWorkerContainer(podSpec)
+	container := ResolveMainContainer(podSpec)
 	if container == nil {
 		return fmt.Errorf("restore target must have at least one container")
 	}
@@ -235,17 +226,25 @@ func DiscoverAndResolveStorage(
 	return ResolveCheckpointStorage(checkpointID, artifactVersion, storage)
 }
 
+// PrepareRestorePodSpecForCheckpoint resolves the workload container via
+// ResolveMainContainer (prefers "main", falls back to Containers[0]) and then
+// wires storage and restore semantics onto it. Callers do not pass the
+// container pointer — the function is the single source of truth for which
+// container carries the restore.
 func PrepareRestorePodSpecForCheckpoint(
 	ctx context.Context,
 	reader ctrlclient.Reader,
 	namespace string,
 	podSpec *corev1.PodSpec,
-	container *corev1.Container,
 	checkpointID string,
 	artifactVersion string,
 	seccompProfile string,
 	isCheckpointReady bool,
 ) error {
+	container := ResolveMainContainer(podSpec)
+	if container == nil {
+		return fmt.Errorf("restore target must have at least one container")
+	}
 	storage, err := DiscoverAndResolveStorage(ctx, reader, namespace, checkpointID, artifactVersion)
 	if err != nil {
 		return err

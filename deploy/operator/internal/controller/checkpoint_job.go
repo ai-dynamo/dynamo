@@ -82,10 +82,10 @@ func buildCheckpointJob(
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
-	if len(podTemplate.Spec.Containers) == 0 {
+	mainContainer := snapshotprotocol.ResolveMainContainer(&podTemplate.Spec)
+	if mainContainer == nil {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
-	mainContainer := &podTemplate.Spec.Containers[0]
 	mainContainer.Env = dynamo.MergeEnvs(
 		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
 		mainContainer.Env,
@@ -131,7 +131,7 @@ func buildCheckpointJob(
 		}
 		// Re-acquire pointer: append in EnsureGMSCheckpointJobSidecars may
 		// have reallocated the Containers slice.
-		mainContainer = &podTemplate.Spec.Containers[0]
+		mainContainer = snapshotprotocol.ResolveMainContainer(&podTemplate.Spec)
 	}
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds

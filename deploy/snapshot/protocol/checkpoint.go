@@ -57,10 +57,10 @@ func NewCheckpointJob(podTemplate *corev1.PodTemplateSpec, opts CheckpointJobOpt
 		EnsureLocalhostSeccompProfile(&podTemplate.Spec, opts.SeccompProfile)
 	}
 	if opts.WrapLaunchJob {
-		if len(podTemplate.Spec.Containers) == 0 {
+		container := ResolveMainContainer(&podTemplate.Spec)
+		if container == nil {
 			return nil, fmt.Errorf("checkpoint job requires at least one container")
 		}
-		container := &podTemplate.Spec.Containers[0]
 		if len(container.Command) == 0 {
 			return nil, fmt.Errorf("checkpoint job requires container.command when cuda-checkpoint launch-job wrapping is enabled")
 		}

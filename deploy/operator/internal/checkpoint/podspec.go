@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,19 +35,6 @@ func ApplyRestorePodMetadata(labels map[string]string, annotations map[string]st
 		artifactVersion = checkpointInfo.ArtifactVersion
 	}
 	snapshotprotocol.ApplyRestoreTargetMetadata(labels, annotations, enabled, hash, artifactVersion)
-}
-
-// resolveMainContainer finds the container named "main" in the pod spec.
-// ExtraPodSpec.PodSpec.Containers can inject user containers before the main
-// container (mergo merge happens before main is appended), so index 0 is
-// not guaranteed to be the main container here.
-func resolveMainContainer(podSpec *corev1.PodSpec) *corev1.Container {
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i]
-		}
-	}
-	return nil
 }
 
 func InjectCheckpointIntoPodSpec(
@@ -75,9 +61,9 @@ func InjectCheckpointIntoPodSpec(
 		info.Hash = hash
 	}
 
-	mainContainer := resolveMainContainer(podSpec)
+	mainContainer := snapshotprotocol.ResolveMainContainer(podSpec)
 	if mainContainer == nil {
-		return fmt.Errorf("no container named %q found in pod spec", commonconsts.MainContainerName)
+		return fmt.Errorf("no containers found in pod spec")
 	}
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
@@ -87,7 +73,6 @@ func InjectCheckpointIntoPodSpec(
 		reader,
 		namespace,
 		podSpec,
-		mainContainer,
 		info.Hash,
 		info.ArtifactVersion,
 		snapshotprotocol.DefaultSeccompLocalhostProfile,

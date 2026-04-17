@@ -3,6 +3,7 @@ package consts
 import (
 	"time"
 
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -122,7 +123,10 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 
-	MainContainerName            = "main"
+	// MainContainerName is the conventional name of the workload container.
+	// Source of truth lives in snapshotprotocol so that both the operator and
+	// the snapshot tooling agree on the contract.
+	MainContainerName            = snapshotprotocol.MainContainerName
 	FrontendSidecarContainerName = "sidecar-frontend"
 
 	RestartAnnotation = "nvidia.com/restartAt"
