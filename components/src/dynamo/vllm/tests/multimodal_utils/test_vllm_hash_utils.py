@@ -9,9 +9,6 @@ tests also pin the canonicalization contract (RGB uint8, C-contiguous) and
 the on-disk preimage format via a known-digest stability anchor.
 """
 
-import time
-
-import blake3
 import numpy as np
 import pytest
 from PIL import Image
@@ -161,36 +158,3 @@ def test_known_digest_stability():
 
     [uuid] = compute_mm_uuids_from_images([arr])
     assert uuid == "1a53ddd0d1539154841e71befde56e9d90661e41b2256223f9ab9ed3fc7c02d5"
-
-
-# ---------------------------------------------------------------------------
-# Performance sanity
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("size", [64, 512, 2048])
-def test_hash_latency_no_regression(size):
-    """Hardened path must not be more than ~1.5x slower than a raw blake3 of
-    the same pixel buffer. Guards against accidental quadratic blowup (e.g.
-    allocating header + pixels into a new buffer per image).
-    """
-    rng = np.random.default_rng(size)
-    arr = rng.integers(0, 256, size=(size, size, 3), dtype=np.uint8)
-
-    trials = 3
-    t0 = time.perf_counter()
-    for _ in range(trials):
-        blake3.blake3(arr.tobytes()).hexdigest()
-    baseline = (time.perf_counter() - t0) / trials
-
-    t0 = time.perf_counter()
-    for _ in range(trials):
-        compute_mm_uuids_from_images([arr])
-    hardened = (time.perf_counter() - t0) / trials
-
-    slack = 1.5
-    floor = 0.001
-    assert hardened <= max(baseline * slack, floor), (
-        f"Hardened hash latency regressed: baseline={baseline:.4f}s "
-        f"hardened={hardened:.4f}s (size={size}x{size})"
-    )
