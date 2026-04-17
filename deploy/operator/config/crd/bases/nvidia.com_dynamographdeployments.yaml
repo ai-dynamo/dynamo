@@ -10774,19 +10774,20 @@ spec:
                         type: object
                       failover:
                         description: |-
-                          Failover configures active-passive GPU failover for this service.
-                          When enabled, the main container is cloned into two engine containers
-                          (active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled.
+                          Failover configures GMS (GPU Memory Service) failover for this service.
+                          For intraPod mode: the main container is cloned into two engine containers (active + standby).
+                          For interPod mode: the operator creates a dedicated GMS weight server pod and
+                          multiple engine pods per rank that share GPUs via DRA resource claims.
                         properties:
                           enabled:
-                            description: |-
-                              Enabled activates failover mode. The main container is cloned into two
-                              engine containers (active + standby) sharing GPUs via DRA. The standby
-                              acquires the flock when the active engine fails.
+                            description: Enabled activates failover mode.
                             type: boolean
                           mode:
                             default: intraPod
-                            description: Mode selects the failover deployment topology. Must match gpuMemoryService.mode.
+                            description: |-
+                              Mode selects the failover deployment topology.
+                              intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).
+                              interPod: a dedicated GMS weight server pod + engine pods per rank (requires Grove).
                             enum:
                               - intraPod
                               - interPod
@@ -10794,10 +10795,9 @@ spec:
                           numShadows:
                             default: 1
                             description: |-
-                              NumShadows is the number of shadow (standby) engine containers per rank.
-                              Reserved for future use — the operator currently creates exactly one shadow.
+                              NumShadows is the number of shadow (standby) engine pods/containers per rank.
+                              Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).
                             format: int32
-                            maximum: 1
                             minimum: 1
                             type: integer
                         required:
