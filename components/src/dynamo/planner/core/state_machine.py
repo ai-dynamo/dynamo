@@ -203,6 +203,11 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             )
 
         if tick.run_load_scaling:
+            # In load-only deployments the kv-hit-rate scrape rides on the
+            # load tick, so consume the traffic observation here.  In mixed
+            # mode the throughput branch above already handled it.
+            if not tick.run_throughput_scaling and tick_input.traffic is not None:
+                self._observe_traffic(tick_input.traffic)
             if tick_input.fpm_observations is not None:
                 if not self._is_easy:
                     self._observe_fpm(tick_input.fpm_observations)
@@ -267,16 +272,27 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
         at_s = min(self._next_load_s, self._next_throughput_s)
         is_load = self._next_load_s <= at_s + self._MERGE_TOLERANCE_S
         is_throughput = self._next_throughput_s <= at_s + self._MERGE_TOLERANCE_S
+        # Throughput ticks scrape full traffic over the throughput interval.
+        # In load-only deployments (no throughput tick ever fires) load ticks
+        # carry a kv-hit-rate-only scrape over the load interval so the
+        # planner can still discount prefill work by recent prefix reuse.
+        if is_throughput:
+            need_traffic = True
+            traffic_duration_s = float(self._config.throughput_adjustment_interval)
+        elif is_load and not self._config.enable_throughput_scaling:
+            need_traffic = True
+            traffic_duration_s = float(self._config.load_adjustment_interval)
+        else:
+            need_traffic = False
+            traffic_duration_s = 0.0
         return ScheduledTick(
             at_s=at_s,
             run_load_scaling=is_load,
             run_throughput_scaling=is_throughput,
             need_worker_states=True,
             need_worker_fpm=is_load,
-            need_traffic_metrics=is_throughput,
-            traffic_metrics_duration_s=(
-                self._config.throughput_adjustment_interval if is_throughput else 0.0
-            ),
+            need_traffic_metrics=need_traffic,
+            traffic_metrics_duration_s=traffic_duration_s,
         )
 
     # ------------------------------------------------------------------
@@ -324,12 +340,25 @@ class PlannerStateMachine(LoadScalingMixin, ThroughputScalingMixin):
             logger.info(f"FPM load stats: {len(obs.decode)} decode engines observed")
 
     def _observe_traffic(self, traffic: TrafficObservation) -> None:
-        self._num_req_predictor.add_data_point(traffic.num_req)
-        self._isl_predictor.add_data_point(traffic.isl)
-        self._osl_predictor.add_data_point(traffic.osl)
+        # Throughput-scaling predictors only have a downstream consumer when
+        # throughput scaling is enabled. In load-only mode the traffic scrape
+        # is a kv-hit-rate-only path and num_req/isl/osl arrive as zero
+        # placeholders, so feeding the predictors would just pollute them.
+        if self._config.enable_throughput_scaling:
+            self._num_req_predictor.add_data_point(traffic.num_req)
+            self._isl_predictor.add_data_point(traffic.isl)
+            self._osl_predictor.add_data_point(traffic.osl)
         if traffic.kv_hit_rate is not None and not math.isnan(traffic.kv_hit_rate):
-            self._last_kv_hit_rate = traffic.kv_hit_rate
-            self._kv_hit_rate_predictor.add_data_point(traffic.kv_hit_rate)
+            if self._config.enable_throughput_scaling:
+                # Mixed mode: feed the predictor; ``_last_kv_hit_rate`` will be
+                # overwritten with the predicted value inside
+                # ``_advance_throughput`` so load scaling consumes the smoothed
+                # forecast (not the raw per-window observation).
+                self._kv_hit_rate_predictor.add_data_point(traffic.kv_hit_rate)
+            else:
+                # Load-only mode: there is no predictor path, the load tick
+                # consumes the freshly observed average directly.
+                self._last_kv_hit_rate = traffic.kv_hit_rate
 
     # ------------------------------------------------------------------
     # Budget

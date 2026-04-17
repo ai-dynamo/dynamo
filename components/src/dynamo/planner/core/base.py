@@ -414,7 +414,7 @@ class NativePlannerBase:
         return num_p, num_d, True
 
     async def _collect_traffic(self) -> Optional[TrafficObservation]:
-        """Pull traffic metrics from Prometheus."""
+        """Pull traffic metrics from Prometheus over the throughput interval."""
         num_p, num_d, _ = await self._get_worker_counts_raw()
 
         if self.prometheus_port != 0:
@@ -489,6 +489,41 @@ class NativePlannerBase:
             isl=m.isl,
             osl=m.osl,
             kv_hit_rate=m.kv_hit_rate,
+        )
+
+    async def _collect_kv_hit_rate_observation(
+        self, duration_s: float
+    ) -> Optional[TrafficObservation]:
+        """Pull only the KV hit rate from Prometheus over ``duration_s``.
+
+        Used in load-only deployments: the load tick only needs the hit rate
+        to discount prefill work, so we skip the five other (unused) traffic
+        queries to keep the per-load-tick scrape cheap.
+
+        Returns ``None`` when the router metric is unavailable (e.g.
+        Prometheus source is "frontend"); the state machine treats that as
+        a no-discount fallback.
+        """
+        assert self.model_name is not None
+        if duration_s <= 0:
+            return None
+        interval_str = f"{int(duration_s)}s"
+        hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
+            interval_str, self.model_name
+        )
+        # Mirror the observed value into Metrics so the diagnostics recorder
+        # sees the up-to-date hit rate even on load-only ticks.
+        self._last_metrics.kv_hit_rate = hit_rate
+        hit_rate_str = f"{hit_rate:.3f}" if hit_rate is not None else "n/a"
+        logger.info(f"Observed kv_hit_rate over {interval_str}: {hit_rate_str}")
+        if hit_rate is None:
+            return None
+        return TrafficObservation(
+            duration_s=duration_s,
+            num_req=0.0,
+            isl=0.0,
+            osl=0.0,
+            kv_hit_rate=hit_rate,
         )
 
     def _collect_fpm(self) -> FpmObservations:
@@ -566,7 +601,17 @@ class NativePlannerBase:
         fpm_obs = None
 
         if tick.need_traffic_metrics:
-            traffic = await self._collect_traffic()
+            # Throughput ticks pull the full traffic snapshot over the
+            # throughput interval. Load-only deployments instead piggyback
+            # a cheap kv-hit-rate-only scrape (over the load interval) on
+            # each load tick so the planner can still discount prefill work
+            # by recent prefix reuse.
+            if tick.run_throughput_scaling:
+                traffic = await self._collect_traffic()
+            else:
+                traffic = await self._collect_kv_hit_rate_observation(
+                    tick.traffic_metrics_duration_s
+                )
         if tick.need_worker_states:
             worker_counts = await self._collect_worker_counts()
         if tick.need_worker_fpm:

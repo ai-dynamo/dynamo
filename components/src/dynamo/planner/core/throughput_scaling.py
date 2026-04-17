@@ -33,6 +33,8 @@ class ThroughputScalingMixin:
     _diag_throughput_reason: Optional[str]
     _diag_throughput_reason_prefill: Optional[str]
     _diag_throughput_reason_decode: Optional[str]
+    # Sticky value consumed by the load-scaling path between throughput ticks.
+    _last_kv_hit_rate: Optional[float]
 
     def _advance_throughput(
         self, traffic: TrafficObservation
@@ -52,6 +54,12 @@ class ThroughputScalingMixin:
         demand_rps = next_num_req / traffic.duration_s
 
         predicted_hit_rate = self._predict_kv_hit_rate()
+        # Promote the predicted value to the sticky field so subsequent
+        # load-scaling ticks (between throughput ticks) discount prefill work
+        # using the smoothed forecast rather than the raw last-window
+        # observation.
+        if predicted_hit_rate is not None and not math.isnan(predicted_hit_rate):
+            self._last_kv_hit_rate = predicted_hit_rate
         mode = self._config.mode
 
         if mode == "agg":
