@@ -163,7 +163,68 @@ Worker received onboard complete request_id=XXXX
 - `true` = async load (G2→G1 transfer)
 - `Onboarding completed successfully` = transfer done
 
-## Step 7: Cleanup
+## Step 7: (Optional) Test Intra-Pass Onboarding
+
+The default test uses **inter-pass** onboarding (async G2→G1 transfer between forward passes).
+To test **intra-pass** onboarding (sync layer-by-layer transfer during the forward pass),
+restart the server with `KVBM_ONBOARD_MODE=intra`.
+
+### Stop existing server
+
+```bash
+docker exec kvbm-v2-test bash -c "pkill -9 -f 'dynamo.trtllm'; pkill -9 -f 'dynamo.frontend'"
+```
+
+### Restart with intra-pass mode
+
+```bash
+docker exec -d kvbm-v2-test bash -c "
+export NATS_SERVER=nats://172.17.0.1:4222
+export ETCD_ENDPOINTS=http://172.17.0.1:2379
+export CUDA_VISIBLE_DEVICES=0
+export DYN_KVBM_CPU_CACHE_GB=4
+export DYN_KVBM_NIXL_BACKEND_UCX=true
+export DYN_LOG=debug
+export KVBM_ONBOARD_MODE=intra
+
+python3 -m dynamo.frontend --http-port 8000 2>/dev/null &
+sleep 5
+python3 -m dynamo.trtllm \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
+  --extra-engine-args /tmp/kvbm_v2_test.yaml 2>&1 | tee /tmp/trtllm_intra.log
+"
+```
+
+Wait ~90 seconds. Verify startup shows:
+```
+ConnectorLeader initialized with onboard mode: Intra
+```
+
+### Re-run the 11-request test
+
+Use the same requests from Step 5 (copy the full script).
+
+### Verify intra-pass onboard in logs
+
+```bash
+docker exec kvbm-v2-test bash -c "grep -E 'onboard_mode.*Intra|Intra pass load: [1-9]|Some\(32\), false|intra.*pass.*onboard' /tmp/trtllm_intra.log"
+```
+
+Expected differences from inter-pass:
+
+| | Inter-pass | Intra-pass |
+|---|---|---|
+| Onboard mode | `onboard mode: Inter` | `onboard mode: Intra` |
+| `get_num_new_matched_tokens` return | `(Some(32), true)` | `(Some(32), false)` |
+| Metadata | `Intra pass load: 0` | `Intra pass load: N` (non-zero) |
+| Transfer timing | Between forward passes (async) | During forward pass, per-layer (sync) |
+
+- `false` in `(Some(32), false)` means intra-pass — KV data loaded layer-by-layer during the forward pass
+- `Intra pass load: N` in metadata summary means N blocks queued for intra-pass H2D transfer
+- `start_load_kv` triggers the per-layer DMA, `wait_for_layer_load` synchronizes before attention
+
+## Step 8: Cleanup
 
 ```bash
 docker stop kvbm-v2-test && docker rm kvbm-v2-test
@@ -172,6 +233,8 @@ cd /home/oandreeva/Code/dynamo && docker compose -f deploy/docker-compose.yml do
 
 ## Pass Criteria
 
+### Inter-pass (default)
+
 | Check | Expected |
 |-------|----------|
 | All 11 requests return valid responses | prompt=31-39, completion=3 |
@@ -179,6 +242,16 @@ cd /home/oandreeva/Code/dynamo && docker compose -f deploy/docker-compose.yml do
 | 11th request gets G2 cache hit | `Some(32), true)` in logs |
 | Onboard completes | `Onboarding completed successfully` |
 | No `Sampling failed` errors | `grep 'Sampling failed' /tmp/trtllm.log` returns nothing |
+
+### Intra-pass (optional)
+
+| Check | Expected |
+|-------|----------|
+| Onboard mode is intra | `onboard mode: Intra` in startup logs |
+| All 11 requests return valid responses | prompt=31-39, completion=3 |
+| 11th request gets G2 cache hit (sync) | `Some(32), false)` in logs |
+| Metadata has intra-pass load | `Intra pass load: N` with N > 0 |
+| No `Sampling failed` errors | `grep 'Sampling failed' /tmp/trtllm_intra.log` returns nothing |
 
 ## Troubleshooting
 
