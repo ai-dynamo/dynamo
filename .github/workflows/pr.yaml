@@ -268,23 +268,6 @@ jobs:
       gpu_test_timeout_minutes: 45
     secrets: inherit
 
-  vllm-gms-test:
-    name: vllm-gms
-    needs: [changed-files, vllm-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: vllm
-      test_type: GMS Test
-      amd_runner: prod-tester-amd-gpu-v1
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]'
-      run_cpu_only_tests: false
-      gpu_test_markers: nightly and fault_tolerance and vllm and gpu_1
-      gpu_test_timeout_minutes: 60
-    secrets: inherit
-
   vllm-multi-gpu-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
@@ -317,23 +300,6 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
       gpu_test_markers: pre_merge and sglang and gpu_1
-    secrets: inherit
-
-  sglang-gms-test:
-    name: sglang-gms
-    needs: [changed-files, sglang-build]
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      test_suite_name: sglang
-      test_type: GMS Test
-      amd_runner: prod-tester-amd-gpu-v1
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]'
-      run_cpu_only_tests: false
-      gpu_test_markers: nightly and fault_tolerance and sglang and gpu_1
-      gpu_test_timeout_minutes: 60
     secrets: inherit
 
   sglang-multi-gpu-test:
