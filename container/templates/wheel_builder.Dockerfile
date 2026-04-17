@@ -252,17 +252,11 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Point the AWS SDK credential chain at the BuildKit secret file that each
-# AWS-consuming RUN mounts below. Keeping creds in a file (not env vars)
-# prevents tools like ffmpeg's ./configure from dumping them into build logs
-# (e.g. ffbuild/config.log). Scoped to this stage; not inherited by runtime
-# images (they FROM a different base).
-ENV AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials
-
 # Always build FFmpeg so libs are available for Rust checks in CI
 # Do not delete the source tarball for legal reasons
 ARG FFMPEG_VERSION
 RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,mode=0400,uid=0,gid=0 \
+    export AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
@@ -304,6 +298,7 @@ RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,m
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,mode=0400,uid=0,gid=0 \
+    export AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
@@ -369,6 +364,7 @@ RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,m
 {% if device == "cuda" %}
 ARG NIXL_LIBFABRIC_REF
 RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,mode=0400,uid=0,gid=0 \
+    export AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
@@ -400,6 +396,7 @@ RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,m
 # Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
 ARG AWS_SDK_CPP_VERSION=1.11.760
 RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,mode=0400,uid=0,gid=0 \
+    export AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env cmake); \
@@ -444,6 +441,7 @@ RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,m
     --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/root/.cache/uv \
+    export AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
     if [ "$USE_SCCACHE" = "true" ]; then \
@@ -508,6 +506,7 @@ ARG CUDA_MAJOR
 {% endif %}
 
 RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,mode=0400,uid=0,gid=0 \
+    export AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
@@ -566,6 +565,7 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,mode=0400,uid=0,gid=0 \
     --mount=type=cache,target=/root/.cache/uv \
+    export AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}}" && \
     if [ "$USE_SCCACHE" = "true" ]; then \
@@ -587,6 +587,7 @@ RUN --mount=type=secret,id=aws-credentials,target=/run/secrets/aws-credentials,m
     --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/root/.cache/uv \
+    export AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws-credentials && \
     export UV_CACHE_DIR=/root/.cache/uv && \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${TARGETARCH}} && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
