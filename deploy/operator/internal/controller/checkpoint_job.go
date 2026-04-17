@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -107,7 +106,6 @@ func buildCheckpointJob(
 	mainContainer.LivenessProbe = nil
 	mainContainer.StartupProbe = nil
 
-	// The snapshot agent sends SIGUSR1 to PID 1 of the main container after
 	checkpoint.EnsurePodInfoMount(mainContainer)
 	dynamo.ApplySharedMemoryVolumeAndMount(&podTemplate.Spec, mainContainer, ckpt.Spec.Job.SharedMemory)
 
@@ -152,16 +150,6 @@ func buildCheckpointJob(
 		pp = 1
 	}
 	wrapLaunchJob := tp*pp > 1
-
-	// For single-GPU jobs (no cuda-checkpoint wrapper), unwrap /bin/sh -c so
-	// the actual process is PID 1 and receives SIGUSR1 from the snapshot agent.
-	if !wrapLaunchJob && len(mainContainer.Command) >= 2 &&
-		mainContainer.Command[len(mainContainer.Command)-1] == "-c" &&
-		len(mainContainer.Args) == 1 {
-		parts := strings.Fields(mainContainer.Args[0])
-		mainContainer.Command = parts[:1]
-		mainContainer.Args = parts[1:]
-	}
 
 	ttlSecondsAfterFinish := snapshotprotocol.DefaultCheckpointJobTTLSeconds
 
