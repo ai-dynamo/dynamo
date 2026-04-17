@@ -246,6 +246,12 @@ pub struct HttpServiceConfig {
     #[builder(default = "false")]
     enable_anthropic_endpoints: bool,
 
+    /// When true, expose the RL admin routes at `/v1/rl/*` (pause, resume,
+    /// update_weights, weight_version, ready). Worker system URLs are read
+    /// from `DYN_RL_WORKER_SYSTEM_URLS` (comma-separated, default `http://localhost:8081`).
+    #[builder(default = "false")]
+    enable_rl: bool,
+
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
@@ -518,7 +524,7 @@ impl HttpServiceConfigBuilder {
         };
 
         // System routes (health, metrics, models) — debug-level spans
-        let system_routes = vec![
+        let mut system_routes = vec![
             metrics::router(
                 registry,
                 var(HTTP_SVC_METRICS_PATH_ENV).ok(),
@@ -530,6 +536,11 @@ impl HttpServiceConfigBuilder {
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
             super::busy_threshold::busy_threshold_router(state.clone(), None),
         ];
+        // RL admin routes: enabled when builder flag is set OR when DYN_ENABLE_RL env var is truthy.
+        if config.enable_rl || env_is_truthy("DYN_ENABLE_RL") {
+            tracing::info!("RL admin routes enabled at /v1/rl/*");
+            system_routes.push(super::openai::rl_router());
+        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
             system_router = system_router.merge(route);

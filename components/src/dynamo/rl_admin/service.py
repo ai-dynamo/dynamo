@@ -84,7 +84,7 @@ async def _tokenize_via_frontend(messages: list[dict], model: str = "") -> list[
     body: dict = {"messages": messages, "add_generation_prompt": True}
     if model:
         body["model"] = model
-    resp = await client.post(f"{DYNAMO_FRONTEND_URL}/tokenize", json=body)
+    resp = await client.post(f"{DYNAMO_FRONTEND_URL}/v1/tokenize", json=body)
     resp.raise_for_status()
     return resp.json()["tokens"]
 
@@ -227,17 +227,17 @@ async def tokenize(request: Request):
     """Proxy to Dynamo Rust frontend /tokenize (same tokenizer as inference)."""
     client = _get_http_client()
     body = await request.json()
-    resp = await client.post(f"{DYNAMO_FRONTEND_URL}/tokenize", json=body)
+    resp = await client.post(f"{DYNAMO_FRONTEND_URL}/v1/tokenize", json=body)
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
 @app.post("/detokenize")
 @app.post("/v1/detokenize")
 async def detokenize(request: Request):
-    """Proxy to Dynamo Rust frontend /detokenize."""
+    """Proxy to Dynamo Rust frontend /v1/detokenize."""
     client = _get_http_client()
     body = await request.json()
-    resp = await client.post(f"{DYNAMO_FRONTEND_URL}/detokenize", json=body)
+    resp = await client.post(f"{DYNAMO_FRONTEND_URL}/v1/detokenize", json=body)
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
