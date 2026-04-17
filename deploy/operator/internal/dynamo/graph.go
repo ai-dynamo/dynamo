@@ -40,7 +40,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -1164,6 +1163,18 @@ func GenerateBasePodSpec(
 
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemory)
+
+	// Wire GMS into the main container while we still hold it locally, before
+	// it lands in podSpec.Containers. This avoids needing to search the slice
+	// for the "main" container after the fact, and keeps graph.go decoupled
+	// from snapshot-protocol naming conventions.
+	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
+		if err := dra.ApplyClaim(&podSpec, &container, claimTemplateName); err != nil {
+			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
+		}
+		gms.EnsureServerSidecar(&podSpec, &container)
+	}
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
@@ -1183,19 +1194,6 @@ func GenerateBasePodSpec(
 				resolveImagePullSecrets(secretsRetriever, namespace, component.FrontendSidecar.Image),
 			)
 		}
-	}
-
-	// GMS: replace nvidia.com/gpu with a shared DRA claim and add the server sidecar.
-	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
-		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
-		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
-			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
-		}
-		mainContainer := snapshotprotocol.ResolveMainContainer(&podSpec)
-		if mainContainer == nil {
-			return nil, fmt.Errorf("cannot wire GMS: pod spec has no containers")
-		}
-		gms.EnsureServerSidecar(&podSpec, mainContainer)
 	}
 
 	// Clone main container into two engine containers (active + standby) for failover.

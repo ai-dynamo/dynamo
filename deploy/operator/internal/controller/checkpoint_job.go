@@ -113,7 +113,7 @@ func buildCheckpointJob(
 
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
 		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
-		if err := dra.ApplyClaim(&podTemplate.Spec, claimTemplateName); err != nil {
+		if err := dra.ApplyClaim(&podTemplate.Spec, mainContainer, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS checkpoint: %w", err)
 		}
 		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
