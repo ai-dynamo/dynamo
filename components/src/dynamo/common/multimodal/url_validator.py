@@ -7,13 +7,18 @@
 #
 # http://www.apache.org/licenses/LICENSE-2.0
 
-"""URL validation and SSRF-safe fetching for multimodal loaders.
+"""Policy helpers for multimodal media URLs and SSRF-safe remote fetching.
 
 Secure defaults
 ---------------
-Out of the box (``UrlValidationPolicy()``), only HTTPS and ``data:`` URLs
-are accepted.  Private / internal IPs and local filesystem access are both
-blocked.
+Out of the box (``UrlValidationPolicy()``), this module permits only
+``https://`` and ``data:`` inputs. Private / internal IPs and local
+filesystem access are both blocked.
+
+Some callers may enforce stricter rules on top of this policy. For example,
+``ImageLoader`` currently rejects local file inputs before calling these
+helpers, even though this module can validate local paths for other loaders
+when explicitly configured.
 
 To loosen restrictions, pass a custom ``UrlValidationPolicy(...)`` directly,
 or let ``UrlValidationPolicy.from_env()`` read the ``DYN_MM_*`` variables
@@ -26,8 +31,9 @@ Environment variables
     on-prem or local-dev environments where media is served from an
     internal network.  Do **not** set in public-facing deployments.
 ``DYN_MM_LOCAL_PATH`` (absolute directory path)
-    Allow ``file://`` and bare filesystem paths, but only within this
-    directory prefix.  Default empty = local filesystem access is rejected.
+    Allow callers that opt into local-path handling to validate ``file://``
+    and bare filesystem paths within this directory prefix. Default empty =
+    local filesystem access is rejected by this module.
 """
 
 import ipaddress
@@ -222,7 +228,8 @@ def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
 
     Bare filesystem paths and ``file://`` URIs are checked against the local-
     path prefix and returned as a ``file://`` URI.  All other schemes pass
-    through :func:`validate_url` and are returned unchanged.
+    through :func:`validate_url` and are returned unchanged. Callers may still
+    choose to reject normalized local paths after validation.
 
     Raises :class:`UrlValidationError` on any policy violation.
     """

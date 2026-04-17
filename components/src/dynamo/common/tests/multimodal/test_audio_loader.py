@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import numpy as np
 import pytest
 
@@ -97,6 +98,30 @@ async def test_load_audio_rejects_http_by_default():
 
     with pytest.raises(ValueError, match="not allowed"):
         await loader.load_audio("http://example.com/x.wav")
+
+
+@pytest.mark.asyncio
+async def test_load_audio_blocks_redirect_to_private_ip():
+    """A 302 to a blocked IP must be rejected per-hop, not only the initial URL."""
+    loader = AudioLoader(url_policy=UrlValidationPolicy())
+
+    redirect = MagicMock(spec=httpx.Response)
+    redirect.status_code = 302
+    redirect.is_redirect = True
+    redirect.headers = {"location": "https://169.254.169.254/evil"}
+    redirect.url = httpx.URL("https://8.8.8.8/a.wav")
+    redirect.aclose = AsyncMock()
+
+    client = MagicMock(spec=httpx.AsyncClient)
+    client.build_request = MagicMock(return_value=MagicMock(spec=httpx.Request))
+    client.send = AsyncMock(return_value=redirect)
+
+    with patch(
+        "dynamo.common.multimodal.audio_loader.get_http_client",
+        return_value=client,
+    ):
+        with pytest.raises(ValueError, match="blocked range"):
+            await loader.load_audio("https://8.8.8.8/a.wav")
 
 
 @pytest.mark.asyncio

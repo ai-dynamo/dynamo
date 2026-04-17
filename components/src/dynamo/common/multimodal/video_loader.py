@@ -17,12 +17,15 @@ import asyncio
 import logging
 import os
 from typing import Any, Awaitable, Dict, Final, List
+from urllib.parse import urlparse
 
 import numpy as np
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.multimodal.http_client import get_http_client
 from dynamo.common.multimodal.url_validator import (
     UrlValidationPolicy,
+    fetch_with_revalidation,
     validate_media_url,
 )
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
@@ -89,14 +92,23 @@ class VideoLoader:
     async def _load_video_with_vllm(
         self, video_url: str
     ) -> tuple[np.ndarray, Dict[str, Any]]:
-        connector = self._get_vllm_media_connector()
         normalized_url = validate_media_url(video_url, self._url_policy)
-        # TODO: Add caching for repeated remote `video_url` downloads to avoid
-        # refetching the same asset across requests.
+        media_io = self._create_vllm_video_io()
+
+        # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is
+        # revalidated; vLLM's own fetcher honors redirects without re-checking.
+        # data: and file:// never touch the network, so vLLM can handle them.
+        if urlparse(normalized_url).scheme in ("http", "https"):
+            http_client = get_http_client(self._http_timeout)
+            response = await fetch_with_revalidation(
+                http_client, normalized_url, self._url_policy
+            )
+            response.raise_for_status()
+            return await asyncio.to_thread(media_io.load_bytes, response.content)
+
+        connector = self._get_vllm_media_connector()
         return await connector.load_from_url_async(
-            normalized_url,
-            self._create_vllm_video_io(),
-            fetch_timeout=self._http_timeout,
+            normalized_url, media_io, fetch_timeout=self._http_timeout
         )
 
     async def load_video(self, video_url: str) -> tuple[np.ndarray, Dict[str, Any]]:
