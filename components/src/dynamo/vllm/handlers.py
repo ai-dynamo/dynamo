@@ -625,6 +625,26 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.error(f"Failed to wake up engine: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def start_profile(self, body: dict) -> dict:
+        """Start profiling on the engine.
+
+        Args:
+            body: Dict with profiling parameters. Supported keys:
+                - profile_prefix (str|None): Optional prefix for profile output files.
+        """
+        profile_prefix = body.get("profile_prefix")
+        await self.engine_client.start_profile(profile_prefix=profile_prefix)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop profiling on the engine.
+
+        Args:
+            body: Unused, but required for handler signature.
+        """
+        await self.engine_client.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
         raise NotImplementedError
