@@ -1161,6 +1161,34 @@ func GenerateBasePodSpec(
 		}
 	}
 
+	// Apply a default preStop hook for frontend components to allow time for endpoint
+	// propagation during rolling updates. Without this, the frontend process begins
+	// shutdown on SIGTERM while proxies (e.g., Kong, NGINX) still route traffic to
+	// the terminating pod, causing 502 errors and mid-stream truncations.
+	// The sleep duration is min(10, gracePeriod/2) to ensure at least half the grace
+	// budget remains for actual graceful shutdown.
+	// Applied here (after all merges) so we use the final TerminationGracePeriodSeconds.
+	// Users can override via extraPodSpec.mainContainer.lifecycle.preStop.
+	// We check PreStop specifically (not just Lifecycle) so that a user-provided
+	// PostStart handler doesn't silently suppress the default PreStop protection.
+	if component.ComponentType == commonconsts.ComponentTypeFrontend &&
+		(container.Lifecycle == nil || container.Lifecycle.PreStop == nil) {
+		gracePeriod := int64(60)
+		if podSpec.TerminationGracePeriodSeconds != nil {
+			gracePeriod = *podSpec.TerminationGracePeriodSeconds
+		}
+		if sleepSeconds := ComputeFrontendPreStopSeconds(gracePeriod); sleepSeconds > 0 {
+			if container.Lifecycle == nil {
+				container.Lifecycle = &corev1.Lifecycle{}
+			}
+			container.Lifecycle.PreStop = &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"sh", "-c", fmt.Sprintf("sleep %d", sleepSeconds)},
+				},
+			}
+		}
+	}
+
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemory)
 	podSpec.Containers = append(podSpec.Containers, container)

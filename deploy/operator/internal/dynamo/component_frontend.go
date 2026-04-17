@@ -84,3 +84,17 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 
 	return container, nil
 }
+
+// maxPreStopSeconds is the upper bound for the frontend preStop sleep duration.
+const maxPreStopSeconds = int64(10)
+
+// ComputeFrontendPreStopSeconds returns the preStop sleep duration for frontend
+// containers based on the pod's TerminationGracePeriodSeconds.
+//
+// The formula min(10, gracePeriod/2) ensures that:
+//   - At least half the grace budget remains for actual graceful shutdown
+//   - The sleep never exceeds 10 seconds (sufficient for endpoint propagation)
+//   - A zero or negative grace period produces 0 (no preStop hook)
+func ComputeFrontendPreStopSeconds(gracePeriodSeconds int64) int64 {
+	return max(0, min(maxPreStopSeconds, gracePeriodSeconds/2))
+}
