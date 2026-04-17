@@ -82,6 +82,9 @@ pub struct ModelWatcher {
     metrics: Arc<Metrics>,
     /// Guards against concurrent pipeline construction for the same (model, namespace).
     registering_worker_sets: DashSet<String>,
+    /// Wakes tasks blocked in `recover_concurrent_registration` when a
+    /// `RegistrationGuard` drops (i.e. a registration completes or panics).
+    registration_notify: Notify,
     /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
     /// can await a racing put before proceeding with cleanup.
     pending_puts: DashMap<String, JoinHandle<()>>,
@@ -121,17 +124,20 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
     }
 }
 
-/// RAII guard that removes a key from a `DashSet` on drop.
+/// RAII guard that removes a key from a `DashSet` on drop and wakes any tasks
+/// waiting for the registration to finish via the shared [`Notify`].
 /// Ensures `registering_worker_sets` is cleaned up even if the registration
 /// task panics, preventing permanent poisoning of the registration key.
 struct RegistrationGuard<'a> {
     set: &'a DashSet<String>,
     key: String,
+    notify: &'a Notify,
 }
 
 impl Drop for RegistrationGuard<'_> {
     fn drop(&mut self) {
         self.set.remove(&self.key);
+        self.notify.notify_waiters();
     }
 }
 
@@ -159,6 +165,7 @@ impl ModelWatcher {
             prefill_load_estimator,
             metrics,
             registering_worker_sets: DashSet::new(),
+            registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
         }
     }
@@ -478,9 +485,11 @@ impl ModelWatcher {
 
         // RAII guard ensures the registration key is removed even if
         // do_worker_set_registration panics, preventing permanent poisoning.
+        // It also wakes any waiters in recover_concurrent_registration.
         let _guard = RegistrationGuard {
             set: &self.registering_worker_sets,
             key: registration_key,
+            notify: &self.registration_notify,
         };
 
         self.do_worker_set_registration(mcid, card).await
@@ -504,10 +513,31 @@ impl ModelWatcher {
         // Wait for the in-flight registration to complete so we can validate
         // the new worker's checksum. Without this, a concurrent worker with a
         // mismatched checksum could sneak past the early check in `watch`.
-        let mut attempts = 0;
-        while self.registering_worker_sets.contains(registration_key) && attempts < 300 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            attempts += 1;
+        //
+        // Uses a Notify + enable() loop instead of polling to wake up
+        // immediately when the RegistrationGuard drops, avoiding up to 100ms
+        // of unnecessary latency and wasted CPU cycles.
+        // An absolute deadline ensures spurious wakeups (from unrelated
+        // registrations sharing the same Notify) cannot extend the wait
+        // beyond 30 seconds.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let notified = self.registration_notify.notified();
+            tokio::pin!(notified);
+            // Register interest in the notification BEFORE checking the
+            // condition to avoid a race where the guard drops between
+            // our check and the .await.
+            notified.as_mut().enable();
+            if !self.registering_worker_sets.contains(registration_key) {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                break;
+            }
         }
 
         // Validate checksum against the registered model
