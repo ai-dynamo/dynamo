@@ -474,7 +474,9 @@ impl ModelWatcher {
                     "Checksum for new worker does not match existing WorkerSet's checksum. \
                      Drain all old workers in this namespace before deploying a new version."
                 );
-                return Ok(());
+                return Err(anyhow::anyhow!(
+                    "Checksum mismatch for worker in namespace {namespace}"
+                ));
             }
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
