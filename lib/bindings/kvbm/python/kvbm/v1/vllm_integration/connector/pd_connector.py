@@ -4,6 +4,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Type
 
 from kvbm.v1.vllm_integration.connector.dynamo_connector import DynamoConnector
+
+try:
+    from kvbm.v2.vllm.schedulers.connector import DynamoConnector as DynamoConnectorV2
+except ImportError:
+    DynamoConnectorV2 = None
+
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorRole,
@@ -78,6 +84,8 @@ class PdConnector(MultiConnector):
 
         # Build allowed types for first connector
         allowed_first_types: list[Type] = [DynamoConnector]
+        if DynamoConnectorV2 is not None:
+            allowed_first_types.append(DynamoConnectorV2)
         if _LMCacheConnectorV1 is not None:
             allowed_first_types.append(_LMCacheConnectorV1)
 
