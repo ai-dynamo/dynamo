@@ -2173,7 +2173,10 @@ async fn detokenize(
         .decode(&request.tokens, false)
         .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to detokenize prompt"))?;
 
-    Ok(Json(DetokenizeResponse { prompt }).into_response())
+    Ok(Json(DetokenizeResponse {
+        prompt: prompt.into(),
+    })
+    .into_response())
 }
 
 pub fn tokenization_router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
