@@ -8,16 +8,122 @@ use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Instrument;
 
-use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId};
+use dynamo_kv_router::protocols::{BlockExtraInfo, WorkerId, WorkerWithDpRank};
 use dynamo_runtime::{pipeline::SingleIn, protocols::maybe_error::MaybeError};
 
+use super::types::{ConditionalPrefillDecisionInput, ConditionalPrefillPolicy};
 use super::{InnerPrefillRouter, PrefillError, PrefillResolveDecision, PrefillRouter};
 use crate::protocols::common::{
     llm_backend::PreprocessedRequest,
     preprocessor::{BootstrapInfo, PrefillResult},
 };
 
+pub(super) struct ConditionalPrefillDecodeDecision {
+    pub worker: WorkerWithDpRank,
+    pub overlap_tokens: usize,
+    pub net_new_tokens: usize,
+}
+
 impl PrefillRouter {
+    pub(super) async fn select_decode_worker_for_conditional_prefill(
+        &self,
+        req: &PreprocessedRequest,
+        request_id: &str,
+    ) -> Result<Option<ConditionalPrefillDecodeDecision>> {
+        if !self.router_mode.is_kv_routing() {
+            return Ok(None);
+        }
+
+        if req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.prefill_worker_id)
+            .is_some()
+        {
+            tracing::debug!(
+                request_id,
+                "Skipping conditional prefill because request has a preselected prefill worker"
+            );
+            return Ok(None);
+        }
+
+        let Some(decode_router) = self.decode_router.as_ref() else {
+            tracing::debug!(
+                request_id,
+                "Skipping conditional prefill because decode router is unavailable"
+            );
+            return Ok(None);
+        };
+
+        let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
+        if routing_token_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let lora_name = req.routing.as_ref().and_then(|r| r.lora_name.clone());
+        let priority_jump = req
+            .routing
+            .as_ref()
+            .and_then(|r| r.priority_jump)
+            .unwrap_or(0.0);
+        let expected_output_tokens = req.routing.as_ref().and_then(|r| r.expected_output_tokens);
+        let allowed_worker_ids = req
+            .routing
+            .as_ref()
+            .and_then(|r| r.allowed_worker_ids.clone());
+        let pinned_worker = req.routing.as_ref().and_then(|routing| {
+            let worker_id = routing.decode_worker_id.or(routing.backend_instance_id)?;
+            let dp_rank = routing
+                .dp_rank
+                .or_else(|| decode_router.unique_dp_rank_for_worker(worker_id))?;
+            Some(WorkerWithDpRank::new(worker_id, dp_rank))
+        });
+
+        let (worker, overlap_blocks) = decode_router
+            .find_best_match(
+                Some(request_id),
+                routing_token_ids,
+                block_mm_infos,
+                req.router_config_override.as_ref(),
+                false,
+                lora_name,
+                priority_jump,
+                expected_output_tokens,
+                pinned_worker,
+                allowed_worker_ids,
+            )
+            .await?;
+
+        let block_size = decode_router.block_size() as usize;
+        let overlap_tokens = overlap_blocks as usize * block_size;
+        let input = ConditionalPrefillDecisionInput {
+            prompt_tokens: routing_token_ids.len(),
+            overlap_tokens,
+        };
+        let net_new_tokens = input.net_new_tokens();
+
+        if self
+            .conditional_prefill_policy
+            .should_bypass_remote_prefill(input)
+        {
+            return Ok(Some(ConditionalPrefillDecodeDecision {
+                worker,
+                overlap_tokens,
+                net_new_tokens,
+            }));
+        }
+
+        tracing::debug!(
+            request_id,
+            worker_id = worker.worker_id,
+            dp_rank = worker.dp_rank,
+            net_new_tokens,
+            overlap_tokens,
+            "Conditional prefill token cap not met"
+        );
+        Ok(None)
+    }
+
     /// Select a prefill worker and resolve its bootstrap connection info.
     /// If preselected_worker is provided (GAIE Stage 2), use it directly.
     /// Otherwise, query for the best worker (KV mode) or select next worker (non-KV modes).

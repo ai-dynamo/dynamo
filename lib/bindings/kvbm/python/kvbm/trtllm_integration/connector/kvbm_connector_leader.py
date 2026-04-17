@@ -12,14 +12,124 @@ from kvbm.trtllm_integration.rust import KvbmRequest
 from kvbm.trtllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from kvbm.trtllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 from kvbm.utils import is_dyn_runtime_enabled, nvtx_annotate
+from tensorrt_llm._torch.pyexecutor import kv_cache_connector
 from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
     KvCacheConnectorScheduler,
     SchedulerOutput,
 )
+from tensorrt_llm._torch.pyexecutor.llm_request import get_draft_token_length
 from tensorrt_llm.bindings.internal.batch_manager import LlmRequest
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 
 logger = logging.getLogger(__name__)
+
+
+def _install_generation_only_connector_shim() -> None:
+    """Let opt-in TRT-LLM connector schedulers handle generation-only requests."""
+    manager_cls = kv_cache_connector.KvCacheConnectorManager
+    if getattr(manager_cls, "_dynamo_kvbm_generation_only_shim", False):
+        return
+
+    original_get_num_new_matched_tokens = manager_cls.get_num_new_matched_tokens
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        if not request.is_generation_only_request:
+            return original_get_num_new_matched_tokens(
+                self, request, num_computed_tokens
+            )
+
+        supports_generation_only_requests = self._run_on_leader(
+            lambda: bool(
+                getattr(self.scheduler, "supports_generation_only_requests", False)
+            )
+        )
+        if not supports_generation_only_requests:
+            raise RuntimeError(
+                "Connector API is not supported for generation-only requests!"
+            )
+
+        num_tokens, load_kv_async = self._run_on_leader(
+            lambda: self.scheduler.get_num_new_matched_tokens(
+                request, num_computed_tokens
+            )
+        )
+
+        if num_tokens == 0 and load_kv_async:
+            raise RuntimeError("load_kv_async must be False when num_tokens is 0!")
+
+        if load_kv_async:
+            self.new_async_requests.loading[request.request_id] = request
+
+        self.scheduler_output_manager.record_new_matched_tokens(request, num_tokens)
+        request.py_num_connector_matched_tokens = num_tokens
+
+        return num_tokens
+
+    manager_cls.get_num_new_matched_tokens = get_num_new_matched_tokens
+    manager_cls._dynamo_kvbm_generation_only_shim = True
+    manager_cls._dynamo_kvbm_generation_only_shim_original = (
+        original_get_num_new_matched_tokens
+    )
+    logger.info("Installed Dynamo KVBM TensorRT-LLM generation-only connector shim.")
+
+
+def _install_speculative_scheduled_token_guard() -> None:
+    """Avoid KVBM offloading speculative draft KV before sampler acceptance."""
+    output_request_cls = getattr(
+        kv_cache_connector, "KvCacheConnectorSchedulerOutputRequest", None
+    )
+    if output_request_cls is None:
+        logger.warning(
+            "TensorRT-LLM KvCacheConnectorSchedulerOutputRequest not found; "
+            "Dynamo KVBM speculative scheduling guard was not installed."
+        )
+        return
+
+    if getattr(output_request_cls, "_dynamo_kvbm_spec_decode_guard", False):
+        return
+
+    original_update_and_build_data = output_request_cls.update_and_build_data
+
+    def update_and_build_data(self, req, kv_cache_manager):
+        data = original_update_and_build_data(self, req, kv_cache_manager)
+        draft_token_length = get_draft_token_length(req)
+        if draft_token_length <= 0 or data.num_scheduled_tokens <= 1:
+            return data
+
+        # WARNING/TODO: conservative speculative-decoding guard.
+        #
+        # TRT-LLM connector metadata is built before the sampler reports how
+        # many Eagle/speculative draft tokens were accepted. TRT-LLM can report
+        # target + draft tokens as scheduled, but rejected drafts are later
+        # rewound. KVBM must not advance/offload against KV that may be
+        # discarded, so clamp speculative decode scheduling to the single
+        # sampled target token that is guaranteed to survive.
+        #
+        # Accepted draft tokens intentionally become visible to KVBM on the
+        # next scheduler iteration through new_tokens/num_computed_tokens, so
+        # offload can lag by a few tokens. The real fix is a post-sampler
+        # connector/KVBM commit path that receives the actual accepted draft
+        # count after sampler acceptance and KV rewind.
+        logger.debug(
+            "Clamping TRT-LLM KVBM speculative scheduled tokens for request %s "
+            "from %s to 1; draft_token_length=%s",
+            data.request_id,
+            data.num_scheduled_tokens,
+            draft_token_length,
+        )
+        data.num_scheduled_tokens = 1
+        return data
+
+    output_request_cls.update_and_build_data = update_and_build_data
+    output_request_cls._dynamo_kvbm_spec_decode_guard = True
+    output_request_cls._dynamo_kvbm_spec_decode_guard_original = (
+        original_update_and_build_data
+    )
+    logger.info("Installed Dynamo KVBM TensorRT-LLM speculative scheduling guard.")
+
+
+_install_generation_only_connector_shim()
+_install_speculative_scheduled_token_guard()
 
 DistributedRuntime = None
 if is_dyn_runtime_enabled():
@@ -27,6 +137,8 @@ if is_dyn_runtime_enabled():
 
 
 class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
+    supports_generation_only_requests = True
+
     def __init__(
         self,
         llm_args: TorchLlmArgs,
@@ -170,6 +282,13 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
             Whether the tokens will be loaded asynchronously.
         """
         self._create_slot(request)
+        if request.is_generation_only_request:
+            logger.debug(
+                "Skipping KVBM prefix matching for generation-only request %s",
+                request.request_id,
+            )
+            return 0, False
+
         return self._connector.get_num_new_matched_tokens(
             str(request.request_id),
             len(request.get_tokens(0)),

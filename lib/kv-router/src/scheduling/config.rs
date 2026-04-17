@@ -20,6 +20,7 @@ const fn default_track_prefill_tokens() -> bool {
 }
 
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
+pub const DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS: usize = 5000;
 
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
@@ -214,6 +215,14 @@ pub struct KvRouterConfig {
     /// overlap scores remotely over the request plane by component + endpoint.
     #[serde(default)]
     pub serve_indexer: bool,
+
+    /// Whether the frontend may skip remote prefill and route directly to a decode worker when
+    /// the decode worker only needs to compute a bounded number of net-new prompt tokens.
+    #[serde(default)]
+    pub conditional_prefill_enabled: bool,
+
+    /// Maximum net-new prompt tokens allowed for conditional local prefill on a decode worker.
+    pub conditional_prefill_max_new_tokens: usize,
 }
 
 impl Default for KvRouterConfig {
@@ -240,6 +249,8 @@ impl Default for KvRouterConfig {
             router_queue_policy: RouterQueuePolicy::default(),
             use_remote_indexer: false,
             serve_indexer: false,
+            conditional_prefill_enabled: false,
+            conditional_prefill_max_new_tokens: DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS,
         }
     }
 }
@@ -416,5 +427,16 @@ mod tests {
         );
 
         assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
+    }
+
+    #[test]
+    fn conditional_prefill_defaults_to_disabled_with_token_cap() {
+        let config = KvRouterConfig::default();
+
+        assert!(!config.conditional_prefill_enabled);
+        assert_eq!(
+            config.conditional_prefill_max_new_tokens,
+            DEFAULT_CONDITIONAL_PREFILL_MAX_NEW_TOKENS
+        );
     }
 }

@@ -784,6 +784,7 @@ pub unsafe extern "C" fn create_routers(
             block_size,
             Some(prefill_config),
             None,
+            None,
             enforce_disagg,
             model_name.clone(),
             actual_namespace.clone(),

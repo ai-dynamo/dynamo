@@ -33,6 +33,9 @@ class FrontendRouterProcess(ManagedProcess):
         router_aic_config: dict[str, str | int] | None = None,
         serve_indexer: bool = False,
         use_remote_indexer: bool = False,
+        use_kv_events: bool = True,
+        conditional_prefill_enabled: bool = False,
+        conditional_prefill_max_new_tokens: int | None = None,
     ):
         command = [
             sys.executable,
@@ -73,6 +76,20 @@ class FrontendRouterProcess(ManagedProcess):
 
         if use_remote_indexer:
             command.append("--use-remote-indexer")
+
+        if not use_kv_events:
+            command.append("--no-router-kv-events")
+
+        if conditional_prefill_enabled:
+            command.append("--router-conditional-prefill")
+
+        if conditional_prefill_max_new_tokens is not None:
+            command.extend(
+                [
+                    "--router-conditional-prefill-max-new-tokens",
+                    str(conditional_prefill_max_new_tokens),
+                ]
+            )
 
         if router_aic_config is not None:
             command.extend(

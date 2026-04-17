@@ -6,7 +6,8 @@ use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, SchedulerMessage, TransferSchedulerClient, WorkerSchedulerClient,
 };
 
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use super::*;
@@ -56,7 +57,8 @@ pub trait Worker: Send + Sync {
     /// Submit offload operations to execute after the CUDA event completes (non-blocking).
     /// Does slot bookkeeping synchronously, then spawns an async task to poll the event
     /// and send operations to the scheduler when complete.
-    fn submit_offload_on_event(&mut self, event: u64) -> anyhow::Result<()>;
+    fn submit_offload_on_event(&mut self, event: u64, iteration: Option<u64>)
+    -> anyhow::Result<()>;
 }
 
 pub struct KvConnectorWorker {
@@ -71,8 +73,8 @@ pub struct KvConnectorWorker {
     /// Map of request id to inflight finished requests
     maybe_finished_offloading: HashSet<String>,
 
-    onboarding_operations: Vec<WorkerTransferRequest>,
-    offloading_operations: Vec<WorkerTransferRequest>,
+    onboarding_operations: VecDeque<StagedOperations>,
+    offloading_operations: VecDeque<StagedOperations>,
 
     bound: bool,
     iteration: u64,
@@ -90,6 +92,12 @@ pub struct KvConnectorWorker {
     /// Owned NCCL communicator; kept alive for worker lifetime, NcclConfig uses borrowed handle.
     #[cfg(feature = "nccl")]
     nccl_comm: Option<Arc<NcclCommOwned>>,
+}
+
+#[derive(Debug)]
+struct StagedOperations {
+    iteration: u64,
+    operations: Vec<WorkerTransferRequest>,
 }
 
 impl KvConnectorWorker {
@@ -146,8 +154,8 @@ impl KvConnectorWorker {
             transfer_client,
             maybe_finished_onboarding: HashSet::new(),
             maybe_finished_offloading: HashSet::new(),
-            onboarding_operations: Vec::new(),
-            offloading_operations: Vec::new(),
+            onboarding_operations: VecDeque::new(),
+            offloading_operations: VecDeque::new(),
             bound: false,
             iteration: 0,
             layers_complete: 0,
@@ -157,6 +165,38 @@ impl KvConnectorWorker {
             #[cfg(feature = "nccl")]
             nccl_comm,
         })
+    }
+
+    fn pop_staged_operations_for_iteration(
+        operations: &mut VecDeque<StagedOperations>,
+        iteration: u64,
+        kind: &'static str,
+    ) -> Option<StagedOperations> {
+        loop {
+            let staged_iteration = operations.front()?.iteration;
+            match staged_iteration.cmp(&iteration) {
+                Ordering::Less => {
+                    let stale = operations.pop_front().expect("front checked above");
+                    tracing::warn!(
+                        kind,
+                        expected_iteration = iteration,
+                        staged_iteration = stale.iteration,
+                        operations = stale.operations.len(),
+                        "dropping stale staged KVBM operations"
+                    );
+                }
+                Ordering::Equal => return operations.pop_front(),
+                Ordering::Greater => {
+                    tracing::debug!(
+                        kind,
+                        expected_iteration = iteration,
+                        staged_iteration,
+                        "no staged KVBM operations for this iteration"
+                    );
+                    return None;
+                }
+            }
+        }
     }
 }
 
@@ -281,8 +321,9 @@ impl Worker for KvConnectorWorker {
 
     fn bind_connector_meta(&mut self, metadata: Vec<u8>) -> anyhow::Result<()> {
         let metadata: ConnectorMetadata = serde_json::from_slice(&metadata)?;
+        let iteration = metadata.iteration;
         self.bound = true;
-        self.iteration = metadata.iteration;
+        self.iteration = iteration;
         self.layers_complete = 0;
         tracing::debug!(
             iteration = self.iteration,
@@ -291,11 +332,7 @@ impl Worker for KvConnectorWorker {
 
         self.connector.start_next_iteration()?;
 
-        debug_assert_eq!(
-            self.connector.iteration(),
-            metadata.iteration,
-            "iteration mismatch"
-        );
+        debug_assert_eq!(self.connector.iteration(), iteration, "iteration mismatch");
 
         // local actions
         // - create a request slot for each new request
@@ -330,25 +367,54 @@ impl Worker for KvConnectorWorker {
             }
         }
 
-        debug_assert!(
-            self.onboarding_operations.is_empty(),
-            "onboarding operations should be empty"
-        );
-        self.onboarding_operations = onboarding_operations;
+        if !self.onboarding_operations.is_empty() && !onboarding_operations.is_empty() {
+            tracing::debug!(
+                pending = self.onboarding_operations.len(),
+                incoming = onboarding_operations.len(),
+                "carrying staged onboarding operations across connector metadata bind"
+            );
+        }
+        if !onboarding_operations.is_empty() {
+            self.onboarding_operations.push_back(StagedOperations {
+                iteration,
+                operations: onboarding_operations,
+            });
+        }
 
-        debug_assert!(
-            self.offloading_operations.is_empty(),
-            "offloading operations should be empty"
-        );
-        self.offloading_operations = offloading_operations;
+        if !self.offloading_operations.is_empty() && !offloading_operations.is_empty() {
+            tracing::debug!(
+                pending = self.offloading_operations.len(),
+                incoming = offloading_operations.len(),
+                "carrying staged offload operations across connector metadata bind"
+            );
+        }
+        if !offloading_operations.is_empty() {
+            self.offloading_operations.push_back(StagedOperations {
+                iteration,
+                operations: offloading_operations,
+            });
+        }
 
         Ok(())
     }
 
     // Assumes the operations are in a valid state for offloading.
     fn execute_offload_operations(&mut self) -> anyhow::Result<()> {
-        let offloading_operations = std::mem::take(&mut self.offloading_operations);
-        for operation in offloading_operations {
+        let iteration = self.iteration;
+        let Some(staged) = Self::pop_staged_operations_for_iteration(
+            &mut self.offloading_operations,
+            iteration,
+            "offload",
+        ) else {
+            return Ok(());
+        };
+
+        tracing::debug!(
+            iteration = staged.iteration,
+            operations = staged.operations.len(),
+            "executing staged offload operations"
+        );
+        for operation in staged.operations {
             self.connector.enqueue_request(operation);
         }
         Ok(())
@@ -369,8 +435,21 @@ impl Worker for KvConnectorWorker {
     }
 
     fn start_load_kv(&mut self) -> anyhow::Result<()> {
-        let onboarding_operations = self.onboarding_operations.clone();
-        for operation in onboarding_operations {
+        let iteration = self.iteration;
+        let Some(staged) = Self::pop_staged_operations_for_iteration(
+            &mut self.onboarding_operations,
+            iteration,
+            "onboard",
+        ) else {
+            return Ok(());
+        };
+
+        tracing::debug!(
+            iteration = staged.iteration,
+            operations = staged.operations.len(),
+            "starting staged onboard operations"
+        );
+        for operation in staged.operations {
             let request_id = operation.request_id.clone();
             self.connector.enqueue_request(operation);
             self.maybe_finished_onboarding.insert(request_id);
@@ -523,8 +602,27 @@ impl Worker for KvConnectorWorker {
         (finished_offloading, finished_onboarding)
     }
 
-    fn submit_offload_on_event(&mut self, event: u64) -> anyhow::Result<()> {
-        let operations = std::mem::take(&mut self.offloading_operations);
+    fn submit_offload_on_event(
+        &mut self,
+        event: u64,
+        iteration: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let iteration = iteration.unwrap_or(self.iteration);
+        let Some(staged) = Self::pop_staged_operations_for_iteration(
+            &mut self.offloading_operations,
+            iteration,
+            "offload",
+        ) else {
+            return Ok(());
+        };
+        let operations = staged.operations;
+        let iteration = staged.iteration;
+
+        tracing::debug!(
+            iteration,
+            operations = operations.len(),
+            "submitting staged offload operations on CUDA event"
+        );
 
         // Bookkeeping done synchronously while we have &mut self
         for op in &operations {
@@ -542,7 +640,7 @@ impl Worker for KvConnectorWorker {
             // Send operations to scheduler
             for op in operations {
                 if let Err(e) = tx.send(SchedulerMessage::EnqueueRequest(op)) {
-                    tracing::error!("Failed to send offload operation: {}", e);
+                    tracing::error!(iteration, "Failed to send offload operation: {}", e);
                 }
             }
         });
@@ -637,9 +735,10 @@ impl PyTrtllmKvConnectorWorker {
             .get_finished(finished_gen_req_ids, started_loading_req_ids)
     }
 
-    pub fn submit_offload_on_event(&mut self, event: u64) -> PyResult<()> {
+    #[pyo3(signature = (event, iteration=None))]
+    pub fn submit_offload_on_event(&mut self, event: u64, iteration: Option<u64>) -> PyResult<()> {
         self.connector_worker
-            .submit_offload_on_event(event)
+            .submit_offload_on_event(event, iteration)
             .map_err(to_pyerr)
     }
 }
