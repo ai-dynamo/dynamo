@@ -200,7 +200,7 @@ jobs:
       framework: dynamo
       target: planner
       cuda_version: '[""]'
-      platform: 'linux/amd64'
+      platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       build_timeout_minutes: 45
       extra_tags: |
