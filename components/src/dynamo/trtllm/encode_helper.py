@@ -209,8 +209,8 @@ class EncodeHelper:
     # Two supported flows:
     #
     # 1. EMBEDDING-PATH FLOW (Pre-computed embeddings via NIXL)
-    #    - User sends URL ending in .pt/.pth/.bin
-    #    - Encode worker loads tensor, creates NIXL readable op
+    #    - User sends URL ending in .safetensors
+    #    - Encode worker loads tensor (via safetensors), creates NIXL readable op
     #    - Prefill worker reads embeddings via RDMA
     #    - Use case: Customer has pre-computed embeddings from custom encoder
     #
@@ -235,7 +235,7 @@ class EncodeHelper:
         for the prefill worker to read via RDMA.
 
         Args:
-            embedding_paths: List of paths to embedding files (.pt/.pth/.bin)
+            embedding_paths: List of paths to embedding files (.safetensors)
             multimodal_processor: Processor to load embeddings
             connector: NIXL connector for RDMA transfer
 
@@ -460,5 +460,5 @@ class EncodeHelper:
         # No valid multimodal content found
         else:
             yield {
-                "error": "No embedding_paths or image_urls found in request, or image_urls without text_prompt or token_ids"
+                "error": "No embedding_paths (.safetensors) or image_urls found in request, or image_urls without text_prompt or token_ids"
             }

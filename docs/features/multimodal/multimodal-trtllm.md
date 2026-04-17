@@ -17,7 +17,7 @@ You can provide multimodal inputs in the following ways:
 | Modality | Input Format | Aggregated | Disaggregated | Notes |
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Full support for all image models |
-| **Image** | Pre-computed Embeddings (.pt, .pth, .bin) | Yes | Yes | Direct embedding files |
+| **Image** | Pre-computed Embeddings (.safetensors) | Yes | Yes | Direct embedding files |
 | **Video** | HTTP/HTTPS URL | No | No | Not implemented |
 | **Audio** | HTTP/HTTPS URL | No | No | Not implemented |
 
@@ -26,7 +26,7 @@ You can provide multimodal inputs in the following ways:
 | Format | Example | Description |
 |--------|---------|-------------|
 | **HTTP/HTTPS** | `http://example.com/image.jpg` | Remote media files |
-| **Pre-computed Embeddings** | `/path/to/embedding.pt` | Local embedding files (.pt, .pth, .bin) |
+| **Pre-computed Embeddings** | `/path/to/embedding.safetensors` | Local embedding files (.safetensors only) |
 
 ## Deployment Patterns
 
@@ -221,39 +221,23 @@ For high-performance multimodal inference, Dynamo supports pre-computed embeddin
 
 ### Supported File Types
 
-- `.pt` - PyTorch tensor files
-- `.pth` - PyTorch checkpoint files
-- `.bin` - Binary tensor files
+- `.safetensors` - Safe tensor files ([safetensors format](https://huggingface.co/docs/safetensors))
+
+> **Security Note:** `.pt`, `.pth`, and `.bin` files are **rejected** because they use Python pickle deserialization, which can execute arbitrary code. Only `.safetensors` format is accepted.
 
 ### Embedding File Formats
 
-TRT-LLM supports two formats for embedding files:
+Embedding files must use the `.safetensors` format. The first tensor key in the file is used as the embedding tensor.
 
-**1. Simple Tensor Format**
-
-Direct tensor saved as `.pt` file containing only the embedding tensor:
+**Saving embeddings:**
 
 ```python
+from safetensors.torch import save_file
+import torch
+
 embedding_tensor = torch.rand(1, 576, 4096)  # [batch, seq_len, hidden_dim]
-torch.save(embedding_tensor, "embedding.pt")
+save_file({"embedding": embedding_tensor}, "embedding.safetensors")
 ```
-
-**2. Dictionary Format with Auxiliary Data**
-
-Dictionary containing multiple keys, used by models like Llama-4 that require additional metadata:
-
-```python
-embedding_dict = {
-    "mm_embeddings": torch.rand(1, 576, 4096),
-    "special_tokens": [128256, 128257],
-    "image_token_offsets": [[0, 576]],
-    # ... other model-specific metadata
-}
-torch.save(embedding_dict, "llama4_embedding.pt")
-```
-
-- **Simple tensors**: Loaded directly and passed to `mm_embeddings` parameter
-- **Dictionary format**: `mm_embeddings` key extracted as main tensor, other keys preserved as auxiliary data
 
 ### How to Launch
 
@@ -264,7 +248,7 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/epd_disagg.sh
 ```
 
-> **Note:** This script is designed for 8-node H200 with `Llama-4-Scout-17B-16E-Instruct` model and assumes you have a model-specific embedding file ready.
+> **Note:** This script is designed for 8-node H200 with `Llama-4-Scout-17B-16E-Instruct` model and assumes you have a model-specific `.safetensors` embedding file ready.
 
 ### Configuration
 
@@ -289,7 +273,7 @@ curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '
             "role": "user",
             "content": [
                 {"type": "text", "text": "Describe the image"},
-                {"type": "image_url", "image_url": {"url": "/path/to/embedding.pt"}}
+                {"type": "image_url", "image_url": {"url": "/path/to/embedding.safetensors"}}
             ]
         }
     ],
@@ -316,7 +300,7 @@ sequenceDiagram
 
     Client->>Frontend: POST /v1/chat/completions
     Frontend->>PrefillWorker: Route to prefill worker
-    PrefillWorker->>EncodeWorker: Send request (embedding paths)
+    PrefillWorker->>EncodeWorker: Send request (embedding .safetensors paths)
     EncodeWorker->>NIXL: Create readable operation
     EncodeWorker->>PrefillWorker: Send metadata + NIXL info
     PrefillWorker->>NIXL: Begin read operation
@@ -401,10 +385,10 @@ await register_model(
 
 | Transfer Stage | Message | NIXL Transfer |
 |----------------|---------|---------------|
-| **Frontend → Prefill** | Request with image URL or embedding path | No |
+| **Frontend → Prefill** | Request with image URL or .safetensors embedding path | No |
 | **Prefill → Encode (Image URL)** | Request with image URL | No |
 | **Encode → Prefill (Image URL)** | `ep_disaggregated_params` with `multimodal_embedding_handles`, processed prompt, and token IDs | No |
-| **Prefill → Encode (Embedding Path)** | Request with embedding file path | No |
+| **Prefill → Encode (Embedding Path)** | Request with .safetensors embedding file path | No |
 | **Encode → Prefill (Embedding Path)** | NIXL readable metadata + shape/dtype + auxiliary data | Yes (Embeddings tensor via RDMA) |
 | **Prefill → Decode** | `disaggregated_params` with `_epd_metadata` (prompt, token IDs) | Configurable (KV cache: NIXL default, UCX optional) |
 
