@@ -144,7 +144,7 @@ class BaseGenerativeHandler(ABC, Generic[RequestT, ResponseT]):
             publisher: Optional metrics publisher for the worker.
         """
         self.config = config
-        self.enable_trace = config.server_args.enable_trace
+        self.enable_trace = getattr(config.server_args, "enable_trace", False)
 
         # Set up metrics and KV publishers
         self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
