@@ -32,7 +32,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{SyncIndexer, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use crate::active_set::reconcile_active_workers;
 use crate::protocols::*;
 
 /// Thread-safe shared reference to a Block.
@@ -236,16 +237,8 @@ impl ConcurrentRadixTree {
                 let child_count = guard.workers.len();
 
                 if child_count != active_count {
-                    // Workers changed: either dropped out (child < active) or
-                    // stale entries exist (child > active). In both cases,
-                    // retain only workers present in the child, scoring dropouts.
-                    active.retain(|w| {
-                        if guard.workers.contains(w) {
-                            true
-                        } else {
-                            scores.scores.insert(*w, matched_depth);
-                            false
-                        }
+                    reconcile_active_workers(&mut active, &guard.workers, |worker| {
+                        scores.scores.insert(worker, matched_depth);
                     });
                     active_count = active.len();
 
@@ -624,14 +617,24 @@ impl ConcurrentRadixTree {
 // ============================================================================
 
 impl SyncIndexer for ConcurrentRadixTree {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
+        let counters = metrics.as_ref().map(|m| m.prebind());
 
         while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
-                    if let Err(e) = self.apply_event(&mut lookup, event) {
-                        tracing::warn!("Failed to apply event: {:?}", e);
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut lookup, event);
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
@@ -639,6 +642,9 @@ impl SyncIndexer for ConcurrentRadixTree {
                 }
                 WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
                     self.remove_worker_dp_rank(&mut lookup, worker_id, dp_rank);
+                }
+                WorkerTask::CleanupStaleChildren => {
+                    self.run_cleanup_task();
                 }
                 WorkerTask::DumpEvents(_sender) => {
                     // Handled directly via dump_events() on the shared tree.

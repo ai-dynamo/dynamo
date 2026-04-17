@@ -53,6 +53,16 @@ def run_serve_deployment(
     if extra_env:
         merged_env.update(extra_env)
 
+    # In serial mode (no parallel scheduler), pass the marker's KV cache budget
+    # so the launch script's small default doesn't starve larger models.
+    # The parallel scheduler already sets this env var per-test.
+    if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in os.environ:
+        kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+        if kv_mark:
+            merged_env.setdefault(
+                "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES", str(int(kv_mark.args[0]))
+            )
+
     # Stagger engine startup under xdist to avoid vLLM profiling race
     # (vLLM bug #10643: concurrent profilers miscount each other's memory).
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
