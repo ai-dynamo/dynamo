@@ -357,7 +357,7 @@ class TestBuildConnectorMeta:
         assert isinstance(result, bytes)
 
     def test_no_decode_offload_sync(self, scheduler, mock_connector):
-        """Decode offload is disabled — no token sync calls."""
+        """Decode offload is disabled — no token extension calls."""
         scheduler.enable_decode_offload = False
 
         request = MockLlmRequest(42, [100, 200, 300])
@@ -370,6 +370,120 @@ class TestBuildConnectorMeta:
         )
         scheduler.build_connector_meta(scheduler_output)
 
-        # Token sync methods should NOT be called
-        mock_connector.get_slot_total_tokens.assert_not_called()
+        # extend_slot_tokens should NOT be called when decode offload is off
         mock_connector.extend_slot_tokens.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: decode offload (token extension from scheduler output)
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeOffload:
+    def test_extends_tokens_from_cached_request_new_tokens(
+        self, scheduler, mock_connector
+    ):
+        """When decode offload is enabled, new_tokens from cached requests
+        are applied to the Rust slot via extend_slot_tokens."""
+        scheduler.enable_decode_offload = True
+
+        scheduler_output = MockSchedulerOutput(
+            cached_requests=[
+                MockRequestData(42, [500, 501], [], 130, 1),
+            ]
+        )
+        scheduler.build_connector_meta(scheduler_output)
+
+        mock_connector.extend_slot_tokens.assert_called_once_with("42", [500, 501])
+
+    def test_no_extension_when_new_tokens_empty(self, scheduler, mock_connector):
+        """No extension when cached request has empty new_tokens."""
+        scheduler.enable_decode_offload = True
+
+        scheduler_output = MockSchedulerOutput(
+            cached_requests=[
+                MockRequestData(42, [], [], 128, 1),
+            ]
+        )
+        scheduler.build_connector_meta(scheduler_output)
+
+        mock_connector.extend_slot_tokens.assert_not_called()
+
+    def test_extends_multiple_cached_requests(self, scheduler, mock_connector):
+        """Multiple cached requests each get their tokens extended."""
+        scheduler.enable_decode_offload = True
+
+        scheduler_output = MockSchedulerOutput(
+            cached_requests=[
+                MockRequestData(42, [500], [], 128, 1),
+                MockRequestData(43, [600, 601], [], 64, 1),
+            ]
+        )
+        scheduler.build_connector_meta(scheduler_output)
+
+        calls = mock_connector.extend_slot_tokens.call_args_list
+        assert len(calls) == 2
+        assert calls[0] == (("42", [500]),)
+        assert calls[1] == (("43", [600, 601]),)
+
+    def test_no_extension_for_new_requests(self, scheduler, mock_connector):
+        """new_requests don't trigger token extension (only cached)."""
+        scheduler.enable_decode_offload = True
+
+        scheduler_output = MockSchedulerOutput(
+            new_requests=[
+                MockRequestData(42, [100, 200, 300], [0, 1], 0, 3),
+            ]
+        )
+        scheduler.build_connector_meta(scheduler_output)
+
+        mock_connector.extend_slot_tokens.assert_not_called()
+
+    def test_disabled_by_default(self, scheduler, mock_connector):
+        """Decode offload is disabled by default."""
+        # Don't set enable_decode_offload — should be False from base class
+        scheduler_output = MockSchedulerOutput(
+            cached_requests=[
+                MockRequestData(42, [500], [], 128, 1),
+            ]
+        )
+        scheduler.build_connector_meta(scheduler_output)
+
+        mock_connector.extend_slot_tokens.assert_not_called()
+
+    def test_request_id_converted_to_str(self, scheduler, mock_connector):
+        """Integer request IDs are converted to str for Rust."""
+        scheduler.enable_decode_offload = True
+
+        scheduler_output = MockSchedulerOutput(
+            cached_requests=[
+                MockRequestData(99999, [700], [], 64, 1),
+            ]
+        )
+        scheduler.build_connector_meta(scheduler_output)
+
+        mock_connector.extend_slot_tokens.assert_called_once_with("99999", [700])
+
+    def test_extension_happens_before_metadata_build(self, scheduler, mock_connector):
+        """Token extension happens before build_connector_metadata is called."""
+        scheduler.enable_decode_offload = True
+        call_order = []
+
+        def track_extend(*args):
+            call_order.append("extend")
+
+        def track_build(*args):
+            call_order.append("build")
+            return b"\x00"
+
+        mock_connector.extend_slot_tokens.side_effect = track_extend
+        mock_connector.build_connector_metadata.side_effect = track_build
+
+        scheduler_output = MockSchedulerOutput(
+            cached_requests=[
+                MockRequestData(42, [500], [], 128, 1),
+            ]
+        )
+        scheduler.build_connector_meta(scheduler_output)
+
+        assert call_order == ["extend", "build"]
