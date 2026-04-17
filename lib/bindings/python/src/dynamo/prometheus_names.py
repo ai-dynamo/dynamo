@@ -51,6 +51,10 @@ class frontend_perf:
     # Tracks how many requests are currently in each pipeline stage.
     # Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
     STAGE_REQUESTS = "stage_requests"
+    # Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    STAGE_PREPROCESS = "preprocess"
+    STAGE_ROUTE = "route"
+    STAGE_DISPATCH = "dispatch"
     # Tokenization time in preprocessor
     TOKENIZE_SECONDS = "tokenize_seconds"
     # Template application time in preprocessor
