@@ -60,3 +60,4 @@ rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

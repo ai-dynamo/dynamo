@@ -7,6 +7,7 @@
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
 mod active_set;
+pub(crate) mod cleanup;
 
 pub mod indexer;
 pub mod protocols;
