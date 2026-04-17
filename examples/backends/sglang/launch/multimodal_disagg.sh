@@ -127,7 +127,7 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D" "$MO
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
 
-# run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
+# run SGLang multimodal encode worker (frontend-facing: encodes images/videos, routes to worker)
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" --skip-tokenizer-init $ENCODE_EXTRA_ARGS &
