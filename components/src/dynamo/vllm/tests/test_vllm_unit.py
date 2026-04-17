@@ -22,6 +22,7 @@ from dynamo.vllm.args import (
     ensure_side_channel_host,
     get_host_ip,
     parse_args,
+    update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
@@ -723,3 +724,86 @@ class TestBenchmarkGrid:
         total_kv = 100 * 16
         for ctx_len, bs in points:
             assert ctx_len <= total_kv
+
+
+# --- update_engine_config_with_dynamo: --runner preservation tests ---
+
+
+def _make_dynamo_config(**overrides):
+    """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
+    defaults = {
+        "disaggregation_mode": DisaggregationMode.AGGREGATED,
+        "use_kv_events": False,
+        "enable_local_indexer": True,
+        "benchmark_mode": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+def _make_engine_config_with_runner(runner="auto", **overrides):
+    """Build a fake engine config with runner and other fields used by defaults loop."""
+    defaults = {
+        "runner": runner,
+        "enable_prefix_caching": True,
+        "block_size": 16,
+        "skip_tokenizer_init": True,
+        "enable_log_requests": True,
+        "disable_log_stats": True,
+        "kv_events_config": None,
+        "kv_transfer_config": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class TestRunnerPreservation:
+    """Tests for GitHub issue #7670: --runner must not be unconditionally overridden."""
+
+    def test_runner_defaults_to_generate_when_auto(self):
+        """When user does not pass --runner (vLLM default is 'auto'),
+        Dynamo should set it to 'generate'."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="auto")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "generate"
+
+    def test_runner_pooling_preserved(self):
+        """When user passes --runner pooling (for embedding models),
+        Dynamo must NOT overwrite it."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="pooling")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "pooling"
+
+    def test_runner_generate_explicit_preserved(self):
+        """When user explicitly passes --runner generate, it should still be 'generate'."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="generate")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "generate"
+
+    def test_runner_draft_preserved(self):
+        """When user passes --runner draft, Dynamo must NOT overwrite it."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(runner="draft")
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.runner == "draft"
+
+    def test_no_runner_attr_skipped_gracefully(self):
+        """If engine_config lacks a 'runner' attr (older vLLM), no error is raised."""
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner()
+        del engine_cfg.runner  # simulate older vLLM without runner
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert not hasattr(engine_cfg, "runner")

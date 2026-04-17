@@ -238,8 +238,6 @@ def update_engine_config_with_dynamo(
         ensure_side_channel_host()
 
     defaults = {
-        # vLLM 0.13+ renamed 'task' to 'runner'
-        "runner": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
         # `sampling_params.update_from_tokenizer(...)`, so we can no longer
         # skip tokenizer initialisation.  Setting this to **False** avoids
@@ -248,6 +246,18 @@ def update_engine_config_with_dynamo(
         "enable_log_requests": False,
         "disable_log_stats": False,
     }
+
+    # vLLM 0.13+ renamed 'task' to 'runner'.  Only default to "generate"
+    # when the user did NOT explicitly set --runner (vLLM's default is "auto").
+    # This preserves user-provided values like --runner pooling for embedding
+    # models.
+    if hasattr(engine_config, "runner"):
+        if engine_config.runner == "auto":
+            defaults["runner"] = "generate"
+        else:
+            logger.debug(
+                f"Preserving user-provided runner: {engine_config.runner}"
+            )
 
     kv_cfg = create_kv_events_config(dynamo_config, engine_config)
     defaults["kv_events_config"] = kv_cfg
