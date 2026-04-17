@@ -26,14 +26,14 @@ spec:
               value: Qwen/Qwen3-32B-FP8
             - name: HF_HOME
               value: /model-store
-            - name: HF_HUB_ENABLE_HF_TRANSFER
+            - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             - name: MODEL_REVISION
               value: aa55da1ecc13d006e8b8e4f54579b1ea8c3db2df
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub==1.11.0 hf_transfer==0.1.9
+              pip install --no-cache-dir huggingface_hub==1.11.0
               hf download $MODEL_NAME --revision $MODEL_REVISION
           volumeMounts:
             - name: model-cache

@@ -20,14 +20,14 @@ spec:
           image: python:3.10-slim
           command: ["sh", "-c"]
           env:
-            - name: HF_HUB_ENABLE_HF_TRANSFER
+            - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
             - name: HF_HOME
               value: /opt/model-cache
           args:
             - |
               set -eux
-              pip install --no-cache-dir huggingface_hub==1.11.0 hf_transfer==0.1.9
+              pip install --no-cache-dir huggingface_hub==1.11.0
               hf download deepseek-ai/DeepSeek-R1
           volumeMounts:
             - name: model-cache
