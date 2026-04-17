@@ -194,14 +194,17 @@ class AggRegressionModel(_BaseRegressionModel):
         seq_cap = max_num_seqs if max_num_seqs and max_num_seqs > 0 else kv_cap
 
         # Prefill/decode balance cap via binary search within [1, min(kv_cap, seq_cap)]
-        # For each candidate x, check: isl / (max_num_batched_tokens - x) <= osl
+        # For each candidate x, check: effective_isl / (max_num_batched_tokens - x) <= osl
+        # Uses ``effective_isl`` (post-cache) because cache reuse shrinks the
+        # prefill tokens each new request consumes from the per-iteration
+        # budget, raising the admissible batch size.
         hard_cap = min(kv_cap, seq_cap, max_num_batched_tokens - 1)
 
         def _prefill_balanced(x: int) -> bool:
             prefill_budget = max_num_batched_tokens - x
             if prefill_budget <= 0:
                 return False
-            return isl / prefill_budget <= osl
+            return effective_isl / prefill_budget <= osl
 
         lo, hi = 1, max(1, hard_cap)
         while lo < hi:
@@ -218,16 +221,27 @@ class AggRegressionModel(_BaseRegressionModel):
 
         for bs in range(1, max_bs + 1):
             decode_kv = bs * avg_ctx
+            # Discounted prefill per iter feeds the wall-time regression: the
+            # engine actually computes ``effective_isl`` tokens per request
+            # because the cached prefix is skipped.
             prefill_per_iter = min(
                 bs * effective_isl / max(1.0, osl), max_num_batched_tokens
             )
             wt = self._predict_2d(prefill_per_iter, decode_kv)
             itl_ms = wt * 1000.0
 
+            # ``estimate_next_ttft`` applies the same discount internally to
+            # both the queued portion and the avg_isl portion. To keep the
+            # discount uniform, we pass the *raw* prefill_per_iter as the
+            # queued contribution and forward ``kv_hit_rate`` so the
+            # function's own ``(1 - clamp(kv_hit_rate))`` factor scales
+            # both sides consistently.
+            raw_prefill_per_iter = min(bs * isl / max(1.0, osl), max_num_batched_tokens)
             est_ttft = self.estimate_next_ttft(
-                queued_prefill_tokens=int(prefill_per_iter),
+                queued_prefill_tokens=int(raw_prefill_per_iter),
                 max_num_batched_tokens=max_num_batched_tokens,
                 current_decode_kv=int(decode_kv),
+                kv_hit_rate=kv_hit_rate,
             )
             ttft_ms = est_ttft * 1000.0 if est_ttft is not None else 0.0
 

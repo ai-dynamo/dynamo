@@ -615,3 +615,38 @@ class TestAggRegressionModel:
             kv_hit_rate=0.6,
         )
         assert rps_hit >= rps_base
+
+    def test_agg_find_best_engine_rps_uniform_discount_in_ttft_estimate(self):
+        """``find_best_engine_agg_rps`` must apply the kv_hit_rate discount
+        uniformly to BOTH the per-iter prefill and the avg_isl portion of
+        the TTFT simulation. Regression for the bug where the function
+        passed already-discounted prefill_per_iter to estimate_next_ttft
+        without forwarding kv_hit_rate, leaving avg_isl at full size and
+        inflating the predicted TTFT (= over-provisioning replicas)."""
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_agg(model)
+        # With a permissive ITL/TTFT SLA, the only difference in engine_rps
+        # at high hit rate vs zero hit rate should come from the prefill
+        # discount. If the bug recurs the high-hit-rate path will under-
+        # estimate capacity (smaller batch sweep) and produce strictly less
+        # rps growth than the discount factor warrants.
+        rps_zero, _, _ = model.find_best_engine_agg_rps(
+            isl=4000.0,
+            osl=200.0,
+            max_num_batched_tokens=8192,
+            ttft_sla=10_000.0,
+            itl_sla=10_000.0,
+            kv_hit_rate=0.0,
+        )
+        rps_high, _, _ = model.find_best_engine_agg_rps(
+            isl=4000.0,
+            osl=200.0,
+            max_num_batched_tokens=8192,
+            ttft_sla=10_000.0,
+            itl_sla=10_000.0,
+            kv_hit_rate=0.8,
+        )
+        # Strictly greater capacity at 80% hit rate (not just >=).
+        assert rps_high > rps_zero

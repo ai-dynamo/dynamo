@@ -309,16 +309,39 @@ class PrometheusAPIClient:
         the LocalRouter component). In disagg deployments the scrape is
         namespace-filtered, so if the planner's ``dynamo_namespace`` matches
         the prefill pool, the returned value pools only prefill-router
-        observations. Returns ``None`` for frontend sources since the
-        frontend doesn't publish an equivalent aggregate.
+        observations.
+
+        Returns ``None`` (not ``0.0``) on missing data — Prometheus scrape
+        gaps must not be confused with a real "no reuse" signal: the state
+        machine treats a real ``0.0`` as a valid observation and would
+        otherwise drag the predictor / sticky value down toward zero on
+        every scrape failure. The caller's ``_clamp_kv_hit_rate(None)``
+        falls back to no-discount behavior, which is the safe choice.
         """
-        if self.metrics_source == "router":
-            return self._get_average_metric(
-                f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}",
-                interval,
-                "avg kv hit rate",
+        if self.metrics_source != "router":
+            return None
+        full_metric_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.router.KV_HIT_RATE}"
+        )
+        try:
+            ns = self.dynamo_namespace.replace("-", "_")
+            ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
+            query = (
+                f"sum(increase({full_metric_name}_sum{{{ns_filter}}}[{interval}])) / "
+                f"sum(increase({full_metric_name}_count{{{ns_filter}}}[{interval}]))"
             )
-        return None
+            result = self.prom.custom_query(query=query)
+            if not result:
+                logger.info(
+                    f"No prometheus data for {full_metric_name}, returning None"
+                )
+                return None
+            value = float(result[0]["value"][1])
+            return None if math.isnan(value) else value
+        except Exception as e:
+            logger.warning(f"Error getting avg kv hit rate: {e}")
+            return None
 
     def warn_if_router_not_scraped(self) -> None:
         """Warn if Prometheus is not scraping any dynamo_component_router_* series.
