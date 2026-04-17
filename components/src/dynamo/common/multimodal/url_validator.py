@@ -23,6 +23,7 @@ Environment variables
     this prefix. Empty (the default) blocks local access entirely.
 """
 
+import asyncio
 import ipaddress
 import os
 import socket
@@ -109,17 +110,16 @@ class UrlValidationPolicy:
         )
 
 
-def validate_url(url: str, policy: UrlValidationPolicy) -> str:
+async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     """Check ``url`` against ``policy`` and return it unchanged if it passes.
 
     ``https://`` and ``data:`` always pass. ``http://`` needs
     ``allow_http=True``. Anything else is rejected outright.
 
-    For URLs with a hostname, we resolve it here and check the resulting
-    IPs against the blocked ranges. This catches obvious DNS rebinding but
-    not an attacker who changes their answer between this lookup and
-    httpx's actual connect — real per-connection IP pinning lives in the
-    Rust loader (issue #14).
+    For URLs with a hostname, we resolve it here (off the event loop via
+    ``loop.getaddrinfo``) and check the resulting IPs against the blocked
+    ranges. This catches obvious DNS rebinding but not an attacker who
+    changes their answer between this lookup and httpx's actual connect.
 
     Raises ``UrlValidationError`` on any policy violation.
     """
@@ -161,8 +161,9 @@ def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     if policy.allow_private_ips:
         return url
 
+    loop = asyncio.get_running_loop()
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = await loop.getaddrinfo(host, None)
     except socket.gaierror as exc:
         raise UrlValidationError(f"Could not resolve host '{host}': {exc}") from exc
     for info in infos:
@@ -211,7 +212,7 @@ def validate_local_path(path: str, policy: UrlValidationPolicy) -> Path:
     return resolved
 
 
-def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
+async def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
     """Validate any media input and return a canonical URL string.
 
     Bare filesystem paths and ``file://`` URIs go through
@@ -233,7 +234,7 @@ def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
         resolved = validate_local_path(raw_path, policy)
         return resolved.as_uri()
 
-    return validate_url(url, policy)
+    return await validate_url(url, policy)
 
 
 _MAX_REDIRECTS = 3
@@ -263,7 +264,7 @@ async def fetch_with_revalidation(
     visited: list[str] = []
 
     while True:
-        validate_url(current_url, policy)
+        await validate_url(current_url, policy)
         visited.append(current_url)
 
         request = client.build_request("GET", current_url)

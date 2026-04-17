@@ -92,7 +92,7 @@ class VideoLoader:
     async def _load_video_with_vllm(
         self, video_url: str
     ) -> tuple[np.ndarray, Dict[str, Any]]:
-        normalized_url = validate_media_url(video_url, self._url_policy)
+        normalized_url = await validate_media_url(video_url, self._url_policy)
         media_io = self._create_vllm_video_io()
 
         # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is

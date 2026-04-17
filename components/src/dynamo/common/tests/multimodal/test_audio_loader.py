@@ -34,54 +34,54 @@ def _permissive_http_policy() -> UrlValidationPolicy:
     )
 
 
-def test_normalize_audio_url_converts_local_paths(tmp_path):
+async def test_normalize_audio_url_converts_local_paths(tmp_path):
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"RIFF")
 
     policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
 
-    assert validate_media_url(str(audio_path), policy) == audio_path.resolve().as_uri()
+    assert await validate_media_url(str(audio_path), policy) == audio_path.resolve().as_uri()
 
 
-def test_normalize_audio_url_preserves_data_urls():
+async def test_normalize_audio_url_preserves_data_urls():
     data_url = "data:audio/wav;base64,UklGRg=="
     policy = UrlValidationPolicy()
-    assert validate_media_url(data_url, policy) == data_url
+    assert await validate_media_url(data_url, policy) == data_url
 
 
-def test_normalize_audio_url_preserves_http_urls():
+async def test_normalize_audio_url_preserves_http_urls():
     url = "https://example.com/audio.wav"
     policy = _permissive_http_policy()
-    assert validate_media_url(url, policy) == url
+    assert await validate_media_url(url, policy) == url
 
 
-def test_normalize_audio_url_rejects_bare_path_by_default(tmp_path):
+async def test_normalize_audio_url_rejects_bare_path_by_default(tmp_path):
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"RIFF")
 
     policy = UrlValidationPolicy()
 
     with pytest.raises(UrlValidationError, match="Local media paths are not permitted"):
-        validate_media_url(str(audio_path), policy)
+        await validate_media_url(str(audio_path), policy)
 
 
-def test_normalize_audio_url_rejects_private_ip():
+async def test_normalize_audio_url_rejects_private_ip():
     policy = UrlValidationPolicy()
 
     with pytest.raises(UrlValidationError):
-        validate_media_url("https://169.254.169.254/audio.wav", policy)
+        await validate_media_url("https://169.254.169.254/audio.wav", policy)
 
 
-def test_normalize_audio_url_accepts_file_uri_inside_prefix(tmp_path):
+async def test_normalize_audio_url_accepts_file_uri_inside_prefix(tmp_path):
     audio_path = tmp_path / "sample.wav"
     audio_path.write_bytes(b"RIFF")
     policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
 
     file_uri = audio_path.resolve().as_uri()
-    assert validate_media_url(file_uri, policy) == file_uri
+    assert await validate_media_url(file_uri, policy) == file_uri
 
 
-def test_normalize_audio_url_rejects_file_uri_outside_prefix(tmp_path):
+async def test_normalize_audio_url_rejects_file_uri_outside_prefix(tmp_path):
     allowed = tmp_path / "media"
     allowed.mkdir()
     other = tmp_path / "secret.wav"
@@ -89,7 +89,7 @@ def test_normalize_audio_url_rejects_file_uri_outside_prefix(tmp_path):
     policy = UrlValidationPolicy(allowed_local_path=str(allowed))
 
     with pytest.raises(UrlValidationError, match="outside the allowed directory"):
-        validate_media_url(other.resolve().as_uri(), policy)
+        await validate_media_url(other.resolve().as_uri(), policy)
 
 
 @pytest.mark.asyncio

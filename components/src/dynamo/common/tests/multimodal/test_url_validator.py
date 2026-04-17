@@ -94,35 +94,35 @@ def test_is_blocked_ip_non_ip_literal_returns_false() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_validate_url_rejects_empty() -> None:
+async def test_validate_url_rejects_empty() -> None:
     with pytest.raises(UrlValidationError, match="empty"):
-        validate_url("", STRICT_HTTPS)
+        await validate_url("", STRICT_HTTPS)
 
 
-def test_validate_url_rejects_http_by_default() -> None:
+async def test_validate_url_rejects_http_by_default() -> None:
     with pytest.raises(UrlValidationError, match="not allowed"):
-        validate_url("http://example.com/x.png", STRICT_HTTPS)
+        await validate_url("http://example.com/x.png", STRICT_HTTPS)
 
 
-def test_validate_url_rejects_file_scheme() -> None:
+async def test_validate_url_rejects_file_scheme() -> None:
     with pytest.raises(UrlValidationError, match="scheme 'file'"):
-        validate_url("file:///etc/passwd", STRICT_HTTPS)
+        await validate_url("file:///etc/passwd", STRICT_HTTPS)
 
 
-def test_validate_url_rejects_ftp() -> None:
+async def test_validate_url_rejects_ftp() -> None:
     with pytest.raises(UrlValidationError, match="scheme 'ftp'"):
-        validate_url("ftp://example.com/x.png", STRICT_HTTPS)
+        await validate_url("ftp://example.com/x.png", STRICT_HTTPS)
 
 
-def test_validate_url_accepts_data_url_by_default() -> None:
+async def test_validate_url_accepts_data_url_by_default() -> None:
     # data: URLs never touch the network — we allow them without further checks.
-    validate_url("data:image/png;base64,iVBORw0KGgoAAAA=", STRICT_HTTPS)
+    await validate_url("data:image/png;base64,iVBORw0KGgoAAAA=", STRICT_HTTPS)
 
 
-def test_validate_url_http_allowed_when_opted_in() -> None:
+async def test_validate_url_http_allowed_when_opted_in() -> None:
     policy = PERMISSIVE
     # With public hostname + allow_private_ips=True (keeps DNS out of the test)
-    validate_url("http://example.com/x.png", policy)
+    await validate_url("http://example.com/x.png", policy)
 
 
 # ---------------------------------------------------------------------------
@@ -140,19 +140,19 @@ def test_validate_url_http_allowed_when_opted_in() -> None:
         "https://[::1]/x.png",
     ],
 )
-def test_validate_url_rejects_private_ip_literal(url: str) -> None:
+async def test_validate_url_rejects_private_ip_literal(url: str) -> None:
     with pytest.raises(UrlValidationError, match="blocked range"):
-        validate_url(url, STRICT_HTTPS)
+        await validate_url(url, STRICT_HTTPS)
 
 
-def test_validate_url_allows_public_ip_literal() -> None:
+async def test_validate_url_allows_public_ip_literal() -> None:
     # Public IP literal and allow_private_ips=False — should pass the IP test
     # and skip DNS resolution (the IP path short-circuits).
-    validate_url("https://8.8.8.8/x.png", STRICT_HTTPS)
+    await validate_url("https://8.8.8.8/x.png", STRICT_HTTPS)
 
 
-def test_validate_url_allows_private_ip_when_opted_in() -> None:
-    validate_url("https://127.0.0.1/x.png", PERMISSIVE)
+async def test_validate_url_allows_private_ip_when_opted_in() -> None:
+    await validate_url("https://127.0.0.1/x.png", PERMISSIVE)
 
 
 # ---------------------------------------------------------------------------
@@ -169,9 +169,9 @@ def test_validate_url_allows_private_ip_when_opted_in() -> None:
         "kubernetes.default.svc",
     ],
 )
-def test_validate_url_rejects_blocked_hostname(host: str) -> None:
+async def test_validate_url_rejects_blocked_hostname(host: str) -> None:
     with pytest.raises(UrlValidationError, match="blocked"):
-        validate_url(f"https://{host}/path", STRICT_HTTPS)
+        await validate_url(f"https://{host}/path", STRICT_HTTPS)
 
 
 # ---------------------------------------------------------------------------
@@ -188,46 +188,46 @@ def _fake_getaddrinfo(addrs: list[str]):
     return _impl
 
 
-def test_validate_url_rejects_host_resolving_to_private_ip() -> None:
+async def test_validate_url_rejects_host_resolving_to_private_ip() -> None:
     with patch(
         "dynamo.common.multimodal.url_validator.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo(["10.0.0.5"]),
     ):
         with pytest.raises(UrlValidationError, match="blocked IP"):
-            validate_url("https://attacker.example.com/x.png", STRICT_HTTPS)
+            await validate_url("https://attacker.example.com/x.png", STRICT_HTTPS)
 
 
-def test_validate_url_rejects_host_if_any_ip_is_private() -> None:
+async def test_validate_url_rejects_host_if_any_ip_is_private() -> None:
     # Even if the host resolves to a public IP too, any blocked IP is fatal.
     with patch(
         "dynamo.common.multimodal.url_validator.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo(["8.8.8.8", "169.254.169.254"]),
     ):
         with pytest.raises(UrlValidationError, match="169.254.169.254"):
-            validate_url("https://mixed.example.com/x.png", STRICT_HTTPS)
+            await validate_url("https://mixed.example.com/x.png", STRICT_HTTPS)
 
 
-def test_validate_url_accepts_public_host() -> None:
+async def test_validate_url_accepts_public_host() -> None:
     with patch(
         "dynamo.common.multimodal.url_validator.socket.getaddrinfo",
         side_effect=_fake_getaddrinfo(["93.184.216.34"]),
     ):
-        validate_url("https://example.com/x.png", STRICT_HTTPS)
+        await validate_url("https://example.com/x.png", STRICT_HTTPS)
 
 
-def test_validate_url_resolution_failure_raises() -> None:
+async def test_validate_url_resolution_failure_raises() -> None:
     with patch(
         "dynamo.common.multimodal.url_validator.socket.getaddrinfo",
         side_effect=socket.gaierror("nodename nor servname provided"),
     ):
         with pytest.raises(UrlValidationError, match="Could not resolve"):
-            validate_url("https://does-not-exist.invalid/x.png", STRICT_HTTPS)
+            await validate_url("https://does-not-exist.invalid/x.png", STRICT_HTTPS)
 
 
-def test_validate_url_skips_resolution_when_private_allowed() -> None:
+async def test_validate_url_skips_resolution_when_private_allowed() -> None:
     # In developer mode we short-circuit DNS to keep tests deterministic.
     with patch("dynamo.common.multimodal.url_validator.socket.getaddrinfo") as resolver:
-        validate_url("https://example.com/x.png", PERMISSIVE)
+        await validate_url("https://example.com/x.png", PERMISSIVE)
         resolver.assert_not_called()
 
 

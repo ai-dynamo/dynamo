@@ -144,7 +144,7 @@ class ImageLoader:
             raise ValueError(
                 "Invalid image source scheme: local file access is not allowed"
             )
-        normalized_url = validate_media_url(image_url, self._url_policy)
+        normalized_url = await validate_media_url(image_url, self._url_policy)
         parsed_url = urlparse(normalized_url)
 
         if parsed_url.scheme in ("http", "https"):
