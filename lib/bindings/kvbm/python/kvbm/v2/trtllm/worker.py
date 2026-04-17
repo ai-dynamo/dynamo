@@ -54,6 +54,24 @@ class TrtllmConnectorWorker(KvCacheConnectorWorker, KvbmConnectorWorkerBase):
                 "Rebuild kvbm with: maturin develop --features v2"
             )
 
+        # Check for CUDA graph configurations that require the forward pass callable.
+        cuda_graph_cfg = getattr(llm_args, "cuda_graph_config", None)
+        torch_compile_cfg = getattr(llm_args, "torch_compile_config", None)
+        piecewise_enabled = torch_compile_cfg and getattr(
+            torch_compile_cfg, "enable_piecewise_cuda_graph", False
+        )
+        if cuda_graph_cfg or piecewise_enabled:
+            logger.info(
+                "CUDA graphs detected — register_forward_pass_callable will "
+                "be used to signal forward-pass completion outside graph replay."
+            )
+            if piecewise_enabled:
+                logger.warning(
+                    "Piecewise CUDA graphs are enabled. Note: intra-pass "
+                    "onboarding (wait_for_layer_load) is INCOMPATIBLE with "
+                    "piecewise graph replay. Use inter-pass onboarding mode."
+                )
+
         runtime = KvbmRuntime.build_worker(None)
         self._init_worker(runtime)
         self._num_layers: int = 0
@@ -67,6 +85,27 @@ class TrtllmConnectorWorker(KvCacheConnectorWorker, KvbmConnectorWorkerBase):
     # ------------------------------------------------------------------
     # KvCacheConnectorWorker ABC implementations
     # ------------------------------------------------------------------
+
+    def register_forward_pass_callable(self):
+        """
+        Return a callable that signals forward-pass completion.
+
+        TRT-LLM's ModelEngine calls this callable AFTER every forward pass
+        (eager, graph capture, or graph replay) and OUTSIDE the CUDA graph.
+        See: [TRT-LLM forward_pass_callable invocation point]
+
+        It ensures the Velo forward-pass completion event is triggered even
+        when save_kv_layer layer hooks don't fire during graph replay.
+
+        In eager mode, save_kv_layer fires first (via layer hook) and the
+        callable becomes a no-op due to the forward_pass_signaled guard.
+        """
+
+        def callback():
+            stream_handle = torch.cuda.current_stream().cuda_stream
+            self._worker.signal_forward_pass_complete(stream_handle)
+
+        return callback
 
     def register_kv_caches(self, kv_cache_tensor: torch.Tensor) -> None:
         """

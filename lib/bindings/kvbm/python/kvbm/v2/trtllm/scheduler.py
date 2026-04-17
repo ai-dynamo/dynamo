@@ -84,7 +84,10 @@ class TrtllmConnectorScheduler(KvCacheConnectorScheduler, KvbmConnectorLeaderBas
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
         self._iteration += 1
-        # Decode offload disabled for stage 1 — no _sync_slot_tokens call.
+        # Decode offload (KVBM_DECODE_OFFLOAD) is not yet supported for TRT-LLM.
+        # Token extension requires either applying CachedRequestData.new_token_ids
+        # on the Rust side, or a TRT-LLM equivalent of vLLM's update_slot().
+        # See: Rust comment in process_scheduler_output cached request path.
         output = process_trtllm_scheduler_output(self._iteration, scheduler_output)
         return bytes(self._connector.build_connector_metadata(output))
 

@@ -112,6 +112,13 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     /// * `stream_handle` - Raw CUDA stream handle (u64) from Python's current stream
     fn save_kv_layer(&self, layer_index: usize, stream_handle: u64) -> Result<()>;
 
+    /// Signal forward pass completion from an external callable.
+    ///
+    /// Called by `register_forward_pass_callable`'s callback, which runs outside
+    /// CUDA graph capture/replay. This is the fallback for when `save_kv_layer`
+    /// layer hooks don't fire during graph replay.
+    fn signal_forward_pass_complete(&self, stream_handle: u64) -> Result<()>;
+
     /// Wait for the intra-pass offload to complete. This is a blocking call; however, we might choose to make it non-blocking
     /// in the future.
     ///
@@ -177,6 +184,12 @@ pub struct ConnectorWorker {
 
     intra_pass_offload_active: Arc<Mutex<Option<IntraPassOffloadState>>>,
 
+    /// Guard to ensure only one forward-pass completion signal per iteration.
+    /// In eager mode both `save_kv_layer(last_layer)` and `signal_forward_pass_complete`
+    /// (via `register_forward_pass_callable`) may fire — only the first one signals.
+    /// Reset to `false` in `bind_connector_metadata`.
+    forward_pass_signaled: Arc<AtomicBool>,
+
     /// Start Forward Pass
     forward_pass_start: Mutex<Option<Instant>>,
 }
@@ -199,6 +212,7 @@ impl ConnectorWorker {
             metadata: Mutex::new(None),
             intra_pass_onboard_active: Arc::new(AtomicBool::new(false)),
             forward_pass_completion_active: Arc::new(AtomicBool::new(false)),
+            forward_pass_signaled: Arc::new(AtomicBool::new(false)),
             intra_pass_offload_active: Arc::new(Mutex::new(None)),
             forward_pass_start: Mutex::new(None),
         }
@@ -317,12 +331,52 @@ impl ConnectorWorker {
             }
         }
 
-        // On last layer with forward pass completion: spawn task to trigger Velo
+        // On last layer with forward pass completion: spawn task to trigger Velo.
+        // Use forward_pass_signaled guard to prevent double-signal when both
+        // save_kv_layer and signal_forward_pass_complete fire in the same iteration.
         if is_last_layer && forward_pass_active {
-            self.trigger_forward_pass_completion(event.clone())?;
+            if !self.forward_pass_signaled.swap(true, Ordering::AcqRel) {
+                self.trigger_forward_pass_completion(event.clone())?;
+            }
         }
 
         Ok(())
+    }
+
+    /// Signal forward pass completion from an external callable (e.g., `register_forward_pass_callable`).
+    ///
+    /// This is the alternative entry point for triggering the forward-pass completion event
+    /// when `save_kv_layer` cannot fire (e.g., during CUDA graph replay). It records a CUDA
+    /// event on the provided stream and triggers the same Velo notification as `save_kv_layer`.
+    ///
+    /// Uses `forward_pass_signaled` to ensure idempotency: if `save_kv_layer` already signaled
+    /// this iteration (eager mode), this is a no-op.
+    pub fn signal_forward_pass_complete(&self, stream_handle: u64) -> Result<()> {
+        // Only signal if forward pass completion is active for this iteration
+        if !self.forward_pass_completion_active.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        // Guard: only the first signal per iteration takes effect
+        if self.forward_pass_signaled.swap(true, Ordering::AcqRel) {
+            return Ok(()); // save_kv_layer already signaled
+        }
+
+        tracing::debug!("signal_forward_pass_complete: triggering from external callable");
+
+        // Record a CUDA event on the provided stream
+        let layer_events = self.state.compute_layer_events()?;
+        let last_layer = self.num_layers() - 1;
+        let event = &layer_events[last_layer];
+
+        unsafe {
+            let status = cuEventRecord(event.cu_event(), stream_handle as CUstream);
+            if status != cudaError_enum::CUDA_SUCCESS {
+                bail!("cuEventRecord failed in signal_forward_pass_complete: {:?}", status);
+            }
+        }
+
+        self.trigger_forward_pass_completion(event.clone())
     }
 
     /// Spawn async task to wait for CUDA event then trigger Velo forward pass event.
@@ -539,6 +593,8 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         // iterations that have no offload.
         self.forward_pass_completion_active
             .store(false, Ordering::Relaxed);
+        self.forward_pass_signaled
+            .store(false, Ordering::Relaxed);
 
         // Store Velo event handle if present (we use pre-allocated CUDA events now)
         if let Some(event_map) = &metadata.foward_pass_completion_events {
@@ -718,6 +774,11 @@ impl ConnectorWorkerInterface for ConnectorWorker {
 
         // Perform the offload action(s)
         self.perform_offload_action(layer_index, stream_handle)
+    }
+
+    fn signal_forward_pass_complete(&self, stream_handle: u64) -> Result<()> {
+        // Delegates to the inherent method on ConnectorWorker
+        ConnectorWorker::signal_forward_pass_complete(self, stream_handle)
     }
 
     fn is_initialized(&self) -> bool {

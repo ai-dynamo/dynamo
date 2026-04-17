@@ -264,3 +264,4 @@ cd /home/oandreeva/Code/dynamo && docker compose -f deploy/docker-compose.yml do
 | `Some(0), false)` on repeat request | G1 not exhausted | Send more unique requests before repeating |
 | No offload/onboard logs | Log level too low | `export DYN_LOG=debug` |
 | `Sampling failed` | Stale forward_pass_completion_active | Ensure Rust fix is applied (reset flag in bind_connector_metadata) |
+| `Precondition timeout after 30s` | Piecewise CUDA graphs enabled | Disable `enable_piecewise_cuda_graph` — incompatible with KVBM v2 offload (`save_kv_layer` doesn't fire during graph replay) |
