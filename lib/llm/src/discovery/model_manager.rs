@@ -218,6 +218,14 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_audios_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_audios_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_videos_models(&self) -> Vec<String> {
         self.models
             .iter()
