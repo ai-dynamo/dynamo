@@ -1168,18 +1168,22 @@ func GenerateBasePodSpec(
 	// The sleep duration is min(10, gracePeriod/2) to ensure at least half the grace
 	// budget remains for actual graceful shutdown.
 	// Applied here (after all merges) so we use the final TerminationGracePeriodSeconds.
-	// Users can override via extraPodSpec.mainContainer.lifecycle.
-	if component.ComponentType == commonconsts.ComponentTypeFrontend && container.Lifecycle == nil {
+	// Users can override via extraPodSpec.mainContainer.lifecycle.preStop.
+	// We check PreStop specifically (not just Lifecycle) so that a user-provided
+	// PostStart handler doesn't silently suppress the default PreStop protection.
+	if component.ComponentType == commonconsts.ComponentTypeFrontend &&
+		(container.Lifecycle == nil || container.Lifecycle.PreStop == nil) {
 		gracePeriod := int64(60)
 		if podSpec.TerminationGracePeriodSeconds != nil {
 			gracePeriod = *podSpec.TerminationGracePeriodSeconds
 		}
 		if sleepSeconds := ComputeFrontendPreStopSeconds(gracePeriod); sleepSeconds > 0 {
-			container.Lifecycle = &corev1.Lifecycle{
-				PreStop: &corev1.LifecycleHandler{
-					Exec: &corev1.ExecAction{
-						Command: []string{"sh", "-c", fmt.Sprintf("sleep %d", sleepSeconds)},
-					},
+			if container.Lifecycle == nil {
+				container.Lifecycle = &corev1.Lifecycle{}
+			}
+			container.Lifecycle.PreStop = &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"sh", "-c", fmt.Sprintf("sleep %d", sleepSeconds)},
 				},
 			}
 		}
