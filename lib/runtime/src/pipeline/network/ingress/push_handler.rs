@@ -132,8 +132,8 @@ impl Drop for RequestMetricsGuard {
         self.inflight_requests.dec();
         self.request_duration
             .observe(self.start_time.elapsed().as_secs_f64());
-        if let Some(request_id) = &self.request_id {
-            tracing::info!(request_id = %request_id, "request completed");
+        if let Some(_) = &self.request_id {
+            tracing::info!("request completed");
         }
     }
 }
@@ -178,8 +178,8 @@ where
             m.request_counter.inc();
             m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
-            if let Some(rid) = &request_id {
-                tracing::info!(request_id = %rid, "request received");
+            if let Some(_) = &request_id {
+                tracing::info!("request received");
             }
             RequestMetricsGuard {
                 inflight_requests: m.inflight_requests.clone(),
