@@ -23,7 +23,7 @@ use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     marker::PhantomData,
     pin::Pin,
     sync::{
@@ -263,53 +263,98 @@ fn device_aware_candidate_group(
 /// This is the core fix for the postmortem: when a worker is killed while requests
 /// are queued (ACK'd but not yet picked up), the oneshot senders are dropped,
 /// unblocking the waiting frontends with a migratable `Disconnected` error.
+///
+/// Uses the raw `list_and_watch` discovery stream instead of diffing coalesced
+/// watch snapshots so that a rapid remove→re-add of the same pod (same stable
+/// hash-based instance_id in Kubernetes) is never silently swallowed.  Each
+/// `Removed` event unconditionally calls `cancel_instance_streams`; each
+/// `Added` event calls `clear_instance_tombstone`.
+///
+/// Cancellation is keyed by `(endpoint_name, instance_id)` to avoid
+/// accidentally cancelling sibling endpoints on the same backend runtime that
+/// share a `connection_id` / `instance_id`.
 fn spawn_instance_removal_watcher(
-    instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
+    endpoint: Endpoint,
     addressed: Arc<AddressedPushRouter>,
     cancel_token: tokio_util::sync::CancellationToken,
 ) {
+    use crate::discovery::{
+        DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+    };
+    use tokio_stream::StreamExt as _;
+
+    let endpoint_name = endpoint.name().to_string();
+
     tokio::spawn(async move {
-        let mut rx = instance_source.as_ref().clone();
-        let mut prev_ids: HashSet<u64> = rx.borrow_and_update().iter().map(|i| i.id()).collect();
+        let namespace = endpoint.component().namespace().name();
+        let component = endpoint.component().name().to_string();
+        let query = DiscoveryQuery::Endpoint {
+            namespace,
+            component,
+            endpoint: endpoint_name.clone(),
+        };
+
+        let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(
+                    endpoint = %endpoint_name,
+                    "Failed to start instance removal watcher: {e}"
+                );
+                return;
+            }
+        };
 
         loop {
             tokio::select! {
-                result = rx.changed() => {
-                    if result.is_err() {
-                        // Sender dropped -- endpoint is shutting down.
-                        break;
+                event = stream.next() => {
+                    match event {
+                        Some(Ok(DiscoveryEvent::Removed(id))) => {
+                            // Only act on endpoint-type removals.
+                            if let DiscoveryInstanceId::Endpoint(eid) = &id {
+                                let n = addressed
+                                    .cancel_instance_streams(&eid.endpoint, eid.instance_id)
+                                    .await;
+                                if n > 0 {
+                                    tracing::warn!(
+                                        endpoint = %eid.endpoint,
+                                        instance_id = eid.instance_id,
+                                        cancelled = n,
+                                        "Cancelled pending response streams for removed instance \
+                                         (discovery-driven cleanup)"
+                                    );
+                                }
+                            }
+                        }
+                        Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
+                            // Clear tombstone so new requests for this (endpoint, instance)
+                            // pair are tracked normally after a restart.
+                            addressed
+                                .clear_instance_tombstone(&inst.endpoint, inst.instance_id)
+                                .await;
+                        }
+                        Some(Ok(_)) => {
+                            // Ignore non-endpoint events (Model, EventChannel).
+                        }
+                        Some(Err(e)) => {
+                            tracing::warn!(
+                                endpoint = %endpoint_name,
+                                "Instance removal watcher stream error: {e}"
+                            );
+                        }
+                        None => {
+                            // Stream ended — discovery plane shut down.
+                            break;
+                        }
                     }
                 }
                 _ = cancel_token.cancelled() => {
                     break;
                 }
             }
-
-            let current_ids: HashSet<u64> = rx.borrow_and_update().iter().map(|i| i.id()).collect();
-
-            // Cancel pending response streams for removed instances.
-            for removed_id in prev_ids.difference(&current_ids) {
-                let n = addressed.cancel_instance_streams(*removed_id).await;
-                if n > 0 {
-                    tracing::warn!(
-                        instance_id = removed_id,
-                        cancelled = n,
-                        "Cancelled pending response streams for removed instance \
-                         (discovery-driven cleanup)"
-                    );
-                }
-            }
-
-            // Clear tombstones for instances that have come back (re-registered
-            // after restart) so new requests can be tracked normally.
-            for added_id in current_ids.difference(&prev_ids) {
-                addressed.clear_instance_tombstone(*added_id).await;
-            }
-
-            prev_ids = current_ids;
         }
 
-        tracing::debug!("Instance removal watcher exiting");
+        tracing::debug!(endpoint = %endpoint_name, "Instance removal watcher exiting");
     });
 }
 
@@ -364,7 +409,7 @@ where
         // registrations when workers die. Otherwise the bare .await on the oneshot
         // receiver hangs forever for queued-but-never-started requests.
         spawn_instance_removal_watcher(
-            client.instance_source.clone(),
+            client.endpoint.clone(),
             addressed.clone(),
             client.endpoint.drt().primary_token(),
         );
@@ -413,7 +458,7 @@ where
         // were ACK'd on the request plane but never picked up by the worker pool
         // before the worker was killed.
         spawn_instance_removal_watcher(
-            client.instance_source.clone(),
+            client.endpoint.clone(),
             addressed.clone(),
             client.endpoint.drt().primary_token(),
         );
@@ -775,7 +820,11 @@ where
         // If the selected instance disappeared between selection and dispatch
         // (e.g. deregistered during scale-down), fall back to another available
         // instance rather than returning a spurious 500.
-        let (address, _transport_kind) = {
+        //
+        // resolve_transport returns (address, transport_kind, Instance) so that
+        // the full Instance (carrying endpoint name + instance_id) can be
+        // threaded through to AddressedRequest for endpoint-scoped cancellation.
+        let (address, _transport_kind, instance) = {
             use crate::component::TransportType;
 
             let resolve_transport = |id: u64| {
@@ -783,31 +832,34 @@ where
                 instances
                     .iter()
                     .find(|i| i.instance_id == id)
-                    .map(|instance| match &instance.transport {
-                        TransportType::Http(http_endpoint) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                http_endpoint = %http_endpoint,
-                                "Using HTTP transport for instance"
-                            );
-                            (http_endpoint.clone(), "transport.http.request")
-                        }
-                        TransportType::Tcp(tcp_endpoint) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                tcp_endpoint = %tcp_endpoint,
-                                "Using TCP transport for instance"
-                            );
-                            (tcp_endpoint.clone(), "transport.tcp.request")
-                        }
-                        TransportType::Nats(subject) => {
-                            tracing::debug!(
-                                instance_id = id,
-                                subject = %subject,
-                                "Using NATS transport for instance"
-                            );
-                            (subject.clone(), "transport.nats.request")
-                        }
+                    .map(|instance| {
+                        let (addr, kind) = match &instance.transport {
+                            TransportType::Http(http_endpoint) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    http_endpoint = %http_endpoint,
+                                    "Using HTTP transport for instance"
+                                );
+                                (http_endpoint.clone(), "transport.http.request")
+                            }
+                            TransportType::Tcp(tcp_endpoint) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    tcp_endpoint = %tcp_endpoint,
+                                    "Using TCP transport for instance"
+                                );
+                                (tcp_endpoint.clone(), "transport.tcp.request")
+                            }
+                            TransportType::Nats(subject) => {
+                                tracing::debug!(
+                                    instance_id = id,
+                                    subject = %subject,
+                                    "Using NATS transport for instance"
+                                );
+                                (subject.clone(), "transport.nats.request")
+                            }
+                        };
+                        (addr, kind, instance.clone())
                     })
             };
 
@@ -846,7 +898,7 @@ where
             }
         };
 
-        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance_id));
+        let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
             .with_label_values(&["route"])
