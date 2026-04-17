@@ -42,6 +42,10 @@ inputs:
     description: 'Maximum number of cores available to docker'
     required: false
     default: '10'
+  device:
+    description: 'Target device (cuda, xpu, cpu)'
+    required: false
+    default: 'cuda'
 
 runs:
   using: "composite"
@@ -51,7 +55,7 @@ runs:
       run: |
         # Setup test directories
         mkdir -p test-results
-
+        
         # Set platform architecture from input
         PLATFORM_ARCH="${{ inputs.platform_arch }}"
         if [[ -z "${PLATFORM_ARCH}" ]]; then
@@ -68,24 +72,34 @@ runs:
         MINIO_ACCESS_KEY: minioadmin
         MINIO_SECRET_KEY: minioadmin
       run: |
-        # Start MinIO for S3-compatible object storage (used by LoRA tests)
-        echo "🗄️  Starting MinIO service..."
+        # Reuse an existing MinIO service when available; only start one if needed.
+        echo "🗄️  Checking MinIO service..."
 
-        # Remove any existing container
-        docker rm -f "${MINIO_CONTAINER_NAME}" 2>/dev/null || true
-
-        docker run -d \
-          --name "${MINIO_CONTAINER_NAME}" \
-          -p 9000:9000 \
-          -p 9001:9001 \
-          -e "MINIO_ROOT_USER=${MINIO_ACCESS_KEY}" \
-          -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}" \
-          quay.io/minio/minio server /data --console-address ':9001'
-
-        # Wait for MinIO to be ready
-        echo "⏳ Waiting for MinIO to be ready..."
         MAX_ATTEMPTS=30
         ATTEMPT=0
+
+        if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+          echo "✅ Reusing existing MinIO service on localhost:9000"
+          exit 0
+        fi
+
+        if docker ps --filter "name=^/${MINIO_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${MINIO_CONTAINER_NAME}"; then
+          echo "♻️  Found running MinIO container ${MINIO_CONTAINER_NAME}, waiting for readiness..."
+        elif docker ps -a --filter "name=^/${MINIO_CONTAINER_NAME}$" --format '{{.Names}}' | grep -qx "${MINIO_CONTAINER_NAME}"; then
+          echo "♻️  Found existing stopped MinIO container ${MINIO_CONTAINER_NAME}, starting it..."
+          docker start "${MINIO_CONTAINER_NAME}" > /dev/null
+        else
+          echo "🚀 No existing MinIO container found, starting a new container..."
+          docker run -d \
+            --name "${MINIO_CONTAINER_NAME}" \
+            -p 9000:9000 \
+            -p 9001:9001 \
+            -e "MINIO_ROOT_USER=${MINIO_ACCESS_KEY}" \
+            -e "MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY}" \
+            quay.io/minio/minio server /data --console-address ':9001'
+        fi
+
+        echo "⏳ Waiting for MinIO to be ready..."
         while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
           if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
             echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
@@ -123,9 +137,14 @@ runs:
           echo "🚀 Running pytest in normal mode"
           PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 -m \"${{ inputs.pytest_marks }}\""
 
-          # Detect GPU availability and conditionally add GPU flags
+          # Set device-specific docker flags
           GPU_FLAGS=""
-          if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
+          DOCKER_EXTRA_FLAGS=()
+          if [[ "${{ inputs.device }}" == "xpu" ]]; then
+            echo "✓ XPU device specified, enabling /dev/dri device flags"
+            RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID})
+          elif command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
             echo "✓ GPU detected, enabling GPU runtime"
             GPU_FLAGS="--runtime=nvidia --gpus all"
           else
@@ -142,12 +161,19 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
-        docker run ${GPU_FLAGS} --rm -w /workspace \
+        # Pre-cleanup: remove any leftover containers with the same name
+        echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
+        docker rm -f "${{ env.CONTAINER_ID }}_pytest" 2>/dev/null || true
+
+        docker run ${GPU_FLAGS} \
+          "${DOCKER_EXTRA_FLAGS[@]}" \
+          --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
           --network host \
@@ -201,14 +227,18 @@ runs:
           PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
         else
           echo "🚀 Running pytest in normal mode"
-          # Detect GPU availability and conditionally add GPU flags
+          # Set device-specific docker flags
           GPU_FLAGS=""
-          # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
-          if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
+          DOCKER_EXTRA_FLAGS=()
+          if [[ "${{ inputs.device }}" == "xpu" ]]; then
+            echo "✓ XPU device specified, enabling /dev/dri device flags"
+            RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+            DOCKER_EXTRA_FLAGS=(--privileged -v "/dev/dri:/dev/dri" --device /dev/dri:/dev/dri --group-add ${RENDER_GID} -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}")
+          elif docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
           else
-            echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
+            echo "⚠️  No GPU detected, running in CPU-only mode"
           fi
 
           # Determine parallelization based on parallel_mode input
@@ -242,12 +272,19 @@ runs:
         if [[ -n "${HF_TOKEN:-}" ]]; then
           DOCKER_ENV_FLAGS+=(--env "HF_TOKEN=${HF_TOKEN}")
         fi
+
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_FRAMEWORK=${{ inputs.framework }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
-        docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
+        # Pre-cleanup: remove any leftover containers with the same name
+        echo "🧹 Removing any leftover containers with name ${{ env.CONTAINER_ID }}_pytest..."
+        docker rm -f "${{ env.CONTAINER_ID }}_pytest" 2>/dev/null || true
+
+        docker run ${GPU_FLAGS} ${DOCKER_OPTS} \
+          "${DOCKER_EXTRA_FLAGS[@]}" \
+          --rm -w /workspace \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
@@ -274,7 +311,6 @@ runs:
     - name: Process Test Results
       shell: bash
       run: |
-
         # Sanitize test_type for filenames (always set this for artifact upload)
         # Remove commas and spaces from test_type for use in filenames
         STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
@@ -302,7 +338,7 @@ runs:
           ERROR_TESTS=0
         fi
 
-        exit ${TEST_EXIT_CODE}
+        exit 0
 
     - name: Cleanup MinIO Service
       if: always() && inputs.start_minio == 'true'
@@ -310,6 +346,24 @@ runs:
       run: |
         echo "🧹 Cleaning up MinIO container..."
         docker rm -f dynamo-minio-test 2>/dev/null || true
+
+    - name: Cleanup Pytest Containers
+      if: always() && inputs.device == 'xpu'
+      shell: bash
+      run: |
+        echo "🧹 Cleaning up pytest containers..."
+        # Clean up pytest containers that may be left over (especially from runner v1)
+        CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
+        PYTEST_CONTAINERS=$(docker ps -aq --filter "name=${CONTAINER_ID_PREFIX}" 2>/dev/null || true)
+        if [[ -n "${PYTEST_CONTAINERS}" ]]; then
+          echo "Found pytest containers: ${PYTEST_CONTAINERS}"
+          echo "Stopping and removing pytest containers..."
+          docker stop ${PYTEST_CONTAINERS} 2>/dev/null || true
+          docker rm -f ${PYTEST_CONTAINERS} 2>/dev/null || true
+          echo "✓ Pytest containers cleaned up"
+        else
+          echo "No pytest containers found"
+        fi
 
     - name: Upload Test Results
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -327,3 +381,10 @@ runs:
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore
+
+    - name: Report Test Exit Code
+      if: always()
+      shell: bash
+      run: |
+        # Propagate the original test exit code after cleanup and uploads
+        exit ${TEST_EXIT_CODE:-0}

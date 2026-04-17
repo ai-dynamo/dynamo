@@ -10,6 +10,11 @@ on:
         description: 'Framework name (e.g. dynamo, vllm, sglang, trtllm)'
         required: true
         type: string
+      device:
+        description: 'Build device (cuda, xpu, cpu)'
+        required: false
+        type: string
+        default: 'cuda'
       builder_flavor:
         description: 'Optional BuildKit routing flavor override (vllm, sglang, trtllm, general)'
         required: false
@@ -20,7 +25,7 @@ on:
         required: true
         type: string
       platform:
-        description: 'Docker platform(s) to build (e.g. linux/amd64,linux/arm64)'
+        description: 'Platform to build (amd64 or arm64)'
         required: true
         type: string
       cuda_version:
@@ -66,6 +71,20 @@ on:
         required: false
         type: number
         default: 30
+      run_single_xpu_tests:
+        description: 'Whether to run single XPU tests'
+        required: false
+        type: boolean
+        default: false
+      single_xpu_test_markers:
+        description: 'Single XPU pytest markers'
+        required: false
+        type: string
+      single_xpu_test_timeout_minutes:
+        description: 'Timeout in minutes for single XPU tests'
+        required: false
+        type: number
+        default: 30
       run_multi_gpu_tests:
         description: 'Whether to run multi-gpu tests'
         required: false
@@ -95,7 +114,7 @@ on:
         required: true
         type: string
       extra_tags:
-        description: 'Additional tags (newline-separated)'
+        description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
         required: false
         type: string
         default: ''
@@ -159,7 +178,7 @@ jobs:
   # ============================================================================
   build:
     if: inputs.build_image
-    name: Build ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}
+    name: Build ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) }}
     runs-on: prod-builder-v3
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
     outputs:
@@ -199,6 +218,8 @@ jobs:
             echo 'runners=[{"arch":"amd64","runner":"prod-tester-amd-gpu-v1"},{"arch":"arm64","runner":"prod-tester-arm-v1"}]' >> $GITHUB_OUTPUT
           elif [[ "$PLATFORM" == *"arm64"* ]]; then
             echo 'runners=[{"arch":"arm64","runner":"prod-tester-arm-v1"}]' >> $GITHUB_OUTPUT
+          elif [[ "$PLATFORM" == *"amd64"* ]]; then
+            echo 'runners=[{"arch":"amd64","runner":"xpu"}]' >> $GITHUB_OUTPUT
           else
             echo 'runners=[{"arch":"amd64","runner":"prod-tester-amd-gpu-v1"}]' >> $GITHUB_OUTPUT
           fi
@@ -207,6 +228,7 @@ jobs:
         uses: ./.github/actions/build-flavor
         with:
           framework: ${{ inputs.framework }}
+          device: ${{ inputs.device }}
           builder_flavor: ${{ inputs.builder_flavor }}
           target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}
@@ -232,15 +254,16 @@ jobs:
           show_summary: ${{ inputs.push_image && inputs.show_summary }}
 
 
+
   # ============================================================================
   # TEST
   # ============================================================================
   test:
     if: |
-        ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests ) &&
+        ( inputs.run_cpu_only_tests || inputs.run_single_gpu_tests || inputs.run_single_xpu_tests ) &&
         inputs.build_image
     needs: [build]
-    name: Test ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }} (${{ matrix.arch }})
+    name: Test ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) }} (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
@@ -256,8 +279,8 @@ jobs:
         shell: bash
         run: |
           RUNTIME_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}${{ needs.build.outputs.image_tag_suffix }}
-          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
           TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.test_tag_plain }}${{ needs.build.outputs.image_tag_suffix }}
+          echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
           echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -294,12 +317,13 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'auto'
           dind_as_sidecar: 'true'
+          device: ${{ inputs.device }}
 
       # Run GPU tests sequentially (only on amd64 runners with GPU)
       # These are e2e tests marked with gpu_1 that require GPU hardware
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.single_gpu_test_timeout_minutes }}
-        if: inputs.run_single_gpu_tests && matrix.arch == 'amd64'
+        if: ( matrix.arch == 'amd64' && inputs.device == 'cuda' && inputs.run_single_gpu_tests == true ) # We only run GPU tests on amd64 CUDA runners
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
@@ -310,6 +334,31 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+          device: ${{ inputs.device }}
+
+      # Run XPU tests sequentially on xpu runners
+      - name: Run XPU tests (sequential)
+        timeout-minutes: ${{ inputs.single_xpu_test_timeout_minutes }}
+        if: ( inputs.device == 'xpu' && inputs.run_single_xpu_tests == true )
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ inputs.single_xpu_test_markers }}
+          test_suite_name: ${{ inputs.framework }}
+          test_type: "pre_merge_xpu"
+          platform_arch: ${{ matrix.arch }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          dind_as_sidecar: 'true'
+          device: ${{ inputs.device }}
+
+      - name: Cleanup Docker images (XPU only)
+        if: inputs.device == 'xpu'
+        shell: bash
+        run: |
+          docker rmi ${{ steps.calculate-target-tag.outputs.test_image }} 2>/dev/null || true
+          docker rmi ${{ steps.calculate-target-tag.outputs.runtime_image }} 2>/dev/null || true
+          docker image prune -f
 
   # ============================================================================
   # MULTI-GPU TESTS
@@ -319,7 +368,8 @@ jobs:
     # Multi-GPU support limited to AMD64 only
     if: |
         inputs.run_multi_gpu_tests &&
-        inputs.build_image
+        inputs.build_image &&
+        inputs.device != 'xpu'
     needs: [build]
     name: Multi-gpu test ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}
     runs-on: prod-tester-amd-gpu-4-v1
@@ -368,6 +418,7 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
           dind_as_sidecar: 'true'
+          device: ${{ inputs.device }}
 
 
   # ============================================================================
@@ -380,7 +431,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: ${{ fromJson(needs.build.outputs.compliance_arches) }}
-    name: Compliance ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}-${{ matrix.arch }}
+    name: Compliance ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || (inputs.device == 'cuda' && format('cuda{0}', inputs.cuda_version)) }}-${{ matrix.arch }}
     runs-on: prod-builder-v3
     steps:
       - name: Checkout repository
@@ -425,7 +476,7 @@ jobs:
       inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
-    name: copy-to-acr ${{ inputs.cpu_only && 'cpu' || format('cuda{0}', inputs.cuda_version) }}
+    name: copy-to-acr ${{ inputs.cpu_only && 'cpu' || (inputs.device == 'xpu' && 'xpu') || format('cuda{0}', inputs.cuda_version) }}
     runs-on: prod-default-small-v2
     outputs:
       target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
