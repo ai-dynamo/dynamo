@@ -2996,15 +2996,30 @@ async fn rl_weight_version(State(state): State<Arc<RlState>>) -> impl IntoRespon
     }
 }
 
+/// `GET /v1/rl/health` — lightweight health check for Prime-RL admin client.
+///
+/// Prime-RL's `check_health()` calls `GET /health` on the admin client. When
+/// `admin_base_url = ["http://dynamo:8000/v1/rl"]` the request arrives here.
+/// Returns 200 OK if the frontend process is running (no deep probe needed —
+/// the frontend's own `/health` endpoint handles that separately).
+async fn rl_health() -> impl IntoResponse {
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+}
+
 /// Create an Axum [`Router`] for the RL admin endpoints at `/v1/rl/*`.
 ///
 /// Worker system URLs are read from the `DYN_RL_WORKER_SYSTEM_URLS` environment
 /// variable (comma-separated, defaults to `http://localhost:8081`).
 ///
-/// Exposed only when `--enable_rl` is set on the frontend.
+/// Exposed only when `DYN_ENABLE_RL=true` or `HttpServiceConfig.enable_rl` is set.
+///
+/// Prime-RL usage: set `admin_base_url = ["http://dynamo-frontend:8000/v1/rl"]`
+/// in the orchestrator config. Prime-RL strips the trailing `/v1` suffix only
+/// if present, so `/v1/rl` is preserved and all routes resolve correctly.
 pub fn rl_router() -> (Vec<RouteDoc>, Router) {
     let rl_state = Arc::new(RlState::from_env());
     let docs = vec![
+        RouteDoc::new(axum::http::Method::GET, "/v1/rl/health"),
         RouteDoc::new(axum::http::Method::GET, "/v1/rl/ready"),
         RouteDoc::new(axum::http::Method::POST, "/v1/rl/pause"),
         RouteDoc::new(axum::http::Method::POST, "/v1/rl/resume"),
@@ -3012,6 +3027,7 @@ pub fn rl_router() -> (Vec<RouteDoc>, Router) {
         RouteDoc::new(axum::http::Method::GET, "/v1/rl/weight_version"),
     ];
     let router = Router::new()
+        .route("/v1/rl/health", get(rl_health))
         .route("/v1/rl/ready", get(rl_ready))
         .route("/v1/rl/pause", post(rl_pause))
         .route("/v1/rl/resume", post(rl_resume))
