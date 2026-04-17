@@ -12,6 +12,13 @@ USER_TEXT_TOKENS = 300
 COCO_ANNOTATIONS = Path(__file__).parent / "annotations" / "image_info_test2017.json"
 
 
+def _positive_int(value: str) -> int:
+    iv = int(value)
+    if iv <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {iv}")
+    return iv
+
+
 def _common_parser() -> argparse.ArgumentParser:
     """Args shared across all strategies."""
     p = argparse.ArgumentParser(add_help=False)
@@ -114,29 +121,31 @@ def parse_args(description: str = "") -> argparse.Namespace:
     )
     sw.add_argument(
         "--num-users",
-        type=int,
+        type=_positive_int,
         default=10,
         help="Number of concurrent user sessions (default: 10)",
     )
     sw.add_argument(
         "--turns-per-user",
-        type=int,
+        type=_positive_int,
         default=20,
         help="Number of requests per user (default: 20)",
     )
     sw.add_argument(
         "--window-size",
-        type=int,
+        type=_positive_int,
         default=5,
-        help="Number of images per request (default: 5)",
+        help="Sliding window width — each turn sees this many images, "
+        "with window_size-1 overlap between consecutive turns (default: 5)",
     )
 
-    # Default to single-turn when no subcommand given
+    # Default to single-turn when no subcommand given, but let top-level
+    # `-h`/`--help` flow through the main parser so users see both
+    # subcommands and the module description.
     known_strategies = {"single-turn", "sliding-window"}
-    if len(sys.argv) < 2 or sys.argv[1] not in known_strategies:
-        args = st.parse_args(sys.argv[1:])
-        args.strategy = "single-turn"
-    else:
-        args = parser.parse_args()
+    argv = sys.argv[1:]
+    help_requested = bool(argv) and argv[0] in {"-h", "--help"}
+    if not help_requested and (not argv or argv[0] not in known_strategies):
+        argv = ["single-turn", *argv]
 
-    return args
+    return parser.parse_args(argv)
