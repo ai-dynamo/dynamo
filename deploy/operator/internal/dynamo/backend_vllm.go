@@ -271,11 +271,12 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		// The operator's RPC-based DP coordination (--data-parallel-hybrid-lb) is
 		// explicitly incompatible with elastic EP — vLLM raises NotImplementedError
 		// if both are present. Instead we set up a cross-node Ray cluster:
-		//   Leader: ray start --head && vllm serve ... --data-parallel-size-local 1
-		//   Worker: ray start --address=<leader>:6379 --block
-		// --data-parallel-size-local 1 tells vLLM's create_dp_placement_groups to
-		// allocate exactly 1 DP rank per Ray node (not n_gpus/world_size which would
-		// over-allocate on nodes with multiple GPUs).
+		//   Leader: ray start --head --block & <tcp-poll-ray-ready> && <vllm cmd>
+		//   Worker: <poll /live until 200> && ray start --address=<leader>:6379 --block
+		// Note: --data-parallel-size-local is intentionally NOT injected. With the
+		// worker's health-gate delaying its Ray join until dynamo.vllm is fully ready,
+		// only the leader node is in the Ray cluster when create_dp_placement_groups runs,
+		// so vLLM naturally places all initial DP workers on the leader node.
 		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
 	} else if needsDataParallelMultinodeLaunch(expandedArgs, resources) {
 		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, resources, numberOfNodes)
@@ -432,9 +433,14 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		// fully ready. This ensures the worker joins Ray AFTER create_dp_placement_groups
 		// has run (which requires only the leader's GPUs to be in the cluster).
 		// Uses Python's urllib (always available) instead of curl.
+		// Bounded at 720 × 15s = 3 hours to cover large models with slow disk I/O.
+		// Without a bound, a permanently broken leader leaves the worker looping
+		// forever with no Kubernetes liveness probe to detect it (probes are removed
+		// at the UpdatePodSpec level for elastic EP workers).
 		healthGate := fmt.Sprintf(
-			`until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
+			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
 				`2>/dev/null; do `+
+				`i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; `+
 				`echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done`,
 			leaderHostname, commonconsts.DynamoSystemPort,
 		)
