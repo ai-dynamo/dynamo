@@ -2169,9 +2169,10 @@ async fn detokenize(
     let tokenizer = card
         .tokenizer()
         .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to load tokenizer"))?;
-    let prompt = tokenizer
+    let prompt: String = tokenizer
         .decode(&request.tokens, false)
-        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to detokenize prompt"))?;
+        .map_err(|err| ErrorMessage::from_anyhow(err, "Failed to detokenize prompt"))?
+        .into();
 
     Ok(Json(DetokenizeResponse { prompt }).into_response())
 }
