@@ -339,10 +339,10 @@ runs:
           ERROR_TESTS=0
         fi
 
-        exit ${TEST_EXIT_CODE}
+        exit 0
 
     - name: Cleanup MinIO Service
-      if: always() && inputs.start_minio == 'true' && env.MINIO_STARTED_BY_ACTION == 'true'
+      if: always() && inputs.start_minio == 'true'
       shell: bash
       run: |
         echo "🧹 Cleaning up MinIO container..."
@@ -382,3 +382,10 @@ runs:
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore
+
+    - name: Report Test Exit Code
+      if: always()
+      shell: bash
+      run: |
+        # Propagate the original test exit code after cleanup and uploads
+        exit ${TEST_EXIT_CODE:-0}
