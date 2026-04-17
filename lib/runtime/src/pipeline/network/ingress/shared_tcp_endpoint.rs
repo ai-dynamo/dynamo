@@ -330,7 +330,7 @@ impl SharedTcpServer {
         // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
 
-        system_health.lock().set_ready(&endpoint_name);
+        system_health.lock().set_endpoint_registered(&endpoint_name);
 
         tracing::info!(
             "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",

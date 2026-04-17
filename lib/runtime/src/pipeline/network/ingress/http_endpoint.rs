@@ -96,7 +96,7 @@ impl SharedHttpServer {
         let subject_clone = subject.clone();
         self.handlers.insert(subject, handler);
 
-        system_health.lock().set_ready(&endpoint_name);
+        system_health.lock().set_endpoint_registered(&endpoint_name);
 
         tracing::debug!("Registered endpoint handler for subject: {subject_clone}");
         Ok(())
