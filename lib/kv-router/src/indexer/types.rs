@@ -210,6 +210,11 @@ pub struct IndexerRecordRoutingDecisionRequest {
     pub local_hashes: Vec<LocalBlockHash>,
     /// Locally-computed rolling sequence hashes for the routed request.
     pub sequence_hashes: Vec<SequenceHash>,
+    /// Optional per-block multimodal extras. When present, `block_mm_infos[i]`
+    /// corresponds to `local_hashes[i]`. Optional for backward compatibility
+    /// with routers and served indexers that predate MM-aware approximate routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
 }
 
 /// Response from a served approximate-mode routing-decision endpoint.
@@ -308,4 +313,8 @@ pub(super) struct RoutingDecisionRequest {
     pub(super) worker: WorkerWithDpRank,
     pub(super) local_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
+    /// Optional multimodal extras per block. When present, `block_mm_infos[i]`
+    /// corresponds to `local_hashes[i]`. Used for MM-aware approximate routing
+    /// so the synthetic `Stored` event carries image hashes.
+    pub(super) block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
 }

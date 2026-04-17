@@ -11,7 +11,9 @@ use dynamo_kv_router::indexer::{
     IndexerRecordRoutingDecisionResponse, KV_INDEXER_QUERY_ENDPOINT,
     KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT,
 };
-use dynamo_kv_router::protocols::{LocalBlockHash, OverlapScores, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{
+    BlockExtraInfo, LocalBlockHash, OverlapScores, WorkerWithDpRank,
+};
 use dynamo_runtime::component::{Client, Component};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery};
 use dynamo_runtime::pipeline::{
@@ -123,6 +125,7 @@ impl RemoteIndexer {
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     ) -> Result<()> {
         self.validate_topology_if_ready().await.inspect_err(|_| {
             self.metrics.increment_write_failures();
@@ -137,6 +140,7 @@ impl RemoteIndexer {
             worker,
             local_hashes,
             sequence_hashes,
+            block_mm_infos,
         };
         let mut stream: ManyOut<IndexerRecordRoutingDecisionResponse> = record_router
             .round_robin(SingleIn::new(request))
@@ -475,6 +479,7 @@ impl
                     request.worker,
                     request.local_hashes,
                     request.sequence_hashes,
+                    request.block_mm_infos,
                 )
                 .await
             {

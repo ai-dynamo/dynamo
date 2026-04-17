@@ -1932,7 +1932,7 @@ async fn test_routing_decision_assigns_first_seen_worker() {
     let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
 
     index
-        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes)
+        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes, None)
         .await
         .unwrap();
     flush_and_settle(&index).await;
@@ -1944,6 +1944,125 @@ async fn test_routing_decision_assigns_first_seen_worker() {
 
     let scores = query_scores(&index, &[11, 22]).await;
     assert!(!scores.scores.contains_key(&worker));
+}
+
+/// Verify MM-aware approximate routing: two workers that have routed the same
+/// tokens but with different images (different mm_hashes) are treated as
+/// distinct in the indexer — a query for tokens+image A returns worker A only.
+#[tokio::test]
+async fn test_routing_decision_distinguishes_mm_hashes() {
+    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+
+    let token = CancellationToken::new();
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    let index = KvIndexer::new_with_frequency(
+        token,
+        Some(Duration::from_secs(60)),
+        32,
+        metrics,
+        Some(PruneConfig::default()),
+    );
+
+    let worker_a = WorkerWithDpRank::new(1, 0);
+    let worker_b = WorkerWithDpRank::new(2, 0);
+    let tokens: Vec<u32> = (0..96u32).collect(); // 3 blocks at block_size=32
+
+    // Worker A routed the same tokens with image hash 0xAAAA on last block.
+    let mm_infos_a = vec![
+        None,
+        None,
+        Some(BlockExtraInfo {
+            mm_objects: vec![BlockMmObjectInfo {
+                mm_hash: 0xAAAA,
+                offsets: vec![],
+            }],
+        }),
+    ];
+    let mut twh_a = TokensWithHashes::new(tokens.clone(), 32).with_mm_infos(mm_infos_a);
+    index
+        .process_routing_decision_for_request(&mut twh_a, worker_a)
+        .await
+        .unwrap();
+
+    // Worker B routed the same tokens with image hash 0xBBBB.
+    let mm_infos_b = vec![
+        None,
+        None,
+        Some(BlockExtraInfo {
+            mm_objects: vec![BlockMmObjectInfo {
+                mm_hash: 0xBBBB,
+                offsets: vec![],
+            }],
+        }),
+    ];
+    let mut twh_b = TokensWithHashes::new(tokens.clone(), 32).with_mm_infos(mm_infos_b);
+    index
+        .process_routing_decision_for_request(&mut twh_b, worker_b)
+        .await
+        .unwrap();
+
+    flush_and_settle(&index).await;
+
+    // Query with image A -> should match worker A on all 3 blocks, worker B
+    // should only overlap on the two image-free prefix blocks.
+    let mm_infos_query = vec![
+        None,
+        None,
+        Some(BlockExtraInfo {
+            mm_objects: vec![BlockMmObjectInfo {
+                mm_hash: 0xAAAA,
+                offsets: vec![],
+            }],
+        }),
+    ];
+    let mut twh_query = TokensWithHashes::new(tokens.clone(), 32).with_mm_infos(mm_infos_query);
+    let query_hashes = twh_query.get_or_compute_block_hashes().to_vec();
+
+    let scores = index.find_matches(query_hashes).await.unwrap();
+    let score_a = *scores.scores.get(&worker_a).unwrap_or(&0);
+    let score_b = *scores.scores.get(&worker_b).unwrap_or(&0);
+    assert!(
+        score_a > score_b,
+        "Expected image-matching worker A to score higher than B; got A={}, B={}",
+        score_a,
+        score_b
+    );
+}
+
+/// Short-length block_mm_infos should pad, not truncate, the synthetic event.
+#[tokio::test]
+async fn test_routing_decision_pads_short_mm_infos() {
+    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+
+    let token = CancellationToken::new();
+    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+    let index = KvIndexer::new_with_frequency(
+        token,
+        Some(Duration::from_secs(60)),
+        32,
+        metrics,
+        Some(PruneConfig::default()),
+    );
+    let worker = WorkerWithDpRank::new(99, 0);
+    let local_hashes = vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)];
+    let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+
+    // Only provide MM info for block 0; blocks 1 and 2 must still be stored.
+    let short_infos = Some(vec![Some(BlockExtraInfo {
+        mm_objects: vec![BlockMmObjectInfo {
+            mm_hash: 0x1234,
+            offsets: vec![],
+        }],
+    })]);
+
+    index
+        .process_routing_decision_with_hashes(worker, local_hashes.clone(), sequence_hashes, short_infos)
+        .await
+        .unwrap();
+    flush_and_settle(&index).await;
+
+    // All three blocks should be reachable — no truncation.
+    assert_score(&index, &[1, 2, 3], worker, 3).await;
 }
 
 mod tree_specific_tests {

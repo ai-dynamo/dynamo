@@ -250,14 +250,31 @@ impl KvIndexer {
 
                             event_id_counter += 1;
 
-                            let hashes = routing_req.local_hashes.iter().zip(routing_req.sequence_hashes.iter());
+                            // Pad mm_infos with `None` so a shorter vector can't
+                            // truncate the synthetic `Stored` event. This preserves
+                            // every block in `local_hashes` even if the sender
+                            // supplied only partial MM info.
+                            let mm_infos_iter: Box<dyn Iterator<Item = Option<BlockExtraInfo>>> =
+                                match routing_req.block_mm_infos {
+                                    Some(infos) => {
+                                        Box::new(infos.into_iter().chain(std::iter::repeat(None)))
+                                    }
+                                    None => Box::new(std::iter::repeat(None)),
+                                };
+                            let hashes = routing_req
+                                .local_hashes
+                                .iter()
+                                .zip(routing_req.sequence_hashes.iter())
+                                .zip(mm_infos_iter);
                             let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
                                 parent_hash: None,
-                                blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
-                                    tokens_hash: *local_hash,
-                                    block_hash: ExternalSequenceBlockHash(*sequence_hash),
-                                mm_extra_info: None,
-                                }).collect(),
+                                blocks: hashes
+                                    .map(|((local_hash, sequence_hash), mm_info)| KvCacheStoredBlockData {
+                                        tokens_hash: *local_hash,
+                                        block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                                        mm_extra_info: mm_info,
+                                    })
+                                    .collect(),
                             });
 
                             let event = RouterEvent::new(
@@ -506,9 +523,15 @@ impl KvIndexerInterface for KvIndexer {
     ) -> Result<(), KvRouterError> {
         let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
         let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
+        let block_mm_infos = tokens_with_hashes.block_mm_infos().map(|s| s.to_vec());
 
-        self.process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
-            .await
+        self.process_routing_decision_with_hashes(
+            worker,
+            local_hashes,
+            sequence_hashes,
+            block_mm_infos,
+        )
+        .await
     }
     async fn flush(&self) -> usize {
         let curr_size = self.event_tx.max_capacity() - self.event_tx.capacity();
@@ -529,12 +552,14 @@ impl KvIndexer {
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     ) -> Result<(), KvRouterError> {
         self.routing_tx
             .send(RoutingDecisionRequest {
                 worker,
                 local_hashes,
                 sequence_hashes,
+                block_mm_infos,
             })
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;

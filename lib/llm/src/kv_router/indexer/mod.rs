@@ -11,8 +11,8 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
     indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
     protocols::{
-        DpRank, LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId,
-        WorkerWithDpRank,
+        BlockExtraInfo, DpRank, LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes,
+        WorkerId, WorkerWithDpRank,
     },
 };
 use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
@@ -129,11 +129,17 @@ impl Indexer {
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer(indexer) => {
                 indexer
-                    .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+                    .process_routing_decision_with_hashes(
+                        worker,
+                        local_hashes,
+                        sequence_hashes,
+                        block_mm_infos,
+                    )
                     .await
             }
             Self::Concurrent(_) => {
@@ -143,7 +149,12 @@ impl Indexer {
                 Err(KvRouterError::IndexerDroppedRequest)
             }
             Self::Remote(remote) => remote
-                .record_hashed_routing_decision(worker, local_hashes, sequence_hashes)
+                .record_hashed_routing_decision(
+                    worker,
+                    local_hashes,
+                    sequence_hashes,
+                    block_mm_infos,
+                )
                 .await
                 .map_err(|error| {
                     tracing::warn!(error = %error, "Remote indexer write failed");
@@ -175,8 +186,14 @@ impl Indexer {
             Self::KvIndexer(_) | Self::Remote(_) => {
                 let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
                 let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
-                self.record_hashed_routing_decision(worker, local_hashes, sequence_hashes)
-                    .await
+                let block_mm_infos = tokens_with_hashes.block_mm_infos().map(|s| s.to_vec());
+                self.record_hashed_routing_decision(
+                    worker,
+                    local_hashes,
+                    sequence_hashes,
+                    block_mm_infos,
+                )
+                .await
             }
             Self::Concurrent(tpi) => {
                 tpi.process_routing_decision_for_request(tokens_with_hashes, worker)
