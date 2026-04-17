@@ -21,6 +21,12 @@ from typing import Optional
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI
+from dynamo.planner.connectors.mdc import (
+    MdcEntry,
+    is_model_card,
+    select_entry,
+    worker_info_from_mdc,
+)
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
@@ -340,22 +346,18 @@ class KubernetesConnector(PlannerConnector):
                 return []
             raise
 
-    def _extract_mdc_entries(
-        self,
-    ) -> list[dict]:
+    def _extract_mdc_entries(self) -> list[MdcEntry]:
         """Extract MDC entries belonging to this DGD.
 
         CRs are named after the worker pod (e.g. ``<dgd>-0-<service>-<hash>``),
         so we filter by the DGD name prefix to avoid picking up entries from
-        other deployments sharing the namespace.
-
-        Returns a list of dicts, each containing:
-            namespace, component, endpoint, instance_id, card_json
+        other deployments sharing the namespace.  LoRA-adapter wrappers are
+        dropped via :func:`is_model_card`.
         """
         crs = self._list_worker_metadata_crs()
         dgd_prefix = f"{self.graph_deployment_name}-"
 
-        entries: list[dict] = []
+        entries: list[MdcEntry] = []
         for cr in crs:
             cr_name = cr.get("metadata", {}).get("name", "")
             if not cr_name.startswith(dgd_prefix):
@@ -368,125 +370,37 @@ class KubernetesConnector(PlannerConnector):
                 except json.JSONDecodeError:
                     continue
             model_cards = data.get("model_cards", {})
-            for _key, instance in model_cards.items():
-                if instance.get("type") != "Model":
+            for _key, wrapper in model_cards.items():
+                if not is_model_card(wrapper):
                     continue
-                entries.append(instance)
+                entries.append(
+                    MdcEntry(
+                        card_json=wrapper.get("card_json") or {},
+                        component=wrapper.get("component"),
+                        endpoint=wrapper.get("endpoint"),
+                        instance_id=wrapper.get("instance_id"),
+                    )
+                )
         return entries
 
-    def _mdc_entry_is_prefill(self, entry: dict) -> bool:
-        """Check if an MDC entry is a prefill worker.
+    def _resolve_dgd_service(
+        self, sub_component_type: SubComponentType, backend: str
+    ) -> tuple[Optional[str], str]:
+        """Return (dgd_service_name, component_name_for_filter).
 
-        model_type can be serialized as:
-        - An integer bitflag (ModelType::Prefill = 1 << 4 = 16)
-        - A dict with a "bits" key (serde bitflags format)
-        - A string like "Prefill" or "Chat|Completions"
+        Uses the DGD when available; otherwise falls back to backend defaults
+        so that stale/missing DGD state still lets us filter out LoRA cards
+        by their expected component name.
         """
-        card = entry.get("card_json", {})
-        model_type = card.get("model_type", 0)
-        if isinstance(model_type, str):
-            return "prefill" in model_type.lower()
-        if isinstance(model_type, dict):
-            model_type = model_type.get("bits", 0)
-        return bool(model_type & 0x10)
-
-    def _build_worker_info_from_mdc(
-        self,
-        entry: dict,
-        sub_component_type: SubComponentType,
-    ) -> WorkerInfo:
-        """Build a WorkerInfo from an MDC entry, applying the fallback chain.
-
-        Priority: MDC -> DGD container-arg parsing -> hard-coded defaults.
-        """
-        defaults = build_worker_info_from_defaults(
-            self._backend_hint or "vllm", sub_component_type
-        )
-
-        card = entry.get("card_json", {})
-        runtime_cfg = card.get("runtime_config", {})
-
-        # --- component / endpoint names from MDC wrapper ---
-        mdc_component = entry.get("component")
-        mdc_endpoint = entry.get("endpoint")
-
-        component_name = mdc_component or defaults.component_name
-        endpoint = mdc_endpoint or defaults.endpoint
-        if not mdc_component:
-            logger.info(
-                f"MDC missing 'component' for {sub_component_type.value}, "
-                f"falling back to default: {defaults.component_name}"
-            )
-        if not mdc_endpoint:
-            logger.info(
-                f"MDC missing 'endpoint' for {sub_component_type.value}, "
-                f"falling back to default: {defaults.endpoint}"
-            )
-
-        # --- model name ---
-        mdc_model = card.get("display_name")
-        model_name = mdc_model
-        if not model_name:
-            # Fallback: parse from DGD container args
-            try:
-                deployment = self.kube_api.get_graph_deployment(
-                    self.graph_deployment_name
-                )
-                service = get_service_from_sub_component_type_or_name(
-                    deployment, sub_component_type
-                )
-                model_name = service.get_model_name()
-                if model_name:
-                    logger.info(
-                        f"MDC missing model name for {sub_component_type.value}, "
-                        f"fell back to DGD container args: {model_name}"
-                    )
-            except PlannerError:
-                pass
-        if not model_name:
-            logger.warning(
-                f"Could not determine model name for {sub_component_type.value} "
-                f"from MDC or DGD container args"
-            )
-
-        # --- runtime config fields ---
-        total_kv_blocks = runtime_cfg.get("total_kv_blocks")
-        max_num_seqs = runtime_cfg.get("max_num_seqs")
-        max_num_batched_tokens = runtime_cfg.get("max_num_batched_tokens")
-        kv_cache_block_size = card.get("kv_cache_block_size")
-        context_length = card.get("context_length")
-
-        if total_kv_blocks is None:
-            logger.info(f"MDC missing total_kv_blocks for {sub_component_type.value}")
-        if max_num_seqs is None:
-            logger.info(f"MDC missing max_num_seqs for {sub_component_type.value}")
-
-        # --- k8s_name: resolve from DGD subComponentType ---
-        k8s_name = defaults.k8s_name
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
             service = get_service_from_sub_component_type_or_name(
                 deployment, sub_component_type
             )
-            k8s_name = service.name
+            return service.name, service.name
         except PlannerError:
-            logger.info(
-                f"Could not resolve k8s service name for {sub_component_type.value}, "
-                f"using default: {defaults.k8s_name}"
-            )
-
-        info = WorkerInfo(
-            k8s_name=k8s_name,
-            component_name=component_name,
-            endpoint=endpoint,
-            model_name=model_name,
-            total_kv_blocks=total_kv_blocks,
-            kv_cache_block_size=kv_cache_block_size,
-            max_num_seqs=max_num_seqs,
-            max_num_batched_tokens=max_num_batched_tokens,
-            context_length=context_length,
-        )
-        return info
+            defaults = build_worker_info_from_defaults(backend, sub_component_type)
+            return None, defaults.component_name or ""
 
     def get_worker_info(
         self,
@@ -499,74 +413,57 @@ class KubernetesConnector(PlannerConnector):
             sub_component_type: PREFILL or DECODE
             backend: Backend framework name (for default fallback)
         """
-        self._backend_hint = backend
         entries = self._extract_mdc_entries()
+        dgd_service_name, expected_component = self._resolve_dgd_service(
+            sub_component_type, backend
+        )
 
-        # Resolve the expected component name so we can scope card selection
-        # and avoid picking up LoRA-adapter cards that share the same CR but
-        # carry a different component/model identity.
-        expected_component: Optional[str] = None
-        try:
-            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-            service = get_service_from_sub_component_type_or_name(
-                deployment, sub_component_type
-            )
-            expected_component = service.name
-        except PlannerError:
-            expected_component = build_worker_info_from_defaults(
-                backend, sub_component_type
-            ).component_name
-
-        for entry in entries:
-            is_prefill = self._mdc_entry_is_prefill(entry)
-            if sub_component_type == SubComponentType.PREFILL and not is_prefill:
-                continue
-            if sub_component_type == SubComponentType.DECODE and is_prefill:
-                continue
-
-            entry_component = entry.get("component")
-            if (
-                entry_component
-                and expected_component
-                and entry_component != expected_component
-            ):
-                logger.debug(
-                    f"Skipping MDC entry with component={entry_component!r}, "
-                    f"expected {expected_component!r} for {sub_component_type.value}"
+        def _dgd_model_name() -> Optional[str]:
+            try:
+                deployment = self.kube_api.get_graph_deployment(
+                    self.graph_deployment_name
                 )
-                continue
+                service = get_service_from_sub_component_type_or_name(
+                    deployment, sub_component_type
+                )
+                return service.get_model_name()
+            except PlannerError:
+                return None
 
-            info = self._build_worker_info_from_mdc(entry, sub_component_type)
+        entry = select_entry(entries, sub_component_type, expected_component)
+        if entry is not None:
+            info = worker_info_from_mdc(
+                entry,
+                sub_component_type,
+                backend=backend,
+                model_name_fallback=_dgd_model_name,
+                k8s_name_override=dgd_service_name,
+            )
+            if not info.model_name:
+                logger.warning(
+                    f"Could not determine model name for {sub_component_type.value} "
+                    f"from MDC or DGD container args"
+                )
             logger.info(
                 f"Built {sub_component_type.value} WorkerInfo from MDC: "
                 f"{info.summary()}"
             )
             return info
 
-        # No MDC entry found -- fall back entirely to defaults + DGD arg parsing
+        # No MDC entry found -- fall back entirely to defaults + DGD arg parsing.
         logger.warning(
             f"No DynamoWorkerMetadata CR found for {sub_component_type.value}. "
             f"Workers may not be registered yet. Falling back to defaults."
         )
         info = build_worker_info_from_defaults(backend, sub_component_type)
-
-        # Try to enrich model_name from DGD container args
-        try:
-            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-            service = get_service_from_sub_component_type_or_name(
-                deployment, sub_component_type
-            )
-            info.k8s_name = service.name
-            arg_model = service.get_model_name()
-            if arg_model:
-                info.model_name = arg_model
-                logger.info(
-                    f"Enriched {sub_component_type.value} WorkerInfo model name "
-                    f"from DGD args: {arg_model}"
-                )
-        except PlannerError as e:
+        if dgd_service_name is not None:
+            info.k8s_name = dgd_service_name
+        arg_model = _dgd_model_name()
+        if arg_model:
+            info.model_name = arg_model
             logger.info(
-                f"Could not enrich WorkerInfo from DGD for {sub_component_type.value}: {e}"
+                f"Enriched {sub_component_type.value} WorkerInfo model name "
+                f"from DGD args: {arg_model}"
             )
 
         logger.info(
