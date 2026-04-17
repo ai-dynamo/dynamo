@@ -10,6 +10,14 @@ spec:
     Frontend:
       componentType: frontend
       replicas: 1
+      resources:
+        requests:
+          memory: "512Mi"
+          custom:
+            # Prevents eviction under node disk pressure (request=0 pods are evicted first)
+            ephemeral-storage: "100Mi"
+        limits:
+          memory: "1Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
