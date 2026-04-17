@@ -104,6 +104,7 @@ reqwest = { version = "0.12.24", default-features = false, features = [
     "json",
     "stream",
     "rustls-tls",
+    "http2",
 ] }
 rmp-serde = { version = "1" }
 serde_bytes = { version = "0.11" }
