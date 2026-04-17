@@ -51,10 +51,6 @@ pub struct SystemHealth {
     new_endpoint_tx: mpsc::UnboundedSender<String>,
     new_endpoint_rx: Arc<parking_lot::Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     use_endpoint_health_status: Vec<String>,
-    /// When true, active canary health checks are enabled and the canary is the sole
-    /// authority on endpoint readiness. Transport endpoints (push, http, tcp) should
-    /// NOT eagerly set endpoints to Ready — only the canary should transition
-    /// endpoints from NotReady to Ready after verifying end-to-end functionality.
     health_check_enabled: bool,
     health_path: String,
     live_path: String,
@@ -70,10 +66,7 @@ impl SystemHealth {
         health_path: String,
         live_path: String,
     ) -> Self {
-        // When canary health checks are enabled, endpoints must start as NotReady
-        // so the canary is the sole authority on readiness. Without this, endpoints
-        // seeded from starting_health_status=Ready would appear healthy before the
-        // canary has verified end-to-end functionality.
+        // Force NotReady when canary is enabled — canary verifies before marking Ready.
         let initial_endpoint_status = if health_check_enabled {
             HealthStatus::NotReady
         } else {
@@ -103,14 +96,12 @@ impl SystemHealth {
         }
     }
 
-    /// Returns true if active canary health checks are enabled.
     pub fn health_check_enabled(&self) -> bool {
         self.health_check_enabled
     }
 
-    /// Signal that an endpoint's transport has registered.
-    /// Sets Ready if canary health checks are disabled. When canary is enabled,
-    /// this is a no-op — the canary is the sole authority on readiness.
+    /// Signal endpoint transport registration. Sets Ready when canary is disabled;
+    /// no-op when canary is enabled (canary will set Ready after verification).
     pub fn set_endpoint_registered(&self, endpoint: &str) {
         if !self.health_check_enabled {
             self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
