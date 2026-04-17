@@ -32,7 +32,7 @@ from tests.gpu_memory_service.flow_assertions import (
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
-pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
+pytestmark = [pytest.mark.pre_merge, pytest.mark.nightly, pytest.mark.fault_tolerance]
 
 # Event flow under test:
 # 1. Shadow A starts as the initial weights publisher, then quiesces without serving traffic.
