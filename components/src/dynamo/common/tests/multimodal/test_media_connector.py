@@ -58,22 +58,45 @@ class TestImageLoaderCache:
         loader._cache_put("url1", img)
         assert len(loader._image_cache) == 1
 
-    def test_sync_cache_lookup(self):
-        """Simulates the sync fetch_image cache lookup path
-        used by DynamoMediaConnector.fetch_image()."""
+    def test_get_cached_sync_miss(self):
+        """get_cached_sync returns None on cache miss."""
+        loader = ImageLoader()
+        assert loader.get_cached_sync("http://example.com/missing.jpg") is None
+
+    def test_get_cached_sync_hit(self):
+        """get_cached_sync returns the cached image and promotes it to MRU."""
         loader = ImageLoader()
         img = _make_pil_image()
-        url = "http://example.com/test.jpg"
-        key = url.lower()
-
-        # No cache hit
-        assert key not in loader._image_cache
-
-        # Populate cache
+        key = "http://example.com/test.jpg"
         loader._cache_put(key, img)
 
-        # Cache hit
-        cache = loader._image_cache
-        assert key in cache
-        cache.move_to_end(key)
-        assert cache[key] is img
+        result = loader.get_cached_sync(key)
+        assert result is img
+
+    def test_get_cached_sync_mode_conversion(self):
+        """get_cached_sync converts mode when caller requests a different one."""
+        loader = ImageLoader()
+        img = Image.new("RGB", (4, 4), color="blue")
+        key = "http://example.com/test.jpg"
+        loader._cache_put(key, img)
+
+        result = loader.get_cached_sync(key, image_mode="L")
+        assert result is not None
+        assert result.mode == "L"
+
+    def test_get_cached_sync_promotes_lru(self):
+        """get_cached_sync moves the entry to MRU so it is not the next eviction."""
+        loader = ImageLoader(cache_size=2)
+        img1 = _make_pil_image()
+        img2 = _make_pil_image()
+        img3 = _make_pil_image()
+        loader._cache_put("url1", img1)
+        loader._cache_put("url2", img2)
+
+        # Access url1 via get_cached_sync — it becomes MRU
+        loader.get_cached_sync("url1")
+
+        # Adding url3 should evict url2 (now LRU), not url1
+        loader._cache_put("url3", img3)
+        assert loader.get_cached_sync("url1") is img1
+        assert loader.get_cached_sync("url2") is None  # evicted

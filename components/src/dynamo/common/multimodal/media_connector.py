@@ -72,13 +72,8 @@ try:
             hit without re-downloading. On miss, delegate to the parent's
             sync implementation.
             """
-            key = image_url.lower()
-            cache = self._image_loader._image_cache
-            if key in cache:
-                cache.move_to_end(key)
-                cached = cache[key]
-                if cached.mode != image_mode:
-                    return cached.convert(image_mode)
+            cached = self._image_loader.get_cached_sync(image_url.lower(), image_mode)
+            if cached is not None:
                 return cached
             return super().fetch_image(image_url, image_mode=image_mode)
 

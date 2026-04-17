@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -21,6 +21,15 @@ from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+
+
+class _Renderer(Protocol):
+    """Structural type for vLLM's chat-template renderer."""
+
+    async def render_messages_async(
+        self, messages: Any, params: ChatParams
+    ) -> tuple[Any, dict[str, Any]]:
+        ...
 
 
 @dataclass
@@ -165,7 +174,7 @@ async def preprocess_chat_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
     tokenizer: TokenizerLike,
-    renderer,
+    renderer: _Renderer,
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
@@ -195,49 +204,6 @@ async def preprocess_chat_request(
             add_special_tokens=request_for_sampling.add_special_tokens,
         )
         tokens = list(encoded.input_ids)
-
-    return PreprocessResult(
-        request_for_sampling=request_for_sampling,
-        tool_parser=tool_parser,
-        chat_template_kwargs=chat_template_kwargs,
-        engine_prompt=engine_prompt,
-        prompt_token_ids=tokens,
-    )
-
-
-def preprocess_chat_request_sync(
-    request: dict[str, Any] | ChatCompletionRequest,
-    *,
-    tokenizer: TokenizerLike,
-    renderer,
-    tool_parser_class: type[ToolParser] | None,
-    exclude_tools_when_tool_choice_none: bool = True,
-    enable_auto_tool_choice: bool = False,
-) -> PreprocessResult:
-    """Sync version of preprocess_chat_request for worker processes."""
-    (
-        request_for_sampling,
-        tool_parser,
-        chat_template_kwargs,
-        messages,
-        chat_params,
-    ) = _prepare_request(
-        request,
-        tokenizer=tokenizer,
-        tool_parser_class=tool_parser_class,
-        exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
-        enable_auto_tool_choice=enable_auto_tool_choice,
-    )
-
-    _, engine_prompt = renderer.render_messages(messages, chat_params)
-
-    if "prompt_token_ids" in engine_prompt:
-        tokens = list(engine_prompt["prompt_token_ids"])
-    else:
-        tokens = tokenizer.encode(
-            engine_prompt["prompt"],
-            add_special_tokens=request_for_sampling.add_special_tokens,
-        )
 
     return PreprocessResult(
         request_for_sampling=request_for_sampling,

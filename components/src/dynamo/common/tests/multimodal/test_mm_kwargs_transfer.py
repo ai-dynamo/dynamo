@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from dynamo.common.multimodal.mm_kwargs_transfer import (
-    MmKwargsSender,
+    MmKwargsNixlSender,
     MmKwargsShmReceiver,
     MmKwargsShmSender,
     MmKwargsTransferMetadata,
@@ -85,13 +85,13 @@ class TestMmKwargsTransferMetadata:
         assert meta.tensor_specs[1].field_name == "image_grid_thw"
 
 
-class TestMmKwargsSender:
+class TestMmKwargsNixlSender:
     """Tests for the NIXL sender side (prepare method)."""
 
     @pytest.mark.asyncio
     async def test_prepare_with_no_features_returns_none(self):
         """Empty features list returns None."""
-        sender = MmKwargsSender()
+        sender = MmKwargsNixlSender()
         meta, futures = await sender.prepare([], modality="image")
         assert meta is None
         assert futures == []
@@ -101,7 +101,7 @@ class TestMmKwargsSender:
         """Features with data=None are skipped."""
         feat = _make_feature(data=None)
 
-        sender = MmKwargsSender()
+        sender = MmKwargsNixlSender()
         meta, futures = await sender.prepare([feat], modality="image")
         assert meta is None
         assert futures == []
@@ -126,15 +126,17 @@ class TestMmKwargsSender:
 class TestMmKwargsShmTransfer:
     """Tests for the SHM sender/receiver round-trip."""
 
-    def test_single_item_roundtrip(self):
+    @pytest.mark.asyncio
+    async def test_single_item_roundtrip(self):
         """Single feature round-trips through SHM correctly."""
         test_data = {"pixel_values": [1, 2, 3], "grid_thw": [1, 4, 4]}
         feat = _make_feature(data=test_data, mm_hash="hash_single")
 
         sender = MmKwargsShmSender()
-        meta, handles = sender.prepare([feat], modality="image")
+        extra_update, handles = await sender.prepare([feat], modality="image")
 
-        assert meta is not None
+        assert extra_update is not None
+        meta = extra_update["mm_kwargs_shm"]
         assert len(meta["items"]) == 1
         assert meta["modality"] == "image"
         assert meta["mm_hashes"] == ["hash_single"]
@@ -149,10 +151,10 @@ class TestMmKwargsShmTransfer:
         restored = pickle.loads(items[0])
         assert restored == test_data
 
-        # Cleanup
-        MmKwargsShmSender.cleanup(handles)
+        await sender.cleanup(handles)
 
-    def test_multi_image_roundtrip_preserves_order(self):
+    @pytest.mark.asyncio
+    async def test_multi_image_roundtrip_preserves_order(self):
         """Multiple features round-trip in correct order through SHM."""
         data_items = [
             {"name": "image_0", "values": list(range(100))},
@@ -164,9 +166,10 @@ class TestMmKwargsShmTransfer:
         ]
 
         sender = MmKwargsShmSender()
-        meta, handles = sender.prepare(feats, modality="image")
+        extra_update, handles = await sender.prepare(feats, modality="image")
 
-        assert meta is not None
+        assert extra_update is not None
+        meta = extra_update["mm_kwargs_shm"]
         assert len(meta["items"]) == 3
         assert meta["mm_hashes"] == ["hash_0", "hash_1", "hash_2"]
 
@@ -183,9 +186,10 @@ class TestMmKwargsShmTransfer:
             assert restored["name"] == f"image_{i}"
             assert len(restored["values"]) == (i + 1) * 100
 
-        MmKwargsShmSender.cleanup(handles)
+        await sender.cleanup(handles)
 
-    def test_skips_none_data_features(self):
+    @pytest.mark.asyncio
+    async def test_skips_none_data_features(self):
         """Features with data=None are skipped, hashes still collected."""
         feats = [
             _make_feature(data="real_data_0", mm_hash="hash_0"),
@@ -194,9 +198,10 @@ class TestMmKwargsShmTransfer:
         ]
 
         sender = MmKwargsShmSender()
-        meta, handles = sender.prepare(feats, modality="image")
+        extra_update, handles = await sender.prepare(feats, modality="image")
 
-        assert meta is not None
+        assert extra_update is not None
+        meta = extra_update["mm_kwargs_shm"]
         assert len(meta["items"]) == 2  # Only 2 features had data
         assert meta["mm_hashes"] == ["hash_0", "hash_1", "hash_2"]  # All hashes
 
@@ -207,9 +212,10 @@ class TestMmKwargsShmTransfer:
         assert pickle.loads(items[0]) == "real_data_0"
         assert pickle.loads(items[1]) == "real_data_2"
 
-        MmKwargsShmSender.cleanup(handles)
+        await sender.cleanup(handles)
 
-    def test_all_none_data_returns_none(self):
+    @pytest.mark.asyncio
+    async def test_all_none_data_returns_none(self):
         """All features with data=None returns None metadata."""
         feats = [
             _make_feature(data=None, mm_hash="hash_0"),
@@ -217,17 +223,20 @@ class TestMmKwargsShmTransfer:
         ]
 
         sender = MmKwargsShmSender()
-        meta, handles = sender.prepare(feats, modality="image")
+        extra_update, handles = await sender.prepare(feats, modality="image")
 
-        assert meta is None
+        assert extra_update is None
         assert handles == []
 
-    def test_cleanup_removes_shared_memory(self):
+    @pytest.mark.asyncio
+    async def test_cleanup_removes_shared_memory(self):
         """Cleanup properly unlinks shared memory segments."""
         feat = _make_feature(data="test", mm_hash="hash")
         sender = MmKwargsShmSender()
-        meta, handles = sender.prepare([feat], modality="image")
+        extra_update, handles = await sender.prepare([feat], modality="image")
 
+        assert extra_update is not None
+        meta = extra_update["mm_kwargs_shm"]
         assert len(handles) == 1
         name = meta["items"][0]["name"]
 
@@ -238,7 +247,7 @@ class TestMmKwargsShmTransfer:
         sm.close()
 
         # Cleanup
-        MmKwargsShmSender.cleanup(handles)
+        await sender.cleanup(handles)
 
         # Verify SHM is gone
         with pytest.raises(FileNotFoundError):
@@ -248,12 +257,13 @@ class TestMmKwargsShmTransfer:
 class TestMmKwargsShmCleanupErrorHandling:
     """Tests for SHM cleanup error handling (Devin review fix #1)."""
 
-    def test_cleanup_handles_file_not_found(self):
+    @pytest.mark.asyncio
+    async def test_cleanup_handles_file_not_found(self):
         """FileNotFoundError is silently handled (already unlinked)."""
 
         feat = _make_feature(data="test", mm_hash="hash")
         sender = MmKwargsShmSender()
-        meta, handles = sender.prepare([feat], modality="image")
+        extra_update, handles = await sender.prepare([feat], modality="image")
 
         assert len(handles) == 1
         # Manually unlink to simulate resource_tracker cleanup
@@ -261,24 +271,28 @@ class TestMmKwargsShmCleanupErrorHandling:
         handles[0].unlink()
 
         # cleanup() should not raise even though SHM is already gone
-        MmKwargsShmSender.cleanup(handles)
+        await sender.cleanup(handles)
 
-    def test_cleanup_logs_non_file_errors(self):
+    @pytest.mark.asyncio
+    async def test_cleanup_logs_non_file_errors(self):
         """Non-FileNotFoundError exceptions are logged but don't crash."""
+        sender = MmKwargsShmSender()
         handle = MagicMock()
         handle.close.side_effect = PermissionError("mocked permission error")
 
         # Should not raise
-        MmKwargsShmSender.cleanup([handle])
+        await sender.cleanup([handle])
 
-    def test_cleanup_processes_all_handles_despite_errors(self):
+    @pytest.mark.asyncio
+    async def test_cleanup_processes_all_handles_despite_errors(self):
         """All handles are attempted even if earlier ones fail."""
+        sender = MmKwargsShmSender()
         handle_ok = MagicMock()
         handle_fail = MagicMock()
         handle_fail.close.side_effect = OSError("mocked")
         handle_ok2 = MagicMock()
 
-        MmKwargsShmSender.cleanup([handle_ok, handle_fail, handle_ok2])
+        await sender.cleanup([handle_ok, handle_fail, handle_ok2])
 
         # All handles should have close() called
         handle_ok.close.assert_called_once()

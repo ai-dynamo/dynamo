@@ -11,8 +11,11 @@ and let the backend construct a pre-rendered MultiModalInput that skips the
 processor entirely.
 
 This module provides:
-- MmKwargsSender: registers mm_kwargs tensors with NIXL on the frontend side
+- MmKwargsSender: abstract base class for frontend-side transfer
+- MmKwargsNixlSender: NIXL RDMA implementation (cross-node)
+- MmKwargsShmSender: shared memory implementation (same-node, ~2ms)
 - MmKwargsReceiver: pulls tensors via NIXL READ on the backend side
+- MmKwargsShmReceiver: reads pickled mm_kwargs from shared memory
 - MmKwargsTransferMetadata: the wire protocol between the two
 """
 
@@ -24,6 +27,7 @@ import multiprocessing.shared_memory as shm
 import os
 import pickle
 import uuid
+from abc import ABC, abstractmethod
 from queue import Queue
 from typing import Any, Awaitable
 
@@ -62,19 +66,54 @@ class MmKwargsTransferMetadata(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Sender (frontend side)
+# Sender (frontend side) — abstract base + concrete implementations
 # ---------------------------------------------------------------------------
 
 
-class MmKwargsSender:
+class MmKwargsSender(ABC):
+    """Abstract base for frontend-side mm_kwargs transfer.
+
+    Subclasses implement different transport mechanisms (NIXL RDMA, shared
+    memory). The caller in vllm_processor treats them uniformly:
+
+        sender = MmKwargsShmSender()  # or MmKwargsNixlSender()
+        extra_args, cleanup_items = await sender.prepare(mm_features, "image")
+        if extra_args:
+            dynamo_preproc["extra_args"].update(extra_args)
+        # ... after streaming:
+        await sender.cleanup(cleanup_items)
+    """
+
+    @abstractmethod
+    async def prepare(
+        self,
+        mm_features: list[Any],
+        modality: str = "image",
+    ) -> tuple[dict[str, Any] | None, list[Any]]:
+        """Serialize and register mm_kwargs for transfer to the backend.
+
+        Returns:
+            (extra_args_update, cleanup_items)
+            extra_args_update: dict to merge into dynamo_preproc["extra_args"],
+                or None if nothing was transferred.
+            cleanup_items: opaque list passed back to cleanup() after the
+                response stream completes.
+        """
+
+    @abstractmethod
+    async def cleanup(self, items: list[Any]) -> None:
+        """Release transfer resources after the backend has consumed them."""
+
+
+class MmKwargsNixlSender(MmKwargsSender):
     """Registers mm_kwargs tensors with NIXL for remote READ access.
 
     Usage::
 
-        sender = MmKwargsSender()
-        metadata, completion = await sender.prepare(mm_features, "image")
-        # ... send metadata to backend ...
-        await completion  # wait for backend to finish reading
+        sender = MmKwargsNixlSender()
+        extra_args, cleanup_items = await sender.prepare(mm_features, "image")
+        # ... send extra_args to backend ...
+        await sender.cleanup(cleanup_items)  # wait for backend to finish reading
     """
 
     def __init__(self) -> None:
@@ -87,22 +126,19 @@ class MmKwargsSender:
             self._available = True
         except ImportError:
             self._available = False
-            logger.warning("nixl_connect not available; MmKwargsSender disabled")
+            logger.warning("nixl_connect not available; MmKwargsNixlSender disabled")
 
     async def prepare(
         self,
         mm_features: list[Any],  # list[MultiModalFeatureSpec]
         modality: str = "image",
-    ) -> tuple[MmKwargsTransferMetadata | None, list[Awaitable[None]]]:
+    ) -> tuple[dict[str, Any] | None, list[Any]]:
         """Register mm_kwargs tensors from mm_features with NIXL.
 
-        Args:
-            mm_features: MultiModalFeatureSpec list from EngineCoreRequest.
-            modality: The modality to extract (default "image").
-
         Returns:
-            (transfer_metadata, completion_futures) or (None, []) if no
-            tensors to transfer.
+            (extra_args_update, completion_futures) or (None, []) if no
+            tensors to transfer. Pass completion_futures to cleanup() after
+            streaming so the frontend waits for the backend to finish reading.
         """
         if not self._available:
             logger.debug("[NIXL-Sender] NIXL not available, skipping")
@@ -163,7 +199,21 @@ class MmKwargsSender:
             tensor_specs=tensor_specs,
             mm_hashes=mm_hashes,
         )
-        return metadata, completions
+        logger.debug(
+            "[NIXL-Sender] registered %d tensor(s) for transfer",
+            len(metadata.tensor_specs),
+        )
+        return {"mm_kwargs_nixl": metadata.model_dump()}, completions
+
+    async def cleanup(self, items: list[Any]) -> None:
+        """Await NIXL completion futures so memory regions can be deregistered."""
+        if not items:
+            return
+        try:
+            await asyncio.gather(*items)
+            logger.debug("[NIXL-Sender] all transfers completed")
+        except Exception:
+            logger.warning("[NIXL-Sender] transfer completion failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +375,7 @@ class MmKwargsReceiver:
 # ---------------------------------------------------------------------------
 
 
-class MmKwargsShmSender:
+class MmKwargsShmSender(MmKwargsSender):
     """Transfers pickled mm_kwargs via shared memory (same-node only).
 
     ~30x faster than NIXL for CPU→CPU same-machine transfers.
@@ -333,13 +383,12 @@ class MmKwargsShmSender:
     Usage::
 
         sender = MmKwargsShmSender()
-        shm_meta, cleanup = sender.prepare(mm_features, "image")
-        # ... send shm_meta to backend via extra_args ...
-        # ... after backend confirms receipt:
-        cleanup()
+        extra_args, cleanup_items = await sender.prepare(mm_features, "image")
+        # ... send extra_args to backend via extra_args ...
+        await sender.cleanup(cleanup_items)
     """
 
-    def prepare(
+    async def prepare(
         self,
         mm_features: list[Any],
         modality: str = "image",
@@ -347,9 +396,8 @@ class MmKwargsShmSender:
         """Pickle mm_kwargs into shared memory.
 
         Returns:
-            (shm_metadata_dict, shm_handles) or (None, []) if nothing to send.
-            Caller must keep shm_handles alive until backend reads, then call
-            handle.close() and handle.unlink() for each.
+            (extra_args_update, shm_handles) or (None, []) if nothing to send.
+            Pass shm_handles to cleanup() after streaming completes.
         """
         if not mm_features:
             return None, []
@@ -384,17 +432,17 @@ class MmKwargsShmSender:
         if not items:
             return None, []
 
-        meta = {
+        meta: dict[str, Any] = {
             "modality": modality,
             "items": items,
             "mm_hashes": mm_hashes,
         }
-        return meta, handles
+        logger.debug("[SHM-Sender] wrote %d item(s) to shared memory", len(items))
+        return {"mm_kwargs_shm": meta}, handles
 
-    @staticmethod
-    def cleanup(handles: list[Any]) -> None:
-        """Release shared memory after backend has read."""
-        for sm in handles:
+    async def cleanup(self, items: list[Any]) -> None:
+        """Release shared memory handles after the backend has read."""
+        for sm in items:
             try:
                 sm.close()
                 sm.unlink()

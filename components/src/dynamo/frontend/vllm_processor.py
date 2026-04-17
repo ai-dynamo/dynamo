@@ -25,6 +25,7 @@ from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutp
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.mm_kwargs_transfer import (
+    MmKwargsNixlSender,
     MmKwargsSender,
     MmKwargsShmSender,
 )
@@ -95,10 +96,10 @@ class VllmProcessor:
         self.exclude_tools_when_tool_choice_none = True
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
-        # Persistent NIXL sender — caches pickled mm_kwargs across requests.
-        self._mm_kwargs_sender: Any = None
-        # SHM sender for same-node transfers.
-        self._shm_sender: Any = None
+        # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
+        # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
+        # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
+        self._sender: MmKwargsSender | None = None
         # Set DYNAMO_DISABLE_NIXL_MM=1 to disable mm_kwargs transfer entirely.
         # Set DYNAMO_MM_TRANSFER to choose transfer mode:
         #   shm (default): shared memory. Same-node only (~2ms). If the
@@ -129,16 +130,17 @@ class VllmProcessor:
         self,
         vllm_preproc: EngineCoreRequest,
         dynamo_preproc: dict[str, Any],
-    ) -> tuple[dict | None, list, bool, list]:
-        """Extract MM routing info and prepare NIXL/SHM transfer.
+    ) -> tuple[dict | None, list, bool]:
+        """Extract MM routing info and prepare mm_kwargs transfer.
 
         Returns:
-            (mm_routing_info, nixl_completion_futures, nixl_transferred, shm_handles)
+            (mm_routing_info, cleanup_items, transferred)
+            cleanup_items: passed to self._sender.cleanup() after streaming.
+            transferred: True when all features with data were sent successfully.
         """
         mm_routing_info = None
-        nixl_completion_futures: list = []
+        cleanup_items: list = []
         nixl_transferred = False
-        shm_handles: list = []
 
         rng_routing = _nvtx.start_range("mm_frontend:build_routing_info", color="cyan")
         if self.is_kv_router and vllm_preproc.mm_features:
@@ -190,7 +192,8 @@ class VllmProcessor:
                         f.mm_position.offset,
                         f.mm_position.length,
                     )
-                # Transfer pre-processed mm_kwargs to the backend so it can skip
+
+            # Transfer pre-processed mm_kwargs to the backend so it can skip
             # the HF processor.  Strategy:
             #   - shm (default): shared memory, same-node only (~2ms).
             #     Cross-node backends fail gracefully and fall back to
@@ -200,67 +203,43 @@ class VllmProcessor:
                 logger.debug(
                     "[mm-routing] mm_kwargs transfer disabled via DYNAMO_DISABLE_NIXL_MM"
                 )
-            elif self.use_shm_transfer:
-                # Shared memory path: ~2ms same-node transfer.
-                try:
-                    if self._shm_sender is None:
-                        self._shm_sender = MmKwargsShmSender()
-                    with _nvtx.annotate("mm_frontend:shm_sender_prepare", color="cyan"):
-                        shm_meta, shm_handles_local = self._shm_sender.prepare(
-                            vllm_preproc.mm_features, modality="image"
-                        )
-                    if shm_meta is not None:
-                        dynamo_preproc["extra_args"]["mm_kwargs_shm"] = shm_meta
-                        shm_handles = shm_handles_local
-                        nixl_transferred = True
-                        logger.debug(
-                            "[mm-routing] SHM: wrote %d item(s) to shared memory",
-                            len(shm_meta["items"]),
-                        )
-                except Exception:
-                    logger.warning(
-                        "[mm-routing] SHM sender failed, backend will run HF processor",
-                        exc_info=True,
-                    )
             else:
-                # NIXL RDMA path: ~47ms same-node (UCX TCP), faster cross-node (IB).
+                nvtx_label = (
+                    "mm_frontend:shm_sender_prepare"
+                    if self.use_shm_transfer
+                    else "mm_frontend:nixl_sender_prepare"
+                )
+                nvtx_color = "cyan" if self.use_shm_transfer else "magenta"
                 try:
-                    if self._mm_kwargs_sender is None:
-                        self._mm_kwargs_sender = MmKwargsSender()
-                    with _nvtx.annotate(
-                        "mm_frontend:nixl_sender_prepare", color="magenta"
-                    ):
-                        (
-                            nixl_meta,
-                            nixl_completion_futures,
-                        ) = await self._mm_kwargs_sender.prepare(
+                    if self._sender is None:
+                        self._sender = (
+                            MmKwargsShmSender()
+                            if self.use_shm_transfer
+                            else MmKwargsNixlSender()
+                        )
+                    with _nvtx.annotate(nvtx_label, color=nvtx_color):
+                        extra_update, cleanup_items = await self._sender.prepare(
                             vllm_preproc.mm_features, modality="image"
                         )
-                    if nixl_meta is not None:
-                        dynamo_preproc["extra_args"][
-                            "mm_kwargs_nixl"
-                        ] = nixl_meta.model_dump()
+                    if extra_update is not None:
+                        dynamo_preproc["extra_args"].update(extra_update)
                         nixl_transferred = True
-                        logger.debug(
-                            "[mm-routing] NIXL: registered %d tensor(s) for transfer",
-                            len(nixl_meta.tensor_specs),
-                        )
                     else:
                         logger.debug(
-                            "[mm-routing] NIXL: no tensors to transfer (sender returned None)"
+                            "[mm-routing] sender returned None — no tensors to transfer"
                         )
                 except Exception:
                     logger.warning(
-                        "[mm-routing] NIXL sender failed, backend will run HF processor",
+                        "[mm-routing] sender failed, backend will run HF processor",
                         exc_info=True,
                     )
-                    nixl_completion_futures = []
+                    cleanup_items = []
 
         elif self.is_kv_router:
             logger.debug("[mm-routing] No mm_features — text-only request")
         _nvtx.end_range(rng_routing)
 
-        return mm_routing_info, nixl_completion_futures, nixl_transferred, shm_handles
+        return mm_routing_info, cleanup_items, nixl_transferred
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -435,13 +414,12 @@ class VllmProcessor:
         }
 
         # Extract MM routing metadata and prepare transfer.
-        shm_handles: list = []
+        cleanup_items: list = []
         try:
             (
                 mm_routing_info,
-                nixl_completion_futures,
+                cleanup_items,
                 nixl_transferred,
-                shm_handles,
             ) = await self._prepare_mm_routing(vllm_preproc, dynamo_preproc)
 
             # Forward multimodal URLs so the backend handler can load the media.
@@ -484,12 +462,11 @@ class VllmProcessor:
                 vllm_preproc,
                 post,
                 mm_routing_info=mm_routing_info,
-                nixl_completion_futures=nixl_completion_futures,
             ):
                 yield item
         finally:
-            if shm_handles:
-                MmKwargsShmSender.cleanup(shm_handles)
+            if cleanup_items and self._sender is not None:
+                await self._sender.cleanup(cleanup_items)
 
     async def _generate_and_stream(
         self,
@@ -500,7 +477,6 @@ class VllmProcessor:
         vllm_preproc: EngineCoreRequest,
         post: StreamingPostProcessor,
         mm_routing_info: dict[str, Any] | None = None,
-        nixl_completion_futures: list | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         self.output_processor.add_request(vllm_preproc, None)
 
@@ -613,20 +589,6 @@ class VllmProcessor:
                     yield dynamo_out
             _nvtx.end_range(rng_stream)
         finally:
-            # Wait for NIXL transfers to complete so the frontend can safely
-            # deregister the memory regions.
-            if nixl_completion_futures:
-                with _nvtx.annotate(
-                    "mm_frontend:nixl_completion_wait", color="magenta"
-                ):
-                    try:
-                        await asyncio.gather(*nixl_completion_futures)
-                        logger.debug("[mm-routing] NIXL: all transfers completed")
-                    except Exception:
-                        logger.warning(
-                            "[mm-routing] NIXL: transfer completion failed",
-                            exc_info=True,
-                        )
             if vllm_preproc.request_id in self.output_processor.request_states:
                 self.output_processor.abort_requests(
                     [vllm_preproc.request_id], internal=True
