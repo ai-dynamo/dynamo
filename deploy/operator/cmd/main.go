@@ -445,7 +445,22 @@ func main() {
 	}
 
 	setupLog.Info("Detecting DRA (Dynamic Resource Allocation) availability...")
-	runtimeConfig.DRAEnabled = commonController.DetectDRAAvailability(mainCtx, mgr)
+	draDetected := commonController.DetectDRAAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.DRA.Enabled == nil:
+		runtimeConfig.DRAEnabled = draDetected
+	case *operatorCfg.DRA.Enabled:
+		if !draDetected {
+			setupLog.Error(nil,
+				"DRA is explicitly enabled in config but the resource.k8s.io API group was not detected in the cluster (requires Kubernetes 1.32+)",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.DRAEnabled = true
+	default:
+		setupLog.Info("DRA is explicitly disabled via config override")
+		runtimeConfig.DRAEnabled = false
+	}
 
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,

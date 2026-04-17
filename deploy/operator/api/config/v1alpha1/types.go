@@ -47,6 +47,9 @@ type OperatorConfiguration struct {
 	// Orchestrator configuration with optional overrides
 	Orchestrators OrchestratorConfiguration `json:"orchestrators"`
 
+	// DRA (Dynamic Resource Allocation) settings with optional override
+	DRA DRAConfiguration `json:"dra,omitempty"`
+
 	// Service mesh and infrastructure addresses
 	Infrastructure InfrastructureConfiguration `json:"infrastructure"`
 
@@ -191,6 +194,24 @@ type LWSConfiguration struct {
 // KaiSchedulerConfiguration holds Kai-scheduler settings.
 type KaiSchedulerConfiguration struct {
 	// Enabled overrides auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io) settings.
+//
+// NOTE: auto-detection here only verifies that the resource.k8s.io API group is
+// registered on the apiserver (Kubernetes 1.32+). It does NOT verify that a
+// GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
+// installed, that its DeviceClass exists, or that node-level GPU drivers are
+// compatible. An admin can use `enabled: false` to force-off DRA integration
+// on clusters where the API is present but the GPU driver stack is not wired
+// up — this makes the operator fail GMS / inter-pod failover admissions early
+// with a clear error instead of letting pods Pend with a confusing
+// "resourceclaim not found" at schedule time.
+type DRAConfiguration struct {
+	// Enabled overrides auto-detection of the resource.k8s.io API group.
+	// nil = auto-detect. Setting true requires detection to also succeed (the
+	// operator will exit at startup otherwise).
 	Enabled *bool `json:"enabled,omitempty"`
 }
 

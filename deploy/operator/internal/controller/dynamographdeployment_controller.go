@@ -675,7 +675,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx
 		for _, component := range dynamoDeployment.Spec.Services {
 			if (component.GPUMemoryService != nil && component.GPUMemoryService.Enabled) ||
 				component.IsInterPodFailoverEnabled() {
-				return fmt.Errorf("gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
+				return fmt.Errorf("gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), but DRA is not available (either the resource.k8s.io API group is not registered on this cluster, which requires Kubernetes 1.32+, or DRA has been explicitly disabled in the operator configuration)")
 			}
 		}
 		return nil
