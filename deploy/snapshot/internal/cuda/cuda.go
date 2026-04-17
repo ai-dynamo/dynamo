@@ -13,7 +13,7 @@ import (
 	"github.com/go-logr/logr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-
+	"k8s.io/client-go/kubernetes"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
@@ -102,6 +102,31 @@ func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) 
 		}
 	}
 	return uuids, nil
+}
+
+// DiscoverGPUUUIDs resolves pod-assigned GPU UUIDs using kubelet PodResources,
+// then DRA API state, and finally nvidia-smi as a last fallback.
+func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
+	gpuUUIDs, err := GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
+	if err != nil {
+		return nil, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
+	}
+	if len(gpuUUIDs) == 0 {
+		log.Info("PodResources API returned no GPU UUIDs, trying DRA API lookup", "pod", podNamespace+"/"+podName)
+		gpuUUIDs, err = GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
+		if err != nil {
+			return nil, fmt.Errorf("DRA API GPU UUID lookup failed: %w", err)
+		}
+	}
+	if len(gpuUUIDs) == 0 {
+		log.Info("DRA API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
+		gpuUUIDs, err = GetGPUUUIDsViaNvidiaSmi(ctx, hostProcPath, pid)
+		if err != nil {
+			return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
+		}
+		log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDs)
+	}
+	return gpuUUIDs, nil
 }
 
 // FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
