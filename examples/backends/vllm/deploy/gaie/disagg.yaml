@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: docker.io/lambda108/epp-inference-extension-dynamo:rc2-v3
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
           imagePullPolicy: IfNotPresent
           env:
             - name: DYN_KV_CACHE_BLOCK_SIZE
@@ -70,7 +70,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:rc2-fresh
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -105,7 +105,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:rc2-fresh
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
@@ -121,7 +121,7 @@ spec:
       sharedMemory:
         size: 2Gi
       frontendSidecar:
-        image: docker.io/lambda108/dynamo:rc2-fresh
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
         args:
           - -m
           - dynamo.frontend
@@ -156,7 +156,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: docker.io/lambda108/dynamo:rc2-fresh
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
