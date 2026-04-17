@@ -51,6 +51,9 @@ pub struct HealthCheckManager {
     /// Track per-endpoint health check tasks
     /// Maps: endpoint_subject -> task_handle
     endpoint_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    /// Counter for DP-rank aware health checks
+    /// Maps: endpoint_subject -> current_dp_rank_counter
+    dp_rank_counters: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl HealthCheckManager {
@@ -60,6 +63,7 @@ impl HealthCheckManager {
             config,
             router_cache: Arc::new(Mutex::new(HashMap::new())),
             endpoint_tasks: Arc::new(Mutex::new(HashMap::new())),
+            dp_rank_counters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -252,15 +256,51 @@ impl HealthCheckManager {
                 anyhow::anyhow!("No health check target found for {}", endpoint_subject)
             })?;
 
-        debug!(
-            "Sending health check to {} (instance_id: {})",
-            endpoint_subject, target.instance.instance_id
-        );
-
         // Create the Endpoint directly from the Instance info
         let namespace = self.drt.namespace(&target.instance.namespace)?;
         let component = namespace.component(&target.instance.component)?;
         let endpoint = component.endpoint(&target.instance.endpoint);
+
+        // Set the DP-rank counter for the DP-rank aware health checking.
+        let current_dp_rank = {
+            let dp_size = payload
+                .get("dp_size")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(1);
+
+            let mut counters = self.dp_rank_counters.lock();
+            let counter = counters.entry(endpoint_subject.to_string()).or_insert(0);
+            let dp_rank = *counter;
+            *counter = counter.wrapping_add(1) % dp_size;
+            dp_rank
+        };
+
+        // Create DP-rank aware payload
+        let mut dp_rank_aware_payload = payload.clone();
+        if let Some(obj) = dp_rank_aware_payload.as_object_mut() {
+            let _bootstrap_info = obj
+                .entry("bootstrap_info")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(_obj) = _bootstrap_info.as_object_mut() {
+                _obj.insert(
+                    "bootstrap_room".to_string(),
+                    serde_json::json!(current_dp_rank),
+                );
+            }
+            let _routing = obj
+                .entry("routing")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(_obj) = _routing.as_object_mut() {
+                _obj.insert("dp_rank".to_string(), serde_json::json!(current_dp_rank));
+            }
+        }
+
+        debug!(
+            "Sending health check to {} (instance_id: {}, dp_rank: {})",
+            endpoint_subject, target.instance.instance_id, current_dp_rank
+        );
 
         // Get or create router for this endpoint
         let router = self
@@ -300,8 +340,8 @@ impl HealthCheckManager {
             }
         }
 
-        // Create the request context
-        let request: SingleIn<serde_json::Value> = Context::new(payload.clone());
+        // Create the request context with DP-rank aware payload
+        let request: SingleIn<serde_json::Value> = Context::new(dp_rank_aware_payload);
 
         // Clone what we need for the spawned task
         let system_health = self.drt.system_health().clone();
