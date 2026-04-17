@@ -2696,3 +2696,80 @@ func TestPropagateTopologyCondition(t *testing.T) {
 		})
 	}
 }
+
+func TestMapPodCliqueScalingGroupToRequests(t *testing.T) {
+	tests := []struct {
+		name         string
+		obj          client.Object
+		wantRequests int
+		wantName     string
+		wantNs       string
+	}{
+		{
+			name: "PCSG with PodCliqueSet controller ownerRef returns DGD request",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "dynamo-recipe-0-worker",
+					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+							Kind:       "PodCliqueSet",
+							Name:       "dynamo-recipe",
+							Controller: ptr.To(true),
+						},
+					},
+				},
+			},
+			wantRequests: 1,
+			wantName:     "dynamo-recipe",
+			wantNs:       "mwieczorek-dsv32-trtllm-agg",
+		},
+		{
+			name: "PCSG with no ownerRef returns no requests",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "orphan-pcsg",
+					Namespace: "default",
+				},
+			},
+			wantRequests: 0,
+		},
+		{
+			name: "PCSG with non-PodCliqueSet ownerRef returns no requests",
+			obj: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "weird-pcsg",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: "apps/v1",
+							Kind:       "Deployment",
+							Name:       "not-a-pcs",
+						},
+					},
+				},
+			},
+			wantRequests: 0,
+		},
+		{
+			name:         "non-PCSG object returns no requests",
+			obj:          &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "default"}},
+			wantRequests: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			r := &DynamoGraphDeploymentReconciler{}
+			reqs := r.mapPodCliqueScalingGroupToRequests(context.Background(), tt.obj)
+
+			g.Expect(reqs).To(gomega.HaveLen(tt.wantRequests))
+			if tt.wantRequests == 1 {
+				g.Expect(reqs[0].Name).To(gomega.Equal(tt.wantName))
+				g.Expect(reqs[0].Namespace).To(gomega.Equal(tt.wantNs))
+			}
+		})
+	}
+}

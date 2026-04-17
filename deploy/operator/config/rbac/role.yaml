@@ -130,6 +130,8 @@ rules:
   - grove.io
   resources:
   - clustertopologies
+  - podcliques
+  - podcliquescalinggroups
   verbs:
   - get
   - list
