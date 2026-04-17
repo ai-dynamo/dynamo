@@ -25,6 +25,16 @@ fi
 # Kill all children on exit so ServerManager.stop() cleanly shuts everything down.
 trap 'kill 0; wait' SIGTERM SIGINT EXIT
 
+# Start infra inline if not already running (avoids needing a separate srun step).
+if ! curl -sf http://localhost:2379/health > /dev/null 2>&1; then
+    rm -rf /tmp/etcd /tmp/nats
+    etcd --listen-client-urls http://0.0.0.0:2379 \
+         --advertise-client-urls http://0.0.0.0:2379 \
+         --data-dir /tmp/etcd > /dev/null 2>&1 &
+    nats-server -js -m 8222 -p 4222 -sd /tmp/nats > /dev/null 2>&1 &
+    sleep 2
+fi
+
 python -m dynamo.frontend &
 
 python -m dynamo.vllm \

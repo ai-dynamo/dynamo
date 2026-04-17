@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# vllm serve (no embedding cache) vs Dynamo frontend+backend (4GB/GPU EC)
-# for Qwen3.5-397B on 8xH100, sweeping request rates 1, 2, 4.
+# Sliding-window: 8K ISL, 5x 2400x1080 images, 1K OSL.
+# vllm serve baseline vs Dynamo (frontend decoding + embedding cache).
 
 model: Qwen/Qwen3.5-397B-A17B-FP8
 request_rates: [1, 2, 4]
@@ -11,7 +11,7 @@ request_count: 100
 warmup_count: 5
 port: 8000
 timeout: 2400
-output_dir: /dynamo-tmp/logs/04-15/sweep_397b_rates
+output_dir: /dynamo-tmp/logs/04-16/sweep_397b_rates
 restart_server_every_benchmark: true
 skip_plots: true
 
@@ -25,11 +25,18 @@ configs:
       - --tensor-parallel-size
       - "8"
       - --enable-expert-parallel
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --reasoning-parser
+      - qwen3
       - --mm-encoder-tp-mode
       - data
       - --mm-processor-cache-gb
-      - "30"
+      - "60"
       - --enable-prefix-caching
+      - --max-model-len
+      - "32768"
 
   - label: dynamo-ec
     workflow: benchmarks/multimodal/sweep/workflows/dynamo_serve.sh
@@ -38,6 +45,10 @@ configs:
       - "8"
       - --enable-expert-parallel
       - --enable-multimodal
+      - --dyn-tool-call-parser
+      - qwen3_coder
+      - --dyn-reasoning-parser
+      - qwen3
       - --mm-encoder-tp-mode
       - data
       - --mm-processor-cache-gb
@@ -48,4 +59,5 @@ configs:
       - --gpu-memory-utilization
       - "0.9"
       - --max-model-len
-      - "16384"
+      - "32768"
+      - --frontend-decoding

@@ -17,7 +17,6 @@ SWEEP_CONFIG=benchmarks/multimodal/sweep/experiments/embedding_cache/sweep_397b_
 pip install --no-deps -e /aiperf
 
 # Build dynamo in background — finishes during first vllm-serve model load.
-# vllm-serve configs don't need dynamo; dynamo-ec configs run after.
 (
   pip uninstall -y ai-dynamo ai-dynamo-runtime 2>/dev/null || true
   cd /workspace/lib/bindings/python && maturin develop --uv --release
@@ -26,13 +25,11 @@ pip install --no-deps -e /aiperf
 ) &
 BUILD_PID=$!
 
-# Run full sweep — vllm-serve configs first, then dynamo-ec.
-# The orchestrator runs configs in order, so dynamo build finishes
-# well before dynamo-ec starts (~35 min model load vs ~5 min build).
+# Run sweep — vllm-serve first (no dynamo needed), then dynamo-ec.
 cd /workspace
 python -m benchmarks.multimodal.sweep --config "$SWEEP_CONFIG"
 
-# Guard: if sweep somehow reached dynamo-ec before build finished
+# Guard: wait for build if sweep finished before build
 wait $BUILD_PID || { echo "ERROR: dynamo build failed" >&2; exit 1; }
 
 echo "=== SWEEP COMPLETE ==="
