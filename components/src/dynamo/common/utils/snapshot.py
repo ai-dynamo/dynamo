@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 from dynamo.common.utils.namespace import get_worker_namespace
+from gpu_memory_service.common.utils import get_checkpoint_save_complete_path
 
 logger = logging.getLogger(__name__)
 PODINFO_ROOT = "/etc/podinfo"
@@ -50,6 +51,7 @@ class CheckpointConfig:
     ) -> bool:
         logger.info("Quiescing model")
         await quiesce_controller.quiesce(*quiesce_args)
+        await self._wait_for_gms_checkpoint_save()
 
         self._install_signal_handlers()
         try:
@@ -110,6 +112,15 @@ class CheckpointConfig:
             for task in waiters:
                 if not task.done():
                     task.cancel()
+
+    async def _wait_for_gms_checkpoint_save(self) -> None:
+        ready_path = get_checkpoint_save_complete_path()
+        if ready_path is None or os.path.exists(ready_path):
+            return
+
+        logger.info("Waiting for GMS checkpoint save to complete: %s", ready_path)
+        while not os.path.exists(ready_path):
+            await asyncio.sleep(0.1)
 
 
 def configure_checkpoint_transport_env() -> None:
