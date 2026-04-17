@@ -122,6 +122,11 @@ setup_env() {
     echo 'else'
     echo '  echo "WARNING: sccache server failed to start, building without cache";'
     echo 'fi'
+    # Scrub AWS credentials from the environment unconditionally. The sccache
+    # server (if started) already holds them in-process; no other build tool
+    # should see them.  This prevents ./configure, cmake, and similar tools
+    # from logging secrets to files like config.log / config.status.
+    echo 'unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_WEB_IDENTITY_TOKEN_FILE 2>/dev/null || true;'
 }
 
 show_stats() {
