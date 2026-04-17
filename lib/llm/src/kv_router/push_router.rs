@@ -90,46 +90,11 @@ struct RequestGuard {
     expected_output_tokens: Option<u32>,
     /// Deferred session close action (fires after generation completes)
     deferred_close: Option<SessionCloseAction>,
-}
-
-struct PendingDispatchGuard {
-    chooser: Arc<KvRouter>,
-    scheduler_tracked: bool,
-    context_id: String,
-    deferred_close: Option<SessionCloseAction>,
-    disarmed: bool,
-}
-
-fn spawn_cleanup_task(
-    chooser: &Arc<KvRouter>,
-    scheduler_tracked: bool,
-    context_id: &str,
-    deferred_close: Option<SessionCloseAction>,
-    log_context: &'static str,
-) {
-    if deferred_close.is_none() && !scheduler_tracked {
-        return;
-    }
-
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        tracing::warn!(
-            "No tokio runtime for {log_context} cleanup of request {}",
-            context_id
-        );
-        return;
-    };
-
-    let chooser = chooser.clone();
-    let context_id = context_id.to_owned();
-
-    handle.spawn(async move {
-        if scheduler_tracked && let Err(e) = chooser.free(&context_id).await {
-            tracing::warn!("Failed to free request {context_id} ({log_context}): {e}");
-        }
-        if let Some(close) = deferred_close {
-            close.execute(&context_id);
-        }
-    });
+    /// True once inner.direct() has returned Ok — guards record_metrics() so
+    /// that a dispatch failure does not emit metrics for a request that never
+    /// reached the backend (spurious requests_total increment, OSL histogram
+    /// zeros, premature tracker.record_finish()).
+    dispatched: bool,
 }
 
 impl RequestGuard {
@@ -223,7 +188,10 @@ impl RequestGuard {
     }
 
     fn record_metrics(&mut self) {
-        if self.metrics_recorded {
+        // Skip metrics for requests that never reached the backend (dispatch
+        // failure before direct() returned Ok). Recording here would emit
+        // spurious requests_total increments and OSL-histogram zeros.
+        if self.metrics_recorded || !self.dispatched {
             return;
         }
         self.metrics_recorded = true;
@@ -254,51 +222,34 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.record_metrics();
 
-        spawn_cleanup_task(
-            &self.chooser,
-            !self.freed && self.scheduler_tracked,
-            &self.context_id,
-            self.deferred_close.take(),
-            "drop guard",
-        );
-    }
-}
+        let deferred_close = self.deferred_close.take();
+        let needs_free = !self.freed && self.scheduler_tracked;
 
-impl PendingDispatchGuard {
-    fn new(
-        chooser: Arc<KvRouter>,
-        scheduler_tracked: bool,
-        context_id: String,
-        deferred_close: Option<SessionCloseAction>,
-    ) -> Self {
-        Self {
-            chooser,
-            scheduler_tracked,
-            context_id,
-            deferred_close,
-            disarmed: false,
-        }
-    }
-
-    fn disarm(mut self) -> Option<SessionCloseAction> {
-        self.disarmed = true;
-        self.deferred_close.take()
-    }
-}
-
-impl Drop for PendingDispatchGuard {
-    fn drop(&mut self) {
-        if self.disarmed {
+        if deferred_close.is_none() && !needs_free {
             return;
         }
 
-        spawn_cleanup_task(
-            &self.chooser,
-            self.scheduler_tracked,
-            &self.context_id,
-            self.deferred_close.take(),
-            "dispatch guard",
-        );
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "No tokio runtime for drop guard cleanup of request {}",
+                self.context_id
+            );
+            return;
+        };
+
+        // Mirror finish(): free the scheduler slot first, then fire the
+        // deferred session close so the worker's KV isn't released while
+        // generation teardown is still in progress.
+        let chooser = self.chooser.clone();
+        let context_id = self.context_id.clone();
+        handle.spawn(async move {
+            if needs_free && let Err(e) = chooser.free(&context_id).await {
+                tracing::warn!("Failed to free request {context_id} (drop guard): {e}");
+            }
+            if let Some(close) = deferred_close {
+                close.execute(&context_id);
+            }
+        });
     }
 }
 
@@ -683,30 +634,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         let chooser = self.chooser.clone();
-        let dispatch_guard = PendingDispatchGuard::new(
-            chooser.clone(),
-            scheduler_tracked,
-            context_id.clone(),
-            deferred_close,
-        );
-        let mut response_stream = self
-            .inner
-            .direct(updated_request, instance_id)
-            .instrument(tracing::info_span!(
-                "kv_router.route_request",
-                request_id = %context_id,
-                worker_id = instance_id,
-                dp_rank = ?backend_dp_rank,
-                overlap_blocks = ?overlap_amount,
-                phase = ?phase,
-            ))
-            .await?;
-        let deferred_close = dispatch_guard.disarm();
-        let stream_context = response_stream.context();
-        let context_for_monitoring = stream_context.clone();
-        // Build the guard before returning the stream so a drop-before-first-poll
-        // still frees booked scheduler state.
-        let guard = RequestGuard {
+
+        // Build the guard BEFORE calling direct() so that its Drop covers the
+        // error path as well as the drop-before-first-poll path.
+        //
+        // Without this, if direct().await? below returns Err, both the
+        // scheduler slot (booked by find_best_match with update_states=true)
+        // and the SessionCloseAction (obtained above via on_routed) are leaked:
+        // SessionCloseAction has no Drop impl, so dropping it never sends the
+        // close_session RPC; chooser.free() is only called via RequestGuard::Drop.
+        //
+        // All guard fields are available here (deferred_close was just obtained;
+        // isl_tokens/block_size/tracker were set before request.into_parts()).
+        let mut guard = RequestGuard {
             chooser: chooser.clone(),
             scheduler_tracked,
             context_id: context_id.clone(),
@@ -723,9 +663,32 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             block_size,
             expected_output_tokens,
             deferred_close,
+            dispatched: false,
         };
 
+        let mut response_stream = self
+            .inner
+            .direct(updated_request, instance_id)
+            .instrument(tracing::info_span!(
+                "kv_router.route_request",
+                request_id = %context_id,
+                worker_id = instance_id,
+                dp_rank = ?backend_dp_rank,
+                overlap_blocks = ?overlap_amount,
+                phase = ?phase,
+            ))
+            .await?;
+        // direct() succeeded — mark dispatched so record_metrics() fires.
+        // If direct() returned Err above, guard drops here with dispatched=false
+        // → RequestGuard::Drop fires → chooser.free() + deferred_close.execute()
+        //   but record_metrics() is suppressed (no backend work was done).
+        guard.dispatched = true;
+        let stream_context = response_stream.context();
+        let context_for_monitoring = stream_context.clone();
+
         let wrapped_stream = Box::pin(async_stream::stream! {
+            // Move guard into the stream closure. Drop fires here if the stream
+            // is polled to completion, or via the outer Drop if never polled.
             let mut guard = guard;
 
             loop {
