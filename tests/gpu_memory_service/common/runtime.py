@@ -286,7 +286,7 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             "--max-num-seqs",
             "1",
             "--gpu-memory-utilization",
-            "0.9",
+            "0.8",
             "--kv-events-config",
             kv_events_cfg,
         ]
@@ -433,7 +433,7 @@ class SGLangWithGMSProcess(GMSEngineProcess):
             "--enable-memory-saver",
             "--disable-cuda-graph",
             "--mem-fraction-static",
-            "0.9",
+            "0.8",
             "--port",
             str(self.serve_port),
         ]
