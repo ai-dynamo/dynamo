@@ -237,6 +237,16 @@ def update_engine_config_with_dynamo(
     if _uses_nixl_connector(engine_config):
         ensure_side_channel_host()
 
+    # Disagg requires enable_mm_embeds set for Qwen multi-modal models
+    # to receive pre-computed image_embeds.
+    if dynamo_config.enable_multimodal:
+        if hasattr(engine_config, "enable_mm_embeds"):
+            engine_config.enable_mm_embeds = True
+            logger.debug(
+                "--enable-multimodal is set: auto-enabling vLLM "
+                "enable_mm_embeds for multimodal embedding support"
+            )
+
     defaults = {
         # vLLM 0.13+ renamed 'task' to 'runner'
         "runner": "generate",
