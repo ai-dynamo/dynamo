@@ -9,6 +9,8 @@ DecodeRegressionModel, AggRegressionModel) without any planner adapter.
 FPM-driven scaling integration tests live in test_state_machine.py.
 """
 
+from unittest.mock import Mock, patch
+
 import pytest
 
 try:
@@ -24,11 +26,14 @@ try:
     )
 except ImportError:
     pytest.skip("forward_pass_metrics not available", allow_module_level=True)
+from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.base import NativePlannerBase
 from dynamo.planner.core.perf_model import (
     AggRegressionModel,
     DecodeRegressionModel,
     PrefillRegressionModel,
 )
+from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -463,12 +468,6 @@ class TestRefreshWorkerInfoFromConnector:
 
     def _make_planner(self, require_prefill=False, require_decode=True):
         """Build a minimal NativePlannerBase with no_operation=True."""
-        from unittest.mock import Mock, patch
-
-        from dynamo.planner.config.planner_config import PlannerConfig
-        from dynamo.planner.core.base import NativePlannerBase
-        from dynamo.planner.monitoring.worker_info import WorkerInfo
-
         with patch("dynamo.planner.monitoring.planner_metrics.Gauge") as mock_gauge:
             mock_gauge.return_value = Mock()
             config = PlannerConfig.model_construct(
@@ -505,10 +504,6 @@ class TestRefreshWorkerInfoFromConnector:
 
     def _install_mock_connector(self, planner, **fresh_info_kwargs):
         """Replace planner.connector with a Mock returning a fresh WorkerInfo."""
-        from unittest.mock import Mock
-
-        from dynamo.planner.monitoring.worker_info import WorkerInfo
-
         fresh = WorkerInfo(**fresh_info_kwargs)
         mock_connector = Mock()
         mock_connector.get_worker_info.return_value = fresh
@@ -538,8 +533,6 @@ class TestRefreshWorkerInfoFromConnector:
 
     def test_noop_when_already_set(self):
         """Does not re-query once max_num_batched_tokens is populated."""
-        from dynamo.planner.monitoring.worker_info import WorkerInfo
-
         planner = self._make_planner()
         planner.decode_worker_info = WorkerInfo(max_num_batched_tokens=2048)
 
@@ -571,8 +564,6 @@ class TestRefreshWorkerInfoFromConnector:
 
     def test_exception_does_not_propagate(self):
         """If connector.get_worker_info throws, refresh is a no-op."""
-        from unittest.mock import Mock
-
         planner = self._make_planner()
         mock_connector = Mock()
         mock_connector.get_worker_info.side_effect = RuntimeError("boom")
@@ -597,10 +588,6 @@ class TestRefreshWorkerInfoFromConnector:
 
     def test_refresh_skips_unneeded_sub_component(self):
         """Only sub-components with require_* True are refreshed."""
-        from unittest.mock import Mock
-
-        from dynamo.planner.monitoring.worker_info import WorkerInfo
-
         planner = self._make_planner(require_prefill=False, require_decode=True)
 
         def _side_effect(sub_type, backend):
