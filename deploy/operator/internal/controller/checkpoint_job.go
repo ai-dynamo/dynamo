@@ -10,6 +10,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
@@ -81,7 +82,7 @@ func buildCheckpointJob(
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
-	mainContainer := snapshotprotocol.ResolveMainContainer(&podTemplate.Spec)
+	mainContainer := common.ResolveMainContainer(&podTemplate.Spec)
 	if mainContainer == nil {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
@@ -129,7 +130,7 @@ func buildCheckpointJob(
 		}
 		// Re-acquire pointer: append in EnsureGMSCheckpointJobSidecars may
 		// have reallocated the Containers slice.
-		mainContainer = snapshotprotocol.ResolveMainContainer(&podTemplate.Spec)
+		mainContainer = common.ResolveMainContainer(&podTemplate.Spec)
 	}
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds

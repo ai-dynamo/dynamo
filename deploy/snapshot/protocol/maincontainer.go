@@ -24,6 +24,11 @@ const MainContainerName = "main"
 // Containers[0] so that pods rendered before the naming convention (or by
 // non-operator tooling in tests) still resolve to a sensible target.
 // Returns nil only when podSpec has no containers.
+//
+// Operator code should use common.ResolveMainContainer in
+// deploy/operator/internal/common instead of importing this function.
+// The duplication exists because deploy/snapshot and deploy/operator are
+// separate Go modules; both implementations must match.
 func ResolveMainContainer(podSpec *corev1.PodSpec) *corev1.Container {
 	if podSpec == nil || len(podSpec.Containers) == 0 {
 		return nil
