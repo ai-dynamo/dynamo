@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
+use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
@@ -267,6 +268,12 @@ pub struct ModelDeploymentCard {
     /// Media fetching configuration
     #[serde(default)]
     pub media_fetcher: Option<MediaFetcher>,
+
+    /// Per-worker-set router configuration override.
+    /// When set, the frontend watcher uses this instead of the global frontend router config.
+    /// Falls back to the frontend-level config when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_config: Option<RouterConfig>,
 
     #[serde(skip, default)]
     checksum: OnceLock<String>,
@@ -759,6 +766,7 @@ impl ModelDeploymentCard {
             runtime_config: ModelRuntimeConfig::default(),
             media_decoder: None,
             media_fetcher: None,
+            router_config: None,
             checksum: OnceLock::new(),
         })
     }

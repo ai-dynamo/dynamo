@@ -561,6 +561,10 @@ impl ModelWatcher {
     ) -> anyhow::Result<()> {
         card.download_config().await?;
 
+        // Use per-worker-set router config if the worker provided one in its MDC,
+        // otherwise fall back to the frontend-level global config.
+        let router_config = card.router_config.as_ref().unwrap_or(&self.router_config);
+
         let component = self
             .drt
             .namespace(&mcid.namespace)?
@@ -602,7 +606,7 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let kv_chooser = if self.router_config.router_mode == RouterMode::KV
+            let kv_chooser = if router_config.router_mode == RouterMode::KV
                 && (needs_local_chat_pipeline || needs_local_completions_pipeline)
             {
                 Some(
@@ -610,7 +614,7 @@ impl ModelWatcher {
                         .kv_chooser_for(
                             &endpoint,
                             card.kv_cache_block_size,
-                            Some(self.router_config.kv_router_config.clone()),
+                            Some(router_config.kv_router_config.clone()),
                             self.prefill_load_estimator.clone(),
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
@@ -644,17 +648,17 @@ impl ModelWatcher {
                 .register_prefill_router(&model_name, &namespace)
                 .map(|rx| {
                     // Create prefill-specific config with track_active_blocks disabled
-                    let mut prefill_config = self.router_config.kv_router_config.clone();
+                    let mut prefill_config = router_config.kv_router_config.clone();
                     prefill_config.router_track_active_blocks = false;
 
                     PrefillRouter::new(
                         rx,
                         self.manager.clone(),
-                        self.router_config.router_mode,
+                        router_config.router_mode,
                         card.kv_cache_block_size,
                         Some(prefill_config),
                         self.prefill_load_estimator.clone(),
-                        self.router_config.enforce_disagg,
+                        router_config.enforce_disagg,
                         model_name.clone(),
                         namespace.clone(),
                         card.runtime_config.enable_eagle,
@@ -677,7 +681,7 @@ impl ModelWatcher {
                 .unwrap_or_else(|| client.clone());
             let worker_monitor = Some(KvWorkerMonitor::new(
                 monitor_client,
-                self.router_config.load_threshold_config.clone(),
+                router_config.load_threshold_config.clone(),
             ));
 
             // Store KV router, worker monitor, and prefill router on the WorkerSet.
@@ -715,12 +719,12 @@ impl ModelWatcher {
                         card,
                         &client,
                         self.manager.clone(),
-                        self.router_config.router_mode,
+                        router_config.router_mode,
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         tk,
                         prefill_chooser.clone(),
-                        self.router_config.enforce_disagg,
+                        router_config.enforce_disagg,
                         self.migration_limit,
                         self.migration_max_seq_len,
                         self.metrics.clone(),
@@ -748,13 +752,13 @@ impl ModelWatcher {
                         card,
                         &client,
                         self.manager.clone(),
-                        self.router_config.router_mode,
+                        router_config.router_mode,
                         worker_monitor,
                         kv_chooser,
                         preprocessor,
                         tk,
                         prefill_chooser,
-                        self.router_config.enforce_disagg,
+                        router_config.enforce_disagg,
                         self.migration_limit,
                         self.migration_max_seq_len,
                         self.metrics.clone(),
@@ -788,7 +792,7 @@ impl ModelWatcher {
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
             >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+                client, router_config.router_mode, None, None
             )
             .await?;
             worker_set.embeddings_engine = Some(Arc::new(push_router));
@@ -809,7 +813,7 @@ impl ModelWatcher {
                     Annotated<NvCreateChatCompletionStreamResponse>,
                 >::from_client_with_threshold(
                     client.clone(),
-                    self.router_config.router_mode,
+                    router_config.router_mode,
                     None,
                     None,
                 )
@@ -822,7 +826,7 @@ impl ModelWatcher {
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
                 >::from_client_with_threshold(
-                    client.clone(), self.router_config.router_mode, None, None
+                    client.clone(), router_config.router_mode, None, None
                 )
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
@@ -833,7 +837,7 @@ impl ModelWatcher {
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
                 >::from_client_with_threshold(
-                    client.clone(), self.router_config.router_mode, None, None
+                    client.clone(), router_config.router_mode, None, None
                 )
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
@@ -845,7 +849,7 @@ impl ModelWatcher {
                     Annotated<NvAudioSpeechResponse>,
                 >::from_client_with_threshold(
                     client.clone(),
-                    self.router_config.router_mode,
+                    router_config.router_mode,
                     None,
                     None,
                 )
@@ -858,7 +862,7 @@ impl ModelWatcher {
                 NvCreateChatCompletionRequest,
                 Annotated<NvCreateChatCompletionStreamResponse>,
             >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+                client, router_config.router_mode, None, None
             )
             .await?;
             worker_set.chat_engine = Some(Arc::new(push_router));
@@ -868,7 +872,7 @@ impl ModelWatcher {
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
             >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+                client, router_config.router_mode, None, None
             )
             .await?;
             worker_set.completions_engine = Some(Arc::new(push_router));
@@ -887,7 +891,7 @@ impl ModelWatcher {
                 PreprocessedEmbeddingRequest,
                 Annotated<EmbeddingsEngineOutput>,
             >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+                client, router_config.router_mode, None, None
             )
             .await?;
 
@@ -911,7 +915,7 @@ impl ModelWatcher {
                 NvCreateTensorRequest,
                 Annotated<NvCreateTensorResponse>,
             >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
+                client, router_config.router_mode, None, None
             )
             .await?;
             worker_set.tensor_engine = Some(Arc::new(push_router));
