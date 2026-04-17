@@ -15,7 +15,16 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["HealthCheckPayload", "load_health_check_from_env"]
+__all__ = [
+    "HealthCheckPayload",
+    "load_health_check_from_env",
+    "is_health_check_enabled",
+]
+
+
+def is_health_check_enabled() -> bool:
+    """Check if active canary health checks are enabled via DYN_HEALTH_CHECK_ENABLED."""
+    return os.environ.get("DYN_HEALTH_CHECK_ENABLED", "").lower() == "true"
 
 
 def load_health_check_from_env(
@@ -93,9 +102,23 @@ class HealthCheckPayload:
         otherwise returns the default payload.
         """
         if self._payload is None:
-            # Check for environment override
             self._payload = load_health_check_from_env() or self.default_payload
         return self._payload
+
+    def to_dict_if_enabled(self) -> Optional[Dict[str, Any]]:
+        """
+        Get the payload only if canary health checks are enabled.
+
+        Returns None if DYN_HEALTH_CHECK_ENABLED is not 'true', meaning
+        no health check target will be registered and the transport layer
+        will set the endpoint to Ready on registration (default behavior).
+
+        Use this when passing to serve_endpoint(health_check_payload=...).
+        Use to_dict() directly when you need the payload regardless of config.
+        """
+        if not is_health_check_enabled():
+            return None
+        return self.to_dict()
 
     def __repr__(self) -> str:
         """Return a string representation of the health check payload."""

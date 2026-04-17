@@ -393,7 +393,7 @@ class WorkerFactory:
 
         health_check_payload = VllmHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
-        ).to_dict()
+        ).to_dict_if_enabled()
 
         perf_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.get_perf_metrics"
@@ -599,7 +599,7 @@ class WorkerFactory:
 
         health_check_payload = VllmPrefillHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
-        ).to_dict()
+        ).to_dict_if_enabled()
 
         prefill_metrics_labels = [
             (
