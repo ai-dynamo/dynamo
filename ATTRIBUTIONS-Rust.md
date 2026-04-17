@@ -35312,3 +35312,268 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## async-openai - 0.34.0
+**Repository URL**: https://github.com/64bit/async-openai
+**License Type(s)**: MIT
+
+## aws-config - 1.8.14
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-credential-types - 1.2.12
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-runtime - 1.7.0
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-sdk-s3 - 1.123.0
+**Repository URL**: https://github.com/awslabs/aws-sdk-rust
+**License Type(s)**: Apache-2.0
+
+## aws-sdk-sso - 1.94.0
+**Repository URL**: https://github.com/awslabs/aws-sdk-rust
+**License Type(s)**: Apache-2.0
+
+## aws-sdk-ssooidc - 1.96.0
+**Repository URL**: https://github.com/awslabs/aws-sdk-rust
+**License Type(s)**: Apache-2.0
+
+## aws-sdk-sts - 1.98.0
+**Repository URL**: https://github.com/awslabs/aws-sdk-rust
+**License Type(s)**: Apache-2.0
+
+## aws-sigv4 - 1.4.0
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-async - 1.2.12
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-checksums - 0.64.4
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-eventstream - 0.60.19
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-http - 0.63.4
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-http-client - 1.1.10
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-json - 0.62.4
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-observability - 0.2.5
+**Repository URL**: https://github.com/awslabs/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-query - 0.60.14
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-runtime - 1.10.1
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-runtime-api - 1.11.4
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-types - 1.4.4
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-smithy-xml - 0.60.15
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## aws-types - 1.3.12
+**Repository URL**: https://github.com/smithy-lang/smithy-rs
+**License Type(s)**: Apache-2.0
+
+## base16ct - 0.1.1
+**Repository URL**: https://github.com/RustCrypto/formats/tree/master/base16ct
+**License Type(s)**: Apache-2.0 OR MIT
+
+## base64-simd - 0.8.0
+**Repository URL**: https://github.com/Nugine/simd
+**License Type(s)**: MIT
+
+## bytes-utils - 0.1.4
+**Repository URL**: https://github.com/vorner/bytes-utils
+**License Type(s)**: Apache-2.0 OR MIT
+
+## crc - 3.3.0
+**Repository URL**: https://github.com/mrhooray/crc-rs.git
+**License Type(s)**: Apache-2.0 OR MIT
+
+## crc-catalog - 2.4.0
+**Repository URL**: https://github.com/akhilles/crc-catalog.git
+**License Type(s)**: Apache-2.0 OR MIT
+
+## crc-fast - 1.9.0
+**Repository URL**: https://github.com/awesomized/crc-fast-rust
+**License Type(s)**: Apache-2.0 OR MIT
+
+## crypto-bigint - 0.4.9
+**Repository URL**: https://github.com/RustCrypto/crypto-bigint
+**License Type(s)**: Apache-2.0 OR MIT
+
+## crypto-bigint - 0.5.5
+**Repository URL**: https://github.com/RustCrypto/crypto-bigint
+**License Type(s)**: Apache-2.0 OR MIT
+
+## daachorse - 1.0.1
+**Repository URL**: https://github.com/daac-tools/daachorse
+**License Type(s)**: Apache-2.0 OR MIT
+
+## ecdsa - 0.14.8
+**Repository URL**: https://github.com/RustCrypto/signatures/tree/master/ecdsa
+**License Type(s)**: Apache-2.0 OR MIT
+
+## elliptic-curve - 0.12.3
+**Repository URL**: https://github.com/RustCrypto/traits/tree/master/elliptic-curve
+**License Type(s)**: Apache-2.0 OR MIT
+
+## fastokens - 0.1.0
+**Repository URL**: https://github.com/Atero-ai/fastokens
+**License Type(s)**: Apache-2.0
+
+## ff - 0.12.1
+**Repository URL**: https://github.com/zkcrypto/ff
+**License Type(s)**: Apache-2.0 OR MIT
+
+## fs4 - 0.13.1
+**Repository URL**: https://github.com/al8n/fs4-rs
+**License Type(s)**: Apache-2.0 OR MIT
+
+## group - 0.12.1
+**Repository URL**: https://github.com/zkcrypto/group
+**License Type(s)**: Apache-2.0 OR MIT
+
+## hmac - 0.12.1
+**Repository URL**: https://github.com/RustCrypto/MACs
+**License Type(s)**: Apache-2.0 OR MIT
+
+## libdynamo_llm - 1.1.0
+**Repository URL**: https://github.com/ai-dynamo/dynamo.git
+**License Type(s)**: Apache-2.0
+
+## opentelemetry-appender-tracing - 0.31.1
+**Repository URL**: https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-appender-tracing
+**License Type(s)**: Apache-2.0
+
+## outref - 0.5.2
+**Repository URL**: https://github.com/Nugine/outref
+**License Type(s)**: MIT
+
+## p256 - 0.11.1
+**Repository URL**: https://github.com/RustCrypto/elliptic-curves/tree/master/p256
+**License Type(s)**: Apache-2.0 OR MIT
+
+## pcre2 - 0.2.11
+**Repository URL**: https://github.com/BurntSushi/rust-pcre2
+**License Type(s)**: MIT OR Unlicense
+
+## pcre2-sys - 0.2.10
+**Repository URL**: https://github.com/BurntSushi/rust-pcre2
+**License Type(s)**: MIT OR Unlicense
+
+## plain - 0.2.3
+**Repository URL**: https://github.com/randomites/plain
+**License Type(s)**: Apache-2.0 OR MIT
+
+## regex-lite - 0.1.9
+**Repository URL**: https://github.com/rust-lang/regex
+**License Type(s)**: Apache-2.0 OR MIT
+
+## rfc6979 - 0.3.1
+**Repository URL**: https://github.com/RustCrypto/signatures/tree/master/rfc6979
+**License Type(s)**: Apache-2.0 OR MIT
+
+## sct - 0.7.1
+**Repository URL**: https://github.com/rustls/sct.rs
+**License Type(s)**: Apache-2.0 OR ISC OR MIT
+
+## sec1 - 0.3.0
+**Repository URL**: https://github.com/RustCrypto/formats/tree/master/sec1
+**License Type(s)**: Apache-2.0 OR MIT
+
+## serde_bytes - 0.11.19
+**Repository URL**: https://github.com/serde-rs/bytes
+**License Type(s)**: Apache-2.0 OR MIT
+
+## slotmap - 1.1.1
+**Repository URL**: https://github.com/orlp/slotmap
+**License Type(s)**: Zlib
+
+## urlencoding - 2.1.3
+**Repository URL**: https://github.com/kornelski/rust_urlencoding
+**License Type(s)**: MIT
+
+## utf16_iter - 1.0.5
+**Repository URL**: https://github.com/hsivonen/utf16_iter
+**License Type(s)**: Apache-2.0 OR MIT
+
+## velo - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## velo-common - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## velo-discovery - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## velo-events - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## velo-messenger - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## velo-observability - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## velo-queue - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## velo-rendezvous - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## velo-streaming - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## velo-transports - 0.1.0
+**Repository URL**: https://github.com/ai-dynamo/velo.git
+**License Type(s)**: Apache-2.0
+
+## vsimd - 0.8.0
+**Repository URL**: https://github.com/Nugine/simd
+**License Type(s)**: MIT
+
+## write16 - 1.0.0
+**Repository URL**: https://github.com/hsivonen/write16
+**License Type(s)**: Apache-2.0 OR MIT
+
+## xmlparser - 0.13.6
+**Repository URL**: https://github.com/RazrFalcon/xmlparser
+**License Type(s)**: Apache-2.0 OR MIT
+

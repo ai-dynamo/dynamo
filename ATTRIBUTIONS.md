@@ -774,6 +774,26 @@ The complete text of the LGPL-2.1 license can be found at: https://www.gnu.org/l
 
 Note: FFmpeg may be compiled with GPL or non-free components. This projects ensures only LGPL components are included.
 
+## cuda-tileiras-13-1
+
+**Version:** 13.1.80-1
+**License:** LicenseRef-NVIDIA-SOFTWARE-LICENSE (NVIDIA CUDA EULA)
+**Copyright:** Copyright (C) NVIDIA Corporation
+
+NVIDIA CUDA Tile IR Assembler — part of the CUDA 13.1 toolkit.
+
+The complete text of the NVIDIA CUDA EULA can be found at: https://docs.nvidia.com/cuda/eula/index.html
+
+## nsight-systems-cli-2026.1.1
+
+**Version:** 2026.1.1.204-261137176666v0
+**License:** LicenseRef-NVIDIA-Proprietary (NVIDIA Software License Agreement)
+**Copyright:** Copyright (C) NVIDIA Corporation
+
+NVIDIA Nsight Systems CLI — system-wide performance analysis tool.
+
+The complete text of the NVIDIA Software License Agreement can be found at: https://docs.nvidia.com/nsight-systems/#license-agreement
+
 ---
 
 ## Source Code Availability
