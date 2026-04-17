@@ -104,22 +104,34 @@ func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) 
 	return uuids, nil
 }
 
-// DiscoverGPUUUIDs resolves pod-assigned GPU UUIDs using kubelet PodResources,
-// then DRA API state, and finally nvidia-smi as a last fallback.
+// DiscoverGPUUUIDs resolves GPU UUIDs according to the pod's allocation mode:
+// DRA-backed pods use the DRA API, classic nvidia.com/gpu pods use PodResources,
+// and nvidia-smi remains the last fallback for either path.
 func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
-	gpuUUIDs, err := GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
+	gpuUUIDs, usesDRAGPU, err := resolveGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
+	if err != nil && usesDRAGPU {
+		log.Error(err, "DRA API GPU UUID lookup failed, falling back to nvidia-smi", "pod", podNamespace+"/"+podName)
+		gpuUUIDs = nil
+	}
+	if len(gpuUUIDs) > 0 {
+		return gpuUUIDs, nil
+	}
+	if usesDRAGPU {
+		log.Info("DRA API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
+		gpuUUIDs, err = GetGPUUUIDsViaNvidiaSmi(ctx, hostProcPath, pid)
+		if err != nil {
+			return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
+		}
+		log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDs)
+		return gpuUUIDs, nil
+	}
+
+	gpuUUIDs, err = GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
 	if err != nil {
 		return nil, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
 	}
 	if len(gpuUUIDs) == 0 {
-		log.Info("PodResources API returned no GPU UUIDs, trying DRA API lookup", "pod", podNamespace+"/"+podName)
-		gpuUUIDs, err = GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
-		if err != nil {
-			return nil, fmt.Errorf("DRA API GPU UUID lookup failed: %w", err)
-		}
-	}
-	if len(gpuUUIDs) == 0 {
-		log.Info("DRA API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
+		log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
 		gpuUUIDs, err = GetGPUUUIDsViaNvidiaSmi(ctx, hostProcPath, pid)
 		if err != nil {
 			return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)

@@ -13,7 +13,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-
+	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
 
@@ -93,7 +96,7 @@ func (s *testPodResourcesServer) Get(context.Context, *podresourcesv1.GetPodReso
 	return nil, status.Error(codes.Unimplemented, "not implemented in test")
 }
 
-func TestGetPodGPUUUIDs(t *testing.T) {
+func installTestPodResourcesServer(t *testing.T, resp *podresourcesv1.ListPodResourcesResponse) {
 	socketDir := t.TempDir()
 	socketPath := filepath.Join(socketDir, "kubelet.sock")
 
@@ -101,61 +104,10 @@ func TestGetPodGPUUUIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen unix socket: %v", err)
 	}
-	defer listener.Close()
 
 	server := grpc.NewServer()
 	podresourcesv1.RegisterPodResourcesListerServer(server, &testPodResourcesServer{
-		resp: &podresourcesv1.ListPodResourcesResponse{
-			PodResources: []*podresourcesv1.PodResources{
-				{
-					Name:      "other-pod",
-					Namespace: "default",
-					Containers: []*podresourcesv1.ContainerResources{
-						{
-							Name: "main",
-							Devices: []*podresourcesv1.ContainerDevices{
-								{
-									ResourceName: nvidiaGPUResource,
-									DeviceIds:    []string{"GPU-ignore"},
-								},
-							},
-						},
-					},
-				},
-				{
-					Name:      "test-pod",
-					Namespace: "default",
-					Containers: []*podresourcesv1.ContainerResources{
-						{
-							Name: "sidecar",
-							Devices: []*podresourcesv1.ContainerDevices{
-								{
-									ResourceName: nvidiaGPUResource,
-									DeviceIds:    []string{"GPU-sidecar"},
-								},
-							},
-						},
-						{
-							Name: "main",
-							Devices: []*podresourcesv1.ContainerDevices{
-								{
-									ResourceName: nvidiaGPUResource,
-									DeviceIds:    []string{"GPU-a", "GPU-b"},
-								},
-								{
-									ResourceName: "example.com/fpga",
-									DeviceIds:    []string{"FPGA-ignore"},
-								},
-								{
-									ResourceName: nvidiaGPUResource,
-									DeviceIds:    []string{"GPU-c"},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
+		resp: resp,
 	})
 
 	go func() {
@@ -167,11 +119,68 @@ func TestGetPodGPUUUIDs(t *testing.T) {
 		}
 	}()
 	t.Cleanup(server.Stop)
+	t.Cleanup(func() {
+		_ = listener.Close()
+	})
 
 	previousSocketPath := podResourcesSocketPath
 	podResourcesSocketPath = socketPath
 	t.Cleanup(func() {
 		podResourcesSocketPath = previousSocketPath
+	})
+}
+
+func TestGetPodGPUUUIDs(t *testing.T) {
+	installTestPodResourcesServer(t, &podresourcesv1.ListPodResourcesResponse{
+		PodResources: []*podresourcesv1.PodResources{
+			{
+				Name:      "other-pod",
+				Namespace: "default",
+				Containers: []*podresourcesv1.ContainerResources{
+					{
+						Name: "main",
+						Devices: []*podresourcesv1.ContainerDevices{
+							{
+								ResourceName: nvidiaGPUResource,
+								DeviceIds:    []string{"GPU-ignore"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name:      "test-pod",
+				Namespace: "default",
+				Containers: []*podresourcesv1.ContainerResources{
+					{
+						Name: "sidecar",
+						Devices: []*podresourcesv1.ContainerDevices{
+							{
+								ResourceName: nvidiaGPUResource,
+								DeviceIds:    []string{"GPU-sidecar"},
+							},
+						},
+					},
+					{
+						Name: "main",
+						Devices: []*podresourcesv1.ContainerDevices{
+							{
+								ResourceName: nvidiaGPUResource,
+								DeviceIds:    []string{"GPU-a", "GPU-b"},
+							},
+							{
+								ResourceName: "example.com/fpga",
+								DeviceIds:    []string{"FPGA-ignore"},
+							},
+							{
+								ResourceName: nvidiaGPUResource,
+								DeviceIds:    []string{"GPU-c"},
+							},
+						},
+					},
+				},
+			},
+		},
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -190,5 +199,132 @@ func TestGetPodGPUUUIDs(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("got %v, want %v", got, want)
 		}
+	}
+}
+
+func TestDiscoverGPUUUIDsUsesPodResourcesForClassicPod(t *testing.T) {
+	installTestPodResourcesServer(t, &podresourcesv1.ListPodResourcesResponse{
+		PodResources: []*podresourcesv1.PodResources{
+			{
+				Name:      "test-pod",
+				Namespace: "default",
+				Containers: []*podresourcesv1.ContainerResources{
+					{
+						Name: "main",
+						Devices: []*podresourcesv1.ContainerDevices{
+							{
+								ResourceName: nvidiaGPUResource,
+								DeviceIds:    []string{"GPU-a", "GPU-b"},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got, err := DiscoverGPUUUIDs(
+		ctx,
+		nil,
+		"test-pod",
+		"default",
+		"main",
+		"/proc",
+		123,
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("DiscoverGPUUUIDs: %v", err)
+	}
+
+	want := []string{"GPU-a", "GPU-b"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestDiscoverGPUUUIDsPrefersDRAForDRAPod(t *testing.T) {
+	previousSocketPath := podResourcesSocketPath
+	podResourcesSocketPath = filepath.Join(t.TempDir(), "missing-kubelet.sock")
+	t.Cleanup(func() {
+		podResourcesSocketPath = previousSocketPath
+	})
+
+	nodeName := "node-1"
+	poolName := "pool-node-1"
+	namespace := "default"
+	podName := "test-pod"
+	claimName := "gpu-claim"
+	uuid := "GPU-ffffffff-1111-2222-3333-444444444444"
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: namespace},
+		Spec: corev1.PodSpec{
+			NodeName: nodeName,
+			ResourceClaims: []corev1.PodResourceClaim{
+				{
+					Name:              "gpu",
+					ResourceClaimName: &claimName,
+				},
+			},
+		},
+	}
+	claim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: namespace},
+		Status: resourcev1.ResourceClaimStatus{
+			Allocation: &resourcev1.AllocationResult{
+				Devices: resourcev1.DeviceAllocationResult{
+					Results: []resourcev1.DeviceRequestAllocationResult{
+						{Driver: nvidiaGPUDRADriver, Pool: poolName, Device: "gpu-0", Request: "gpu"},
+					},
+				},
+			},
+		},
+	}
+	slice := &resourcev1.ResourceSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: poolName + "-gpu.nvidia.com-xxx"},
+		Spec: resourcev1.ResourceSliceSpec{
+			Driver:   nvidiaGPUDRADriver,
+			NodeName: &nodeName,
+			Pool:     resourcev1.ResourcePool{Name: poolName},
+			Devices: []resourcev1.Device{
+				{
+					Name: "gpu-0",
+					Attributes: map[resourcev1.QualifiedName]resourcev1.DeviceAttribute{
+						resourcev1.QualifiedName("uuid"): {StringValue: &uuid},
+					},
+				},
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(pod, claim, slice)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got, err := DiscoverGPUUUIDs(
+		ctx,
+		client,
+		podName,
+		namespace,
+		"main",
+		"/proc",
+		123,
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("DiscoverGPUUUIDs: %v", err)
+	}
+	if len(got) != 1 || got[0] != uuid {
+		t.Fatalf("got %v, want [%s]", got, uuid)
 	}
 }

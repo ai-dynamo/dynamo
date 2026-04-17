@@ -14,35 +14,31 @@ const (
 	resourceAttributeUUID = "uuid"
 )
 
-// GetGPUUUIDsViaDRAAPI resolves GPU UUIDs for a pod by querying the Kubernetes API:
-// Pod (resource claim refs) -> ResourceClaim (allocation results) -> ResourceSlice (device attributes).
-// Returns nil without error if the pod has no DRA claims or the driver is not gpu.nvidia.com.
-func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]string, error) {
+type allocatedDRADevice struct {
+	pool   string
+	device string
+}
+
+func getAllocatedNVIDIADRADevices(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]allocatedDRADevice, string, bool, error) {
 	if clientset == nil {
-		return nil, nil
+		return nil, "", false, nil
 	}
 	if podName == "" || podNamespace == "" {
-		return nil, nil
+		return nil, "", false, nil
 	}
 
 	pod, err := clientset.CoreV1().Pods(podNamespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("get pod %s/%s: %w", podNamespace, podName, err)
+		return nil, "", false, fmt.Errorf("get pod %s/%s: %w", podNamespace, podName, err)
 	}
 	if len(pod.Spec.ResourceClaims) == 0 {
-		return nil, nil
+		return nil, pod.Spec.NodeName, false, nil
 	}
-	nodeName := pod.Spec.NodeName
-	if nodeName == "" {
+	if pod.Spec.NodeName == "" {
 		log.V(1).Info("pod has no node name, skipping DRA API lookup")
-		return nil, nil
+		return nil, "", false, nil
 	}
 
-	var allocated []struct {
-		driver string
-		pool   string
-		device string
-	}
 	claimNamesByPodRef := make(map[string]string, len(pod.Spec.ResourceClaims))
 	for _, ref := range pod.Spec.ResourceClaims {
 		if ref.ResourceClaimName != nil && *ref.ResourceClaimName != "" {
@@ -57,6 +53,9 @@ func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, p
 			claimNamesByPodRef[status.Name] = *status.ResourceClaimName
 		}
 	}
+
+	var allocated []allocatedDRADevice
+	usesDRAGPU := false
 	for _, ref := range pod.Spec.ResourceClaims {
 		claimName := claimNamesByPodRef[ref.Name]
 		if claimName == "" {
@@ -65,30 +64,40 @@ func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, p
 		}
 		claim, err := clientset.ResourceV1().ResourceClaims(podNamespace).Get(ctx, claimName, metav1.GetOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("get resource claim %s/%s: %w", podNamespace, claimName, err)
+			return nil, pod.Spec.NodeName, usesDRAGPU, fmt.Errorf("get resource claim %s/%s: %w", podNamespace, claimName, err)
 		}
 		if claim.Status.Allocation == nil || len(claim.Status.Allocation.Devices.Results) == 0 {
 			continue
 		}
-		for _, r := range claim.Status.Allocation.Devices.Results {
-			if r.Driver == nvidiaGPUDRADriver {
-				allocated = append(allocated, struct {
-					driver string
-					pool   string
-					device string
-				}{r.Driver, r.Pool, r.Device})
+		for _, result := range claim.Status.Allocation.Devices.Results {
+			if result.Driver != nvidiaGPUDRADriver {
+				continue
 			}
+			usesDRAGPU = true
+			allocated = append(allocated, allocatedDRADevice{
+				pool:   result.Pool,
+				device: result.Device,
+			})
 		}
 	}
-	if len(allocated) == 0 {
-		return nil, nil
+
+	return allocated, pod.Spec.NodeName, usesDRAGPU, nil
+}
+
+func resolveGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]string, bool, error) {
+	allocated, nodeName, usesDRAGPU, err := getAllocatedNVIDIADRADevices(ctx, clientset, podName, podNamespace, log)
+	if err != nil {
+		return nil, usesDRAGPU, err
+	}
+	if !usesDRAGPU || len(allocated) == 0 {
+		return nil, usesDRAGPU, nil
 	}
 
 	slices, err := clientset.ResourceV1().ResourceSlices().List(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("spec.driver=%s,spec.nodeName=%s", nvidiaGPUDRADriver, nodeName),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("list resource slices for node %s: %w", nodeName, err)
+		return nil, true, fmt.Errorf("list resource slices for node %s: %w", nodeName, err)
 	}
 
 	poolDeviceToUUID := make(map[string]map[string]string)
@@ -107,15 +116,15 @@ func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, p
 	}
 
 	var uuids []string
-	for _, a := range allocated {
-		devMap := poolDeviceToUUID[a.pool]
+	for _, device := range allocated {
+		devMap := poolDeviceToUUID[device.pool]
 		if devMap == nil {
-			log.V(1).Info("no ResourceSlice found for pool", "pool", a.pool, "device", a.device)
+			log.V(1).Info("no ResourceSlice found for pool", "pool", device.pool, "device", device.device)
 			continue
 		}
-		uuid, ok := devMap[a.device]
+		uuid, ok := devMap[device.device]
 		if !ok || uuid == "" {
-			log.V(1).Info("device has no UUID in ResourceSlice", "pool", a.pool, "device", a.device)
+			log.V(1).Info("device has no UUID in ResourceSlice", "pool", device.pool, "device", device.device)
 			continue
 		}
 		uuids = append(uuids, uuid)
@@ -123,7 +132,15 @@ func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, p
 	if len(uuids) > 0 {
 		log.Info("resolved GPU UUIDs via DRA API", "uuids", uuids)
 	}
-	return uuids, nil
+	return uuids, true, nil
+}
+
+// GetGPUUUIDsViaDRAAPI resolves GPU UUIDs for a pod by querying the Kubernetes API:
+// Pod (resource claim refs) -> ResourceClaim (allocation results) -> ResourceSlice (device attributes).
+// Returns nil without error if the pod has no DRA claims or the driver is not gpu.nvidia.com.
+func GetGPUUUIDsViaDRAAPI(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace string, log logr.Logger) ([]string, error) {
+	uuids, _, err := resolveGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
+	return uuids, err
 }
 
 func deviceUUIDFromAttributes(attrs map[resourcev1.QualifiedName]resourcev1.DeviceAttribute) string {
