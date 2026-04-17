@@ -658,35 +658,48 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
+// reconcileGMSResourceClaimTemplates syncs one ResourceClaimTemplate per
+// service when DRA is available, and otherwise fails fast if any service
+// needs DRA-backed GPU allocation.
+//
+// Both the GMS sidecar (gpuMemoryService.enabled=true) and inter-pod GMS
+// failover (failover.mode=interPod) allocate GPUs via DRA ResourceClaims.
+// Without DRA, pods would be admitted by the webhook but silently reference
+// ResourceClaimTemplates that reconcile never creates, producing a confusing
+// "resourceclaim not found" at schedule time. We fail fast here so the user
+// gets an actionable error instead.
+func (r *DynamoGraphDeploymentReconciler) reconcileGMSResourceClaimTemplates(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	// Sync ResourceClaimTemplates for GMS-enabled components before creating pods.
-	if r.RuntimeConfig.DRAEnabled {
-		for serviceName, component := range dynamoDeployment.Spec.Services {
-			gpuCount, deviceClassName := dra.ExtractGPUParams(component.GPUMemoryService, component.Resources)
-			claimTemplateName := dra.ResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
-			_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-				return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
-			})
-			if err != nil {
-				logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
-				return ReconcileResult{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", serviceName, err)
-			}
-		}
-	} else {
-		// Both the GMS sidecar (gpuMemoryService.enabled=true) and inter-pod GMS
-		// failover (failover.mode=interPod) allocate GPUs via DRA
-		// ResourceClaims. Without DRA, pods would be admitted by the webhook
-		// but silently reference ResourceClaimTemplates that reconcile never
-		// creates, producing a confusing "resourceclaim not found" at schedule
-		// time. Fail fast here so the user gets an actionable error.
+	if !r.RuntimeConfig.DRAEnabled {
 		for _, component := range dynamoDeployment.Spec.Services {
 			if (component.GPUMemoryService != nil && component.GPUMemoryService.Enabled) ||
 				component.IsInterPodFailoverEnabled() {
-				return ReconcileResult{}, fmt.Errorf("gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
+				return fmt.Errorf("gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
 			}
 		}
+		return nil
+	}
+
+	for serviceName, component := range dynamoDeployment.Spec.Services {
+		gpuCount, deviceClassName := dra.ExtractGPUParams(component.GPUMemoryService, component.Resources)
+		claimTemplateName := dra.ResourceClaimTemplateName(dynamoDeployment.Name, serviceName)
+		_, _, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
+			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, dynamoDeployment.Namespace, gpuCount, deviceClassName)
+		})
+		if err != nil {
+			logger.Error(err, "failed to sync GMS ResourceClaimTemplate", "service", serviceName)
+			return fmt.Errorf("failed to sync GMS ResourceClaimTemplate for %s: %w", serviceName, err)
+		}
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
+	logger := log.FromContext(ctx)
+
+	if err := r.reconcileGMSResourceClaimTemplates(ctx, dynamoDeployment); err != nil {
+		return ReconcileResult{}, err
 	}
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
