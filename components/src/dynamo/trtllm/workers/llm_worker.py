@@ -422,7 +422,7 @@ async def init_llm_worker(
             max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
             allowed_local_media_path=config.allowed_local_media_path,
-            enable_frontend_decoding=MEDIA_DECODER_AVAILABLE,
+            enable_frontend_decoding=config.frontend_decoding,
         )
 
     else:
@@ -599,13 +599,14 @@ async def init_llm_worker(
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
 
-        # Rust media infrastructure for multimodal: the Rust preprocessor
-        # routes by URL extension — .safetensors passes through as a URL for
-        # Python to deserialize safely, .pt/.pth/.bin are rejected, and
-        # everything else (images, video, audio) goes through MediaDecoder.
         media_decoder = None
         media_fetcher = None
-        if config.modality == Modality.MULTIMODAL and MEDIA_DECODER_AVAILABLE:
+        if config.frontend_decoding:
+            if not MEDIA_DECODER_AVAILABLE:
+                raise RuntimeError(
+                    "--frontend-decoding requires MediaDecoder support. "
+                    "Ensure dynamo.llm module includes MediaDecoder and MediaFetcher."
+                )
             assert MediaDecoder is not None and MediaFetcher is not None
             media_decoder = MediaDecoder()
             media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})

@@ -440,6 +440,35 @@ trtllm_configs = {
             ),
         ],
     ),
+    # Aggregated multimodal with --frontend-decoding enabled.
+    # Verifies image URL inference works when images are decoded by the Rust
+    # MediaDecoder in the frontend instead of the Python backend.
+    "aggregated_multimodal_frontend_decoding": TRTLLMConfig(
+        name="aggregated_multimodal_frontend_decoding",
+        directory=trtllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+            pytest.mark.timeout(900),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=60,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "AGG_ENGINE_ARGS": "$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml",
+            "DYN_TRTLLM_FRONTEND_DECODING": "true",
+        },
+    ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
         directory=trtllm_dir,
