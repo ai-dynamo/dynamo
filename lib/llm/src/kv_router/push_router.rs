@@ -7,7 +7,7 @@ use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
     dynamo_nvtx_range,
-    metrics::frontend_perf::StageGuard,
+    metrics::frontend_perf::{STAGE_DISPATCH, STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -513,7 +513,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .map(|t| t.phase())
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
-        let route_guard = StageGuard::new("route", &phase_label);
+        let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
 
         let block_size = self.chooser.block_size() as usize;
         let selection = self
@@ -617,7 +617,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // End route stage — worker has been selected and routing metrics recorded.
         // Dispatch stage starts immediately so there is no gap between stages.
         drop(route_guard);
-        let stage_dispatch_guard = StageGuard::new("dispatch", &phase_label);
+        let stage_dispatch_guard = StageGuard::new(STAGE_DISPATCH, &phase_label);
 
         // Dispatch to worker
         let isl_tokens = request.token_ids.len();

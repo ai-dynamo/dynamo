@@ -10,6 +10,8 @@ use prometheus::{Counter, Histogram, HistogramOpts, HistogramVec, IntGaugeVec, O
 use super::prometheus_names::{frontend_perf, name_prefix};
 use crate::MetricsRegistry;
 
+pub use super::prometheus_names::frontend_perf::{STAGE_DISPATCH, STAGE_PREPROCESS, STAGE_ROUTE};
+
 fn frontend_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::FRONTEND, suffix)
 }
@@ -39,8 +41,10 @@ pub struct StageGuard {
 impl StageGuard {
     /// Increment the stage gauge and return a guard that decrements on drop.
     ///
-    /// * `stage` — pipeline stage name (e.g. `"preprocess"`, `"route"`, `"dispatch"`)
-    /// * `phase` — request phase (e.g. `"prefill"`, `"decode"`, `"aggregated"`, or `""`)
+    /// * `stage` — pipeline stage name; use `frontend_perf::STAGE_{PREPROCESS,ROUTE,DISPATCH}`
+    ///   constants from [`crate::metrics::prometheus_names`].
+    /// * `phase` — request phase; use [`RequestPhase::to_string`] output
+    ///   (`"prefill"|"decode"|"aggregated"`), or `""` for stages without a phase.
     pub fn new(stage: &str, phase: &str) -> Self {
         let gauge = STAGE_REQUESTS.with_label_values(&[stage, phase]);
         gauge.inc();

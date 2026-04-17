@@ -550,6 +550,11 @@ pub mod frontend_perf {
     /// Tracks how many requests are currently in each pipeline stage.
     /// Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
     pub const STAGE_REQUESTS: &str = "stage_requests";
+
+    /// Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    pub const STAGE_PREPROCESS: &str = "preprocess";
+    pub const STAGE_ROUTE: &str = "route";
+    pub const STAGE_DISPATCH: &str = "dispatch";
     /// Tokenization time in preprocessor
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
