@@ -132,10 +132,6 @@ on:
         required: true
       SCCACHE_S3_BUCKET:
         required: false
-      AWS_ACCESS_KEY_ID:
-        required: false
-      AWS_SECRET_ACCESS_KEY:
-        required: false
       HF_TOKEN:
         required: false
 
