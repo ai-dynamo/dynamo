@@ -114,6 +114,11 @@ pub struct NvExtResponse {
     /// Routed expert capture payload (SGLang-specific)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routed_experts: Option<serde_json::Value>,
+
+    /// Opaque engine data passed through from the backend worker.
+    /// Dynamo does not inspect this; it is forwarded as-is to the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_data: Option<serde_json::Value>,
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
@@ -162,7 +167,7 @@ pub struct NvExt {
 
     /// Extra fields to be included in the response's nvext
     /// This is a list of field names that should be populated in the response
-    /// Supported fields include "worker_id", "timing", "routed_experts",
+    /// Supported fields include "worker_id", "timing", "routed_experts", "engine_data",
     /// which map to fields in NvExtResponse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]

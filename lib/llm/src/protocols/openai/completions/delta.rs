@@ -48,6 +48,8 @@ impl NvCreateCompletionRequest {
         // Enable tracking if:
         // 1. Client requested timing in extra_fields, OR
         // 2. query_instance_id annotation is present (needs worker_id tracking for response)
+        let extra_fields = self.nvext().and_then(|nv| nv.extra_fields.as_ref());
+
         let enable_tracking = self
             .nvext()
             .map(|nv| {
@@ -59,6 +61,9 @@ impl NvCreateCompletionRequest {
                     })
             })
             .unwrap_or(false);
+
+        let enable_engine_data =
+            extra_fields.is_some_and(|fields| fields.iter().any(|f| f == "engine_data"));
 
         let options = DeltaGeneratorOptions {
             enable_usage: self
@@ -75,6 +80,7 @@ impl NvCreateCompletionRequest {
                 .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
             enable_tracking,
+            enable_engine_data,
         };
 
         DeltaGenerator::new(self.inner.model.clone(), options, request_id)
@@ -87,6 +93,9 @@ pub struct DeltaGeneratorOptions {
     pub continuous_usage_stats: bool,
     pub enable_logprobs: bool,
     pub enable_tracking: bool,
+    /// Determines whether opaque engine_data should be forwarded in `nvext`.
+    /// Enabled when the client requests `extra_fields: ["engine_data"]`.
+    pub enable_engine_data: bool,
 }
 
 pub struct DeltaGenerator {
@@ -332,17 +341,25 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             None
         };
 
-        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
+        let engine_data = if self.options.enable_engine_data {
+            delta.engine_data
+        } else {
+            None
+        };
+
+        // Inject nvext if we have worker_id, token_ids, timing, routed experts, or engine_data.
         if worker_id_info.is_some()
             || token_ids.is_some()
             || timing_info.is_some()
             || routed_experts.is_some()
+            || engine_data.is_some()
         {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
                 timing: timing_info,
                 token_ids: token_ids.clone(),
                 routed_experts,
+                engine_data,
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {

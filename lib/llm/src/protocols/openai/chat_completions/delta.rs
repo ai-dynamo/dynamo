@@ -54,6 +54,8 @@ impl NvCreateChatCompletionRequest {
         // Enable tracking if:
         // 1. Client requested timing in extra_fields, OR
         // 2. query_instance_id annotation is present (needs worker_id tracking for response)
+        let extra_fields = self.nvext().and_then(|nv| nv.extra_fields.as_ref());
+
         let enable_tracking = self
             .nvext()
             .map(|nv| {
@@ -65,6 +67,9 @@ impl NvCreateChatCompletionRequest {
                     })
             })
             .unwrap_or(false);
+
+        let enable_engine_data =
+            extra_fields.is_some_and(|fields| fields.iter().any(|f| f == "engine_data"));
 
         let options = DeltaGeneratorOptions {
             enable_usage: self
@@ -82,6 +87,7 @@ impl NvCreateChatCompletionRequest {
             enable_logprobs: self.inner.logprobs.unwrap_or(false)
                 || self.inner.top_logprobs.unwrap_or(0) > 0,
             enable_tracking,
+            enable_engine_data,
             runtime_config: ModelRuntimeConfig::default(),
         };
 
@@ -100,6 +106,9 @@ pub struct DeltaGeneratorOptions {
     pub enable_logprobs: bool,
     /// Determines whether request tracking (timing, KV hit rate) should be enabled.
     pub enable_tracking: bool,
+    /// Determines whether opaque engine_data should be forwarded in `nvext`.
+    /// Enabled when the client requests `extra_fields: ["engine_data"]`.
+    pub enable_engine_data: bool,
 
     pub runtime_config: ModelRuntimeConfig,
 }
@@ -438,17 +447,25 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             None
         };
 
-        // Inject nvext if we have worker_id, token_ids, timing, or routed experts.
+        let engine_data = if self.options.enable_engine_data {
+            delta.engine_data
+        } else {
+            None
+        };
+
+        // Inject nvext if we have worker_id, token_ids, timing, routed experts, or engine_data.
         if worker_id_info.is_some()
             || token_ids.is_some()
             || timing_info.is_some()
             || routed_experts.is_some()
+            || engine_data.is_some()
         {
             let nvext_response = NvExtResponse {
                 worker_id: worker_id_info.clone(),
                 timing: timing_info,
                 token_ids: token_ids.clone(),
                 routed_experts,
+                engine_data,
             };
 
             if let Ok(nvext_json) = serde_json::to_value(&nvext_response) {
@@ -500,6 +517,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::openai::DeltaGeneratorExt;
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
@@ -563,5 +581,145 @@ mod tests {
             request.inner.stream_options.is_none(),
             "Streaming request should not have stream_options modified"
         );
+    }
+
+    fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {
+        let messages = vec![ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text("test".to_string()),
+                name: None,
+            },
+        )];
+
+        NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages,
+                stream: Some(true),
+                stream_options: None,
+                ..Default::default()
+            },
+            common: Default::default(),
+            nvext: Some(
+                crate::protocols::openai::nvext::NvExt::builder()
+                    .extra_fields(fields)
+                    .build()
+                    .unwrap(),
+            ),
+            chat_template_args: None,
+            media_io_kwargs: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    fn make_backend_output_with_engine_data() -> crate::protocols::common::llm_backend::BackendOutput
+    {
+        crate::protocols::common::llm_backend::BackendOutput {
+            token_ids: vec![42],
+            tokens: vec![Some("hello".to_string())],
+            text: Some("hello".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: None,
+            disaggregated_params: None,
+            engine_data: Some(serde_json::json!({
+                "kv_transfer_time_ms": 12.3,
+                "disaggregated_kv_transfer_time_ms": 8.1,
+                "prefill_compute_time_ms": 45.6
+            })),
+        }
+    }
+
+    #[test]
+    fn test_engine_data_included_when_requested_via_extra_fields() {
+        let request = create_test_request_with_extra_fields(vec!["engine_data".to_string()]);
+        let mut generator = request.response_generator("req-engine-1".to_string());
+
+        let backend_output = make_backend_output_with_engine_data();
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        let nvext = response.nvext.expect("nvext should be present");
+        let engine_data = nvext
+            .get("engine_data")
+            .expect("engine_data should be present");
+        assert_eq!(engine_data["kv_transfer_time_ms"], 12.3);
+        assert_eq!(engine_data["prefill_compute_time_ms"], 45.6);
+    }
+
+    #[test]
+    fn test_engine_data_excluded_when_not_requested() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-engine-2".to_string());
+
+        let backend_output = make_backend_output_with_engine_data();
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        // nvext may or may not be present (tracker may inject worker_id),
+        // but engine_data specifically must be absent
+        if let Some(nvext) = &response.nvext {
+            assert!(
+                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
+                "engine_data should not be present when not requested"
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_data_excluded_when_other_extra_fields_requested() {
+        let request = create_test_request_with_extra_fields(vec!["timing".to_string()]);
+        let mut generator = request.response_generator("req-engine-3".to_string());
+
+        let backend_output = make_backend_output_with_engine_data();
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        if let Some(nvext) = &response.nvext {
+            assert!(
+                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
+                "engine_data should not be present when only timing is requested"
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_data_none_from_backend_no_nvext_noise() {
+        let request = create_test_request_with_extra_fields(vec!["engine_data".to_string()]);
+        let mut generator = request.response_generator("req-engine-4".to_string());
+
+        let backend_output = crate::protocols::common::llm_backend::BackendOutput {
+            token_ids: vec![42],
+            tokens: vec![Some("hello".to_string())],
+            text: Some("hello".to_string()),
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            completion_usage: None,
+            disaggregated_params: None,
+            engine_data: None, // engine didn't provide any data
+        };
+
+        let response = generator
+            .choice_from_postprocessor(backend_output)
+            .expect("should produce a response");
+
+        // engine_data is None from backend, so nvext.engine_data should be absent
+        if let Some(nvext) = &response.nvext {
+            assert!(
+                nvext.get("engine_data").is_none() || nvext.get("engine_data").unwrap().is_null(),
+                "engine_data should not appear when backend provides None"
+            );
+        }
     }
 }
