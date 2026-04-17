@@ -224,7 +224,121 @@ Expected differences from inter-pass:
 - `Intra pass load: N` in metadata summary means N blocks queued for intra-pass H2D transfer
 - `start_load_kv` triggers the per-layer DMA, `wait_for_layer_load` synchronizes before attention
 
-## Step 8: Cleanup
+## Step 8: (Optional) Test Decode Block Offload + Onboard
+
+This tests that KV cache blocks generated DURING decode (not just prefill)
+are offloaded to G2 and can be onboarded back. Requires `KVBM_DECODE_OFFLOAD=true`.
+
+### Stop existing server and restart with decode offload
+
+```bash
+docker exec kvbm-v2-test bash -c "pkill -9 -f 'dynamo.trtllm'; pkill -9 -f 'dynamo.frontend'"
+```
+
+```bash
+docker exec -d kvbm-v2-test bash -c "
+export NATS_SERVER=nats://172.17.0.1:4222
+export ETCD_ENDPOINTS=http://172.17.0.1:2379
+export CUDA_VISIBLE_DEVICES=0
+export DYN_KVBM_CPU_CACHE_GB=4
+export DYN_KVBM_NIXL_BACKEND_UCX=true
+export DYN_LOG=debug
+export KVBM_DECODE_OFFLOAD=true
+
+python3 -m dynamo.frontend --http-port 8000 2>/dev/null &
+sleep 5
+python3 -m dynamo.trtllm \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
+  --extra-engine-args /tmp/kvbm_v2_test.yaml 2>&1 | tee /tmp/trtllm_decode.log
+"
+```
+
+Wait ~90 seconds for server ready.
+
+### Send R1 with 40 OSL (generates decode blocks)
+
+Copy and run this Python script inside the container:
+
+```python
+import json, urllib.request
+
+def send(messages, max_tokens):
+    data = json.dumps({"model": "Qwen/Qwen3-0.6B", "messages": messages,
+                       "stream": False, "max_tokens": max_tokens}).encode()
+    req = urllib.request.Request("http://localhost:8000/v1/chat/completions",
+                                data=data, headers={"Content-Type": "application/json"})
+    return json.loads(urllib.request.urlopen(req, timeout=120).read())
+
+PROMPT = ("Please explain in great detail the complete history and evolution of "
+          "programming languages from the earliest assembly languages and FORTRAN "
+          "in the 1950s through the structured programming revolution with C and "
+          "Pascal in the 1970s to the rise of object oriented languages like C++ "
+          "Java and Python in the 1980s and 1990s and finally the modern era of "
+          "Rust Go Kotlin and TypeScript. Discuss the key innovations that each "
+          "generation brought")
+
+# R1: 40 decode tokens — should offload 3 prefill + 1 decode block
+print("=== R1 ===")
+r1 = send([{"role": "user", "content": PROMPT}], 40)
+print(f"prompt={r1['usage']['prompt_tokens']}, completion={r1['usage']['completion_tokens']}")
+response_text = r1["choices"][0]["message"]["content"]
+
+# 10 fillers to evict R1 blocks from G1
+FILLERS = [
+    "Can you provide a comprehensive overview of distributed systems architecture including the CAP theorem and its implications for system design the differences between strong and eventual consistency",
+    "What are the fundamental principles behind modern machine learning including supervised unsupervised and reinforcement learning approaches explain how neural networks work from basic perceptrons",
+    "Describe the complete software development lifecycle from requirements gathering and system design through implementation testing deployment and maintenance cover agile methodologies like Scrum",
+    "Explain the principles of computer networking from the physical layer through the application layer including Ethernet WiFi TCP IP UDP DNS HTTP HTTPS TLS and modern protocols like QUIC",
+    "What are the key differences between symmetric and asymmetric encryption algorithms and how are they typically combined in modern secure communication protocols like TLS and SSH",
+    "Describe how garbage collection works in managed runtime environments like the Java Virtual Machine compared to manual memory management in languages like C and Rust with examples",
+    "How do modern CPU cache hierarchies with L1 L2 and L3 caches affect software performance and what programming patterns help maximize cache utilization and minimize cache misses",
+    "Explain the differences between process based and thread based concurrency models and how async await patterns provide an alternative approach to handling concurrent operations efficiently",
+    "What are the fundamental principles behind containerization technologies like Docker and how do they differ from traditional virtual machine based deployment strategies in modern cloud computing",
+    "Describe the evolution of web development from static HTML pages through server side rendering with PHP and Rails to modern single page applications with React Vue and Angular frameworks",
+]
+for i, f in enumerate(FILLERS):
+    print(f"=== Filler {i+2} ===")
+    r = send([{"role": "user", "content": f}], 40)
+    print(f"prompt={r['usage']['prompt_tokens']}, completion={r['usage']['completion_tokens']}")
+
+# R12: prompt + response + continue — should match 128 tokens (3 prefill + 1 decode block)
+print("\n=== R12: prompt + response (should match 128 tokens from G2) ===")
+r12 = send([
+    {"role": "user", "content": PROMPT},
+    {"role": "assistant", "content": response_text},
+    {"role": "user", "content": "Please continue your explanation"}
+], 3)
+print(f"prompt={r12['usage']['prompt_tokens']}, completion={r12['usage']['completion_tokens']}")
+print("Done")
+```
+
+### Verify decode block offload + onboard in logs
+
+```bash
+# R1 should offload 4 blocks (3 prefill + 1 decode)
+docker exec kvbm-v2-test bash -c "sed 's/\x1b\[[0-9;]*m//g' /tmp/trtllm_decode.log | grep 'req_id=\"2048\".*blocks_to_offload' | grep -v 'blocks_to_offload=0' | sort -u"
+```
+
+Expected (two offload events):
+```
+blocks_to_offload=3 iteration=1    ← prefill blocks
+blocks_to_offload=1 iteration=29   ← decode block
+```
+
+```bash
+# R12 should match 128 tokens (4 blocks) from G2
+docker exec kvbm-v2-test bash -c "sed 's/\x1b\[[0-9;]*m//g' /tmp/trtllm_decode.log | grep 'get_num_new_matched_tokens.*return' | tail -1"
+```
+
+Expected:
+```
+return=Ok((Some(128), true))   ← 128 tokens = 3 prefill + 1 decode block from G2
+```
+
+Without decode offload this would be `Some(96)` (3 prefill blocks only).
+
+## Step 9: Cleanup
 
 ```bash
 docker stop kvbm-v2-test && docker rm kvbm-v2-test
@@ -252,6 +366,15 @@ cd /home/oandreeva/Code/dynamo && docker compose -f deploy/docker-compose.yml do
 | 11th request gets G2 cache hit (sync) | `Some(32), false)` in logs |
 | Metadata has intra-pass load | `Intra pass load: N` with N > 0 |
 | No `Sampling failed` errors | `grep 'Sampling failed' /tmp/trtllm_intra.log` returns nothing |
+
+### Decode offload (optional)
+
+| Check | Expected |
+|-------|----------|
+| R1 offloads 4 blocks (3 prefill + 1 decode) | Two offload events: `blocks_to_offload=3` then `blocks_to_offload=1` |
+| Decode block offloaded at iteration ~29 | `evaluated_blocks_after=4` at iteration ~29 |
+| R12 matches 128 tokens from G2 | `Some(128), true)` (inter) or `Some(128), false)` (intra) |
+| No errors | 0 `Sampling failed`, 0 `Precondition timeout` |
 
 ## Troubleshooting
 
