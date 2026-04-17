@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Modalities that are currently supported
 class DiffusionModality(str, Enum):
     """Output modality of a diffusion pipeline."""
 
@@ -49,11 +50,18 @@ class DiffusionModality(str, Enum):
 # Explicit mapping from TRT-LLM pipeline class names to their output modality.
 # This replaces brittle substring matching and must be updated when new
 # pipelines are registered in TRT-LLM's PIPELINE_REGISTRY.
+# The list of supported pipelines can be found by searching @register_pipeline in TRT-LLM's visual_gen module
 _PIPELINE_MODALITY_MAP: dict[str, DiffusionModality] = {
+    # Text-to-Video pipelines
     "WanPipeline": DiffusionModality.VIDEO,
-    "WanImageToVideoPipeline": DiffusionModality.VIDEO,
-    "FluxPipeline": DiffusionModality.IMAGE,
     "LTX2Pipeline": DiffusionModality.VIDEO,
+    "LTX2TwoStagesPipeline": DiffusionModality.VIDEO,
+    # [gluo FIXME] Image-to-Video pipelines, should get it for free from
+    # text-to-video support once we connect image_reference.
+    "WanImageToVideoPipeline": DiffusionModality.VIDEO,
+    # Text-to-Image pipelines
+    "FluxPipeline": DiffusionModality.IMAGE,
+    "Flux2Pipeline": DiffusionModality.IMAGE,
 }
 
 # Default when the pipeline is not yet loaded or the class name is unknown.
@@ -213,6 +221,7 @@ class DiffusionEngine:
         height: int = 480,
         width: int = 832,
         num_frames: int = 81,
+        num_images_per_prompt: int = 1,
         num_inference_steps: int = 50,
         guidance_scale: float = 5.0,
         seed: Optional[int] = None,
@@ -231,6 +240,7 @@ class DiffusionEngine:
             height: Output height in pixels.
             width: Output width in pixels.
             num_frames: Number of frames to generate (for video).
+            num_images_per_prompt: Number of images to generate per prompt (for image).
             num_inference_steps: Number of denoising steps.
             guidance_scale: CFG guidance scale.
             seed: Random seed for reproducibility.
@@ -265,6 +275,7 @@ class DiffusionEngine:
             height=height,
             width=width,
             num_frames=num_frames,
+            num_images_per_prompt=num_images_per_prompt,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             seed=seed if seed is not None else random.randint(0, 2**32 - 1),
