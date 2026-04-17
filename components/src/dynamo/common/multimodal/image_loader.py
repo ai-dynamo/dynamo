@@ -85,22 +85,6 @@ class ImageLoader:
                 self._image_cache.popitem(last=False)
             self._image_cache[key] = image
 
-    def get_cached_sync(
-        self, key: str, image_mode: str = "RGB"
-    ) -> "Image.Image | None":
-        """Return a cached image by key, or None on miss.
-
-        Sync-safe: no HTTP fetch is performed. Promotes the entry to MRU and
-        converts mode if the caller requests a different one than was stored.
-        """
-        if key not in self._image_cache:
-            return None
-        self._image_cache.move_to_end(key)
-        cached = self._image_cache[key]
-        if cached.mode != image_mode:
-            return cached.convert(image_mode)
-        return cached
-
     async def _fetch_and_process(self, image_url: str) -> Image.Image:
         """Fetch image via HTTP(S), decode with PIL, return RGB Image.
 

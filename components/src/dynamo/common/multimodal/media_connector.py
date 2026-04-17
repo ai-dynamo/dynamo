@@ -59,24 +59,6 @@ try:
             super().__init__(**kwargs)
             self._image_loader = _get_shared_image_loader()
 
-        def fetch_image(
-            self,
-            image_url: str,
-            *,
-            image_mode: str = "RGB",
-        ) -> Image.Image:
-            """Synchronous image fetch with cache lookup.
-
-            ImageLoader is async-only for HTTP fetches, so we can't call it
-            here. But we can check its LRU cache (sync-safe) and return a
-            hit without re-downloading. On miss, delegate to the parent's
-            sync implementation.
-            """
-            cached = self._image_loader.get_cached_sync(image_url.lower(), image_mode)
-            if cached is not None:
-                return cached
-            return super().fetch_image(image_url, image_mode=image_mode)
-
         async def fetch_image_async(
             self,
             image_url: str,
