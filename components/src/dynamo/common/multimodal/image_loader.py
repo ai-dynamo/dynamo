@@ -127,6 +127,16 @@ class ImageLoader:
         finally:
             self._inflight.pop(key, None)
 
+    async def _read_and_convert_nixl_image(
+        self, metadata: Dict[str, Any]
+    ) -> Image.Image:
+        """Read decoded image via NIXL and convert numpy array to PIL Image."""
+        arr = await read_decoded_media_via_nixl(self._nixl_connector, metadata)
+        # TRT-LLM's input processor requires PIL Images (accesses .height/.width
+        # for token count calculation). fromarray() is near-zero-cost: it wraps
+        # the existing numpy buffer without copying pixel data.
+        return Image.fromarray(arr)
+
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:
         parsed_url = urlparse(image_url)
@@ -213,9 +223,7 @@ class ImageLoader:
                     metadata = item[DECODED_VARIANT_KEY]
                     if self._nixl_connector is None:
                         raise RuntimeError("NIXL connector is not initialized")
-                    image_futures.append(
-                        read_decoded_media_via_nixl(self._nixl_connector, metadata)
-                    )
+                    image_futures.append(self._read_and_convert_nixl_image(metadata))
                 else:
                     logger.error(
                         "Received Decoded multimodal data but enable_frontend_decoding=False. "

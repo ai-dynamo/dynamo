@@ -63,6 +63,18 @@ from dynamo.trtllm.request_handlers.handlers import (
 )
 from dynamo.trtllm.utils.trtllm_utils import deep_update
 
+# Optional imports for Rust frontend media decoding support
+MediaDecoder: type | None = None
+MediaFetcher: type | None = None
+try:
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    MEDIA_DECODER_AVAILABLE = True
+except ImportError:
+    MediaDecoder = None
+    MediaFetcher = None
+    MEDIA_DECODER_AVAILABLE = False
+
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
@@ -410,6 +422,7 @@ async def init_llm_worker(
             max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
             allowed_local_media_path=config.allowed_local_media_path,
+            enable_frontend_decoding=MEDIA_DECODER_AVAILABLE,
         )
 
     else:
@@ -586,6 +599,20 @@ async def init_llm_worker(
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
         )
 
+        # Rust media infrastructure for multimodal: the Rust preprocessor
+        # routes by URL extension — .safetensors passes through as a URL for
+        # Python to deserialize safely, .pt/.pth/.bin are rejected, and
+        # everything else (images, video, audio) goes through MediaDecoder.
+        media_decoder = None
+        media_fetcher = None
+        if config.modality == Modality.MULTIMODAL and MEDIA_DECODER_AVAILABLE:
+            assert MediaDecoder is not None and MediaFetcher is not None
+            media_decoder = MediaDecoder()
+            media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+            media_fetcher = MediaFetcher()
+            media_fetcher.timeout_ms(30000)
+            media_fetcher.allow_direct_port(True)
+
         # Register the model with runtime config
         # Encode workers do NOT register - they're internal workers only
         # Prefill and decode workers register - frontend detects their role via ModelType
@@ -600,6 +627,8 @@ async def init_llm_worker(
                 kv_cache_block_size=config.kv_block_size,
                 runtime_config=runtime_config,
                 custom_template_path=config.custom_jinja_template,
+                media_decoder=media_decoder,
+                media_fetcher=media_fetcher,
             )
 
         # Get health check payload (checks env var and falls back to TensorRT-LLM default)
