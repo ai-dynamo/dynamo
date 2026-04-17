@@ -36,7 +36,7 @@ import zmq
 from prometheus_client import CollectorRegistry
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
-from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.llm import FpmDirectPublisher, KvEventPublisher, WorkerMetricsPublisher
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -328,6 +328,10 @@ class Publisher:
 
         # Needed by the events and metrics publishers
         self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
+        # FpmDirectPublisher: publishes ForwardPassMetrics for the planner.
+        # Allocated with one per-DP-rank channel; the Rust side handles the
+        # 1 s idle heartbeat internally.
+        self.fpm_publisher: Optional[FpmDirectPublisher] = None
         self.kv_event_publishers: Optional[
             Dict[int, KvEventPublisher]
         ] = None  # One per attention_dp_rank
@@ -370,6 +374,23 @@ class Publisher:
         task.add_done_callback(
             lambda _: logging.debug("metrics publisher endpoint created")
         )
+
+        # Setup the ForwardPassMetrics publisher. Each attention-DP rank gets
+        # its own channel; the Rust side owns heartbeat (1s) per rank.
+        try:
+            self.fpm_publisher = FpmDirectPublisher(
+                endpoint=self.endpoint,
+                worker_id=str(self.worker_id),
+                dp_size=self.attention_dp_size,
+            )
+            logging.info(
+                f"FpmDirectPublisher initialized with dp_size={self.attention_dp_size}"
+            )
+        except Exception as e:
+            logging.warning(
+                f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
+            )
+            self.fpm_publisher = None
 
         # Setup the kv cache events publisher
         # Publisher selection based on consolidator configuration:
@@ -498,6 +519,36 @@ class Publisher:
                     self.metrics_collector.log_iteration_stats(stat)
                 except Exception as e:
                     logging.warning(f"Failed to log iteration stats: {e}")
+
+            # Publish ForwardPassMetrics. TRT-LLM tags each stat dict with
+            # attentionDpRank inside BaseWorker._stats_serializer; when
+            # attention DP is off, the tag defaults to 0. The 9 flat FPM
+            # fields live at the top level of the dict (camelCase from
+            # NLOHMANN serialization). Variance fields are not yet computed
+            # in TRT-LLM's PyExecutor and default to 0.0 in the Rust
+            # snapshot.
+            if self.fpm_publisher is not None:
+                try:
+                    dp_rank = int(stat.get("attentionDpRank", 0))
+                    # iterLatencyMS is ms; the Rust snapshot expects seconds.
+                    iter_latency_ms = float(stat.get("iterLatencyMS", 0.0))
+                    self.fpm_publisher.publish(
+                        dp_rank,
+                        int(stat.get("scheduledNumPrefillRequests", 0)),
+                        int(stat.get("scheduledSumPrefillTokens", 0)),
+                        int(stat.get("scheduledSumPrefillKvTokens", 0)),
+                        int(stat.get("scheduledNumDecodeRequests", 0)),
+                        int(stat.get("scheduledSumDecodeKvTokens", 0)),
+                        int(stat.get("queuedNumPrefillRequests", 0)),
+                        int(stat.get("queuedSumPrefillTokens", 0)),
+                        int(stat.get("queuedNumDecodeRequests", 0)),
+                        int(stat.get("queuedSumDecodeKvTokens", 0)),
+                        iter_latency_ms / 1000.0,
+                    )
+                except Exception as e:
+                    # Defensive: don't let FPM publish failures break the
+                    # ActiveLoad / Prometheus pipeline above.
+                    logging.warning(f"FPM publish failed: {e}")
 
         await self._polling_loop(
             lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
@@ -732,6 +783,14 @@ class Publisher:
         # Shutdown ZMQ publisher if it exists
         if self.zmq_kv_event_publisher:
             self.zmq_kv_event_publisher.shutdown()
+
+        # Shutdown FpmDirectPublisher (stops the per-rank serialization tasks
+        # and the event-plane publisher task on the Rust side).
+        if self.fpm_publisher is not None:
+            try:
+                self.fpm_publisher.shutdown()
+            except Exception as e:
+                logging.warning(f"FpmDirectPublisher shutdown failed: {e}")
 
     def update_max_window_size(self, event: dict) -> None:
         if "window_size" in event:
