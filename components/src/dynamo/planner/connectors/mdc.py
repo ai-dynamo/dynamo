@@ -129,7 +129,7 @@ def worker_info_from_mdc(
     if not model_name and model_name_fallback is not None:
         try:
             model_name = model_name_fallback()
-        except Exception as e:
+        except (RuntimeError, OSError, ValueError) as e:
             logger.debug(f"Model name fallback raised: {e}")
             model_name = None
 
