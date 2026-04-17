@@ -70,17 +70,17 @@ def test_handle_stat_maps_fields_single_rank():
     stat = _build_fake_stat()
     _invoke_handler(stat, fpm)
     fpm.publish.assert_called_once_with(
-        0,       # dp_rank
-        3,       # scheduled_num_prefill_requests
-        1024,    # scheduled_sum_prefill_tokens
-        256,     # scheduled_sum_prefill_kv_tokens
-        5,       # scheduled_num_decode_requests
-        9000,    # scheduled_sum_decode_kv_tokens
-        2,       # queued_num_prefill_requests
-        512,     # queued_sum_prefill_tokens
-        1,       # queued_num_decode_requests
-        800,     # queued_sum_decode_kv_tokens
-        0.025,   # wall_time_secs (25 ms -> 0.025 s)
+        0,  # dp_rank
+        3,  # scheduled_num_prefill_requests
+        1024,  # scheduled_sum_prefill_tokens
+        256,  # scheduled_sum_prefill_kv_tokens
+        5,  # scheduled_num_decode_requests
+        9000,  # scheduled_sum_decode_kv_tokens
+        2,  # queued_num_prefill_requests
+        512,  # queued_sum_prefill_tokens
+        1,  # queued_num_decode_requests
+        800,  # queued_sum_decode_kv_tokens
+        0.025,  # wall_time_secs (25 ms -> 0.025 s)
     )
 
 
@@ -95,7 +95,7 @@ def test_handle_stat_routes_per_attention_dp_rank():
     calls = fpm.publish.call_args_list
     assert len(calls) == 4
     for i, call in enumerate(calls):
-        assert call.args[0] == i              # dp_rank
+        assert call.args[0] == i  # dp_rank
         assert call.args[2] == 100 * (i + 1)  # scheduled_sum_prefill_tokens
 
 
@@ -117,7 +117,17 @@ def test_handle_stat_missing_fpm_fields_are_zero():
     }
     _invoke_handler(stat, fpm)
     fpm.publish.assert_called_once_with(
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.01,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.01,
     )
 
 
@@ -159,8 +169,10 @@ def test_publisher_initialize_constructs_fpm_direct_publisher():
     pub.publish_stats_thread = None
     pub.partial_block_hashes = set()
     import queue as _queue
+
     pub.error_queue = _queue.Queue()
     import threading as _threading
+
     pub._stop_event = _threading.Event()
     pub._last_engine_event_id = None
 
@@ -172,12 +184,12 @@ def test_publisher_initialize_constructs_fpm_direct_publisher():
     # Stub out the other side-effecty subsystems that initialize() touches.
     pub._init_publish_metrics_thread = MagicMock()
     pub._init_publish_kv_cache_events_thread = MagicMock()
-    pub._create_metrics_publisher_endpoint = MagicMock(
-        return_value=MagicMock())
+    pub._create_metrics_publisher_endpoint = MagicMock(return_value=MagicMock())
 
     try:
         # Run synchronously (no event loop) by monkey-patching asyncio.create_task.
         import asyncio as _asyncio
+
         real_create_task = _asyncio.create_task
         _asyncio.create_task = lambda coro: MagicMock(add_done_callback=lambda _: None)
         try:
