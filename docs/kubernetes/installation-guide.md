@@ -280,10 +280,10 @@ kubectl get pods -n ${NAMESPACE}
 1. **Deploy Model/Workflow**
    ```bash
    # Example: Deploy a vLLM workflow with Qwen3-0.6B using aggregated serving
-   kubectl apply -f examples/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
+   kubectl apply -f examples/backends/vllm/deploy/agg.yaml
 
    # Port forward and test
-   kubectl port-forward svc/agg-vllm-frontend 8000:8000 -n ${NAMESPACE}
+   kubectl port-forward svc/vllm-agg-frontend 8000:8000
    curl http://localhost:8000/v1/models
    ```
 
