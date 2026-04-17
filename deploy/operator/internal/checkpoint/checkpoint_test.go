@@ -236,6 +236,23 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		assert.Equal(t, []string{"run"}, podSpec.Containers[1].Args)
 	})
 
+	t.Run("ready checkpoint resolves main even when not at index zero", func(t *testing.T) {
+		podSpec := &corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "istio-proxy", Image: "istio:latest", Command: []string{"istio"}, Args: []string{"run"}},
+				{Name: "main", Image: "main:latest", Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm"}},
+			},
+		}
+		info := &CheckpointInfo{Enabled: true, Ready: true, Hash: testHash}
+		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
+
+		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info))
+		assert.Equal(t, []string{"istio"}, podSpec.Containers[0].Command, "sidecar at index 0 must remain untouched")
+		assert.Equal(t, []string{"run"}, podSpec.Containers[0].Args)
+		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[1].Command, "main at index 1 should receive the restore override")
+		assert.Nil(t, podSpec.Containers[1].Args)
+	})
+
 	t.Run("ready gms checkpoint injects restore sidecars and loader mount", func(t *testing.T) {
 		podSpec := testPodSpec()
 		podSpec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
@@ -280,7 +297,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 			errMsg  string
 		}{
 			{"hash empty and identity nil", testPodSpec(), &CheckpointInfo{Enabled: true}, fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "identity is nil"},
-			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no container named"},
+			{"no containers", &corev1.PodSpec{}, testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build(), "no containers found"},
 			{"snapshot daemonset missing", testPodSpec(), testInfo(), fake.NewClientBuilder().WithScheme(testScheme()).Build(), "no snapshot-agent daemonset found"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
