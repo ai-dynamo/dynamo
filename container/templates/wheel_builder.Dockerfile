@@ -293,6 +293,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
     ldconfig && \
     mkdir -p /usr/local/src/ffmpeg && \
+    # Remove build artifacts (config.log, etc.) before preserving the source.
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
 
