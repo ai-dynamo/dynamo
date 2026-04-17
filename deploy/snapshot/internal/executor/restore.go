@@ -21,6 +21,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
 // RestoreRequest holds the parameters for a restore operation.
@@ -122,7 +123,7 @@ func inspectRestore(ctx context.Context, ctrd *containerd.Client, log logr.Logge
 
 	containerName := req.ContainerName
 	if containerName == "" {
-		containerName = "main"
+		containerName = snapshotprotocol.MainContainerName
 	}
 
 	placeholderPID, _, err := snapshotruntime.ResolveContainerByPod(ctx, ctrd, req.PodName, req.PodNamespace, containerName)
