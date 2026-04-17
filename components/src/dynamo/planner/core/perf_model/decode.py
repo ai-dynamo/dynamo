@@ -18,7 +18,20 @@ logger = logging.getLogger(__name__)
 
 
 class DecodeRegressionModel(_BaseRegressionModel):
-    """Predict per-iteration wall time from decode batch composition."""
+    """Predict per-iteration wall time from decode batch composition.
+
+    Features: ``[num_decode_requests, sum_decode_kv_tokens]``.  The
+    ``sum_decode_kv_tokens`` feature dominates wall time via attention
+    compute, while ``num_decode_requests`` has a weaker secondary effect
+    from linear-layer work.  Under multicollinearity (both features scale
+    with batch size), the ``num_decode_requests`` coefficient can flip
+    sign under noisy fits; we accept the small negative value since
+    ``sum_decode_kv_tokens`` keeps the overall prediction monotone.
+    """
+
+    # num_decode_requests (index 0) is relaxable; sum_decode_kv_tokens (index 1)
+    # must remain non-negative.
+    _relaxable_feature_indices = frozenset({0})
 
     def __init__(
         self,
@@ -69,7 +82,12 @@ class DecodeRegressionModel(_BaseRegressionModel):
         return self._predict_2d(num_req, total_kv)
 
     def find_best_engine_decode_rps(
-        self, itl: float, context_length: float, osl: float
+        self,
+        itl: float,
+        context_length: float,
+        osl: float,
+        max_kv_tokens: Optional[int] = None,
+        max_num_seqs: Optional[int] = None,
     ) -> tuple[float, float]:
         """Find the maximum decode engine request rate within an ITL target.
 
@@ -81,6 +99,12 @@ class DecodeRegressionModel(_BaseRegressionModel):
         Request rate is derived via Little's law:
         ``engine_rps = best_batch_size / (osl * wall_time_per_iter)``.
 
+        The upper bound of the sweep is the smallest of:
+          - ``max_kv_tokens / context_length`` -- KV cache capacity
+          - ``max_num_seqs`` -- engine concurrency limit
+        Falls back to ``_max_observed_kv / context_length`` (or 256) if
+        neither capability is provided.
+
         Returns:
             (engine_rps, actual_itl_ms) -- 0 rps signals an error
             (model not fitted or invalid input); positive rps is
@@ -89,11 +113,14 @@ class DecodeRegressionModel(_BaseRegressionModel):
         if not self._ensure_fitted() or context_length <= 0 or osl <= 0 or itl <= 0:
             return (0.0, 0.0)
 
-        max_batch = (
-            max(1, int(self._max_observed_kv / context_length))
-            if self._max_observed_kv > 0
-            else 256
-        )
+        if max_kv_tokens and max_kv_tokens > 0:
+            kv_cap = max(1, int(max_kv_tokens / context_length))
+        elif self._max_observed_kv > 0:
+            kv_cap = max(1, int(self._max_observed_kv / context_length))
+        else:
+            kv_cap = 256
+        seq_cap = max_num_seqs if max_num_seqs and max_num_seqs > 0 else kv_cap
+        max_batch = max(1, min(kv_cap, seq_cap))
         lo, hi = 1, max_batch
         best_bs, best_wt = 1, self._predict_2d(1, context_length)
 

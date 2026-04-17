@@ -256,6 +256,15 @@ impl TraceCollector {
         }
     }
 
+    /// Return (ttft_ms, mean_itl_ms) for a completed request, if available.
+    pub(crate) fn request_latencies(&self, uuid: Uuid) -> Option<(f64, f64)> {
+        let stats = self.requests.get(&uuid)?;
+        let first_token_ms = stats.first_token_ms()?;
+        let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
+        let mean_itl_ms = stats.mean_tpot_ms().unwrap_or(0.0);
+        Some((ttft_ms, mean_itl_ms))
+    }
+
     pub(crate) fn finish(self) -> TraceSimulationReport {
         let requests = self.requests;
         let request_count = requests.len();

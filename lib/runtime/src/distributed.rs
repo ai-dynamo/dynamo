@@ -131,6 +131,7 @@ impl DistributedRuntime {
         let system_health = Arc::new(parking_lot::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
+            config.health_check_enabled,
             health_endpoint_path,
             live_endpoint_path,
         )));

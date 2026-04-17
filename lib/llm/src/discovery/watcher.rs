@@ -82,6 +82,9 @@ pub struct ModelWatcher {
     metrics: Arc<Metrics>,
     /// Guards against concurrent pipeline construction for the same (model, namespace).
     registering_worker_sets: DashSet<String>,
+    /// Wakes tasks blocked in `recover_concurrent_registration` when a
+    /// `RegistrationGuard` drops (i.e. a registration completes or panics).
+    registration_notify: Notify,
     /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
     /// can await a racing put before proceeding with cleanup.
     pending_puts: DashMap<String, JoinHandle<()>>,
@@ -108,6 +111,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_embeddings_models().is_empty()
     } else if model_type == ModelType::Images {
         manager.list_images_models().is_empty()
+    } else if model_type == ModelType::Audios {
+        manager.list_audios_models().is_empty()
     } else if model_type == ModelType::Videos {
         manager.list_videos_models().is_empty()
     } else if model_type == ModelType::TensorBased {
@@ -119,17 +124,20 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
     }
 }
 
-/// RAII guard that removes a key from a `DashSet` on drop.
+/// RAII guard that removes a key from a `DashSet` on drop and wakes any tasks
+/// waiting for the registration to finish via the shared [`Notify`].
 /// Ensures `registering_worker_sets` is cleaned up even if the registration
 /// task panics, preventing permanent poisoning of the registration key.
 struct RegistrationGuard<'a> {
     set: &'a DashSet<String>,
     key: String,
+    notify: &'a Notify,
 }
 
 impl Drop for RegistrationGuard<'_> {
     fn drop(&mut self) {
         self.set.remove(&self.key);
+        self.notify.notify_waiters();
     }
 }
 
@@ -157,6 +165,7 @@ impl ModelWatcher {
             prefill_load_estimator,
             metrics,
             registering_worker_sets: DashSet::new(),
+            registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
         }
     }
@@ -274,7 +283,6 @@ impl ModelWatcher {
                     // await the in-flight put before attempting cleanup.
                     let instance_key = mcid.to_path();
                     let watcher = Arc::clone(&self);
-                    let key_for_cleanup = instance_key.clone();
                     let handle = tokio::spawn(async move {
                         match watcher.handle_put(&mcid, &mut card).await {
                             Ok(()) => {
@@ -294,12 +302,20 @@ impl ModelWatcher {
                                 );
                             }
                         }
-                        // Remove ourselves from pending_puts once complete
-                        watcher.pending_puts.remove(&key_for_cleanup);
+                        // Note: we intentionally do NOT remove from pending_puts here.
+                        // Only the watch loop (on duplicate events) and handle_delete
+                        // manage pending_puts, avoiding a race where a completed task's
+                        // cleanup could remove a newer task's entry.
                     });
                     // If a duplicate Added event arrives while the first task is still
-                    // in-flight, abort the old task to prevent its cleanup from
-                    // removing the new task's handle from pending_puts.
+                    // in-flight, abort the old task to cancel redundant work.
+                    //
+                    // `instance_key` is `mcid.to_path()` = "{ns}/{component}/{endpoint}/{instance_id:x}",
+                    // so this is keyed per-worker-instance, NOT per-model. Two different workers
+                    // registering the same model produce two different keys and run independently.
+                    // The only case that hits this branch is the etcd watch replaying the same
+                    // worker's Added event (reconnect or re-sync) — where cancelling the earlier
+                    // redundant task is exactly what we want.
                     if let Some((_, old_handle)) = self.pending_puts.remove(&instance_key) {
                         old_handle.abort();
                     }
@@ -349,11 +365,23 @@ impl ModelWatcher {
         // to complete before we attempt cleanup. Without this, a Removed event
         // arriving while handle_put is still downloading HF config would fail
         // to find the model card, leaving a stale registration.
-        if let Some((_, handle)) = self.pending_puts.remove(&key) {
+        if let Some((_, mut handle)) = self.pending_puts.remove(&key) {
             tracing::debug!(key = %key, "awaiting in-flight handle_put before delete");
             // Ignore join errors (panic in the spawned task) — we still proceed
             // with cleanup since the put may have partially registered the model.
-            let _ = handle.await;
+            match tokio::time::timeout(Duration::from_secs(60), &mut handle).await {
+                Ok(_) => {}
+                Err(_) => {
+                    // Abort the timed-out task so it cannot register the model
+                    // after we proceed with deletion.
+                    handle.abort();
+                    let _ = handle.await;
+                    tracing::warn!(
+                        key = %key,
+                        "Timed out waiting for in-flight handle_put, aborted and proceeding with delete"
+                    );
+                }
+            }
         }
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
@@ -445,6 +473,18 @@ impl ModelWatcher {
         if let Some(model) = self.manager.get_model(&model_name)
             && model.has_worker_set(&ws_key)
         {
+            if !model.is_checksum_compatible(&ws_key, card.mdcsum()) {
+                tracing::error!(
+                    model_name = card.name(),
+                    namespace = namespace,
+                    new_checksum = card.mdcsum(),
+                    "Checksum for new worker does not match existing WorkerSet's checksum. \
+                     Drain all old workers in this namespace before deploying a new version."
+                );
+                return Err(anyhow::anyhow!(
+                    "Checksum mismatch for worker in namespace {namespace}"
+                ));
+            }
             self.resolve_card_local_files(&model_name, card);
             self.manager
                 .save_model_card(&mcid.to_path(), card.clone())?;
@@ -485,9 +525,11 @@ impl ModelWatcher {
 
         // RAII guard ensures the registration key is removed even if
         // do_worker_set_registration panics, preventing permanent poisoning.
+        // It also wakes any waiters in recover_concurrent_registration.
         let _guard = RegistrationGuard {
             set: &self.registering_worker_sets,
             key: registration_key,
+            notify: &self.registration_notify,
         };
 
         self.do_worker_set_registration(mcid, card).await
@@ -511,10 +553,45 @@ impl ModelWatcher {
         // Wait for the in-flight registration to complete so we can validate
         // the new worker's checksum. Without this, a concurrent worker with a
         // mismatched checksum could sneak past the early check in `watch`.
-        let mut attempts = 0;
-        while self.registering_worker_sets.contains(registration_key) && attempts < 300 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            attempts += 1;
+        //
+        // Uses a Notify + enable() loop instead of polling to wake up
+        // immediately when the RegistrationGuard drops, avoiding up to 100ms
+        // of unnecessary latency and wasted CPU cycles.
+        // An absolute deadline ensures spurious wakeups (from unrelated
+        // registrations sharing the same Notify) cannot extend the wait
+        // beyond 30 seconds.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let notified = self.registration_notify.notified();
+            tokio::pin!(notified);
+            // Register interest in the notification BEFORE checking the
+            // condition to avoid a race where the guard drops between
+            // our check and the .await.
+            notified.as_mut().enable();
+            if !self.registering_worker_sets.contains(registration_key) {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                break;
+            }
+        }
+
+        // If we timed out and the other task is still running, bail out rather
+        // than proceeding with concurrent pipeline construction.
+        if self.registering_worker_sets.contains(registration_key) {
+            // Save the model card so handle_delete can find it for cleanup.
+            self.manager
+                .save_model_card(&mcid.to_path(), card.clone())?;
+            tracing::warn!(
+                model_name = card.name(),
+                namespace = namespace,
+                "Timed out waiting for concurrent registration to complete, skipping"
+            );
+            return Ok(false);
         }
 
         // Validate checksum against the registered model
@@ -539,13 +616,27 @@ impl ModelWatcher {
             .get_model(model_name)
             .is_none_or(|m| !m.has_worker_set(ws_key))
         {
+            // Only the first waiter to re-insert the key should proceed with
+            // registration. Other waiters return false to avoid concurrent builds.
+            if !self
+                .registering_worker_sets
+                .insert(registration_key.to_string())
+            {
+                // Save the model card so handle_delete can find it for cleanup.
+                self.manager
+                    .save_model_card(&mcid.to_path(), card.clone())?;
+                tracing::debug!(
+                    model_name = card.name(),
+                    namespace = namespace,
+                    "Another waiter won the re-registration race, skipping"
+                );
+                return Ok(false);
+            }
             tracing::warn!(
                 model_name = card.name(),
                 namespace = namespace,
                 "Concurrent registration produced no WorkerSet, retrying"
             );
-            self.registering_worker_sets
-                .insert(registration_key.to_string());
             return Ok(true);
         }
 
@@ -1084,6 +1175,7 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Completions));
         assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
         assert!(is_model_type_list_empty(&mm, ModelType::Images));
+        assert!(is_model_type_list_empty(&mm, ModelType::Audios));
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Prefill));
@@ -1101,6 +1193,7 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Completions));
         assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
         assert!(is_model_type_list_empty(&mm, ModelType::Images));
+        assert!(is_model_type_list_empty(&mm, ModelType::Audios));
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
     }
