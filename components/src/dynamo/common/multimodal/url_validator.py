@@ -7,33 +7,26 @@
 #
 # http://www.apache.org/licenses/LICENSE-2.0
 
-"""Policy helpers for multimodal media URLs and SSRF-safe remote fetching.
+"""URL / path validation and SSRF-safe HTTP fetching for multimodal loaders.
 
-Secure defaults
----------------
-Out of the box (``UrlValidationPolicy()``), this module permits only
-``https://`` and ``data:`` inputs. Private / internal IPs and local
-filesystem access are both blocked.
+By default (``UrlValidationPolicy()``), only ``https://`` and ``data:`` URLs
+are allowed; private / internal IPs and local filesystem access are both
+blocked. Individual loaders can add stricter rules on top — ``ImageLoader``,
+for example, refuses every local input regardless of policy.
 
-Some callers may enforce stricter rules on top of this policy. For example,
-``ImageLoader`` currently rejects local file inputs before calling these
-helpers, even though this module can validate local paths for other loaders
-when explicitly configured.
-
-To loosen restrictions, pass a custom ``UrlValidationPolicy(...)`` directly,
-or let ``UrlValidationPolicy.from_env()`` read the ``DYN_MM_*`` variables
+To loosen the defaults, either build a ``UrlValidationPolicy(...)`` directly
+or call ``UrlValidationPolicy.from_env()`` to pick up the ``DYN_MM_*`` vars
 below.
 
 Environment variables
 ---------------------
 ``DYN_MM_ALLOW_INTERNAL`` (``1``/``0``, default ``0``)
-    Allow ``http://`` and private / internal IP targets.  Intended for
-    on-prem or local-dev environments where media is served from an
-    internal network.  Do **not** set in public-facing deployments.
+    Allow ``http://`` and private-network / internal IP targets. Intended
+    for on-prem or local-dev setups where media lives on an internal
+    network. **Never** set this on anything public-facing.
 ``DYN_MM_LOCAL_PATH`` (absolute directory path)
-    Allow callers that opt into local-path handling to validate ``file://``
-    and bare filesystem paths within this directory prefix. Default empty =
-    local filesystem access is rejected by this module.
+    Let opted-in callers load ``file://`` and bare filesystem paths inside
+    this prefix. Empty (the default) blocks local access entirely.
 """
 
 import ipaddress
@@ -47,7 +40,7 @@ import httpx
 
 
 class UrlValidationError(ValueError):
-    """Raised when a URL or filesystem path violates the configured policy."""
+    """Raised when a URL or filesystem path fails the configured policy."""
 
 
 # IP ranges that must never be reachable from a user-controlled URL.
@@ -98,7 +91,7 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 def is_blocked_ip(ip_text: str) -> bool:
-    """Return ``True`` if ``ip_text`` is a literal IP in a blocked range."""
+    """Return True if ``ip_text`` parses as an IP inside one of the blocked ranges."""
     try:
         ip = ipaddress.ip_address(ip_text)
     except ValueError:
@@ -108,7 +101,7 @@ def is_blocked_ip(ip_text: str) -> bool:
 
 @dataclass(frozen=True)
 class UrlValidationPolicy:
-    """Immutable policy controlling which media URLs and local paths are permitted."""
+    """Frozen policy describing which media URLs and local paths are allowed."""
 
     allow_http: bool = False
     allow_private_ips: bool = False
@@ -116,7 +109,7 @@ class UrlValidationPolicy:
 
     @classmethod
     def from_env(cls) -> "UrlValidationPolicy":
-        """Build a policy from ``DYN_MM_*`` environment variables."""
+        """Build a policy by reading the ``DYN_MM_*`` environment variables."""
         allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "").lower() in _TRUTHY
         return cls(
             allow_http=allow_internal,
@@ -126,16 +119,18 @@ class UrlValidationPolicy:
 
 
 def validate_url(url: str, policy: UrlValidationPolicy) -> str:
-    """Validate ``url`` against ``policy`` and return it unchanged.
+    """Check ``url`` against ``policy`` and return it unchanged if it passes.
 
-    ``https://`` and ``data:`` are always permitted. ``http://`` requires
-    ``allow_http=True``. All other schemes are rejected.
+    ``https://`` and ``data:`` always pass. ``http://`` needs
+    ``allow_http=True``. Anything else is rejected outright.
 
-    For hostname targets, performs a pre-flight DNS resolution against the
-    blocked IP ranges — best-effort against DNS rebinding. The Rust loader
-    handles per-request IP pinning for the harder attacker model (issue #14).
+    For URLs with a hostname, we resolve it here and check the resulting
+    IPs against the blocked ranges. This catches obvious DNS rebinding but
+    not an attacker who changes their answer between this lookup and
+    httpx's actual connect — real per-connection IP pinning lives in the
+    Rust loader (issue #14).
 
-    Raises :class:`UrlValidationError` on any policy violation.
+    Raises ``UrlValidationError`` on any policy violation.
     """
     if not url:
         raise UrlValidationError("URL is empty")
@@ -187,12 +182,14 @@ def validate_url(url: str, policy: UrlValidationPolicy) -> str:
 
 
 def validate_local_path(path: str, policy: UrlValidationPolicy) -> Path:
-    """Return a resolved :class:`pathlib.Path` within the allowed prefix.
+    """Resolve ``path`` and confirm it sits inside ``allowed_local_path``.
 
-    Raises :class:`UrlValidationError` if local filesystem loading is disabled
-    (the default) or the resolved path escapes ``allowed_local_path``.
-    The prefix check happens after :meth:`Path.resolve`, so symlinks that
-    point outside the prefix are rejected.
+    We call ``Path.resolve()`` first, so symlinks that point outside the
+    allowed prefix are caught. Local access is refused outright when
+    ``allowed_local_path`` is unset (the default).
+
+    Raises ``UrlValidationError`` if the feature is off or the resolved
+    path escapes the prefix.
     """
     if not policy.allowed_local_path:
         raise UrlValidationError(
@@ -224,14 +221,15 @@ def validate_local_path(path: str, policy: UrlValidationPolicy) -> Path:
 
 
 def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
-    """Validate any media URL and return a normalized form.
+    """Validate any media input and return a canonical URL string.
 
-    Bare filesystem paths and ``file://`` URIs are checked against the local-
-    path prefix and returned as a ``file://`` URI.  All other schemes pass
-    through :func:`validate_url` and are returned unchanged. Callers may still
-    choose to reject normalized local paths after validation.
+    Bare filesystem paths and ``file://`` URIs go through
+    ``validate_local_path`` and come back as a resolved ``file://`` URI.
+    Everything else goes through ``validate_url`` and is returned
+    unchanged. Callers can still reject the result afterwards —
+    ``ImageLoader``, for example, refuses local files regardless.
 
-    Raises :class:`UrlValidationError` on any policy violation.
+    Raises ``UrlValidationError`` on any policy violation.
     """
     if not url:
         raise UrlValidationError("URL is empty")
@@ -254,20 +252,20 @@ async def fetch_with_revalidation(
     client: httpx.AsyncClient,
     url: str,
     policy: UrlValidationPolicy,
-    *,
-    method: str = "GET",
-    headers: dict | None = None,
 ) -> httpx.Response:
-    """Fetch ``url``, validating every redirect hop against ``policy``.
+    """Safely fetch a URL while checking security policy at every redirect.
 
-    The ``client`` must have ``follow_redirects=False`` (the default in
-    :func:`dynamo.common.multimodal.http_client.get_http_client`). Redirects
-    are followed in a loop so each ``Location`` header is subject to the same
-    policy as the initial URL, closing the redirect-based SSRF bypass.
+    Only ``_MAX_REDIRECTS`` hops allowed. ``client`` must have
+    ``follow_redirects=False`` (the default from ``get_http_client``).
+    We follow redirects ourselves and validate each ``Location`` header
+    against the policy first.
 
-    DNS rebinding protection is best-effort (pre-flight check only); httpx
-    re-resolves at connect time. Full per-connection IP pinning is handled by
-    the Rust loader (see issue #14).
+    Only plain ``GET`` with no custom headers is supported. httpx normally
+    strips credentials on cross-origin redirects only when
+    ``follow_redirects=True``.
+
+    Raises ``UrlValidationError`` on any policy violation or when the
+    redirect chain exceeds ``_MAX_REDIRECTS``.
     """
     current_url = url
     hops_remaining = _MAX_REDIRECTS
@@ -277,7 +275,7 @@ async def fetch_with_revalidation(
         validate_url(current_url, policy)
         visited.append(current_url)
 
-        request = client.build_request(method, current_url, headers=headers)
+        request = client.build_request("GET", current_url)
         response = await client.send(request, follow_redirects=False)
 
         if not response.is_redirect:
