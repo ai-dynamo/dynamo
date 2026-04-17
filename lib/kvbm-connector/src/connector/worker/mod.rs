@@ -39,7 +39,7 @@ mod velo;
 use cudarc::driver::CudaStream;
 pub use velo::client::ConnectorWorkerClient;
 
-use init::PendingWorkerState;
+use init::{DeviceLayoutKind, PendingWorkerState};
 use state::{WorkerDetails, WorkerState};
 
 use anyhow::{Result, bail};
@@ -63,6 +63,12 @@ use kvbm_physical::TransferOptions;
 
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
+    ///
+    /// Supports two layouts, auto-detected from the input:
+    /// - **LayerSeparate** (vLLM): multiple tensors, one per layer.
+    /// - **FullyContiguous** (TRT-LLM): single stacked tensor
+    ///   `[num_blocks, num_layers, 2, flat_block]`. `num_layers` is inferred
+    ///   from `tensor.shape()[1]`.
     fn register_kv_caches(
         &self,
         tensors: Vec<Arc<dyn TensorDescriptor>>,
@@ -371,16 +377,9 @@ impl ConnectorWorker {
     }
 }
 
-impl ConnectorWorkerInterface for ConnectorWorker {
-    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.runtime.messenger().instance_id()))]
-    fn register_kv_caches(
-        &self,
-        tensors: Vec<Arc<dyn TensorDescriptor>>,
-        num_device_blocks: usize,
-        page_size: usize,
-        dtype_width_bytes: usize,
-    ) -> Result<()> {
-        // Prevent double registration
+impl ConnectorWorker {
+    /// Shared validation for register_kv_caches.
+    fn validate_not_registered(&self) -> Result<()> {
         if self.state.service.get().is_some() {
             bail!("KV caches already registered");
         }
@@ -390,18 +389,27 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         if self.state.details.get().is_some() {
             bail!("Worker details already set");
         }
+        Ok(())
+    }
 
-        // Determine layout from tensor shapes
+    /// Register per-layer tensors with LayerSeparate layout (vLLM path).
+    fn register_layer_separate(
+        &self,
+        tensors: Vec<Arc<dyn TensorDescriptor>>,
+        num_device_blocks: usize,
+        page_size: usize,
+        dtype_width_bytes: usize,
+    ) -> Result<()> {
         let (layout_config, block_dim) =
             determine_kv_layout(num_device_blocks, page_size, dtype_width_bytes, &tensors)?;
 
         tracing::debug!(
             ?layout_config,
             ?block_dim,
-            "Determined KV layout configuration"
+            "Determined LayerSeparate KV layout"
         );
 
-        // Create pending state (validates tensors internally)
+        let num_layers = tensors.len();
         let pending = PendingWorkerState::builder()
             .tensors(tensors)
             .num_device_blocks(num_device_blocks)
@@ -409,18 +417,84 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             .dtype_width_bytes(dtype_width_bytes)
             .layout_config(layout_config)
             .block_dim(block_dim)
+            .device_layout_kind(DeviceLayoutKind::LayerSeparate(block_dim))
             .build()?;
 
-        let details = WorkerDetails {
-            num_layers: pending.tensors.len(),
-        };
+        self.finalize_registration(pending, num_layers, num_device_blocks, page_size, dtype_width_bytes)
+    }
+
+    /// Register a single stacked tensor with FullyContiguous layout (TRT-LLM path).
+    ///
+    /// Tensor shape: `[num_blocks, num_layers, 2, flat_block]`.
+    /// `num_layers` is inferred from `tensor.shape()[1]`.
+    fn register_fully_contiguous(
+        &self,
+        tensor: Arc<dyn TensorDescriptor>,
+        num_device_blocks: usize,
+        page_size: usize,
+        dtype_width_bytes: usize,
+    ) -> Result<()> {
+        let shape = tensor.shape();
+        if shape.len() < 4 {
+            bail!(
+                "FullyContiguous tensor must have at least 4 dimensions, got {:?}",
+                shape
+            );
+        }
+
+        let num_layers = shape[1];
+        // For FullyContiguous: outer_dim covers the KV factor and inner page structure.
+        // The entire tensor is one contiguous region; `num_layers` comes from the shape.
+        let mut builder = kvbm_physical::layout::LayoutConfig::builder();
+        builder.num_blocks(num_device_blocks);
+        builder.num_layers(num_layers);
+        builder.page_size(page_size);
+        builder.dtype_width_bytes(dtype_width_bytes);
+        // outer_dim = shape[2] (the KV factor, typically 2)
+        builder.outer_dim(shape[2]);
+        // inner_dim = remaining dimensions flattened / page_size
+        let inner_dim: usize = shape[3..].iter().product::<usize>() / page_size;
+        builder.inner_dim(inner_dim);
+        let layout_config = builder.build()?;
+
+        tracing::debug!(
+            ?layout_config,
+            num_layers,
+            "Determined FullyContiguous KV layout"
+        );
+
+        let pending = PendingWorkerState::builder()
+            .tensors(vec![tensor])
+            .num_device_blocks(num_device_blocks)
+            .page_size(page_size)
+            .dtype_width_bytes(dtype_width_bytes)
+            .layout_config(layout_config)
+            .block_dim(kvbm_physical::layout::BlockDimension::BlockIsFirstDim)
+            .device_layout_kind(DeviceLayoutKind::FullyContiguous)
+            .build()?;
+
+        self.finalize_registration(pending, num_layers, num_device_blocks, page_size, dtype_width_bytes)
+    }
+
+    /// Store pending state and worker details.
+    fn finalize_registration(
+        &self,
+        pending: PendingWorkerState,
+        num_layers: usize,
+        num_device_blocks: usize,
+        page_size: usize,
+        dtype_width_bytes: usize,
+    ) -> Result<()> {
+        let details = WorkerDetails { num_layers };
 
         tracing::info!(
             cuda_device = pending.cuda_device_id,
             num_tensors = pending.tensors.len(),
+            num_layers,
             num_device_blocks,
             page_size,
             dtype_width_bytes,
+            layout = ?pending.device_layout_kind,
             "KV caches registered (deferred mode - waiting for leader RPC)"
         );
 
@@ -433,9 +507,38 @@ impl ConnectorWorkerInterface for ConnectorWorker {
 
         Ok(())
     }
+}
+
+impl ConnectorWorkerInterface for ConnectorWorker {
+    #[tracing::instrument(level = "debug", skip_all, fields(instance_id = ?self.runtime.messenger().instance_id()))]
+    fn register_kv_caches(
+        &self,
+        tensors: Vec<Arc<dyn TensorDescriptor>>,
+        num_device_blocks: usize,
+        page_size: usize,
+        dtype_width_bytes: usize,
+    ) -> Result<()> {
+        self.validate_not_registered()?;
+
+        if tensors.len() == 1 {
+            // Single tensor: TRT-LLM stacked layout [num_blocks, num_layers, 2, flat_block]
+            let tensor = tensors.into_iter().next().unwrap();
+            self.register_fully_contiguous(tensor, num_device_blocks, page_size, dtype_width_bytes)
+        } else {
+            // Multiple tensors: per-layer layout (vLLM)
+            self.register_layer_separate(tensors, num_device_blocks, page_size, dtype_width_bytes)
+        }
+    }
 
     fn bind_connector_metadata(&self, metadata: KvConnectorMetadata) -> Result<()> {
         tracing::debug!(iteration = metadata.iteration, "Binding connector metadata");
+
+        // Reset forward pass state from previous iteration.
+        // Without this, the flag stays true after an iteration with offload events,
+        // causing save_kv_layer to try firing a non-existent Velo event on subsequent
+        // iterations that have no offload.
+        self.forward_pass_completion_active
+            .store(false, Ordering::Relaxed);
 
         // Store Velo event handle if present (we use pre-allocated CUDA events now)
         if let Some(event_map) = &metadata.foward_pass_completion_events {

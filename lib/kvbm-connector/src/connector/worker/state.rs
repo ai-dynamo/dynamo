@@ -205,7 +205,11 @@ impl WorkerState {
         );
 
         // Complete initialization
-        let (worker, response) = pending.complete_initialization(&self.runtime, config)?;
+        let (worker, response) = pending.complete_initialization(&self.runtime, config)
+            .map_err(|e| {
+                tracing::error!("complete_initialization failed: {:#}", e);
+                e
+            })?;
 
         // Pre-allocate CUDA events for layer-wise operations (onboarding and offloading)
         let num_layers = self

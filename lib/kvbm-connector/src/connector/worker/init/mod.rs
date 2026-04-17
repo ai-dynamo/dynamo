@@ -7,6 +7,6 @@
 //!
 //! -
 
-mod pending;
+pub(crate) mod pending;
 
-pub(crate) use pending::PendingWorkerState;
+pub(crate) use pending::{DeviceLayoutKind, PendingWorkerState};
