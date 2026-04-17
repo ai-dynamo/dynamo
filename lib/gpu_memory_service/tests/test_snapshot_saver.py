@@ -49,7 +49,9 @@ def _load_saver(monkeypatch: pytest.MonkeyPatch, devices: list[int]):
     cuda_utils_module = types.ModuleType("gpu_memory_service.common.cuda_utils")
     cuda_utils_module.list_devices = lambda: list(devices)
 
-    storage_client_module = types.ModuleType("gpu_memory_service.snapshot.storage_client")
+    storage_client_module = types.ModuleType(
+        "gpu_memory_service.snapshot.storage_client"
+    )
 
     class FakeStorageClient:
         saves: list[tuple[str, str, int, int]] = []

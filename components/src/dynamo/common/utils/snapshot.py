@@ -10,8 +10,9 @@ import signal
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
-from dynamo.common.utils.namespace import get_worker_namespace
 from gpu_memory_service.common.utils import get_checkpoint_save_complete_path
+
+from dynamo.common.utils.namespace import get_worker_namespace
 
 logger = logging.getLogger(__name__)
 PODINFO_ROOT = "/etc/podinfo"
