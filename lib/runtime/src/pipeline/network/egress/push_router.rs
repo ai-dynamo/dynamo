@@ -8,6 +8,7 @@ use crate::{
         Client, DeviceType, Endpoint, Instance, RoutingOccupancyState,
         get_or_create_routing_occupancy_state,
     },
+    discovery::EndpointInstanceId,
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
     metrics::frontend_perf::STAGE_DURATION_SECONDS,
@@ -15,7 +16,7 @@ use crate::{
         AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
         error::{PipelineError, PipelineErrorExt},
     },
-    protocols::maybe_error::MaybeError,
+    protocols::{EndpointId, maybe_error::MaybeError},
     traits::DistributedRuntimeProvider,
 };
 use async_trait::async_trait;
@@ -257,22 +258,30 @@ fn device_aware_candidate_group(
     }
 }
 
+/// Per-endpoint guard: ensures at most one `list_and_watch` control-plane
+/// connection is opened per endpoint, regardless of how many `PushRouter`
+/// instances are created for it.  The entry is removed when the watcher
+/// task exits (cancel_token fired or discovery stream closed) so that a
+/// subsequent router creation can re-arm the watcher.
+static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
+    std::sync::OnceLock::new();
+
 /// Background task that watches the discovery plane for instance removals and
 /// cancels all pending response-stream registrations for removed instances.
 ///
-/// This is the core fix for the postmortem: when a worker is killed while requests
-/// are queued (ACK'd but not yet picked up), the oneshot senders are dropped,
-/// unblocking the waiting frontends with a migratable `Disconnected` error.
+/// This is the core fix for the postmortem: when a worker is killed while
+/// requests are queued (ACK'd but not yet picked up), the oneshot senders
+/// are dropped, unblocking waiting frontends with a migratable `Disconnected`
+/// error.
 ///
-/// Uses the raw `list_and_watch` discovery stream instead of diffing coalesced
-/// watch snapshots so that a rapid remove→re-add of the same pod (same stable
-/// hash-based instance_id in Kubernetes) is never silently swallowed.  Each
-/// `Removed` event unconditionally calls `cancel_instance_streams`; each
-/// `Added` event calls `clear_instance_tombstone`.
+/// Uses the raw `list_and_watch` discovery stream (not a coalesced snapshot
+/// diff) so that a rapid remove→re-add of the same Kubernetes pod — which
+/// keeps the same hash-stable instance_id — is never silently swallowed.
 ///
-/// Cancellation is keyed by `(endpoint_name, instance_id)` to avoid
-/// accidentally cancelling sibling endpoints on the same backend runtime that
-/// share a `connection_id` / `instance_id`.
+/// Cancellation is keyed by the full `EndpointInstanceId` (namespace +
+/// component + endpoint + instance_id) to prevent services from different
+/// namespaces/components that happen to share an endpoint name and
+/// pod-backed instance_id from cancelling each other's pending streams.
 fn spawn_instance_removal_watcher(
     endpoint: Endpoint,
     addressed: Arc<AddressedPushRouter>,
@@ -282,6 +291,17 @@ fn spawn_instance_removal_watcher(
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     };
     use tokio_stream::StreamExt as _;
+
+    // One watcher per endpoint: if one is already running, skip.
+    let guard = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+    let endpoint_id = endpoint.id();
+    if guard.insert(endpoint_id.clone(), ()).is_some() {
+        tracing::debug!(
+            ?endpoint_id,
+            "Instance removal watcher already running for this endpoint, skipping"
+        );
+        return;
+    }
 
     let endpoint_name = endpoint.name().to_string();
 
@@ -301,6 +321,7 @@ fn spawn_instance_removal_watcher(
                     endpoint = %endpoint_name,
                     "Failed to start instance removal watcher: {e}"
                 );
+                guard.remove(&endpoint_id);
                 return;
             }
         };
@@ -310,28 +331,29 @@ fn spawn_instance_removal_watcher(
                 event = stream.next() => {
                     match event {
                         Some(Ok(DiscoveryEvent::Removed(id))) => {
-                            // Only act on endpoint-type removals.
+                            // Only act on endpoint-type removals; pass the
+                            // full EndpointInstanceId so cancellation is
+                            // scoped to exactly one service identity.
                             if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                let n = addressed
-                                    .cancel_instance_streams(&eid.endpoint, eid.instance_id)
-                                    .await;
+                                let n = addressed.cancel_instance_streams(eid).await;
                                 if n > 0 {
                                     tracing::warn!(
+                                        namespace = %eid.namespace,
+                                        component = %eid.component,
                                         endpoint = %eid.endpoint,
                                         instance_id = eid.instance_id,
                                         cancelled = n,
-                                        "Cancelled pending response streams for removed instance \
-                                         (discovery-driven cleanup)"
+                                        "Cancelled pending response streams for removed \
+                                         instance (discovery-driven cleanup)"
                                     );
                                 }
                             }
                         }
                         Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
-                            // Clear tombstone so new requests for this (endpoint, instance)
-                            // pair are tracked normally after a restart.
-                            addressed
-                                .clear_instance_tombstone(&inst.endpoint, inst.instance_id)
-                                .await;
+                            // Clear tombstone so new requests for this identity are
+                            // tracked normally after a pod restart.
+                            let eid: EndpointInstanceId = inst.endpoint_instance_id();
+                            addressed.clear_instance_tombstone(&eid).await;
                         }
                         Some(Ok(_)) => {
                             // Ignore non-endpoint events (Model, EventChannel).
@@ -354,6 +376,8 @@ fn spawn_instance_removal_watcher(
             }
         }
 
+        // Release the guard so the next router creation can re-arm the watcher.
+        guard.remove(&endpoint_id);
         tracing::debug!(endpoint = %endpoint_name, "Instance removal watcher exiting");
     });
 }

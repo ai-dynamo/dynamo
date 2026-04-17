@@ -28,6 +28,7 @@ use super::{
     CallHomeHandshake, ControlMessage, PendingConnections, RegisteredStream, StreamOptions,
     StreamReceiver, StreamSender, TcpStreamConnectionInfo, TwoPartCodec,
 };
+use crate::discovery::EndpointInstanceId;
 use crate::engine::AsyncEngineContext;
 use crate::pipeline::{
     PipelineError,
@@ -122,19 +123,21 @@ struct RequestedRecvConnection {
 struct State {
     tx_subjects: HashMap<String, RequestedSendConnection>,
     rx_subjects: HashMap<String, RequestedRecvConnection>,
-    /// Maps subject UUID -> (endpoint_name, instance_id) for reverse lookup
-    /// during cleanup.  The endpoint name is included so that cancellation is
-    /// scoped to the specific endpoint that was removed, not to every endpoint
-    /// registered on the same runtime (which share a connection_id / instance_id).
-    subject_instance: HashMap<String, (String, u64)>,
-    /// Maps (endpoint_name, instance_id) -> set of subject UUIDs for batch
-    /// cancellation when the discovery plane reports the instance is gone.
-    instance_subjects: HashMap<(String, u64), HashSet<String>>,
-    /// Tombstone set keyed by (endpoint_name, instance_id). Closes the race
-    /// window where `cancel_instance_streams()` fires before `associate_instance()`
-    /// for the same request. Cleared by `clear_instance_tombstone()` when the
+    /// Maps subject UUID -> full EndpointInstanceId for reverse lookup during
+    /// cleanup.  The full 4-field key (namespace, component, endpoint,
+    /// instance_id) ensures two services from different namespaces/components
+    /// that share an endpoint name and pod-backed instance_id cannot cancel or
+    /// tombstone each other's streams, even though the TcpStreamServer is
+    /// shared per runtime.
+    subject_instance: HashMap<String, EndpointInstanceId>,
+    /// Maps EndpointInstanceId -> set of subject UUIDs for batch cancellation
+    /// when the discovery plane reports the instance is gone.
+    instance_subjects: HashMap<EndpointInstanceId, HashSet<String>>,
+    /// Tombstone set keyed by full EndpointInstanceId.  Closes the race window
+    /// where `cancel_instance_streams()` fires before `associate_instance()`
+    /// for the same request.  Cleared by `clear_instance_tombstone()` when the
     /// instance reappears in the discovery set.
-    removed_instances: HashSet<(String, u64)>,
+    removed_instances: HashSet<EndpointInstanceId>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -224,23 +227,20 @@ impl TcpStreamServer {
     /// When `false` is returned the caller should skip `send_request` and
     /// return a migratable `Disconnected` error directly.
     ///
-    /// The `endpoint` parameter scopes the key to a specific endpoint name
-    /// (e.g. `"generate"`), preventing cross-endpoint cancellation when
-    /// multiple endpoints on the same runtime share a `connection_id`.
-    pub async fn associate_instance(
-        &self,
-        subject: &str,
-        endpoint: &str,
-        instance_id: u64,
-    ) -> bool {
-        let key = (endpoint.to_string(), instance_id);
+    /// The full `EndpointInstanceId` (namespace + component + endpoint +
+    /// instance_id) scopes the key precisely, so two services from different
+    /// namespaces or components that share an endpoint name and pod-backed
+    /// instance_id cannot cancel each other's streams.
+    pub async fn associate_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
         let mut state = self.state.lock().await;
-        if state.removed_instances.contains(&key) {
+        if state.removed_instances.contains(id) {
             // Instance was already removed -- cancel immediately.
             tracing::warn!(
                 subject,
-                endpoint,
-                instance_id,
+                namespace = %id.namespace,
+                component = %id.component,
+                endpoint = %id.endpoint,
+                instance_id = id.instance_id,
                 "Cancelling subject immediately: instance already removed (tombstoned)"
             );
             state.rx_subjects.remove(subject);
@@ -248,10 +248,10 @@ impl TcpStreamServer {
         }
         state
             .subject_instance
-            .insert(subject.to_string(), key.clone());
+            .insert(subject.to_string(), id.clone());
         state
             .instance_subjects
-            .entry(key)
+            .entry(id.clone())
             .or_default()
             .insert(subject.to_string());
         true
@@ -287,16 +287,16 @@ impl TcpStreamServer {
     /// `associate_instance()` call for the same instance (race with the
     /// request path) will immediately cancel the late-arriving subject.
     ///
-    /// The `endpoint` parameter scopes the tombstone to a specific endpoint,
-    /// preventing sibling endpoints on the same runtime from being affected.
+    /// The full `EndpointInstanceId` tombstone key ensures sibling
+    /// endpoints from the same or different namespace/component pairs are
+    /// never accidentally affected.
     ///
     /// Returns the number of streams cancelled.
-    pub async fn cancel_instance_streams(&self, endpoint: &str, instance_id: u64) -> usize {
-        let key = (endpoint.to_string(), instance_id);
+    pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
         let mut state = self.state.lock().await;
-        // Tombstone the (endpoint, instance) pair so late associate_instance() calls cancel.
-        state.removed_instances.insert(key.clone());
-        let subjects = match state.instance_subjects.remove(&key) {
+        // Tombstone the identity so late associate_instance() calls cancel immediately.
+        state.removed_instances.insert(id.clone());
+        let subjects = match state.instance_subjects.remove(id) {
             Some(subjects) => subjects,
             None => return 0,
         };
@@ -308,16 +308,15 @@ impl TcpStreamServer {
         count
     }
 
-    /// Remove an (endpoint, instance) pair from the tombstone set.
+    /// Remove an `EndpointInstanceId` from the tombstone set.
     ///
     /// Called by the discovery watcher when an instance reappears in the
     /// discovery set (re-registered after restart). Without this, the
-    /// tombstone would cause every future subject for that endpoint+instance
-    /// to be immediately cancelled even though the instance is alive again.
-    pub async fn clear_instance_tombstone(&self, endpoint: &str, instance_id: u64) {
-        let key = (endpoint.to_string(), instance_id);
+    /// tombstone would cause every future subject for that identity to be
+    /// immediately cancelled even though the instance is alive again.
+    pub async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
         let mut state = self.state.lock().await;
-        state.removed_instances.remove(&key);
+        state.removed_instances.remove(id);
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -975,17 +974,31 @@ mod tests {
         (tcp_info.subject, provider)
     }
 
+    /// Convenience constructor so tests don't repeat the struct literal.
+    fn make_eid(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        instance_id: u64,
+    ) -> EndpointInstanceId {
+        EndpointInstanceId {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint.to_string(),
+            instance_id,
+        }
+    }
+
     #[tokio::test]
     async fn test_cancel_instance_streams_unblocks_receiver() {
         let server = test_server().await;
 
         let (subject, provider) = register_and_get_subject(&server).await;
 
-        // Associate the subject with endpoint "generate", instance 42
-        assert!(server.associate_instance(&subject, "generate", 42).await);
+        let id = make_eid("ns", "comp", "generate", 42);
+        assert!(server.associate_instance(&subject, &id).await);
 
-        // Cancel all streams for endpoint "generate", instance 42
-        let cancelled = server.cancel_instance_streams("generate", 42).await;
+        let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(cancelled, 1);
 
         // The oneshot receiver should now resolve with an error (sender dropped)
@@ -1001,20 +1014,23 @@ mod tests {
         let (subj2, prov2) = register_and_get_subject(&server).await;
         let (subj3, prov3) = register_and_get_subject(&server).await;
 
+        let id10 = make_eid("ns", "comp", "generate", 10);
+        let id20 = make_eid("ns", "comp", "generate", 20);
+
         // Associate first two with instance 10, third with instance 20
-        assert!(server.associate_instance(&subj1, "generate", 10).await);
-        assert!(server.associate_instance(&subj2, "generate", 10).await);
-        assert!(server.associate_instance(&subj3, "generate", 20).await);
+        assert!(server.associate_instance(&subj1, &id10).await);
+        assert!(server.associate_instance(&subj2, &id10).await);
+        assert!(server.associate_instance(&subj3, &id20).await);
 
         // Cancel instance 10 -- should cancel 2 subjects
-        let cancelled = server.cancel_instance_streams("generate", 10).await;
+        let cancelled = server.cancel_instance_streams(&id10).await;
         assert_eq!(cancelled, 2);
 
         assert!(prov1.await.is_err());
         assert!(prov2.await.is_err());
 
         // Instance 20 should be unaffected -- cancel it separately
-        let cancelled = server.cancel_instance_streams("generate", 20).await;
+        let cancelled = server.cancel_instance_streams(&id20).await;
         assert_eq!(cancelled, 1);
         assert!(prov3.await.is_err());
     }
@@ -1023,8 +1039,8 @@ mod tests {
     async fn test_cancel_instance_streams_nonexistent_instance() {
         let server = test_server().await;
 
-        // Cancelling a nonexistent instance should return 0 and not panic
-        let cancelled = server.cancel_instance_streams("generate", 999).await;
+        let id = make_eid("ns", "comp", "generate", 999);
+        let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(cancelled, 0);
     }
 
@@ -1033,13 +1049,14 @@ mod tests {
         let server = test_server().await;
 
         let (subject, _provider) = register_and_get_subject(&server).await;
-        assert!(server.associate_instance(&subject, "generate", 42).await);
+        let id = make_eid("ns", "comp", "generate", 42);
+        assert!(server.associate_instance(&subject, &id).await);
 
         // Cancel the individual subject
         server.cancel_recv_stream(&subject).await;
 
         // Instance should have no remaining subjects
-        let cancelled = server.cancel_instance_streams("generate", 42).await;
+        let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(
             cancelled, 0,
             "Instance tracking should have been cleaned up"
@@ -1129,13 +1146,15 @@ mod tests {
         // Simulates the race: cancel_instance_streams fires before associate_instance.
         let server = test_server().await;
 
-        // Cancel instance 42 for endpoint "generate" BEFORE any subject is registered (tombstone).
-        let cancelled = server.cancel_instance_streams("generate", 42).await;
+        let id = make_eid("ns", "comp", "generate", 42);
+
+        // Cancel BEFORE any subject is registered (tombstone).
+        let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(cancelled, 0);
 
         // Now register a subject and try to associate it with the tombstoned instance.
         let (subject, provider) = register_and_get_subject(&server).await;
-        let associated = server.associate_instance(&subject, "generate", 42).await;
+        let associated = server.associate_instance(&subject, &id).await;
 
         // associate_instance should return false when the instance is tombstoned.
         assert!(
@@ -1156,18 +1175,17 @@ mod tests {
     async fn test_clear_tombstone_allows_new_associations() {
         let server = test_server().await;
 
-        // Tombstone instance 42 for endpoint "generate".
-        server.cancel_instance_streams("generate", 42).await;
+        let id = make_eid("ns", "comp", "generate", 42);
 
-        // Clear the tombstone (simulates instance coming back in discovery).
-        server.clear_instance_tombstone("generate", 42).await;
+        server.cancel_instance_streams(&id).await;
+        server.clear_instance_tombstone(&id).await;
 
         // Now associate should work normally (subject NOT cancelled).
         let (subject, _provider) = register_and_get_subject(&server).await;
-        assert!(server.associate_instance(&subject, "generate", 42).await);
+        assert!(server.associate_instance(&subject, &id).await);
 
         // Subject should be tracked, not cancelled.
-        let cancelled = server.cancel_instance_streams("generate", 42).await;
+        let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(
             cancelled, 1,
             "After clearing tombstone, subjects should be tracked normally"
@@ -1176,31 +1194,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_does_not_affect_sibling_endpoint() {
-        // Bug 1 regression test: cancelling "generate" must not cancel "prefill"
-        // subjects that share the same instance_id (same backend runtime).
+        // Regression: cancelling "generate" must not cancel "prefill" subjects
+        // that share the same instance_id (same backend runtime).
         let server = test_server().await;
 
         let (gen_subj, gen_prov) = register_and_get_subject(&server).await;
         let (pre_subj, pre_prov) = register_and_get_subject(&server).await;
 
-        // Same instance_id 42, but different endpoints.
-        assert!(server.associate_instance(&gen_subj, "generate", 42).await);
-        assert!(server.associate_instance(&pre_subj, "prefill", 42).await);
+        let gen_id = make_eid("ns", "comp", "generate", 42);
+        let pre_id = make_eid("ns", "comp", "prefill", 42);
+
+        assert!(server.associate_instance(&gen_subj, &gen_id).await);
+        assert!(server.associate_instance(&pre_subj, &pre_id).await);
 
         // Cancel only the "generate" endpoint's subjects.
-        let cancelled = server.cancel_instance_streams("generate", 42).await;
+        let cancelled = server.cancel_instance_streams(&gen_id).await;
         assert_eq!(
             cancelled, 1,
             "Only the generate subject should be cancelled"
         );
-
-        // generate provider must be cancelled.
         assert!(gen_prov.await.is_err());
 
-        // prefill provider must still be pending (not cancelled).
-        // We verify by doing a try-style check -- the oneshot should not be resolved yet.
-        // We just check it can still be cancelled by its own endpoint.
-        let still_pending = server.cancel_instance_streams("prefill", 42).await;
+        // prefill must still be tracked.
+        let still_pending = server.cancel_instance_streams(&pre_id).await;
         assert_eq!(still_pending, 1, "prefill subject should still be tracked");
         assert!(pre_prov.await.is_err());
     }
@@ -1211,13 +1227,15 @@ mod tests {
         // for the same instance_id.
         let server = test_server().await;
 
-        // Tombstone "generate" for instance 42.
-        server.cancel_instance_streams("generate", 42).await;
+        let gen_id = make_eid("ns", "comp", "generate", 42);
+        let pre_id = make_eid("ns", "comp", "prefill", 42);
+
+        server.cancel_instance_streams(&gen_id).await;
 
         // A new subject for "generate" should be rejected.
         let (gen_subj, gen_prov) = register_and_get_subject(&server).await;
         assert!(
-            !server.associate_instance(&gen_subj, "generate", 42).await,
+            !server.associate_instance(&gen_subj, &gen_id).await,
             "generate should be tombstoned"
         );
         assert!(gen_prov.await.is_err());
@@ -1225,10 +1243,64 @@ mod tests {
         // A new subject for "prefill" with the same instance_id should be accepted.
         let (pre_subj, _pre_prov) = register_and_get_subject(&server).await;
         assert!(
-            server.associate_instance(&pre_subj, "prefill", 42).await,
+            server.associate_instance(&pre_subj, &pre_id).await,
             "prefill tombstone is independent; subject should be tracked"
         );
-        let count = server.cancel_instance_streams("prefill", 42).await;
+        let count = server.cancel_instance_streams(&pre_id).await;
         assert_eq!(count, 1, "prefill subject should be tracked normally");
+    }
+
+    #[tokio::test]
+    async fn test_cancel_does_not_affect_different_component() {
+        // Regression: two services with different (namespace, component) but the
+        // same endpoint name and the same pod-backed instance_id must not interfere,
+        // even though they share a single TcpStreamServer runtime.
+        let server = test_server().await;
+
+        let (subj_a, prov_a) = register_and_get_subject(&server).await;
+        let (subj_b, prov_b) = register_and_get_subject(&server).await;
+
+        // Same endpoint name + instance_id, different namespace/component.
+        let id_a = make_eid("ns-a", "comp-a", "generate", 42);
+        let id_b = make_eid("ns-b", "comp-b", "generate", 42);
+
+        assert!(server.associate_instance(&subj_a, &id_a).await);
+        assert!(server.associate_instance(&subj_b, &id_b).await);
+
+        // Cancel service A -- only subj_a should be affected.
+        let cancelled = server.cancel_instance_streams(&id_a).await;
+        assert_eq!(cancelled, 1, "Only service-A subject should be cancelled");
+        assert!(prov_a.await.is_err());
+
+        // Service B subject must still be pending.
+        let still_tracked = server.cancel_instance_streams(&id_b).await;
+        assert_eq!(still_tracked, 1, "Service-B subject should be unaffected");
+        assert!(prov_b.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_tombstone_scoped_to_full_identity() {
+        // A tombstone on (ns-a, comp-a, generate, 42) must not block
+        // associations on (ns-b, comp-b, generate, 42).
+        let server = test_server().await;
+
+        let id_a = make_eid("ns-a", "comp-a", "generate", 42);
+        let id_b = make_eid("ns-b", "comp-b", "generate", 42);
+
+        // Tombstone only service A.
+        server.cancel_instance_streams(&id_a).await;
+
+        // Service A is tombstoned — new association is rejected.
+        let (subj_a, prov_a) = register_and_get_subject(&server).await;
+        assert!(!server.associate_instance(&subj_a, &id_a).await);
+        assert!(prov_a.await.is_err());
+
+        // Service B with same endpoint name + instance_id must be accepted.
+        let (subj_b, _prov_b) = register_and_get_subject(&server).await;
+        assert!(
+            server.associate_instance(&subj_b, &id_b).await,
+            "Different namespace/component must not be tombstoned"
+        );
+        assert_eq!(server.cancel_instance_streams(&id_b).await, 1);
     }
 }
