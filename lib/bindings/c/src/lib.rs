@@ -224,14 +224,14 @@ fn kv_event_create_stored_block_from_parts(
     num_tokens: usize,
     kv_block_size: u32,
     lora_name: Option<&str>,
-    cache_salt: Option<&str>,
+    cache_namespace: Option<&str>,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(
         unsafe { std::slice::from_raw_parts(token_ids, num_tokens) },
         kv_block_size,
         BlockHashOptions {
             lora_name,
-            cache_salt,
+            cache_namespace,
             ..Default::default()
         },
     )[0];
@@ -456,7 +456,7 @@ impl RouterHandles {
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
         update_states: bool,
         lora_name: Option<String>,
-        cache_salt: Option<String>,
+        cache_namespace: Option<String>,
         priority_jump: f64,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
     ) -> Result<(u64, Option<u32>), QueryRouterResult> {
@@ -470,7 +470,7 @@ impl RouterHandles {
                 block_mm_infos,
                 update_states,
                 lora_name,
-                cache_salt,
+                cache_namespace,
                 priority_jump,
                 allowed_worker_ids,
             )
@@ -898,7 +898,7 @@ pub unsafe extern "C" fn add_request(
                     None,
                     worker,
                     None, // lora_name
-                    None, // cache_salt
+                    None, // cache_namespace
                     Some(&router_config_override),
                 )
                 .await;

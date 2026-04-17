@@ -144,7 +144,7 @@ pub fn compute_block_hash_for_seq_py(
             block_mm_infos: mm_infos.as_deref(),
             lora_name: lora_name.as_deref(),
             is_eagle,
-            cache_salt: None,
+            cache_namespace: None,
         },
     );
 

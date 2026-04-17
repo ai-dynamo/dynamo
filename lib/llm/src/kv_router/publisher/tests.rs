@@ -106,7 +106,7 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
-            cache_salt: None,
+            cache_namespace: None,
         };
 
         let out = convert_event(
@@ -133,7 +133,7 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
-            cache_salt: None,
+            cache_namespace: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -144,7 +144,7 @@ mod test_event_processing {
             lora_name: Some("my-lora".to_string()),
             block_mm_infos: None,
             is_eagle: None,
-            cache_salt: None,
+            cache_namespace: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -192,7 +192,7 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
-            cache_salt: None,
+            cache_namespace: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -203,7 +203,7 @@ mod test_event_processing {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
-            cache_salt: None,
+            cache_namespace: None,
         };
 
         let out1 = convert_event(
@@ -948,7 +948,7 @@ mod tests_startup_helpers {
             lora_name: None,
             block_mm_infos: None,
             is_eagle: None,
-            cache_salt: None,
+            cache_namespace: None,
         }];
 
         let batch = KvEventBatch {
@@ -1026,7 +1026,7 @@ mod tests_startup_helpers {
                 lora_name: None,
                 block_mm_infos: None,
                 is_eagle: None,
-                cache_salt: None,
+                cache_namespace: None,
             }],
             data_parallel_rank: Some(0),
         };

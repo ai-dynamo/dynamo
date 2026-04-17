@@ -34,7 +34,9 @@ pub struct BlockHashOptions<'a> {
     pub block_mm_infos: Option<&'a [Option<BlockExtraInfo>]>,
     pub lora_name: Option<&'a str>,
     pub is_eagle: Option<bool>,
-    pub cache_salt: Option<&'a str>,
+    /// Cache namespace for multi-tenant KV cache isolation. Surfaced to users
+    /// as `cache_salt` in the OpenAI `nvext` field.
+    pub cache_namespace: Option<&'a str>,
 }
 
 #[inline]
@@ -60,13 +62,13 @@ fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> Lo
     }
 }
 
-/// Seed used to hash `cache_salt` values, distinct from [`XXH3_SEED`] so that
-/// a LoRA adapter name and a cache salt with the same string value produce
+/// Seed used to hash `cache_namespace` values, distinct from [`XXH3_SEED`] so that
+/// a LoRA adapter name and a cache namespace with the same string value produce
 /// different seed contributions.
-pub const XXH3_SALT_SEED: u64 = 0xCAFE;
+pub const XXH3_NAMESPACE_SEED: u64 = 0xCAFE;
 
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata,
-/// LoRA adapter identity, and cache salt.
+/// LoRA adapter identity, and cache namespace.
 ///
 /// When multimodal extra info is provided, the mm_hashes are included in the hash computation
 /// to ensure that blocks with identical tokens but different multimodal objects produce
@@ -78,8 +80,8 @@ pub const XXH3_SALT_SEED: u64 = 0xCAFE;
 /// seed is more efficient than appending per-block bytes and matches the approach used by
 /// KVBM's `SaltHash`.
 ///
-/// When `cache_salt` is provided, it is mixed into the seed using a different hash seed
-/// ([`XXH3_SALT_SEED`]) to prevent collisions with `lora_name`.
+/// When `cache_namespace` is provided, it is mixed into the seed using a different hash seed
+/// ([`XXH3_NAMESPACE_SEED`]) to prevent collisions with `lora_name`.
 pub fn compute_block_hash_for_seq(
     tokens: &[u32],
     kv_block_size: u32,
@@ -93,8 +95,8 @@ pub fn compute_block_hash_for_seq(
     if let Some(name) = options.lora_name.filter(|n| !n.is_empty()) {
         seed = seed.wrapping_add(xxh3::xxh3_64(name.as_bytes()));
     }
-    if let Some(salt) = options.cache_salt.filter(|s| !s.is_empty()) {
-        seed = seed.wrapping_add(xxh3::xxh3_64_with_seed(salt.as_bytes(), XXH3_SALT_SEED));
+    if let Some(ns) = options.cache_namespace.filter(|s| !s.is_empty()) {
+        seed = seed.wrapping_add(xxh3::xxh3_64_with_seed(ns.as_bytes(), XXH3_NAMESPACE_SEED));
     }
     let is_eagle_flag = options.is_eagle.unwrap_or(false);
     let stride = kv_block_size as usize;
@@ -817,7 +819,7 @@ pub struct TokensWithHashes {
     block_size: u32,
     block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     lora_name: Option<String>,
-    cache_salt: Option<String>,
+    cache_namespace: Option<String>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     seq_hashes: Option<Vec<SequenceHash>>,
     is_eagle: Option<bool>,
@@ -831,7 +833,7 @@ impl TokensWithHashes {
             block_size,
             block_mm_infos: None,
             lora_name: None,
-            cache_salt: None,
+            cache_namespace: None,
             block_hashes: None,
             seq_hashes: None,
             is_eagle: None,
@@ -850,9 +852,10 @@ impl TokensWithHashes {
         self
     }
 
-    /// Sets the cache salt for multi-tenant KV cache isolation.
-    pub fn with_cache_salt(mut self, salt: String) -> Self {
-        self.cache_salt = Some(salt);
+    /// Sets the cache namespace for multi-tenant KV cache isolation
+    /// (user-facing name: `cache_salt`).
+    pub fn with_cache_namespace(mut self, ns: String) -> Self {
+        self.cache_namespace = Some(ns);
         self
     }
 
@@ -909,7 +912,7 @@ impl TokensWithHashes {
                     block_mm_infos: self.block_mm_infos.as_deref(),
                     lora_name: self.lora_name.as_deref(),
                     is_eagle: self.is_eagle,
-                    cache_salt: self.cache_salt.as_deref(),
+                    cache_namespace: self.cache_namespace.as_deref(),
                 },
             ));
         }
@@ -1068,33 +1071,33 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_salt_produces_different_hash() {
+    fn test_cache_namespace_produces_different_hash() {
         let tokens: Vec<u32> = (0..4).collect();
         let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
-        let salt_a = compute_block_hash_for_seq(
+        let ns_a = compute_block_hash_for_seq(
             &tokens,
             4,
             BlockHashOptions {
-                cache_salt: Some("tenant-A"),
+                cache_namespace: Some("tenant-A"),
                 ..Default::default()
             },
         );
-        let salt_b = compute_block_hash_for_seq(
+        let ns_b = compute_block_hash_for_seq(
             &tokens,
             4,
             BlockHashOptions {
-                cache_salt: Some("tenant-B"),
+                cache_namespace: Some("tenant-B"),
                 ..Default::default()
             },
         );
 
-        assert_ne!(base[0], salt_a[0], "salt should differ from base");
-        assert_ne!(base[0], salt_b[0], "salt should differ from base");
-        assert_ne!(salt_a[0], salt_b[0], "different salts should differ");
+        assert_ne!(base[0], ns_a[0], "namespace should differ from base");
+        assert_ne!(base[0], ns_b[0], "namespace should differ from base");
+        assert_ne!(ns_a[0], ns_b[0], "different namespaces should differ");
     }
 
     #[test]
-    fn test_cache_salt_does_not_collide_with_lora_name() {
+    fn test_cache_namespace_does_not_collide_with_lora_name() {
         let tokens: Vec<u32> = (0..4).collect();
         let same_string = "foo";
 
@@ -1106,41 +1109,41 @@ mod tests {
                 ..Default::default()
             },
         );
-        let salt_hash = compute_block_hash_for_seq(
+        let ns_hash = compute_block_hash_for_seq(
             &tokens,
             4,
             BlockHashOptions {
-                cache_salt: Some(same_string),
+                cache_namespace: Some(same_string),
                 ..Default::default()
             },
         );
 
         assert_ne!(
-            lora_hash[0], salt_hash[0],
-            "lora_name and cache_salt with same string must produce different hashes"
+            lora_hash[0], ns_hash[0],
+            "lora_name and cache_namespace with same string must produce different hashes"
         );
     }
 
     #[test]
-    fn test_cache_salt_empty_string_normalized_to_none() {
+    fn test_cache_namespace_empty_string_normalized_to_none() {
         let tokens: Vec<u32> = (0..4).collect();
         let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
         let empty = compute_block_hash_for_seq(
             &tokens,
             4,
             BlockHashOptions {
-                cache_salt: Some(""),
+                cache_namespace: Some(""),
                 ..Default::default()
             },
         );
         assert_eq!(
             base, empty,
-            "empty cache_salt should be treated as no salt"
+            "empty cache_namespace should be treated as no namespace"
         );
     }
 
     #[test]
-    fn test_cache_salt_combined_with_lora() {
+    fn test_cache_namespace_combined_with_lora() {
         let tokens: Vec<u32> = (0..4).collect();
         let lora_only = compute_block_hash_for_seq(
             &tokens,
@@ -1150,35 +1153,35 @@ mod tests {
                 ..Default::default()
             },
         );
-        let lora_and_salt = compute_block_hash_for_seq(
+        let lora_and_ns = compute_block_hash_for_seq(
             &tokens,
             4,
             BlockHashOptions {
                 lora_name: Some("adapter"),
-                cache_salt: Some("tenant-A"),
+                cache_namespace: Some("tenant-A"),
                 ..Default::default()
             },
         );
 
         assert_ne!(
-            lora_only[0], lora_and_salt[0],
-            "adding cache_salt to lora request should change hash"
+            lora_only[0], lora_and_ns[0],
+            "adding cache_namespace to lora request should change hash"
         );
     }
 
     #[test]
-    fn test_tokens_with_hashes_cache_salt() {
+    fn test_tokens_with_hashes_cache_namespace() {
         let tokens: Vec<u32> = (0..8).collect();
 
         let mut base = TokensWithHashes::new(tokens.clone(), 4);
         let base_hashes = base.get_or_compute_block_hashes().to_vec();
 
-        let mut with_salt =
-            TokensWithHashes::new(tokens, 4).with_cache_salt("my-tenant".to_string());
-        let salt_hashes = with_salt.get_or_compute_block_hashes().to_vec();
+        let mut with_ns =
+            TokensWithHashes::new(tokens, 4).with_cache_namespace("my-tenant".to_string());
+        let ns_hashes = with_ns.get_or_compute_block_hashes().to_vec();
 
-        assert_eq!(base_hashes.len(), salt_hashes.len());
-        for (b, s) in base_hashes.iter().zip(salt_hashes.iter()) {
+        assert_eq!(base_hashes.len(), ns_hashes.len());
+        for (b, s) in base_hashes.iter().zip(ns_hashes.iter()) {
             assert_ne!(b, s);
         }
     }

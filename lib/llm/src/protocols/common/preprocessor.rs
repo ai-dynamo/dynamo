@@ -72,10 +72,15 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
 
-    /// Cache salt for multi-tenant KV cache isolation.
-    /// Mixed into block hash seed to prevent cross-tenant cache reuse.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_salt: Option<String>,
+    /// Cache namespace for multi-tenant KV cache isolation, mixed into the
+    /// block hash seed to prevent cross-tenant cache reuse. The wire name
+    /// stays `cache_salt` to match the `nvext.cache_salt` field users set.
+    #[serde(
+        default,
+        rename = "cache_salt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_namespace: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
