@@ -160,12 +160,25 @@ runs:
         SECRET_ARGS=""
         if [ "${{ inputs.use_sccache }}" == "true" ]; then
           set +x  # disable tracing while handling credentials
-          CREDS_JSON=$(aws configure export-credentials --format json 2>/dev/null || true)
+          CREDS_JSON=""
+          if [ -n "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" ] && [ -f "${AWS_WEB_IDENTITY_TOKEN_FILE}" ]; then
+            echo "Deriving temporary credentials from IRSA (role: ${AWS_ROLE_ARN})..."
+            CREDS_JSON=$(aws sts assume-role-with-web-identity \
+              --role-arn "${AWS_ROLE_ARN}" \
+              --role-session-name "sccache-build-${GITHUB_RUN_ID}" \
+              --web-identity-token "$(cat ${AWS_WEB_IDENTITY_TOKEN_FILE})" \
+              --duration-seconds 3600 \
+              --output json \
+              --query 'Credentials' 2>&1) || {
+              echo "WARNING: Failed to assume role via IRSA: ${CREDS_JSON}"
+              CREDS_JSON=""
+            }
+          fi
           if [ -n "$CREDS_JSON" ]; then
             SECRET_DIR=$(mktemp -d)
-            echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c['AccessKeyId'])" > "$SECRET_DIR/aws-key-id"
-            echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c['SecretAccessKey'])" > "$SECRET_DIR/aws-secret-key"
-            echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('SessionToken',''))" > "$SECRET_DIR/aws-session-token"
+            echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c['AccessKeyId'],end='')" > "$SECRET_DIR/aws-key-id"
+            echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c['SecretAccessKey'],end='')" > "$SECRET_DIR/aws-secret-key"
+            echo "$CREDS_JSON" | python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('SessionToken',''),end='')" > "$SECRET_DIR/aws-session-token"
             SECRET_ARGS+=" --secret id=aws-key-id,src=$SECRET_DIR/aws-key-id"
             SECRET_ARGS+=" --secret id=aws-secret-key,src=$SECRET_DIR/aws-secret-key"
             SECRET_ARGS+=" --secret id=aws-session-token,src=$SECRET_DIR/aws-session-token"
