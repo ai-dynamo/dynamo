@@ -6,10 +6,12 @@ package protocol
 import corev1 "k8s.io/api/core/v1"
 
 // MainContainerName is the conventional name of the workload container that
-// checkpoint/restore operates on. The operator always sets this name on the
-// pods it emits. Keeping the constant in the snapshot protocol package makes
-// it the shared contract between the operator (which builds pods) and the
-// snapshot agent / snapshotctl (which checkpoint them).
+// checkpoint/restore operates on. The operator originated this convention
+// for LWS multinode enforcement and the authoritative copy lives in
+// deploy/operator/internal/consts (commonconsts.MainContainerName). This
+// package keeps a local copy because deploy/snapshot is a separate Go
+// module and cannot import deploy/operator/internal. Keep the two copies
+// in sync.
 const MainContainerName = "main"
 
 // ResolveMainContainer returns a pointer to the workload container in podSpec.

@@ -3,7 +3,6 @@ package consts
 import (
 	"time"
 
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -123,10 +122,13 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 
-	// MainContainerName is the conventional name of the workload container.
-	// Source of truth lives in snapshotprotocol so that both the operator and
-	// the snapshot tooling agree on the contract.
-	MainContainerName            = snapshotprotocol.MainContainerName
+	// MainContainerName is the conventional name of the workload container in
+	// operator-rendered pods. The operator originated this convention (LWS
+	// multinode enforcement); other subsystems (snapshot/protocol) that need
+	// to match on the name keep their own local copy because deploy/snapshot
+	// is a separate Go module and cannot import deploy/operator/internal.
+	// Keep the two copies in sync.
+	MainContainerName            = "main"
 	FrontendSidecarContainerName = "sidecar-frontend"
 
 	RestartAnnotation = "nvidia.com/restartAt"

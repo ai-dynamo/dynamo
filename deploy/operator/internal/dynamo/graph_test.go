@@ -31,6 +31,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/google/go-cmp/cmp"
@@ -5152,6 +5154,107 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 					podSpec.ServiceAccountName, tt.expectedServiceAcc)
 			}
 		})
+	}
+}
+
+// TestGenerateBasePodSpec_GMSWiredToMainBeforeFailover covers the invariant
+// that failover requires: GMS wiring must land on the main container before
+// buildFailoverPod clones it into engine-0 / engine-1, so both engines
+// inherit the shared socket volume, mount, env, and DRA claim.
+func TestGenerateBasePodSpec_GMSWiredToMainBeforeFailover(t *testing.T) {
+	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: commonconsts.ComponentTypeWorker,
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Image:   "test-image:latest",
+				Command: []string{"python3", "-m", "dynamo.vllm"},
+				Args:    []string{"--model", "Qwen/Qwen3-0.6B"},
+			},
+		},
+		Resources: &v1alpha1.Resources{
+			Limits: &v1alpha1.ResourceItem{GPU: "1"},
+		},
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
+		Failover:         &v1alpha1.FailoverSpec{Enabled: true},
+	}
+	controllerConfig := &configv1alpha1.OperatorConfiguration{}
+
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkVLLM,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		controllerConfig,
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"test-service",
+		nil,
+	)
+	require.NoError(t, err)
+
+	// After failover transformation the workload lives in engine-0 / engine-1,
+	// not in a single "main" container. The GMS server sidecar remains in
+	// InitContainers and is shared across both engines.
+	var engines []corev1.Container
+	for _, c := range podSpec.Containers {
+		if strings.HasPrefix(c.Name, "engine-") {
+			engines = append(engines, c)
+		}
+	}
+	require.Len(t, engines, 2, "failover should produce engine-0 and engine-1")
+
+	var gmsServer *corev1.Container
+	for i := range podSpec.InitContainers {
+		if podSpec.InitContainers[i].Name == gms.ServerContainerName {
+			gmsServer = &podSpec.InitContainers[i]
+			break
+		}
+	}
+	require.NotNil(t, gmsServer, "gms-server must be registered as an init sidecar")
+
+	// Shared socket volume is a pod-level prerequisite for engine <-> gms-server
+	// communication. It must exist exactly once regardless of engine count.
+	var sharedVolume *corev1.Volume
+	for i := range podSpec.Volumes {
+		if podSpec.Volumes[i].Name == gms.SharedVolumeName {
+			sharedVolume = &podSpec.Volumes[i]
+			break
+		}
+	}
+	require.NotNil(t, sharedVolume, "gms shared socket volume must be present")
+
+	// Each engine must carry the GMS mount, env, and DRA claim it inherited
+	// from the main container via DeepCopy in buildEngineContainer.
+	for i := range engines {
+		engine := engines[i]
+		name := engine.Name
+
+		var mount *corev1.VolumeMount
+		for j := range engine.VolumeMounts {
+			if engine.VolumeMounts[j].Name == gms.SharedVolumeName {
+				mount = &engine.VolumeMounts[j]
+				break
+			}
+		}
+		require.NotNil(t, mount, "%s must mount the GMS shared volume", name)
+		assert.Equal(t, gms.SharedMountPath, mount.MountPath, "%s GMS mount path", name)
+
+		var socketDirEnv string
+		for _, e := range engine.Env {
+			if e.Name == gms.EnvSocketDir {
+				socketDirEnv = e.Value
+				break
+			}
+		}
+		assert.Equal(t, gms.SharedMountPath, socketDirEnv, "%s %s env", name, gms.EnvSocketDir)
+
+		require.Len(t, engine.Resources.Claims, 1, "%s must inherit the DRA claim", name)
+		assert.Equal(t, dra.ClaimName, engine.Resources.Claims[0].Name, "%s DRA claim", name)
+
+		_, hasLimit := engine.Resources.Limits[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)]
+		assert.False(t, hasLimit, "%s nvidia.com/gpu limit must be removed in favor of DRA claim", name)
 	}
 }
 
