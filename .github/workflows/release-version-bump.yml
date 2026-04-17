@@ -243,7 +243,6 @@ jobs:
           NIXL: ${{ steps.metadata.outputs.nixl_version }}
           RELEASE_DATE: ${{ steps.metadata.outputs.release_date }}
           FLAGS: ${{ steps.flags.outputs.skip_flags }}
-          GITHUB_STEP_SUMMARY: ${{ env.GITHUB_STEP_SUMMARY }}
         run: |
           set -euo pipefail
           python3 .github/scripts/bump_version.py \

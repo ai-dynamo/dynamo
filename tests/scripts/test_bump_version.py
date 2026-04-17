@@ -8,6 +8,7 @@ entry points (--check, --dry-run, full bump, post-release minimal bump).
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 from pathlib import Path
@@ -73,15 +74,27 @@ class TestVersion:
 
     @pytest.mark.parametrize("bad", ["1.2", "1.2.3.4", "v1.2.3", "1.2.3-rc1", "abc"])
     def test_parse_rejects_invalid(self, bv, bad):
-        with pytest.raises(Exception):
+        with pytest.raises(argparse.ArgumentTypeError):
             bv.Version.parse(bad)
 
     def test_ordering(self, bv):
+        # PEP 440 ordering: base < post-release; minor bumps order numerically.
         assert bv.Version.parse("1.0.0") < bv.Version.parse("1.0.1")
-        # post-releases sort after their base because None < int is False in tuple cmp;
-        # the @dataclass(order=True) comparison puts None before ints, which is the
-        # PEP 440 semantic inverse — assert only the stable cases we rely on.
         assert bv.Version.parse("0.9.0") < bv.Version.parse("0.10.0")
+        assert bv.Version.parse("0.9.0") < bv.Version.parse("0.9.0.post1")
+        assert bv.Version.parse("0.9.0.post1") < bv.Version.parse("0.9.0.post2")
+        assert bv.Version.parse("0.9.0.post2") > bv.Version.parse("0.9.0")
+        # Sorting a mixed list must not raise (regression guard for order=True bug).
+        versions = [
+            bv.Version.parse("0.9.0.post1"),
+            bv.Version.parse("0.9.0"),
+            bv.Version.parse("1.0.0"),
+        ]
+        assert sorted(versions) == [
+            bv.Version.parse("0.9.0"),
+            bv.Version.parse("0.9.0.post1"),
+            bv.Version.parse("1.0.0"),
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -358,13 +371,19 @@ def test_skip_flags_combine(bv, tmp_path):
         ]
     )
     assert rc == 0
-    # core untouched
-    assert '"0.9.0"' in (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    # core untouched: both the [project].version line AND the ai-dynamo self-pin
+    # must remain on the old version. Asserting only the version-line would miss
+    # a regression where the broad CONTAINERS pip pin rule rewrites the pin.
+    py = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.9.0"' in py
+    assert "ai-dynamo-runtime==0.9.0" in py
+    assert "ai-dynamo[vllm]==0.9.0" in py
+    assert "1.0.0" not in py
     # helm untouched
     assert "version: 0.9.0" in (
         tmp_path / "deploy/helm/charts/platform/Chart.yaml"
     ).read_text(encoding="utf-8")
-    # containers were bumped
+    # containers (outside pyproject.toml) were bumped
     assert "vllm-runtime:1.0.0" in (tmp_path / "docs/example.md").read_text(
         encoding="utf-8"
     )

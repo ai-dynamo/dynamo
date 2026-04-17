@@ -65,7 +65,7 @@ IGNORE_MARKER = "bump-version: ignore"
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, order=True)
+@dataclass(frozen=True)
 class Version:
     """A Dynamo release version.
 
@@ -108,6 +108,38 @@ class Version:
     @property
     def is_post(self) -> bool:
         return self.post is not None
+
+    def _sort_key(self) -> tuple[int, int, int, int]:
+        # PEP 440: a base release sorts before any of its post-releases, so
+        # treat ``post=None`` as ``-1`` (less than any real post number). The
+        # default dataclass ordering would compare ``None`` to ``int`` and
+        # raise ``TypeError`` at runtime.
+        return (
+            self.major,
+            self.minor,
+            self.patch,
+            self.post if self.post is not None else -1,
+        )
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+        return self._sort_key() < other._sort_key()
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+        return self._sort_key() <= other._sort_key()
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+        return self._sort_key() > other._sort_key()
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, Version):
+            return NotImplemented
+        return self._sort_key() >= other._sort_key()
 
     def __str__(self) -> str:
         return self.python()
@@ -249,12 +281,15 @@ RULES: tuple[Rule, ...] = (
         ),
         r"\g<1>:{python}",
     ),
-    # Wheel filenames and pip install specs in docs/Dockerfiles/shell
+    # Wheel filenames and pip install specs in docs/Dockerfiles/shell.
+    # pyproject.toml pins are owned by the CORE rule (pyproject_ai_dynamo_pin);
+    # excluding pyproject.toml here keeps it consistent when --skip-core is set.
     Rule(
         "pip_wheel_or_pin",
         Scope.CONTAINERS,
         re.compile(rf"(ai[_-]dynamo(?:[_-]runtime)?(?:\[[^\]]*\])?)(==|-){_VER}"),
         r"\g<1>\g<2>{python}",
+        lambda p: p.name != "pyproject.toml",
     ),
     # Operator sample YAML dynamoVersion: "X.Y.Z"
     Rule(
