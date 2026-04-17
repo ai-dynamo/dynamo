@@ -278,6 +278,22 @@ impl Indexer {
     pub(crate) async fn get_workers(&self) -> Vec<WorkerId> {
         self.inner.get_workers().await
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_none() -> Self {
+        Self {
+            inner: InnerIndexer::None,
+            approx: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_from_kv_indexer(kv_indexer: KvIndexer) -> Self {
+        Self {
+            inner: InnerIndexer::KvIndexer(kv_indexer),
+            approx: None,
+        }
+    }
 }
 
 impl InnerIndexer {

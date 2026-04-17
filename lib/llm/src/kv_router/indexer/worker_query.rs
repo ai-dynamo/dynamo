@@ -923,7 +923,10 @@ mod tests {
         let token = CancellationToken::new();
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
         let kv_indexer = KvIndexer::new(token, 4, metrics);
-        (kv_indexer.clone(), Indexer::KvIndexer(kv_indexer))
+        (
+            kv_indexer.clone(),
+            Indexer::test_from_kv_indexer(kv_indexer),
+        )
     }
 
     async fn make_test_client(
