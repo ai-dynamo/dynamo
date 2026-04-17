@@ -333,7 +333,8 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help=(
                 "Threshold percentage (0.0-1.0) for determining when a worker is considered busy "
-                "based on KV cache block utilization. If not set, blocks-based busy detection is disabled."
+                "based on KV cache block utilization. If not set, blocks-based busy detection is disabled. "
+                "Default: unset (check disabled)."
             ),
             arg_type=float,
         )
@@ -345,7 +346,8 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Literal token count threshold for determining when a worker is considered busy "
                 "based on prefill token utilization. When active prefill tokens exceed this "
-                "threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled."
+                "threshold, the worker is marked as busy. If not set, this check is disabled. "
+                "Uses OR logic with --active-prefill-tokens-threshold-frac. Default: unset (check disabled)."
             ),
             arg_type=int,
         )
@@ -356,8 +358,8 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help=(
                 "Fraction of max_num_batched_tokens for busy detection. Worker is busy when "
-                "active_prefill_tokens > frac * max_num_batched_tokens. Default 1.5 (disabled). "
-                "Uses OR logic with --active-prefill-tokens-threshold."
+                "active_prefill_tokens > frac * max_num_batched_tokens. If not set, this check is "
+                "disabled. Uses OR logic with --active-prefill-tokens-threshold. Default: unset (check disabled)."
             ),
             arg_type=float,
         )
