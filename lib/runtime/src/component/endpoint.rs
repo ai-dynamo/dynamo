@@ -144,9 +144,6 @@ impl EndpointConfigBuilder {
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
-            // When canary health checks are enabled, the canary calls the engine
-            // via LocalEndpointRegistry. Fail fast if the engine wasn't registered
-            // (caller forgot .register_local_engine() before .start()).
             if system_health.lock().health_check_enabled()
                 && endpoint
                     .drt()

@@ -192,11 +192,6 @@ impl HealthCheckManager {
     }
 
     /// Send a health check request via the local endpoint registry (in-process).
-    ///
-    /// This calls the engine directly without going through discovery, routing,
-    /// or network transport. The local registry is populated during
-    /// `EndpointConfigBuilder::start()` via `.register_local_engine()`, using
-    /// the same `endpoint.name` key as health check target registration.
     async fn send_health_check_request(
         &self,
         endpoint_subject: &str,
@@ -207,9 +202,6 @@ impl HealthCheckManager {
             endpoint_subject
         );
 
-        // Look up the engine in the local endpoint registry (in-process call only).
-        // If not found, the endpoint hasn't finished registering yet — the canary
-        // will retry on the next cycle.
         let engine = self
             .drt
             .local_endpoint_registry()
@@ -234,10 +226,7 @@ impl HealthCheckManager {
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
                         // Get the first response to verify endpoint is alive.
-                        // Check for errors rather than data presence: an Annotated
-                        // item can have data: None without being an error (e.g.,
-                        // annotation/metadata events). Only explicit errors indicate
-                        // an unhealthy endpoint.
+                        // Check for errors
                         let is_healthy = if let Some(response) = response_stream.next().await {
                             if let Some(error) = response.err() {
                                 warn!(
@@ -257,8 +246,8 @@ impl HealthCheckManager {
                             false
                         };
 
-                        // Consume the rest of the stream in the background
                         tokio::spawn(async move {
+                            // We need to consume the rest of the stream to avoid warnings on the frontend.
                             response_stream.for_each(|_| async {}).await;
                         });
 
