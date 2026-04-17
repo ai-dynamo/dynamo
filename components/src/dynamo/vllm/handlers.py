@@ -1478,6 +1478,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Build top_logprobs list for this token position
             token_top_logprobs = []
             for tok_id, logprob_info in token_logprobs_dict.items():
+                token_str: str | None
                 if return_tokens_as_token_ids:
                     token_str = f"token_id:{tok_id}"
                 else:
