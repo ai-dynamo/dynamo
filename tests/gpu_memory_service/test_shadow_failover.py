@@ -79,7 +79,7 @@ def _start_primary(
     *,
     weights_hash: str,
     quiesced_memory_after_shadow_b: int,
-    shadow_b_released_bytes: int,
+    shadow_a_released_bytes: int,
 ):
     primary = manager.start_engine("primary", read_only_weights=True)
     assert_completion_ok(
@@ -94,7 +94,7 @@ def _start_primary(
         "Primary active memory",
         quiesced_memory_after_shadow_b,
         primary_memory_in_use,
-        shadow_b_released_bytes,
+        shadow_a_released_bytes,
     )
 
     weights_with_primary, _ = wait_for_active_layout(
@@ -204,7 +204,7 @@ def _run_shadow_failover_test(
         )
         (
             weights_state_after_shadow_a,
-            _,
+            shadow_a_released_bytes,
             _,
         ) = quiesce_engine(
             weights_gms,
@@ -219,7 +219,7 @@ def _run_shadow_failover_test(
         )
         (
             weights_state_after_shadow_b,
-            shadow_b_released_bytes,
+            _,
             quiesced_memory_after_shadow_b,
         ) = quiesce_engine(
             weights_gms,
@@ -236,8 +236,6 @@ def _run_shadow_failover_test(
         kv_events_after_shadow_quiesce = kv_cache_gms.get_event_history().events
         assert_kv_history(kv_events_after_shadow_quiesce, cleared_layouts=2)
 
-        # Later engines import the committed weights layout read-only, so
-        # compare them against the importer footprint from shadow-b.
         primary, weights_with_primary = _start_primary(
             manager,
             frontend_port,
@@ -245,7 +243,7 @@ def _run_shadow_failover_test(
             kv_cache_gms,
             weights_hash=weights_hash,
             quiesced_memory_after_shadow_b=quiesced_memory_after_shadow_b,
-            shadow_b_released_bytes=shadow_b_released_bytes,
+            shadow_a_released_bytes=shadow_a_released_bytes,
         )
         resume_result = _resume_shadow_after_primary_failover(
             shadow_a,
@@ -259,7 +257,7 @@ def _run_shadow_failover_test(
             "Shadow resume memory",
             quiesced_memory_after_shadow_b,
             shadow_memory_after_resume,
-            shadow_b_released_bytes,
+            shadow_a_released_bytes,
         )
 
         # Once the primary is gone, the failover shadow should finish resume
