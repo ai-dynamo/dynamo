@@ -129,8 +129,6 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           push_image: 'true'
       - name: Build and Push Test Image
         env:
