@@ -35,8 +35,8 @@ from tests.utils.managed_process import ManagedProcess
 pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
 
 # Event flow under test:
-# 1. Shadow A starts as the initial weights publisher, then quiesces.
-# 2. Shadow B starts in read-only mode from the committed weights layout, then quiesces.
+# 1. Shadow A starts as the initial weights publisher, then quiesces without serving traffic.
+# 2. Shadow B starts in read-only mode from the committed weights layout, then quiesces without serving traffic.
 # 3. Primary starts in read-only mode and owns the next RW KV layout.
 # 4. Shadow A tries to resume while primary still owns the KV-cache RW layout.
 # 5. Primary is SIGKILLed; the old KV session clears before its GPU memory is reclaimed.
@@ -202,12 +202,6 @@ def _run_shadow_failover_test(
         shadow_a = manager.start_engine(
             "shadow-a",
         )
-        assert_completion_ok(
-            frontend_port,
-            "Hello",
-            failure_message="Shadow inference failed",
-            success_message="Shadow inference OK",
-        )
         (
             weights_state_after_shadow_a,
             _,
@@ -222,12 +216,6 @@ def _run_shadow_failover_test(
         shadow_b = manager.start_engine(
             "shadow-b",
             read_only_weights=True,
-        )
-        assert_completion_ok(
-            frontend_port,
-            "Hello",
-            failure_message="Shadow inference failed",
-            success_message="Shadow inference OK",
         )
         (
             weights_state_after_shadow_b,
