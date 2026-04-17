@@ -106,10 +106,8 @@ func uniformScores(endpoints []schedtypes.Endpoint, score float64) map[schedtype
 // injects nvext.token_data into the PayloadMap so it is forwarded to the
 // worker in the request body.
 //
-// NOTE: The GAIE ext-proc framework serializes RawBody before scheduling
-// plugins run. For the PayloadMap mutation to reach the worker, the framework
-// must re-serialize the PayloadMap after scheduling — see
-// https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/2854
+// The GAIE framework re-serializes the PayloadMap after scheduling/PreRequest
+// plugins run (PR #2854), so this mutation is included in the forwarded body.
 func setTokenizedPrompt(req *schedtypes.InferenceRequest, tokens []int64, logger logr.Logger) {
 	if req == nil || len(tokens) == 0 {
 		logger.V(logutil.DEFAULT).Info("[EPP-INJECT] No tokens to inject (empty token list)")

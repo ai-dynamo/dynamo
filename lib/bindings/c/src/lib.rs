@@ -412,12 +412,6 @@ pub struct CRoutingResult {
     pub token_ids: *mut u32,
     /// Number of tokens in the request
     pub token_count: usize,
-    /// Modified request body JSON with `nvext.token_data` injected (null-terminated).
-    /// The EPP should use this as the forwarded body so the frontend sidecar can
-    /// skip redundant tokenization.  Caller must free via `free_routing_result`.
-    pub modified_body: *mut c_char,
-    /// Length of `modified_body` in bytes (excluding the null terminator).
-    pub modified_body_len: usize,
 }
 
 impl Default for CRoutingResult {
@@ -430,8 +424,6 @@ impl Default for CRoutingResult {
             decode_dp_rank: 0,
             token_ids: ptr::null_mut(),
             token_count: 0,
-            modified_body: ptr::null_mut(),
-            modified_body_len: 0,
         }
     }
 }
@@ -1078,13 +1070,6 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
         res.token_ids = ptr::null_mut();
         res.token_count = 0;
     }
-
-    // Free modified body
-    if !res.modified_body.is_null() {
-        drop(unsafe { std::ffi::CString::from_raw(res.modified_body) });
-        res.modified_body = ptr::null_mut();
-        res.modified_body_len = 0;
-    }
 }
 
 /// Parse a JSON request string, apply the chat template, and tokenize.
@@ -1196,61 +1181,6 @@ fn write_tokens_to_result(tokens: &[u32], out: &mut CRoutingResult) {
     std::mem::forget(tokens_boxed);
 }
 
-/// Inject `nvext.token_data` into a request JSON body and return the modified JSON.
-///
-/// The original body (typically `messages` + `model`) is augmented with an
-/// `nvext` object containing the pre-computed token IDs.  The EPP forwards
-/// this body so the frontend sidecar can skip redundant tokenization.
-fn inject_tokens_into_body(request_json: &str, tokens: &[u32]) -> Result<String, String> {
-    let mut body: serde_json::Value =
-        serde_json::from_str(request_json).map_err(|e| format!("JSON parse error: {e}"))?;
-
-    let obj = body
-        .as_object_mut()
-        .ok_or_else(|| "request body is not a JSON object".to_string())?;
-
-    let token_ids: Vec<serde_json::Value> = tokens
-        .iter()
-        .map(|&t| serde_json::Value::Number(serde_json::Number::from(t)))
-        .collect();
-
-    let nvext = obj.entry("nvext").or_insert_with(|| serde_json::json!({}));
-    if !nvext.is_object() {
-        *nvext = serde_json::json!({});
-    }
-    nvext.as_object_mut().unwrap().insert(
-        "token_data".to_string(),
-        serde_json::Value::Array(token_ids),
-    );
-
-    serde_json::to_string(&body).map_err(|e| format!("JSON serialize error: {e}"))
-}
-
-/// Write `modified_body` into a `CRoutingResult`, transferring ownership.
-fn write_modified_body_to_result(request_json: &str, tokens: &[u32], out: &mut CRoutingResult) {
-    match inject_tokens_into_body(request_json, tokens) {
-        Ok(modified) => {
-            tracing::info!(
-                token_count = tokens.len(),
-                body_len = modified.len(),
-                "[EPP-BODY-INJECT] Injected nvext.token_data into request body JSON"
-            );
-            let c_str = match std::ffi::CString::new(modified.as_bytes()) {
-                Ok(cs) => cs,
-                Err(e) => {
-                    tracing::warn!(error = %e, "modified body contains interior NUL; skipping");
-                    return;
-                }
-            };
-            out.modified_body_len = modified.len();
-            out.modified_body = c_str.into_raw();
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to inject tokens into request body");
-        }
-    }
-}
-
 /// Route a request to select the best **prefill** worker only.
 ///
 /// This is used in disaggregated mode where the EPP runs separate prefill and decode
@@ -1311,9 +1241,6 @@ pub unsafe extern "C" fn route_prefill_request(
             out.is_disaggregated = true;
             out.prefill_worker_id = prefill_worker_id;
             out.prefill_dp_rank = prefill_dp_rank;
-            if let Ok(json_str) = unsafe { CStr::from_ptr(request_json) }.to_str() {
-                write_modified_body_to_result(json_str, &tokens, out);
-            }
             write_tokens_to_result(&tokens, out);
             QueryRouterResult::Ok
         }
@@ -1383,9 +1310,6 @@ pub unsafe extern "C" fn route_decode_request(
             out.is_disaggregated = is_disaggregated;
             out.decode_worker_id = decode_worker.worker_id;
             out.decode_dp_rank = decode_worker.dp_rank;
-            if let Ok(json_str) = unsafe { CStr::from_ptr(request_json) }.to_str() {
-                write_modified_body_to_result(json_str, &tokens, out);
-            }
             write_tokens_to_result(&tokens, out);
             QueryRouterResult::Ok
         }

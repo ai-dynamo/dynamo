@@ -56,8 +56,6 @@ typedef struct {
     uint32_t decode_dp_rank;
     uint32_t *token_ids;
     size_t token_count;
-    char *modified_body;
-    size_t modified_body_len;
 } CRoutingResult;
 
 // Router bindings API
@@ -411,27 +409,23 @@ func CallFreeRequest(requestID string) error {
 
 // RoutingResult holds the result of a prefill or decode routing call.
 type RoutingResult struct {
-	WorkerID     uint64
-	DpRank       uint32
-	TokenData    []int64
-	ModifiedBody string // Request body JSON with nvext.token_data injected
+	WorkerID  uint64
+	DpRank    uint32
+	TokenData []int64
 }
 
-// extractRoutingResult copies token data and modified body from a C result into Go memory.
-func extractRoutingResult(result *C.CRoutingResult) (tokens []int64, modifiedBody string) {
+// extractTokenData copies token IDs from a C result into Go memory.
+func extractTokenData(result *C.CRoutingResult) []int64 {
 	count := int(result.token_count)
 	if count > 0 && result.token_ids != nil {
 		src := unsafe.Slice((*uint32)(unsafe.Pointer(result.token_ids)), count)
-		tokens = make([]int64, count)
+		tokens := make([]int64, count)
 		for i := 0; i < count; i++ {
 			tokens[i] = int64(src[i])
 		}
+		return tokens
 	}
-
-	if result.modified_body != nil && result.modified_body_len > 0 {
-		modifiedBody = C.GoStringN(result.modified_body, C.int(result.modified_body_len))
-	}
-	return
+	return nil
 }
 
 // CallRoutePrefillRequest routes a request to the best prefill worker.
@@ -463,12 +457,12 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 		return nil, fmt.Errorf("route_prefill_request failed with code %d", rc)
 	}
 
-	tokens, modifiedBody := extractRoutingResult(&result)
+	tokens := extractTokenData(&result)
 	workerID := uint64(result.prefill_worker_id)
 	dpRank := uint32(result.prefill_dp_rank)
 	C.free_routing_result(&result)
 
-	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens, ModifiedBody: modifiedBody}, nil
+	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens}, nil
 }
 
 // CallRouteDecodeRequest routes a request to the best decode worker.
@@ -500,10 +494,10 @@ func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated
 		return nil, fmt.Errorf("route_decode_request failed with code %d", rc)
 	}
 
-	tokens, modifiedBody := extractRoutingResult(&result)
+	tokens := extractTokenData(&result)
 	workerID := uint64(result.decode_worker_id)
 	dpRank := uint32(result.decode_dp_rank)
 	C.free_routing_result(&result)
 
-	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens, ModifiedBody: modifiedBody}, nil
+	return &RoutingResult{WorkerID: workerID, DpRank: dpRank, TokenData: tokens}, nil
 }

@@ -58,7 +58,6 @@ type DecodeRoutingState struct {
 	DpRank          uint32
 	PrefillWorkerID string
 	TokenData       []int64
-	ModifiedBody    string
 }
 
 // Clone implements plugins.StateData.
@@ -70,7 +69,6 @@ func (s *DecodeRoutingState) Clone() plugins.StateData {
 		WorkerID:        s.WorkerID,
 		DpRank:          s.DpRank,
 		PrefillWorkerID: s.PrefillWorkerID,
-		ModifiedBody:    s.ModifiedBody,
 	}
 	if s.TokenData != nil {
 		clone.TokenData = make([]int64, len(s.TokenData))
@@ -162,7 +160,7 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 		"decodeDpRank", result.DpRank,
 		"isDisaggregated", isDisaggregated,
 		"tokenCount", len(result.TokenData),
-		"hasModifiedBody", result.ModifiedBody != "")
+		"tokenCount", len(result.TokenData))
 
 	if req.Headers == nil {
 		req.Headers = map[string]string{}
@@ -189,10 +187,9 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 	// Store routing state for PreRequest bookkeeping
 	if req.RequestId != "" {
 		routingState := &DecodeRoutingState{
-			WorkerID:     workerIDStr,
-			DpRank:       result.DpRank,
-			TokenData:    result.TokenData,
-			ModifiedBody: result.ModifiedBody,
+			WorkerID:  workerIDStr,
+			DpRank:    result.DpRank,
+			TokenData: result.TokenData,
 		}
 		s.pluginState.Write(req.RequestId, plugins.StateKey(decodeStateKey), routingState)
 	}
@@ -258,23 +255,23 @@ func (s *DynDecodeScorer) ResponseBody(ctx context.Context, request *schedtypes.
 		if err := dynscorer.CallMarkPrefillComplete(request.RequestId); err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to mark prefill complete",
 				"requestID", request.RequestId)
-			return
+		} else {
+			logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: marked prefill complete",
+				"requestID", request.RequestId)
 		}
-		logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: marked prefill complete",
-			"requestID", request.RequestId)
 	}
 
-	// Free request on end of stream
+	// Free request on end of stream — must always run regardless of
+	// earlier errors to avoid leaking router bookkeeping state.
 	if response != nil && response.EndOfStream {
 		s.firstTokenSeen.Delete(request.RequestId)
 
 		if err := dynscorer.CallFreeRequest(request.RequestId); err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "DynDecodeScorer ResponseBody: failed to free request",
 				"requestID", request.RequestId)
-			return
+		} else {
+			logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: freed request",
+				"requestID", request.RequestId)
 		}
-
-		logger.V(logutil.VERBOSE).Info("DynDecodeScorer ResponseBody: freed request",
-			"requestID", request.RequestId)
 	}
 }
