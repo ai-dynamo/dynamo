@@ -44,6 +44,11 @@ on:
         description: 'CPU-only pytest markers'
         required: false
         type: string
+      cpu_parallel_mode:
+        description: 'Parallelization mode for CPU-only tests (e.g. auto, none, or number of parallel workers)'
+        required: false
+        type: string
+        default: 'auto'
       cpu_only_test_timeout_minutes:
         description: 'Timeout in minutes for CPU tests'
         required: false
@@ -155,7 +160,7 @@ jobs:
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
-          parallel_mode: 'auto'
+          parallel_mode: ${{ inputs.cpu_parallel_mode }}
           dind_as_sidecar: 'true'
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}

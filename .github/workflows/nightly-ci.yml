@@ -41,80 +41,148 @@ jobs:
           buildkit_worker_addresses: ''
           fresh_builder: 'true'
 
+  # ============================================================================
+  # BUILD JOBS
+  # ============================================================================
 
-  # ============================================================================
-  # FRAMEWORK PIPELINES (Build → Test → Copy)
-  # ============================================================================
-  # ============================================================================
-  # VLLM PIPELINE
-  # ============================================================================
-  vllm-pipeline:
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+  vllm-build:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [create-fresh-builder]
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
-      fresh_builder: true
+      cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      build_timeout_minutes: 180
-      cpu_only_test_markers: 'vllm and gpu_0'
-      single_gpu_test_markers: 'vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 180
-      multi_gpu_test_markers: 'vllm and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 120
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
     secrets: inherit
 
-  # ============================================================================
-  # SGLANG PIPELINE
-  # ============================================================================
-  sglang-pipeline:
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+  sglang-build:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [create-fresh-builder]
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: runtime
-      fresh_builder: true
+      cuda_version: '["12.9", "13.0"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      build_timeout_minutes: 180
-      cpu_only_test_markers: 'sglang and gpu_0'
-      single_gpu_test_markers: 'sglang and gpu_1'
-      single_gpu_test_timeout_minutes: 180
-      multi_gpu_test_markers: 'sglang and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 120
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
     secrets: inherit
 
-  # ============================================================================
-  # TRTLLM PIPELINE
-  # ============================================================================
-  trtllm-pipeline:
-    uses: ./.github/workflows/build-test-distribute-flavor-matrix.yml
+  trtllm-build:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [create-fresh-builder]
+    uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
-      fresh_builder: true
+      cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
-      cuda_versions: '["13.1"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-      build_timeout_minutes: 180
-      cpu_only_test_markers: 'trtllm and gpu_0'
-      single_gpu_test_markers: 'trtllm and gpu_1'
-      single_gpu_test_timeout_minutes: 180
-      multi_gpu_test_markers: 'trtllm and (gpu_2 or gpu_4)'
-      multi_gpu_test_timeout_minutes: 120
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 60
+    secrets: inherit
+
+  # ============================================================================
+  # TEST JOBS
+  # ============================================================================
+
+  vllm-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: nightly and vllm and gpu_0
+      gpu_test_markers: nightly and vllm and gpu_1
+      gpu_test_timeout_minutes: 35
+    secrets: inherit
+
+  vllm-multi-gpu-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: nightly and vllm and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  sglang-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: nightly and sglang and gpu_0
+      gpu_test_markers: nightly and sglang and gpu_1
+    secrets: inherit
+
+  sglang-multi-gpu-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["12.9", "13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: nightly and sglang and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  trtllm-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      test_type: Test
+      amd_runner: prod-tester-amd-gpu-v1 # This runner is overridden for ARM platform
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      run_cpu_only_tests: true
+      cpu_only_test_markers: nightly and trtllm and gpu_0
+      gpu_test_markers: nightly and trtllm and gpu_1
+    secrets: inherit
+
+  trtllm-multi-gpu-test:
+    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    needs: [trtllm-build]
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      test_type: Multi-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v1
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: nightly and trtllm and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
     secrets: inherit
 
   # ============================================================================
@@ -124,7 +192,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-pipeline, sglang-pipeline, trtllm-pipeline, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -147,7 +215,7 @@ jobs:
     name: Notify Slack
     runs-on: ubuntu-slim
     if: always() && failure()
-    needs: [ vllm-pipeline, sglang-pipeline, trtllm-pipeline ]
+    needs: [vllm-test, sglang-test, trtllm-test, vllm-multi-gpu-test, sglang-multi-gpu-test, trtllm-multi-gpu-test]
     permissions:
       contents: read
     steps:

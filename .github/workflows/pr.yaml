@@ -244,6 +244,18 @@ jobs:
       build_timeout_minutes: 45
     secrets: inherit
 
+  frontend-build:
+    name: frontend
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: dynamo
+      target: frontend
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 45
+    secrets: inherit
+
   # ============================================================================
   # TEST PIPELINES
   # ============================================================================
@@ -362,10 +374,11 @@ jobs:
       amd_runner: prod-tester-amd-gpu-v1 # TODO: CPU only DinD runner for dynamo repo
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and planner and gpu_0'
+      cpu_parallel_mode: none
       cpu_only_test_timeout_minutes: 30
       run_gpu_tests: false
     secrets: inherit
@@ -384,7 +397,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   sglang-compliance:
@@ -397,7 +410,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   trtllm-compliance:
@@ -410,7 +423,7 @@ jobs:
       target: runtime
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   planner-compliance:
@@ -423,7 +436,19 @@ jobs:
       target: planner
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
-      platform: '["amd64"]'
+      platform: '["amd64", "arm64"]'
+    secrets: inherit
+
+  frontend-compliance:
+    name: frontend # This name overlaps with other frontend jobs to group them in the UI
+    needs: [frontend-build]
+    uses: ./.github/workflows/shared-compliance.yml
+    with:
+      framework: dynamo
+      target: frontend
+      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64", "arm64"]'
     secrets: inherit
 
   # ============================================================================
@@ -441,7 +466,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -457,7 +482,7 @@ jobs:
     uses: ./.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["12.9"]' # Deploy tests only use CUDA 12
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
@@ -511,7 +536,7 @@ jobs:
 
   deploy-test-vllm:
     name: vllm Deploy Test
-    needs: [changed-files, deploy-operator, vllm-copy-to-acr, vllm-multi-gpu-test]
+    needs: [changed-files, deploy-operator, vllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true')
@@ -527,7 +552,7 @@ jobs:
 
   deploy-test-sglang:
     name: sglang Deploy Test
-    needs: [changed-files, deploy-operator, sglang-copy-to-acr, sglang-multi-gpu-test]
+    needs: [changed-files, deploy-operator, sglang-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true')
@@ -543,7 +568,7 @@ jobs:
 
   deploy-test-trtllm:
     name: trtllm Deploy Test
-    needs: [changed-files, deploy-operator, trtllm-copy-to-acr, trtllm-multi-gpu-test]
+    needs: [changed-files, deploy-operator, trtllm-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true')
