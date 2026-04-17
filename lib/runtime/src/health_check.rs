@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::DistributedRuntime;
 use crate::config::HealthStatus;
 use crate::engine::AsyncEngine;
 use crate::pipeline::SingleIn;
-use crate::DistributedRuntime;
 use futures::StreamExt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -201,7 +201,10 @@ impl HealthCheckManager {
         endpoint_subject: &str,
         payload: &serde_json::Value,
     ) -> anyhow::Result<()> {
-        debug!("Sending health check to {} via local registry", endpoint_subject);
+        debug!(
+            "Sending health check to {} via local registry",
+            endpoint_subject
+        );
 
         // Look up the engine in the local endpoint registry (in-process call only).
         // If not found, the endpoint hasn't finished registering yet — the canary
