@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Notify;
 
@@ -52,20 +52,16 @@ fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
     let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(unset_labels);
 }
 
-/// Scale factor for storing f64 thresholds as u32 (10000 = 4 decimal places)
-const THRESHOLD_SCALE: u32 = 10000;
-
-/// Default value for max_num_batched_tokens and active_prefill_tokens_threshold
-/// when not configured. Set high enough to effectively disable busy detection.
+/// Default value for `max_num_batched_tokens` when the runtime config does not
+/// report it. Set high enough that the frac-based busy check (which multiplies
+/// this value by the threshold fraction) can never fire with realistic loads.
 const DEFAULT_MAX_TOKENS: u64 = 10_000_000;
 
 /// Configuration for worker load thresholds used in busy detection.
 ///
-/// All thresholds are optional. When not set, defaults are applied:
-/// - `active_decode_blocks_threshold`: 1.0 (effectively disabled)
-/// - `active_prefill_tokens_threshold`: 10,000,000 (effectively disabled)
-/// - `active_prefill_tokens_threshold_frac`: 1.5 (effectively disabled)
-/// - `max_num_batched_tokens` (from runtime config): 10,000,000 if not reported
+/// All thresholds are opt-in. An unset (`None`) field means the corresponding
+/// check is skipped entirely — it never contributes to a worker being marked
+/// busy. If all three are `None`, busy-based rejection is fully disabled.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct LoadThresholdConfig {
     /// KV cache block utilization threshold (0.0-1.0).
@@ -200,7 +196,7 @@ impl WorkerLoadState {
     fn update_from_active_load(
         &mut self,
         active_load: &ActiveLoad,
-        active_decode_blocks_threshold: f64,
+        active_decode_blocks_threshold: Option<f64>,
     ) {
         let dp_rank = active_load.dp_rank;
         if let Some(active_blocks) = active_load.active_decode_blocks {
@@ -212,29 +208,33 @@ impl WorkerLoadState {
         if let Some(active_tokens) = active_load.active_prefill_tokens {
             self.active_prefill_tokens.insert(dp_rank, active_tokens);
         }
-        self.update_decode_busy_latch(
-            dp_rank,
-            active_load.active_decode_blocks,
-            active_load.kv_used_blocks,
-            active_decode_blocks_threshold,
-        );
+        if let Some(threshold) = active_decode_blocks_threshold {
+            self.update_decode_busy_latch(
+                dp_rank,
+                active_load.active_decode_blocks,
+                active_load.kv_used_blocks,
+                threshold,
+            );
+        }
     }
 
     /// Returns true if ALL dp_ranks are considered busy based on the threshold logic.
     ///
-    /// For each dp_rank, a dp_rank is busy if ANY of these conditions is met (OR logic):
-    /// 1. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute threshold)
-    /// 2. `active_prefill_tokens > frac * max_num_batched_tokens` (fraction-based threshold)
-    /// 3. decode busy latch set by either `kv_used_blocks` or `active_decode_blocks`
+    /// Each threshold is `Option<T>`. A `None` threshold means that check is
+    /// skipped entirely — it cannot contribute to a dp_rank being busy. If all
+    /// three thresholds are `None`, no dp_rank is ever busy.
     ///
-    /// If none of these checks can be performed (missing data), that dp_rank is considered free.
+    /// For each dp_rank, a dp_rank is busy if ANY of these conditions is met (OR logic):
+    /// 1. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute, if set)
+    /// 2. `active_prefill_tokens > frac * max_num_batched_tokens` (fractional, if set)
+    /// 3. decode busy latch set by either `kv_used_blocks` or `active_decode_blocks` (if set)
     ///
     /// The worker is busy only if ALL dp_ranks are busy.
     pub fn is_busy(
         &self,
-        active_decode_blocks_threshold: f64,
-        active_prefill_tokens_threshold: u64,
-        active_prefill_tokens_threshold_frac: f64,
+        active_decode_blocks_threshold: Option<f64>,
+        active_prefill_tokens_threshold: Option<u64>,
+        active_prefill_tokens_threshold_frac: Option<f64>,
     ) -> bool {
         // Get all dp_ranks we know about
         let all_dp_ranks: std::collections::HashSet<_> = self
@@ -255,30 +255,35 @@ impl WorkerLoadState {
         all_dp_ranks.iter().all(|&dp_rank| {
             // Check 1: prefill tokens threshold (absolute token count)
             if let Some(&active_tokens) = self.active_prefill_tokens.get(&dp_rank) {
-                if active_tokens > active_prefill_tokens_threshold {
-                    return true; // This dp_rank is busy due to absolute token threshold
+                if let Some(abs_threshold) = active_prefill_tokens_threshold {
+                    if active_tokens > abs_threshold {
+                        return true;  // This dp_rank is busy due to absolute token threshold
+                    }
                 }
 
-                // Check 2: prefill tokens threshold (fraction of max_num_batched_tokens)
-                let max_batched = self
-                    .max_num_batched_tokens
-                    .get(&dp_rank)
-                    .copied()
-                    .unwrap_or(DEFAULT_MAX_TOKENS);
-                let frac_threshold =
-                    (active_prefill_tokens_threshold_frac * max_batched as f64) as u64;
-                if active_tokens > frac_threshold {
-                    return true; // This dp_rank is busy due to frac-based token threshold
+                // Check 2: prefill tokens threshold (fraction of max_num_batched_tokens
+                if let Some(frac) = active_prefill_tokens_threshold_frac {
+                    let max_batched = self
+                        .max_num_batched_tokens
+                        .get(&dp_rank)
+                        .copied()
+                        .unwrap_or(DEFAULT_MAX_TOKENS);
+                    let frac_threshold = (frac * max_batched as f64) as u64;
+                    if active_tokens > frac_threshold {
+                        return true;
+                    }
                 }
             }
 
-            // Check 3: decode busy latch
-            if let Some(latch) = self.decode_busy_latches.get(&dp_rank) {
-                if latch.latched_busy {
+            // Check 3: decode busy latch (OR-ed from kv_used_blocks and active_decode_blocks)
+            if let Some(decode_threshold) = active_decode_blocks_threshold {
+                if let Some(latch) = self.decode_busy_latches.get(&dp_rank) {
+                    if latch.latched_busy {
+                        return true;
+                    }
+                } else if self.current_decode_busy(dp_rank, decode_threshold) {
                     return true;
                 }
-            } else if self.current_decode_busy(dp_rank, active_decode_blocks_threshold) {
-                return true;
             }
 
             // If we can't perform any check or no threshold exceeded, this dp_rank is free
@@ -307,12 +312,10 @@ pub struct KvWorkerMonitor {
     /// Notifies the monitoring task when a prefill client is registered
     prefill_client_notify: Arc<Notify>,
     worker_load_states: Arc<DashMap<u64, WorkerLoadState>>,
-    /// Active decode blocks threshold stored as parts-per-10000 (e.g., 8500 = 0.85)
-    active_decode_blocks_threshold: Arc<AtomicU32>,
-    /// Active prefill tokens threshold stored as literal token count (u64)
-    active_prefill_tokens_threshold: Arc<AtomicU64>,
-    /// Active prefill tokens threshold as fraction of max_num_batched_tokens, stored scaled
-    active_prefill_tokens_threshold_frac: Arc<AtomicU32>,
+    /// Load thresholds for busy detection. Each field is `Option<T>` — unset
+    /// means the corresponding check in `is_busy` is skipped. If all three are
+    /// `None`, rejection is fully disabled.
+    thresholds: Arc<RwLock<LoadThresholdConfig>>,
     /// Guard to ensure start_monitoring() only runs once across clones
     started: Arc<AtomicBool>,
 }
@@ -320,13 +323,10 @@ pub struct KvWorkerMonitor {
 impl KvWorkerMonitor {
     /// Create a new worker monitor with the given threshold configuration.
     ///
-    /// All thresholds can be dynamically updated via setter methods or
-    /// `set_load_threshold_config()`.
-    ///
-    /// Defaults are applied for any threshold not specified in the config:
-    /// - `active_decode_blocks_threshold`: 1.0 (effectively disabled)
-    /// - `active_prefill_tokens_threshold`: DEFAULT_MAX_TOKENS (effectively disabled)
-    /// - `active_prefill_tokens_threshold_frac`: 1.5 (effectively disabled)
+    /// Unset thresholds (`None`) remain unset and their corresponding checks
+    /// in `is_busy` are skipped. Thresholds can be updated at runtime via
+    /// [`set_load_threshold_config`](Self::set_load_threshold_config) or the
+    /// individual setters.
     ///
     /// Prometheus metrics are exposed via [`WORKER_LOAD_METRICS`] and should be registered
     /// using [`register_worker_load_metrics`](crate::kv_router::metrics::register_worker_load_metrics)
@@ -335,26 +335,23 @@ impl KvWorkerMonitor {
     /// For disaggregated mode, call `set_prefill_client` after creation to enable
     /// proper TTFT metric cleanup when prefill workers are removed.
     pub fn new(client: Client, config: LoadThresholdConfig) -> Self {
-        let active_decode_blocks = config.active_decode_blocks_threshold.unwrap_or(1.0);
-        let active_prefill_tokens = config
-            .active_prefill_tokens_threshold
-            .unwrap_or(DEFAULT_MAX_TOKENS);
-        let active_prefill_tokens_frac = config.active_prefill_tokens_threshold_frac.unwrap_or(1.5);
-
         Self {
             client,
             prefill_client: Arc::new(RwLock::new(None)),
             prefill_client_notify: Arc::new(Notify::new()),
             worker_load_states: Arc::new(DashMap::new()),
-            active_decode_blocks_threshold: Arc::new(AtomicU32::new(Self::f64_to_scaled(
-                active_decode_blocks,
-            ))),
-            active_prefill_tokens_threshold: Arc::new(AtomicU64::new(active_prefill_tokens)),
-            active_prefill_tokens_threshold_frac: Arc::new(AtomicU32::new(Self::f64_to_scaled(
-                active_prefill_tokens_frac,
-            ))),
+            thresholds: Arc::new(RwLock::new(config)),
             started: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Returns true iff the user explicitly configured at least one threshold.
+    ///
+    /// When false, all three per-field checks are skipped in `is_busy` and
+    /// rejection is fully disabled. Callers that gate 503 responses on busy
+    /// detection should check this before enabling the gate.
+    pub fn is_configured(&self) -> bool {
+        self.thresholds.read().unwrap().is_configured()
     }
 
     /// Set the prefill client for disaggregated mode.
@@ -368,79 +365,77 @@ impl KvWorkerMonitor {
     pub fn set_prefill_client(&self, prefill_client: Client) {
         let mut guard = self.prefill_client.write().unwrap();
         *guard = Some(prefill_client);
-        // Notify the monitoring task that prefill client is now available
         self.prefill_client_notify.notify_one();
         tracing::debug!("KvWorkerMonitor: prefill client registered for TTFT cleanup");
     }
 
-    /// Convert a f64 threshold to scaled u32 for atomic storage.
-    #[inline]
-    fn f64_to_scaled(threshold: f64) -> u32 {
-        (threshold * THRESHOLD_SCALE as f64) as u32
+    /// Get the current active decode blocks threshold, if configured.
+    pub fn active_decode_blocks_threshold(&self) -> Option<f64> {
+        self.thresholds
+            .read()
+            .unwrap()
+            .active_decode_blocks_threshold
     }
 
-    /// Convert a scaled u32 back to f64 threshold.
-    #[inline]
-    fn scaled_to_f64(scaled: u32) -> f64 {
-        scaled as f64 / THRESHOLD_SCALE as f64
-    }
-
-    /// Get the current active decode blocks threshold value as f64.
-    pub fn active_decode_blocks_threshold(&self) -> f64 {
-        Self::scaled_to_f64(self.active_decode_blocks_threshold.load(Ordering::Relaxed))
-    }
-
-    /// Set the active decode blocks threshold value from f64.
+    /// Set the active decode blocks threshold.
     pub fn set_active_decode_blocks_threshold(&self, threshold: f64) {
-        self.active_decode_blocks_threshold
-            .store(Self::f64_to_scaled(threshold), Ordering::Relaxed);
+        self.thresholds
+            .write()
+            .unwrap()
+            .active_decode_blocks_threshold = Some(threshold);
     }
 
-    /// Get the current active prefill tokens threshold value as u64.
-    pub fn active_prefill_tokens_threshold(&self) -> u64 {
-        self.active_prefill_tokens_threshold.load(Ordering::Relaxed)
+    /// Get the current active prefill tokens threshold, if configured.
+    pub fn active_prefill_tokens_threshold(&self) -> Option<u64> {
+        self.thresholds
+            .read()
+            .unwrap()
+            .active_prefill_tokens_threshold
     }
 
-    /// Set the active prefill tokens threshold value from u64.
+    /// Set the active prefill tokens threshold.
     pub fn set_active_prefill_tokens_threshold(&self, threshold: u64) {
-        self.active_prefill_tokens_threshold
-            .store(threshold, Ordering::Relaxed);
+        self.thresholds
+            .write()
+            .unwrap()
+            .active_prefill_tokens_threshold = Some(threshold);
     }
 
-    /// Get the current active prefill tokens threshold frac value as f64.
-    pub fn active_prefill_tokens_threshold_frac(&self) -> f64 {
-        Self::scaled_to_f64(
-            self.active_prefill_tokens_threshold_frac
-                .load(Ordering::Relaxed),
-        )
+    /// Get the current active prefill tokens threshold frac, if configured.
+    pub fn active_prefill_tokens_threshold_frac(&self) -> Option<f64> {
+        self.thresholds
+            .read()
+            .unwrap()
+            .active_prefill_tokens_threshold_frac
     }
 
-    /// Set the active prefill tokens threshold frac value from f64.
+    /// Set the active prefill tokens threshold frac.
     pub fn set_active_prefill_tokens_threshold_frac(&self, frac: f64) {
-        self.active_prefill_tokens_threshold_frac
-            .store(Self::f64_to_scaled(frac), Ordering::Relaxed);
+        self.thresholds
+            .write()
+            .unwrap()
+            .active_prefill_tokens_threshold_frac = Some(frac);
     }
 
-    /// Get the current load threshold configuration.
+    /// Get the current load threshold configuration. Unset fields are returned
+    /// as `None` (no spurious fallback values).
     pub fn load_threshold_config(&self) -> LoadThresholdConfig {
-        LoadThresholdConfig {
-            active_decode_blocks_threshold: Some(self.active_decode_blocks_threshold()),
-            active_prefill_tokens_threshold: Some(self.active_prefill_tokens_threshold()),
-            active_prefill_tokens_threshold_frac: Some(self.active_prefill_tokens_threshold_frac()),
-        }
+        self.thresholds.read().unwrap().clone()
     }
 
-    /// Update all thresholds from a LoadThresholdConfig.
-    /// Only updates fields that are Some in the config.
+    /// Update thresholds from a `LoadThresholdConfig`. Only fields that are
+    /// `Some` in the input overwrite their counterparts; `None` fields leave
+    /// the existing value untouched.
     pub fn set_load_threshold_config(&self, config: &LoadThresholdConfig) {
-        if let Some(threshold) = config.active_decode_blocks_threshold {
-            self.set_active_decode_blocks_threshold(threshold);
+        let mut guard = self.thresholds.write().unwrap();
+        if let Some(v) = config.active_decode_blocks_threshold {
+            guard.active_decode_blocks_threshold = Some(v);
         }
-        if let Some(threshold) = config.active_prefill_tokens_threshold {
-            self.set_active_prefill_tokens_threshold(threshold);
+        if let Some(v) = config.active_prefill_tokens_threshold {
+            guard.active_prefill_tokens_threshold = Some(v);
         }
-        if let Some(frac) = config.active_prefill_tokens_threshold_frac {
-            self.set_active_prefill_tokens_threshold_frac(frac);
+        if let Some(v) = config.active_prefill_tokens_threshold_frac {
+            guard.active_prefill_tokens_threshold_frac = Some(v);
         }
     }
 }
@@ -507,10 +502,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
         let client = self.client.clone();
         let prefill_client_holder = self.prefill_client.clone();
         let prefill_client_notify = self.prefill_client_notify.clone();
-        let active_decode_blocks_threshold = self.active_decode_blocks_threshold.clone();
-        let active_prefill_tokens_threshold = self.active_prefill_tokens_threshold.clone();
-        let active_prefill_tokens_threshold_frac =
-            self.active_prefill_tokens_threshold_frac.clone();
+        let thresholds = self.thresholds.clone();
 
         // Spawn background monitoring task
         tokio::spawn(async move {
@@ -626,13 +618,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             .or_default()
                             .insert(dp_rank);
 
-                        // Load thresholds dynamically - allows runtime updates
-                        let current_active_decode_blocks_threshold =
-                            Self::scaled_to_f64(active_decode_blocks_threshold.load(Ordering::Relaxed));
-                        let current_active_prefill_tokens_threshold =
-                            active_prefill_tokens_threshold.load(Ordering::Relaxed);
-                        let current_active_prefill_tokens_threshold_frac =
-                            Self::scaled_to_f64(active_prefill_tokens_threshold_frac.load(Ordering::Relaxed));
+                        // Snapshot thresholds once per event — rare writes (HTTP endpoint)
+                        // mean RwLock contention is effectively zero.
+                        let cfg = thresholds.read().unwrap().clone();
 
                         // Update worker load state per dp_rank (for busy detection only)
                         // Note: Prometheus gauges are updated directly by sequence.rs
@@ -640,7 +628,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             let mut state = worker_load_states.entry(worker_id).or_default();
                             state.update_from_active_load(
                                 &active_load,
-                                current_active_decode_blocks_threshold,
+                                cfg.active_decode_blocks_threshold,
                             );
                         }
 
@@ -651,9 +639,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 entry
                                     .value()
                                     .is_busy(
-                                        current_active_decode_blocks_threshold,
-                                        current_active_prefill_tokens_threshold,
-                                        current_active_prefill_tokens_threshold_frac,
+                                        cfg.active_decode_blocks_threshold,
+                                        cfg.active_prefill_tokens_threshold,
+                                        cfg.active_prefill_tokens_threshold_frac,
                                     )
                                     .then_some(*entry.key())
                             })
@@ -771,8 +759,50 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
 #[cfg(test)]
 mod tests {
-    use super::WorkerLoadState;
+    use super::{LoadThresholdConfig, WorkerLoadState};
     use dynamo_kv_router::protocols::ActiveLoad;
+
+    #[test]
+    fn load_threshold_config_default_is_not_configured() {
+        assert!(!LoadThresholdConfig::default().is_configured());
+    }
+
+    #[test]
+    fn load_threshold_config_decode_only_is_configured() {
+        let config = LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.85),
+            ..Default::default()
+        };
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn load_threshold_config_prefill_tokens_only_is_configured() {
+        let config = LoadThresholdConfig {
+            active_prefill_tokens_threshold: Some(10_000),
+            ..Default::default()
+        };
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn load_threshold_config_prefill_frac_only_is_configured() {
+        let config = LoadThresholdConfig {
+            active_prefill_tokens_threshold_frac: Some(0.9),
+            ..Default::default()
+        };
+        assert!(config.is_configured());
+    }
+
+    #[test]
+    fn load_threshold_config_all_set_is_configured() {
+        let config = LoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.85),
+            active_prefill_tokens_threshold: Some(10_000),
+            active_prefill_tokens_threshold_frac: Some(0.9),
+        };
+        assert!(config.is_configured());
+    }
 
     #[test]
     fn is_busy_prefers_kv_used_blocks_over_active_decode_blocks() {
@@ -781,7 +811,7 @@ mod tests {
         state.kv_used_blocks.insert(0, 90);
         state.kv_total_blocks.insert(0, 100);
 
-        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
@@ -790,7 +820,7 @@ mod tests {
         state.active_decode_blocks.insert(0, 90);
         state.kv_total_blocks.insert(0, 100);
 
-        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
@@ -799,7 +829,7 @@ mod tests {
         state.kv_used_blocks.insert(0, 90);
         state.kv_total_blocks.insert(0, 100);
 
-        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
@@ -814,10 +844,10 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
             },
-            0.6,
+            Some(0.6),
         );
 
-        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
@@ -833,9 +863,9 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
             },
-            0.6,
+            Some(0.6),
         );
-        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -845,9 +875,9 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
             },
-            0.6,
+            Some(0.6),
         );
-        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -857,9 +887,9 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
             },
-            0.6,
+            Some(0.6),
         );
-        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(!state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
@@ -875,9 +905,9 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
             },
-            0.6,
+            Some(0.6),
         );
-        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -887,9 +917,9 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
             },
-            0.6,
+            Some(0.6),
         );
-        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(!state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
@@ -905,9 +935,9 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
             },
-            0.6,
+            Some(0.6),
         );
-        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -917,9 +947,9 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
             },
-            0.6,
+            Some(0.6),
         );
-        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(!state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
     #[test]
@@ -935,9 +965,9 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
             },
-            0.6,
+            Some(0.6),
         );
-        assert!(state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -947,8 +977,83 @@ mod tests {
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
             },
-            0.6,
+            Some(0.6),
         );
-        assert!(!state.is_busy(0.6, u64::MAX, 2.0));
+        assert!(!state.is_busy(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
+
+    #[test]
+    fn is_busy_returns_false_when_all_thresholds_are_none() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+        state.active_decode_blocks.insert(0, 99);
+        state.kv_used_blocks.insert(0, 99);
+        state.active_prefill_tokens.insert(0, u64::MAX / 2);
+        state.max_num_batched_tokens.insert(0, 1_000);
+
+        assert!(!state.is_busy(None, None, None));
+    }
+
+    #[test]
+    fn is_busy_with_only_decode_threshold_ignores_prefill_signals() {
+        let mut state = WorkerLoadState::default();
+        state.max_num_batched_tokens.insert(0, 1_000);
+        state.active_prefill_tokens.insert(0, 5_000);
+
+        assert!(!state.is_busy(Some(0.6), None, None));
+    }
+
+    #[test]
+    fn is_busy_with_only_prefill_abs_ignores_decode_latch() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(90),
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            Some(0.6),
+        );
+
+        assert!(!state.is_busy(None, Some(u64::MAX), None));
+    }
+
+    #[test]
+    fn is_busy_with_only_prefill_frac_ignores_decode_latch() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(90),
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            Some(0.6),
+        );
+
+        assert!(!state.is_busy(None, None, Some(2.0)));
+    }
+
+    #[test]
+    fn is_busy_with_only_prefill_abs_fires_when_tokens_exceed_threshold() {
+        let mut state = WorkerLoadState::default();
+        state.active_prefill_tokens.insert(0, 5_000);
+
+        assert!(state.is_busy(None, Some(1_000), None));
+    }
+
+    #[test]
+    fn is_busy_with_only_prefill_frac_fires_when_fraction_exceeded() {
+        let mut state = WorkerLoadState::default();
+        state.max_num_batched_tokens.insert(0, 1_000);
+        state.active_prefill_tokens.insert(0, 2_500);
+
+        assert!(state.is_busy(None, None, Some(2.0)));
+    }
+
 }
