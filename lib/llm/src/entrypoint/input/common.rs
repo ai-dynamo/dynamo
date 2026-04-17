@@ -106,6 +106,7 @@ pub async fn prepare_engine(
                 model_manager.clone(),
                 RouterConfig::default(),
                 local_model.migration_limit(),
+                local_model.migration_max_seq_len(),
                 None,
                 prefill_load_estimator,
                 metrics,
@@ -135,7 +136,26 @@ pub async fn prepare_engine(
 
             let model_service_name = watch_obj.wait_for_chat_model().await;
             tracing::info!("Connected to {model_service_name}");
-            let engine = model_manager.get_chat_completions_engine(&model_service_name)?;
+            // In disaggregated deployments the model may be listed before the prefill
+            // router is fully activated, causing a transient ModelUnavailable. Retry
+            // with a timeout so the startup path doesn't fail during this cold-start
+            // window, but also doesn't hang indefinitely on misconfiguration.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+            let engine = loop {
+                match model_manager.get_chat_completions_engine(&model_service_name) {
+                    Ok(engine) => break engine,
+                    Err(crate::discovery::ModelManagerError::ModelUnavailable(_))
+                        if tokio::time::Instant::now() < deadline =>
+                    {
+                        tracing::debug!(
+                            model = %model_service_name,
+                            "Model listed but not yet servable, waiting for prefill activation"
+                        );
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
             Ok(PreparedEngine {
                 service_name: model_service_name,
                 engine,
@@ -221,6 +241,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -250,6 +271,7 @@ where
         prefill_chooser,
         enforce_disagg,
         migration_limit,
+        migration_max_seq_len,
         metrics,
     )
     .await
@@ -268,6 +290,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -283,7 +306,8 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
-    let migration = Migration::from_mdc(card, migration_limit, metrics).into_operator();
+    let migration =
+        Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics).into_operator();
     let min_initial_workers = min_initial_workers_from_env()?;
 
     // For KV routing, use the client from the chooser to ensure shared state
@@ -328,7 +352,8 @@ where
         RouterMode::Random
         | RouterMode::RoundRobin
         | RouterMode::PowerOfTwoChoices
-        | RouterMode::LeastLoaded => ServiceBackend::from_engine(Arc::new(router)),
+        | RouterMode::LeastLoaded
+        | RouterMode::DeviceAwareWeighted => ServiceBackend::from_engine(Arc::new(router)),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");

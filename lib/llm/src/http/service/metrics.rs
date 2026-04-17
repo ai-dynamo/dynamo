@@ -36,12 +36,20 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
+/// Check whether an error chain indicates the request was cancelled.
+pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
+    const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
+    const NON_CANCELLATION: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;
 
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+const UNSET_DP_RANK_LABEL: &str = "none";
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -265,6 +273,7 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
 }
@@ -365,6 +374,8 @@ pub enum ErrorType {
     Overload,
     /// Request cancelled by client or timeout
     Cancelled,
+    /// Backend accepted the request but stopped responding (response inactivity timeout)
+    ResponseTimeout,
     /// Internal server error (500 and other unexpected errors)
     Internal,
     /// Feature not implemented (501)
@@ -510,7 +521,7 @@ impl Metrics {
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
         let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 256.0, 10);
+            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -681,6 +692,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_max_seq_len_exceeded_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL),
+                "Total number of times migration was disabled by max_seq_len limit",
+            ),
+            &["model"],
+        )
+        .unwrap();
+
         let model_cancellation_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_CANCELLATION_TOTAL),
@@ -719,6 +739,7 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
         }
@@ -825,6 +846,9 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(
+            self.model_migration_max_seq_len_exceeded_total.clone(),
+        ))?;
         registry.register(Box::new(self.model_cancellation_total.clone()))?;
         registry.register(Box::new(self.model_rejection_total.clone()))?;
 
@@ -907,6 +931,20 @@ impl Metrics {
     pub fn get_migration_ongoing_request_count(&self, model: &str) -> u64 {
         self.model_migration_total
             .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .get()
+    }
+
+    /// Increment the counter for migrations disabled by max_seq_len being exceeded
+    pub fn inc_migration_max_seq_len_exceeded(&self, model: &str) {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
+            .inc();
+    }
+
+    /// Get the current count of migrations disabled by max_seq_len being exceeded
+    pub fn get_migration_max_seq_len_exceeded_count(&self, model: &str) -> u64 {
+        self.model_migration_max_seq_len_exceeded_total
+            .with_label_values(&[model])
             .get()
     }
 
@@ -1089,6 +1127,7 @@ impl Drop for InflightGuard {
             Status::Error => {
                 let detail = match self.error_type {
                     ErrorType::Cancelled => "cancelled before completion",
+                    ErrorType::ResponseTimeout => "backend stream inactivity timeout",
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
                     ErrorType::NotFound => "model or resource not found",
@@ -1187,6 +1226,7 @@ impl ErrorType {
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
             ErrorType::Overload => frontend_service::error_type::OVERLOAD,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
+            ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
             ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
         }
@@ -1342,7 +1382,7 @@ impl ResponseMetricCollector {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .prefill_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .prefill_worker_type
                     .as_deref()
@@ -1385,7 +1425,7 @@ impl ResponseMetricCollector {
                 let worker_id_str = worker_id.to_string();
                 let dp_rank_str = self
                     .decode_dp_rank
-                    .map_or("0".to_string(), |r| r.to_string());
+                    .map_or(UNSET_DP_RANK_LABEL.to_string(), |r| r.to_string());
                 let worker_type = self
                     .decode_worker_type
                     .as_deref()
@@ -1411,11 +1451,17 @@ impl Drop for ResponseMetricCollector {
                 .observe(avg_detokenize_latency_ms);
         }
 
-        // Publish final OSL when the collector is dropped
-        self.metrics
-            .output_sequence_length
-            .with_label_values(&[&self.model])
-            .observe(self.osl as f64);
+        // Publish final OSL when the collector is dropped, but only for
+        // requests that actually produced output tokens. Recording zero for
+        // failed/cancelled requests would corrupt histogram averages (sum/count)
+        // and percentiles. Failures are already tracked by requests_total with
+        // status and error_type labels.
+        if self.osl > 0 {
+            self.metrics
+                .output_sequence_length
+                .with_label_values(&[&self.model])
+                .observe(self.osl as f64);
+        }
 
         // Record request summary on the enclosing span.
         // InflightGuard::Drop and on_response logs will inherit these.
@@ -2214,6 +2260,7 @@ mod tests {
         assert_eq!(ErrorType::NotFound.as_str(), "not_found");
         assert_eq!(ErrorType::Overload.as_str(), "overload");
         assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
+        assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
         assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
     }
@@ -2323,6 +2370,7 @@ mod tests {
             ErrorType::NotFound,
             ErrorType::Overload,
             ErrorType::Cancelled,
+            ErrorType::ResponseTimeout,
             ErrorType::Internal,
             ErrorType::NotImplemented,
         ];

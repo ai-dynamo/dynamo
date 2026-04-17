@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+try:
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+except ImportError:
+    pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )

@@ -11,7 +11,8 @@ use dynamo_kv_router::{
     config::KvRouterConfig,
     indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError},
     protocols::{
-        LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId, WorkerWithDpRank,
+        DpRank, LocalBlockHash, OverlapScores, RouterEvent, TokensWithHashes, WorkerId,
+        WorkerWithDpRank,
     },
 };
 use dynamo_runtime::{component::Component, traits::DistributedRuntimeProvider};
@@ -82,11 +83,15 @@ impl Indexer {
         }
 
         if kv_router_config.router_event_threads > 1 {
-            return Ok(Self::Concurrent(Arc::new(ThreadPoolIndexer::new(
-                ConcurrentRadixTreeCompressed::new(),
-                kv_router_config.router_event_threads as usize,
-                block_size,
-            ))));
+            let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
+            return Ok(Self::Concurrent(Arc::new(
+                ThreadPoolIndexer::new_with_metrics(
+                    ConcurrentRadixTreeCompressed::new(),
+                    kv_router_config.router_event_threads as usize,
+                    block_size,
+                    Some(kv_indexer_metrics),
+                ),
+            )));
         }
 
         let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
@@ -202,6 +207,18 @@ impl Indexer {
             }
             Self::Concurrent(tpi) => {
                 KvIndexerInterface::remove_worker(tpi.as_ref(), worker_id).await;
+            }
+            Self::Remote(_) | Self::None => {}
+        }
+    }
+
+    pub(crate) async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
+        match self {
+            Self::KvIndexer(indexer) => {
+                KvIndexerInterface::remove_worker_dp_rank(indexer, worker_id, dp_rank).await;
+            }
+            Self::Concurrent(tpi) => {
+                KvIndexerInterface::remove_worker_dp_rank(tpi.as_ref(), worker_id, dp_rank).await;
             }
             Self::Remote(_) | Self::None => {}
         }

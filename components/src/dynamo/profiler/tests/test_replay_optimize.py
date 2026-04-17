@@ -11,7 +11,10 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
+try:
+    from dynamo.llm import KvRouterConfig, MockEngineArgs
+except ImportError:
+    pytest.skip("dynamo.llm bindings not available", allow_module_level=True)
 from dynamo.profiler.utils import replay_optimize
 from dynamo.profiler.utils.replay_optimize import (
     DenseAggReplayState,

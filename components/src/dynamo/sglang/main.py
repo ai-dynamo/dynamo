@@ -50,7 +50,10 @@ async def worker():
         (
             dynamo_args.namespace,
             dynamo_args.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity()
+        ) = snapshot_controller.reload_restore_identity(
+            dynamo_args.namespace,
+            dynamo_args.discovery_backend,
+        )
 
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
@@ -58,7 +61,6 @@ async def worker():
         discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
-        use_kv_events=dynamo_args.use_kv_events,
     )
 
     run_deferred_handlers = install_graceful_shutdown(

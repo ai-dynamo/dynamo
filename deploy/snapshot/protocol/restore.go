@@ -6,6 +6,7 @@ package protocol
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -38,10 +39,23 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) *corev1.Pod {
 		pod.Annotations = map[string]string{}
 	}
 	ApplyRestoreTargetMetadata(pod.Labels, pod.Annotations, true, opts.CheckpointID, opts.ArtifactVersion)
-	PrepareRestorePodSpec(&pod.Spec, &pod.Spec.Containers[0], opts.Storage, opts.SeccompProfile, true)
+	container := resolveWorkerContainer(&pod.Spec)
+	if container == nil {
+		return nil
+	}
+	PrepareRestorePodSpec(&pod.Spec, container, opts.Storage, opts.SeccompProfile, true)
 	pod.Namespace = opts.Namespace
 	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
 	return pod
+}
+
+// resolveWorkerContainer returns the workload container, which is always
+// Containers[0]. GMS sidecars are appended after the workload.
+func resolveWorkerContainer(podSpec *corev1.PodSpec) *corev1.Container {
+	if podSpec == nil || len(podSpec.Containers) == 0 {
+		return nil
+	}
+	return &podSpec.Containers[0]
 }
 
 func PrepareRestorePodSpec(
@@ -53,7 +67,7 @@ func PrepareRestorePodSpec(
 ) {
 	EnsureLocalhostSeccompProfile(podSpec, seccompProfile)
 	if storage.PVCName != "" {
-		injectCheckpointVolume(podSpec, storage.PVCName)
+		InjectCheckpointVolume(podSpec, storage.PVCName)
 	}
 	if storage.BasePath != "" {
 		injectCheckpointVolumeMount(container, storage.BasePath)
@@ -61,10 +75,26 @@ func PrepareRestorePodSpec(
 	if isCheckpointReady {
 		container.Command = []string{"sleep", "infinity"}
 		container.Args = nil
-		container.StartupProbe = nil
-		container.LivenessProbe = nil
-		container.ReadinessProbe = nil
+		ensureRestoreStartupProbe(container)
 	}
+}
+
+func ensureRestoreStartupProbe(container *corev1.Container) {
+	startup := container.StartupProbe
+	if startup == nil {
+		startup = container.LivenessProbe
+		if startup == nil {
+			startup = container.ReadinessProbe
+		}
+	}
+	if startup == nil {
+		return
+	}
+
+	startup = startup.DeepCopy()
+	startup.FailureThreshold = math.MaxInt32
+	startup.SuccessThreshold = 1
+	container.StartupProbe = startup
 }
 
 func ValidateRestorePodSpec(
@@ -75,10 +105,10 @@ func ValidateRestorePodSpec(
 	if podSpec == nil {
 		return fmt.Errorf("pod spec is nil")
 	}
-	if len(podSpec.Containers) != 1 {
-		return fmt.Errorf("restore target must have exactly one container, got %d", len(podSpec.Containers))
+	container := resolveWorkerContainer(podSpec)
+	if container == nil {
+		return fmt.Errorf("restore target must have at least one container")
 	}
-	container := &podSpec.Containers[0]
 	if storage.PVCName != "" {
 		hasVolume := false
 		for _, volume := range podSpec.Volumes {
@@ -173,6 +203,38 @@ func DiscoverStorageFromDaemonSets(namespace string, daemonSets []appsv1.DaemonS
 	)
 }
 
+// DiscoverAndResolveStorage lists snapshot-agent DaemonSets in the given
+// namespace, discovers the shared storage configuration, and resolves the
+// checkpoint-specific path for the given checkpoint ID and artifact version.
+func DiscoverAndResolveStorage(
+	ctx context.Context,
+	reader ctrlclient.Reader,
+	namespace string,
+	checkpointID string,
+	artifactVersion string,
+) (Storage, error) {
+	if reader == nil {
+		return Storage{}, fmt.Errorf("snapshot client is required")
+	}
+
+	daemonSets := &appsv1.DaemonSetList{}
+	if err := reader.List(
+		ctx,
+		daemonSets,
+		ctrlclient.InNamespace(namespace),
+		ctrlclient.MatchingLabels{SnapshotAgentLabelKey: SnapshotAgentLabelValue},
+	); err != nil {
+		return Storage{}, fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
+	}
+
+	storage, err := DiscoverStorageFromDaemonSets(namespace, daemonSets.Items)
+	if err != nil {
+		return Storage{}, err
+	}
+
+	return ResolveCheckpointStorage(checkpointID, artifactVersion, storage)
+}
+
 func PrepareRestorePodSpecForCheckpoint(
 	ctx context.Context,
 	reader ctrlclient.Reader,
@@ -184,35 +246,19 @@ func PrepareRestorePodSpecForCheckpoint(
 	seccompProfile string,
 	isCheckpointReady bool,
 ) error {
-	if reader == nil {
-		return fmt.Errorf("snapshot client is required")
-	}
-
-	daemonSets := &appsv1.DaemonSetList{}
-	if err := reader.List(
-		ctx,
-		daemonSets,
-		ctrlclient.InNamespace(namespace),
-		ctrlclient.MatchingLabels{SnapshotAgentLabelKey: SnapshotAgentLabelValue},
-	); err != nil {
-		return fmt.Errorf("list snapshot-agent daemonsets in %s: %w", namespace, err)
-	}
-
-	storage, err := DiscoverStorageFromDaemonSets(namespace, daemonSets.Items)
+	storage, err := DiscoverAndResolveStorage(ctx, reader, namespace, checkpointID, artifactVersion)
 	if err != nil {
 		return err
 	}
 
-	resolvedStorage, err := ResolveCheckpointStorage(checkpointID, artifactVersion, storage)
-	if err != nil {
-		return err
-	}
-
-	PrepareRestorePodSpec(podSpec, container, resolvedStorage, seccompProfile, isCheckpointReady)
+	PrepareRestorePodSpec(podSpec, container, storage, seccompProfile, isCheckpointReady)
 	return nil
 }
 
-func injectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
+// InjectCheckpointVolume adds the checkpoint PVC volume to the pod spec if
+// not already present. Used by both the snapshot protocol and the operator's
+// GMS checkpoint wiring.
+func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 	for _, volume := range podSpec.Volumes {
 		if volume.Name == CheckpointVolumeName {
 			return

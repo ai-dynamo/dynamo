@@ -124,6 +124,10 @@ var (
 	routerHandlesMutex sync.RWMutex
 )
 
+// UnsetDpRank is the ABI sentinel used by the Rust C bindings when a prefill
+// route selected a worker but left the DP rank unresolved.
+const UnsetDpRank = ^uint32(0)
+
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE_PREFIX", getEnvOrDefault("DYN_NAMESPACE", "vllm-agg"))
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
