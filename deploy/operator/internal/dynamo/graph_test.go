@@ -1490,6 +1490,13 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														},
 													},
 												},
+												Lifecycle: &corev1.Lifecycle{
+													PreStop: &corev1.LifecycleHandler{
+														Exec: &corev1.ExecAction{
+															Command: []string{"sh", "-c", "sleep 10"},
+														},
+													},
+												},
 												Env: []corev1.EnvVar{
 													{
 														Name:  "DYN_HTTP_PORT",
@@ -2488,6 +2495,13 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														},
 													},
 												},
+												Lifecycle: &corev1.Lifecycle{
+													PreStop: &corev1.LifecycleHandler{
+														Exec: &corev1.ExecAction{
+															Command: []string{"sh", "-c", "sleep 10"},
+														},
+													},
+												},
 												Env: []corev1.EnvVar{
 													{
 														Name:  "DYN_HTTP_PORT",
@@ -3483,6 +3497,13 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														HTTPGet: &corev1.HTTPGetAction{
 															Path: "/ready",
 															Port: intstr.FromInt(8080),
+														},
+													},
+												},
+												Lifecycle: &corev1.Lifecycle{
+													PreStop: &corev1.LifecycleHandler{
+														Exec: &corev1.ExecAction{
+															Command: []string{"sh", "-c", "sleep 10"},
 														},
 													},
 												},

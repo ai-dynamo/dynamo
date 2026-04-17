@@ -39,6 +39,21 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 		},
 	}
 
+	// Add a default preStop hook to allow time for endpoint propagation during
+	// rolling updates. Without this, the frontend process begins shutdown on SIGTERM
+	// while proxies (e.g., Kong, NGINX) still route traffic to the terminating pod,
+	// causing 502 errors on non-streaming requests and mid-stream truncations on
+	// streaming ones. The 10-second sleep gives kube-proxy / endpoint controllers
+	// enough time to remove the pod from service endpoints before shutdown begins.
+	// Users can override this via extraPodSpec.mainContainer.lifecycle.
+	container.Lifecycle = &corev1.Lifecycle{
+		PreStop: &corev1.LifecycleHandler{
+			Exec: &corev1.ExecAction{
+				Command: []string{"sh", "-c", "sleep 10"},
+			},
+		},
+	}
+
 	// Add frontend-specific defaults
 	container.LivenessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
