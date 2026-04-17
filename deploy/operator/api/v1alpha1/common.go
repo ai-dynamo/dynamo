@@ -161,7 +161,10 @@ type GPUMemoryServiceMode string
 const (
 	// GMSModeIntraPod runs GMS as a sidecar within the same pod.
 	GMSModeIntraPod GPUMemoryServiceMode = "intraPod"
-	// GMSModeInterPod runs GMS as a separate pod (not yet supported).
+	// GMSModeInterPod runs GMS as a separate weight server pod and one or more
+	// engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared
+	// hostPath volume for UDS sockets. Only valid on FailoverSpec; the
+	// GPUMemoryServiceSpec sidecar always runs in intraPod mode.
 	GMSModeInterPod GPUMemoryServiceMode = "interPod"
 )
 

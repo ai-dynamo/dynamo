@@ -1471,6 +1471,18 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		}
 	}
 
+	// minAvailable controls Grove gang-scheduling: the clique is only considered
+	// available when at least this many replicas are Ready.
+	//
+	// Multinode cliques (NCCL-connected ranks of the same engine) are gang-
+	// scheduled — losing any replica breaks the collective, so minAvailable
+	// must equal Replicas.
+	//
+	// Single-node cliques (including inter-pod failover, where Replicas =
+	// primary + shadows) tolerate minAvailable = 1: shadows are by definition
+	// redundant hot spares and any one of them can service traffic alone. Do
+	// NOT "unify" this to Replicas for failover cliques — that would defeat
+	// the purpose of the shadows and block recovery.
 	minAvailable := int32(1)
 	if p.isMultinode {
 		minAvailable = p.r.Replicas
@@ -1498,9 +1510,16 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	if p.isInterPodFailover && p.r.Role != RoleGMS {
 		clique.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
 	}
-	if p.discoveryBackend == configv1alpha1.DiscoveryBackendKubernetes && (p.r.Role == RoleMain || p.r.Role == RoleLeader) {
-		clique.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
-		clique.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	// Strip discovery labels from RoleGMS pods. generateLabels applies them
+	// unconditionally to every role for container-mode Pod reflector filtering
+	// (see #8067), but GMS weight-server pods run gpu_memory_service.cli.server
+	// — not the dynamo runtime — and never register a DynamoWorkerMetadata CR.
+	// Leaving the labels on them would make the Rust discovery daemon include
+	// them in its reflector store for no purpose and wake its debounce loop on
+	// every GMS restart/fast-kill event.
+	if p.r.Role == RoleGMS {
+		delete(clique.Labels, commonconsts.KubeLabelDynamoDiscoveryBackend)
+		delete(clique.Labels, commonconsts.KubeLabelDynamoDiscoveryEnabled)
 	}
 
 	annotations, err := generateAnnotations(p.component)
@@ -1769,7 +1788,15 @@ func generateLabels(
 	if workerHash := component.Labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
-	// Discovery labels on pod template — needed for Pod reflector filtering in container mode
+	// Discovery labels on pod template — needed for Pod reflector filtering in
+	// container mode (see lib/runtime/src/discovery/kube/daemon.rs). Applied to
+	// every role by default because any role may host the dynamo runtime — for
+	// example, multinode vLLM workers in data-parallel hybrid-lb mode run their
+	// own API server (see RoleWorker branch in injectDataParallelLaunchFlags).
+	// Callers that render non-dynamo pods (specifically the RoleGMS weight
+	// server, which runs gpu_memory_service.cli.server and never registers a
+	// DynamoWorkerMetadata CR) are responsible for stripping these labels after
+	// the fact — see renderClique.
 	if discovery.Backend == configv1alpha1.DiscoveryBackendKubernetes {
 		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = commonconsts.DiscoveryBackendKubernetes
 		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue

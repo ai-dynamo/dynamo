@@ -43,6 +43,11 @@ const (
 	// Pod names follow formats like: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
 	// The random string and hyphens consume additional characters, leaving 45 for the resource names.
 	maxCombinedResourceNameLength = 45
+
+	// backendFrameworkVLLM is the spec.backendFramework value that identifies
+	// a vLLM deployment. Duplicated here (instead of importing from
+	// internal/dynamo) to avoid a webhook -> dynamo import cycle.
+	backendFrameworkVLLM = "vllm"
 )
 
 // DynamoGraphDeploymentValidator validates DynamoGraphDeployment resources.
@@ -306,7 +311,26 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
 	// GMS failover requires the Grove pathway
 	if service.IsInterPodFailoverEnabled() && !v.isGrovePathway() {
-		return nil, fmt.Errorf("spec.services[%s]: GMS failover requires the Grove pathway (nvidia.com/enable-grove must not be \"false\")", serviceName)
+		if !v.groveEnabled {
+			return nil, fmt.Errorf(
+				"spec.services[%s]: GMS failover requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
+				serviceName)
+		}
+		return nil, fmt.Errorf(
+			"spec.services[%s]: GMS failover requires the Grove pathway; remove or unset the %q annotation (currently %q)",
+			serviceName, consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
+	}
+
+	// Inter-pod GMS failover is currently implemented only for vLLM (the engine
+	// relies on vLLM-specific runtime hooks like --load-format gms and
+	// DYN_VLLM_GMS_SHADOW_MODE). Fail fast at admission rather than producing a
+	// broken deployment when another backend is configured.
+	if service.IsInterPodFailoverEnabled() &&
+		v.deployment.Spec.BackendFramework != "" &&
+		v.deployment.Spec.BackendFramework != backendFrameworkVLLM {
+		return nil, fmt.Errorf(
+			"spec.services[%s]: inter-pod GMS failover is currently supported only for vLLM (detected: %s)",
+			serviceName, v.deployment.Spec.BackendFramework)
 	}
 
 	// Validate service name length constraints for Grove PodCliqueSet naming

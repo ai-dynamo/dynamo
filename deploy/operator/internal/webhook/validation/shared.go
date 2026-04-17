@@ -267,6 +267,27 @@ func (v *SharedSpecValidator) validateFrontendSidecar() error {
 	return nil
 }
 
+// parseGPUCount extracts the GPU count from a Resources block, preferring
+// Limits then Requests. Returns (0, nil) when no GPU is requested, or an
+// error if the value is non-numeric.
+func parseGPUCount(r *nvidiacomv1alpha1.Resources) (int, error) {
+	gpuStr := ""
+	switch {
+	case r != nil && r.Limits != nil && r.Limits.GPU != "":
+		gpuStr = r.Limits.GPU
+	case r != nil && r.Requests != nil && r.Requests.GPU != "":
+		gpuStr = r.Requests.GPU
+	}
+	if gpuStr == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(gpuStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid value %q: %w", gpuStr, err)
+	}
+	return n, nil
+}
+
 // validateFailover validates GMS failover configuration constraints.
 func (v *SharedSpecValidator) validateFailover() error {
 	if v.spec.Failover == nil || !v.spec.Failover.Enabled {
@@ -295,13 +316,10 @@ func (v *SharedSpecValidator) validateFailover() error {
 			errs = append(errs, fmt.Errorf("%s.failover.numShadows must be >= 1", v.fieldPath))
 		}
 
-		gpuCount := int64(0)
-		if v.spec.Resources != nil && v.spec.Resources.Limits != nil && v.spec.Resources.Limits.GPU != "" {
-			if n, err := strconv.ParseInt(v.spec.Resources.Limits.GPU, 10, 32); err == nil {
-				gpuCount = n
-			}
-		}
-		if gpuCount < 1 {
+		gpuCount, err := parseGPUCount(v.spec.Resources)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s.resources.limits.gpu: %w", v.fieldPath, err))
+		} else if gpuCount < 1 {
 			errs = append(errs, fmt.Errorf("%s: GMS failover requires at least 1 GPU in resources.limits.gpu", v.fieldPath))
 		}
 
@@ -328,27 +346,7 @@ func (v *SharedSpecValidator) validateGPUMemoryService() error {
 			v.fieldPath)
 	}
 
-	if v.spec.Resources == nil {
-		return fmt.Errorf(
-			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
-			v.fieldPath)
-	}
-
-	gpuStr := ""
-	switch {
-	case v.spec.Resources.Limits != nil && v.spec.Resources.Limits.GPU != "":
-		gpuStr = v.spec.Resources.Limits.GPU
-	case v.spec.Resources.Requests != nil && v.spec.Resources.Requests.GPU != "":
-		gpuStr = v.spec.Resources.Requests.GPU
-	}
-
-	if gpuStr == "" {
-		return fmt.Errorf(
-			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
-			v.fieldPath)
-	}
-
-	gpuCount, err := strconv.Atoi(gpuStr)
+	gpuCount, err := parseGPUCount(v.spec.Resources)
 	if err != nil || gpuCount < 1 {
 		return fmt.Errorf(
 			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",

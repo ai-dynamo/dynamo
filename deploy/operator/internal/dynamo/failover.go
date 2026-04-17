@@ -52,17 +52,20 @@ const (
 // (gpu_memory_service.cli.server), which auto-discovers DRA-allocated GPUs
 // and exposes both "weights" and "kv_cache" UDS sockets per device. The
 // wrapper cleans up stale sockets from a previous run, forwards SIGTERM/SIGINT
-// to the process group, and exits when the server process exits so Kubernetes
-// can restart the pod.
+// to the process group, and propagates the GMS server's exit code so the
+// container's exitCode in the Pod status reflects the actual failure mode
+// (rather than always being 1).
 func gmsWrapperScript() string {
 	return fmt.Sprintf(
 		`rm -f %s/gms_*.sock
-cleanup() { kill -- -$$ 2>/dev/null; exit 1; }
+rc=1
+cleanup() { kill -- -$$ 2>/dev/null; exit "$rc"; }
 trap cleanup SIGTERM SIGINT
 python3 -m %s &
 echo "Started GMS server pid=$!"
 wait -n
-echo "GMS server exited, shutting down"
+rc=$?
+echo "GMS server exited (code=$rc), shutting down"
 cleanup`, gmsSharedMountPath, gmsruntime.ServerModule)
 }
 
@@ -93,6 +96,16 @@ func applyGMSSharedResources(podSpec *corev1.PodSpec, c *corev1.Container, rank 
 // modifying a base engine pod spec. The GMS pod runs a different command,
 // has no liveness/readiness probes, and uses a startup probe that checks
 // for the expected number of GMS UDS sockets.
+//
+// RestartPolicy is intentionally left unset here (i.e. inherits the base /
+// Grove default, which is Always). A GMS server process holds only local
+// state — GPU allocations (via DRA, which survive the container), hostPath
+// UDS sockets (recreated by gmsWrapperScript on startup), and in-memory
+// weight buffers (re-sharded on reconnection by the engine clients). So an
+// in-place kubelet restart is a fast, correct recovery path.
+//
+// This is DELIBERATELY asymmetric with augmentEngineForGMS, which forces
+// RestartPolicyNever for engine pods — see the comment there.
 func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount int) *corev1.PodSpec {
 	podSpec := basePodSpec.DeepCopy()
 	if len(podSpec.Containers) == 0 {
@@ -146,6 +159,20 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 // augmentEngineForGMS modifies an engine pod spec in-place to work with GMS failover:
 // injects env vars, shared volume, strips GPU limits, adds toleration, and
 // prepends an init container to fix hostPath directory permissions.
+//
+// RestartPolicy is forced to Never — DO NOT change this. Engine pods hold
+// distributed state that cannot survive an in-place container restart:
+// active NCCL collectives, CUDA IPC handles to weight buffers shared with the
+// GMS server, torch.distributed TCPStore membership, and shadow/primary
+// coordination via DYN_VLLM_GMS_SHADOW_MODE. An in-place restart here leaves
+// the cohort in a half-torn-down state (partial NCCL group, stale IPC handles,
+// dangling UDS file descriptors on the shared hostPath) and blocks recovery.
+// The correct recovery path is for the pod to exit, FailoverCascadeReconciler
+// to force-delete the full engine group (see failover_cascade_controller.go),
+// and Grove to recreate the cohort from scratch.
+//
+// This is DELIBERATELY asymmetric with gmsWeightServerPodSpec, which leaves
+// RestartPolicy at the default (Always) — see the comment there.
 func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32) {
 	if len(podSpec.Containers) == 0 {
 		return

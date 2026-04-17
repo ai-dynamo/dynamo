@@ -43,6 +43,27 @@ func shellQuoteForBashC(s string) string {
 	return s
 }
 
+// containerHasArg reports whether the container already carries the given
+// flag/value pair in its Args (either as adjacent tokens "flag", "value" or
+// as a single token "flag=value" or "flag value" embedded inside a shell
+// string). It is used to make flag injection idempotent.
+func containerHasArg(container *corev1.Container, flag, value string) bool {
+	if container == nil {
+		return false
+	}
+	joined := flag + " " + value
+	equals := flag + "=" + value
+	for i, arg := range container.Args {
+		if strings.Contains(arg, joined) || strings.Contains(arg, equals) {
+			return true
+		}
+		if arg == flag && i+1 < len(container.Args) && container.Args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, needsShell bool, framework string) {
 	if len(container.Command) > 0 && isPythonCommand(container.Command[0]) {
 		// Direct python command case

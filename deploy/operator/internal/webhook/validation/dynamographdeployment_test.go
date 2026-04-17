@@ -822,6 +822,34 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:      "GMS failover requires the Grove pathway",
 		},
 		{
+			name:         "GMS failover rejected on non-vLLM backend",
+			groveEnabled: true,
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gms",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "sglang",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							Failover: &nvidiacomv1alpha1.FailoverSpec{
+								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+								NumShadows: 1,
+							},
+							Resources: &nvidiacomv1alpha1.Resources{
+								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "inter-pod GMS failover is currently supported only for vLLM",
+		},
+		{
 			name: "GMS failover disabled is valid without GPU",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{

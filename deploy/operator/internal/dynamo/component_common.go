@@ -148,10 +148,9 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	}
 
 	if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  "CONTAINER_NAME",
-			Value: container.Name,
-		})
+		// CONTAINER_NAME is already injected unconditionally above with
+		// MainContainerName (which equals container.Name here); do not append
+		// it again or we end up with two env entries of the same name.
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "DYN_KUBE_DISCOVERY_MODE",
 			Value: string(configv1alpha1.KubeDiscoveryModeContainer),

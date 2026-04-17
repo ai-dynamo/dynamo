@@ -420,9 +420,14 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 
 		var isReady bool
 		var reason string
-		if component.GetNumberOfNodes() > 1 {
+		// Keep in sync with reconcileGroveScaling: any service that requires a
+		// PodCliqueScalingGroup (multinode OR inter-pod GMS failover) must be
+		// queried via CheckPCSGReady, otherwise single-node GMS services stall
+		// in the "in progress" list because the corresponding PodClique never
+		// exists.
+		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodFailoverEnabled()
+		if usesPCSG {
 			isReady, reason, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
-
 		} else {
 			isReady, reason, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		}
@@ -670,9 +675,16 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 			}
 		}
 	} else {
+		// Both the GMS sidecar (gpuMemoryService.enabled=true) and inter-pod GMS
+		// failover (failover.mode=interPod) allocate GPUs via DRA
+		// ResourceClaims. Without DRA, pods would be admitted by the webhook
+		// but silently reference ResourceClaimTemplates that reconcile never
+		// creates, producing a confusing "resourceclaim not found" at schedule
+		// time. Fail fast here so the user gets an actionable error.
 		for _, component := range dynamoDeployment.Spec.Services {
-			if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
-				return ReconcileResult{}, fmt.Errorf("gpuMemoryService requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
+			if (component.GPUMemoryService != nil && component.GPUMemoryService.Enabled) ||
+				component.IsInterPodFailoverEnabled() {
+				return ReconcileResult{}, fmt.Errorf("gpuMemoryService / inter-pod GMS failover requires DRA (Dynamic Resource Allocation), but the resource.k8s.io API group is not available on this cluster (requires Kubernetes 1.32+)")
 			}
 		}
 	}

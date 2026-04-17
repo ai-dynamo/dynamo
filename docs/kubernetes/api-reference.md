@@ -864,7 +864,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `intraPod` | GMSModeIntraPod runs GMS as a sidecar within the same pod.<br /> |
-| `interPod` | GMSModeInterPod runs GMS as a separate pod (not yet supported).<br /> |
+| `interPod` | GMSModeInterPod runs GMS as a separate weight server pod and one or more<br />engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared<br />hostPath volume for UDS sockets. Only valid on FailoverSpec; the<br />GPUMemoryServiceSpec sidecar always runs in intraPod mode.<br /> |
 
 
 #### GPUMemoryServiceSpec

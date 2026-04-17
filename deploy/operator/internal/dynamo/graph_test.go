@@ -7141,6 +7141,70 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 	assert.Equal(t, "workerhash", labels[commonconsts.KubeLabelDynamoWorkerHash])
 }
 
+// TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels pins the
+// contract that inter-pod GMS weight-server cliques (RoleGMS) do NOT carry
+// the kubernetes discovery labels, while engine cliques (RoleMain / RoleLeader
+// / RoleWorker) do — the latter matches the behavior introduced by
+// #8067 "per-container kube discovery for multi-engine pods". The Rust
+// discovery daemon (lib/runtime/src/discovery/kube/daemon.rs) uses these
+// labels as a reflector filter; GMS pods run gpu_memory_service.cli.server,
+// not the dynamo runtime, and never register a DynamoWorkerMetadata CR, so
+// they must be excluded to avoid reflector-store bloat and spurious wake-ups.
+func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "test-ns",
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"decode": {
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(1)),
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+					Failover: &v1alpha1.FailoverSpec{
+						Enabled:    true,
+						Mode:       v1alpha1.GMSModeInterPod,
+						NumShadows: 1,
+					},
+				},
+			},
+		},
+	}
+
+	controllerConfig := &configv1alpha1.OperatorConfiguration{
+		Discovery: configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
+		Infrastructure: configv1alpha1.InfrastructureConfiguration{
+			ETCDAddress: "etcd-address",
+			NATSAddress: "nats-address",
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, &controller_common.RuntimeConfig{DRAEnabled: true}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	var sawGMS, sawEngine bool
+	for _, clique := range got.Spec.Template.Cliques {
+		_, hasBackend := clique.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend]
+		_, hasEnabled := clique.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled]
+		if strings.Contains(clique.Name, "gms") {
+			sawGMS = true
+			assert.False(t, hasBackend, "GMS clique %q must not carry KubeLabelDynamoDiscoveryBackend", clique.Name)
+			assert.False(t, hasEnabled, "GMS clique %q must not carry KubeLabelDynamoDiscoveryEnabled", clique.Name)
+		} else {
+			sawEngine = true
+			assert.True(t, hasBackend, "engine clique %q must carry KubeLabelDynamoDiscoveryBackend (#8067 contract)", clique.Name)
+			assert.True(t, hasEnabled, "engine clique %q must carry KubeLabelDynamoDiscoveryEnabled (#8067 contract)", clique.Name)
+		}
+	}
+	assert.True(t, sawGMS, "test setup should produce at least one GMS clique")
+	assert.True(t, sawEngine, "test setup should produce at least one engine clique")
+}
+
 func TestIsWorkerComponent(t *testing.T) {
 	workers := []string{commonconsts.ComponentTypeWorker, commonconsts.ComponentTypePrefill, commonconsts.ComponentTypeDecode}
 	nonWorkers := []string{commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner, commonconsts.ComponentTypeEPP, "custom", ""}

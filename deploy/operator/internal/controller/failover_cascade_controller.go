@@ -114,6 +114,12 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		groveLabelPodIndex:         podIndex,
 	}
 
+	// Force delete (grace=0) intentionally: the distributed inference group is
+	// already broken when we get here, so giving the surviving engines a SIGTERM
+	// window only delays Grove's recreation of the cohort and risks leaving
+	// half-torn-down NCCL/CUDA IPC state and stale UDS sockets on the shared
+	// hostPath. We deliberately skip preStop hooks and the graceful shutdown
+	// window; do NOT soften this to a positive grace period.
 	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace), groupLabels, client.GracePeriodSeconds(0)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to cascade-delete engine group: %w", err)
 	}
