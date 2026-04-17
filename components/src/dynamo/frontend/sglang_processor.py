@@ -32,6 +32,9 @@ from dynamo.runtime import DistributedRuntime
 
 from .sglang_prepost import (
     SglangStreamingPostProcessor,
+    ToolCallParserType,
+    _get_history_tool_calls_count,
+    convert_tools,
     create_parsers,
     preprocess_chat_request,
 )
@@ -117,11 +120,12 @@ def _init_worker(
     tool_call_parser_name: str | None,
     reasoning_parser_name: str | None,
     exclude_tools_when_tool_choice_none: bool = True,
+    trust_remote_code: bool = False,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none
-    _w_tokenizer = get_tokenizer(model_path)
+    _w_tokenizer = get_tokenizer(model_path, trust_remote_code=trust_remote_code)
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
@@ -146,7 +150,12 @@ def _preprocess_worker(
         raise PreprocessError(_unsupported_n_error(n))
 
     dynamo_preproc = _build_dynamo_preproc(
-        request, pre.prompt_token_ids, model_name, eos_token_id
+        request,
+        pre.prompt_token_ids,
+        model_name,
+        eos_token_id,
+        pre.guided_decoding,
+        pre.tool_call_parser,
     )
 
     return SglangPreprocessWorkerResult(
@@ -161,6 +170,8 @@ def _build_dynamo_preproc(
     prompt_token_ids: list[int],
     model_name: str,
     eos_token_id: int | None,
+    guided_decoding: dict[str, Any] | None = None,
+    tool_call_parser: ToolCallParserType | None = None,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
@@ -205,11 +216,16 @@ def _build_dynamo_preproc(
             "top_k": request.get("top_k", 0) or -1,
             "min_p": request.get("min_p", 0.0),
             "seed": request.get("seed"),
+            "guided_decoding": guided_decoding,
         },
         "output_options": {
             "logprobs": logprobs_val,
             "prompt_logprobs": None,
-            "skip_special_tokens": True,
+            # Preserve special tokens only when a tool-call parser is
+            # actually active — the parser needs delimiter tokens
+            # (e.g. <|tool_call|>) to detect calls. Mirrors the
+            # post-processor's _skip_special_tokens logic.
+            "skip_special_tokens": tool_call_parser is None,
         },
         "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
         "annotations": [],
@@ -320,7 +336,12 @@ class SglangProcessor:
                 return
 
             dynamo_preproc = _build_dynamo_preproc(
-                request, tokens, request["model"], self.eos_token_id
+                request,
+                tokens,
+                request["model"],
+                self.eos_token_id,
+                pre.guided_decoding,
+                pre.tool_call_parser,
             )
         except Exception as exc:
             logger.exception("SGLang preprocessing failed for request %s", request_id)
@@ -336,6 +357,11 @@ class SglangProcessor:
             tokenizer=self.tokenizer,
             tool_call_parser=pre.tool_call_parser,
             reasoning_parser=pre.reasoning_parser,
+            history_tool_calls_count=_get_history_tool_calls_count(
+                request.get("messages", [])
+            ),
+            sglang_tools=convert_tools(request.get("tools")),
+            tool_call_parser_name=self.tool_call_parser_name,
         )
 
         async for item in self._generate_and_stream(
@@ -389,6 +415,11 @@ class SglangProcessor:
             tokenizer=self.tokenizer,
             tool_call_parser=tool_call_parser,
             reasoning_parser=reasoning_parser,
+            history_tool_calls_count=_get_history_tool_calls_count(
+                request.get("messages", [])
+            ),
+            sglang_tools=convert_tools(request.get("tools")),
+            tool_call_parser_name=self.tool_call_parser_name,
         )
 
         async for item in self._generate_and_stream(
@@ -530,6 +561,7 @@ class SglangEngineFactory:
         self.tool_call_parser_name = tool_call_parser_name
         self.reasoning_parser_name = reasoning_parser_name
 
+        self.trust_remote_code = config.trust_remote_code
         self.stream_interval = 20
         raw_stream_interval = os.getenv("DYN_SGLANG_STREAM_INTERVAL")
         if raw_stream_interval:
@@ -560,7 +592,7 @@ class SglangEngineFactory:
             await fetch_model(source_path, ignore_weights=True)
 
         logger.info("Loading SGLang tokenizer from %s", source_path)
-        tokenizer = get_tokenizer(source_path)
+        tokenizer = get_tokenizer(source_path, trust_remote_code=self.trust_remote_code)
 
         eos_token_id = getattr(tokenizer, "eos_token_id", None)
 
@@ -610,6 +642,7 @@ class SglangEngineFactory:
                     tool_call_parser_name,
                     reasoning_parser_name,
                     self.config.exclude_tools_when_tool_choice_none,
+                    self.trust_remote_code,
                 ),
             )
             futures = [
