@@ -109,7 +109,7 @@ func uniformScores(endpoints []schedtypes.Endpoint, score float64) map[schedtype
 // NOTE: The GAIE ext-proc framework serializes RawBody before scheduling
 // plugins run. For the PayloadMap mutation to reach the worker, the framework
 // must re-serialize the PayloadMap after scheduling — see
-// https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/XXXX
+// https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/2854
 func setTokenizedPrompt(req *schedtypes.InferenceRequest, tokens []int64, logger logr.Logger) {
 	if req == nil || len(tokens) == 0 {
 		logger.V(logutil.DEFAULT).Info("[EPP-INJECT] No tokens to inject (empty token list)")

@@ -564,24 +564,36 @@ impl OpenAIPreprocessor {
                             // directly and skip tokenization.  This avoids redundant
                             // tokenization when an external component (e.g. the GAIE EPP
                             // KV-router) has already tokenized the prompt.
+                            // When backend_instance_id is set without token_data, warn
+                            // but fall back to tokenization (backward compat for non-GAIE
+                            // routers that set the header without providing tokens).
+                            let has_backend_instance_id = request
+                                .nvext()
+                                .and_then(|ext| ext.backend_instance_id)
+                                .is_some();
+
                             let token_data =
                                 request.nvext().and_then(|ext| ext.token_data.as_ref());
 
-                            let (tokens_vec, skip_token_annotation) =
-                                if let Some(tokens) = token_data {
-                                    tracing::info!(
-                                        token_count = tokens.len(),
-                                        first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
-                                        "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
-                                    );
-                                    (tokens.clone(), true)
-                                } else {
-                                    tracing::info!(
-                                        "[SIDECAR-TOKENIZE] No nvext.token_data found — performing tokenization in frontend sidecar"
-                                    );
-                                    let encoding = self.encode_with_timing(&prompt, tracker)?;
-                                    (encoding.token_ids().to_vec(), false)
-                                };
+                            let (tokens_vec, skip_token_annotation) = if let Some(tokens) =
+                                token_data
+                            {
+                                tracing::info!(
+                                    token_count = tokens.len(),
+                                    first_tokens = ?&tokens[..std::cmp::min(5, tokens.len())],
+                                    "[SIDECAR-SKIP-TOKENIZE] Found nvext.token_data — using pre-computed tokens, SKIPPING tokenization"
+                                );
+                                (tokens.clone(), true)
+                            } else if has_backend_instance_id {
+                                tracing::warn!(
+                                    "backend_instance_id provided but no token_data; tokenizing prompt"
+                                );
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                (encoding.token_ids().to_vec(), false)
+                            } else {
+                                let encoding = self.encode_with_timing(&prompt, tracker)?;
+                                (encoding.token_ids().to_vec(), false)
+                            };
 
                             if request.has_annotation(ANNOTATION_TOKEN_IDS)
                                 && !skip_token_annotation
