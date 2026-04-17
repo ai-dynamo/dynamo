@@ -1457,6 +1457,7 @@ mod tests {
     }
 
     /// Helper: build a single-choice stream chunk with text content and logprobs
+    #[allow(deprecated)]
     fn text_chunk_with_logprobs(text: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let logprobs = ChatChoiceLogprobs {
             content: Some(
