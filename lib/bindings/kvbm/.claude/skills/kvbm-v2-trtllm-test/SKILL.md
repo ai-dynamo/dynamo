@@ -11,8 +11,14 @@ This skill runs the full offload + onboard verification for the KVBM v2 TRT-LLM 
 ## Prerequisites
 
 - Docker with GPU support
-- Access to `nvcr.io/nvidian/dynamo-dev/oandreeva-dev:trtllm-kvbm-v2-test`
+- A container image with KVBM v2 wheel (built with `v2` feature) and TRT-LLM installed
 - NATS and etcd infrastructure
+
+Before starting, ask the user which container image to use. The image must have:
+- `kvbm` wheel with v2 support (`python3 -c 'import kvbm; print(kvbm.v2.is_available())'` returns `True`)
+- `kvbm.v2.trtllm` module installed
+- TRT-LLM with the KV connector API (`KVConnectorOutput`, `update_state_after_alloc` with `num_external_tokens`)
+- NIXL library
 
 ## Step 1: Start Infrastructure
 
@@ -25,9 +31,11 @@ Verify NATS is reachable on port 4222 and etcd on port 2379.
 
 ## Step 2: Start Container
 
+Replace `<IMAGE>` with the image provided by the user:
+
 ```bash
 docker run -d --gpus all --ipc=host --ulimit memlock=-1 --name kvbm-v2-test \
-  nvcr.io/nvidian/dynamo-dev/oandreeva-dev:trtllm-kvbm-v2-test \
+  <IMAGE> \
   sleep infinity
 ```
 
