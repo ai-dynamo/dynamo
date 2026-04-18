@@ -345,22 +345,18 @@ class TestRunAicInterpolation:
         }
         assert len(distinct_concurrencies) >= 2
 
-class TestQwen235BugReproCase:
-    """Regression guard for the Qwen/Qwen3-235B-A22B-FP8 crash.
+class TestQwen235MoEPicks:
+    """End-to-end exercise with a realistic large-MoE pick pair.
 
-    The original triage identified two specific MoE picks that crashed or
-    asserted inside AIConfigurator:
+    Uses a concrete Qwen-235B-A22B-FP8 pick shape that spans the full MoE
+    parallelism surface in one test class:
 
-    * Prefill pick ``tp=4, moe_tp=1, moe_ep=4`` (+ dp=1 implied) — triggered
-      ``TypeError`` on ``None * None`` from missing moe kwargs (Bug #1),
-      AND would have asserted via the wrong-``tp_size`` path if Bug #1 were
-      fixed in isolation (Bug #2).
-    * Decode pick ``tp=1, dp=8, moe_tp=2, moe_ep=4`` — triggered AIC's MoE
-      parallelism assertion because ``attention_dp_size`` never reached
-      ``ModelConfig`` (Bug #3).
+    * Prefill: ``tp=4, dp=1, moe_tp=1, moe_ep=4`` — DEP on the MoE layer.
+    * Decode: ``tp=1, dp=8, moe_tp=2, moe_ep=4`` — hybrid TEP + attention DP.
 
-    This test pins down the exact picks so future regressions surface here
-    with an obvious failure message.
+    Together they cover every AIC kwarg that a pick can carry, including the
+    case where ``.tp_size`` (KV-head-split property) disagrees with AIC's
+    attention-TP.
     """
 
     PREFILL_PICK = PickedParallelConfig(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4)
@@ -390,8 +386,8 @@ class TestQwen235BugReproCase:
         )
 
     def test_tp_size_property_differs_from_aic_tp_size(self):
-        """Regression for Bug #2: the property would give the wrong answer."""
-        # For the prefill pick: .tp_size property returns 1 (because moe_ep > 1),
+        """Documents that the KV-split property is NOT AIC's tp_size."""
+        # For this DEP-on-MoE pick, .tp_size returns 1 (because moe_ep > 1),
         # which would violate the MoE identity. AIC's real tp_size is 4.
         assert self.PREFILL_PICK.tp_size == 1  # KV-head-split semantics
         kw = picked_to_aic_model_config_kwargs(self.PREFILL_PICK)
@@ -399,7 +395,7 @@ class TestQwen235BugReproCase:
         assert kw["tp_size"] != self.PREFILL_PICK.tp_size
 
     def test_end_to_end_sweep_delivers_complete_kwargs_to_aic(self):
-        """Run both sweeps; verify the exact kwargs the old path dropped."""
+        """Run both sweeps end-to-end and verify every AIC call is well-formed."""
         spec = _make_spec(
             prefill_pick=self.PREFILL_PICK,
             decode_pick=self.DECODE_PICK,
@@ -421,7 +417,7 @@ class TestQwen235BugReproCase:
         assert prefill_fpms and decode_fpms
 
         # Every prefill AIC call must carry complete MoE kwargs and satisfy
-        # the parallelism identity — this is what the old path violated.
+        # the parallelism identity.
         for call in estimator.estimate_prefill_perf.call_args_list:
             kw = call.kwargs
             assert {
