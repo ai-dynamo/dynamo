@@ -116,6 +116,5 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         },
         request_payloads=[make_image_payload(["green"])],
         extra_vllm_args=["--dtype", "bfloat16"],
-        gated=True,
     ),
 ]
