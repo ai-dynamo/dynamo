@@ -35,6 +35,40 @@ pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     }
 }
 
+/// Type of external shared KV cache to query during routing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SharedCacheType {
+    /// No shared cache (default).
+    #[default]
+    None,
+    /// HiCache L3 shared cache — queries sglang workers via the request plane.
+    Hicache,
+}
+
+impl fmt::Display for SharedCacheType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("none"),
+            Self::Hicache => f.write_str("hicache"),
+        }
+    }
+}
+
+impl FromStr for SharedCacheType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "hicache" => Ok(Self::Hicache),
+            _ => Err(format!(
+                "unknown shared_cache_type: {s:?}, expected 'none' or 'hicache'"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RouterQueuePolicy {
@@ -121,6 +155,11 @@ pub struct RouterConfigOverride {
 
     #[builder(default)]
     pub track_prefill_tokens: Option<bool>,
+
+    /// Per-request override of `shared_cache_multiplier`.
+    #[builder(default)]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub shared_cache_multiplier: Option<f64>,
 }
 
 /// KV Router configuration parameters
@@ -210,10 +249,20 @@ pub struct KvRouterConfig {
     pub use_remote_indexer: bool,
 
     /// Whether this router should serve its local indexer from the worker component.
-    /// This enables other routers/frontends in the same namespace to query
-    /// overlap scores remotely over the request plane by component + endpoint.
     #[serde(default)]
     pub serve_indexer: bool,
+
+    /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
+    /// Blocks available in the shared cache are less valuable than device-local blocks
+    /// because they need to be fetched. A value of 0.5 means each shared cache hit
+    /// counts as half a device-local hit. Default: 0.0 (shared cache scoring disabled);
+    /// the CLI sets this to 0.5 when shared cache is enabled.
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub shared_cache_multiplier: f64,
+
+    /// Type of external shared KV cache to query during routing.
+    /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
+    pub shared_cache_type: SharedCacheType,
 }
 
 impl Default for KvRouterConfig {
@@ -240,6 +289,8 @@ impl Default for KvRouterConfig {
             router_queue_policy: RouterQueuePolicy::default(),
             use_remote_indexer: false,
             serve_indexer: false,
+            shared_cache_multiplier: 0.0,
+            shared_cache_type: SharedCacheType::default(),
         }
     }
 }
@@ -416,5 +467,46 @@ mod tests {
         );
 
         assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_out_of_range_shared_cache_multiplier() {
+        let too_small = KvRouterConfig {
+            shared_cache_multiplier: -0.1,
+            ..Default::default()
+        };
+        let too_large = KvRouterConfig {
+            shared_cache_multiplier: 1.1,
+            ..Default::default()
+        };
+
+        assert!(too_small.validate().is_err());
+        assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn test_router_config_override_rejects_out_of_range_shared_cache_multiplier() {
+        let too_small = RouterConfigOverride {
+            overlap_score_weight: None,
+            router_temperature: None,
+            assume_kv_reuse: None,
+            track_prefill_tokens: None,
+            shared_cache_multiplier: Some(-0.1),
+        };
+        let too_large = RouterConfigOverride {
+            overlap_score_weight: None,
+            router_temperature: None,
+            assume_kv_reuse: None,
+            track_prefill_tokens: None,
+            shared_cache_multiplier: Some(1.1),
+        };
+
+        assert!(too_small.validate().is_err());
+        assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn test_kv_router_config_default_shared_cache_multiplier_is_disabled() {
+        assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.0);
     }
 }

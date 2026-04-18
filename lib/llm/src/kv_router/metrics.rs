@@ -208,6 +208,8 @@ pub struct RoutingOverheadMetrics {
     pub seq_hashing: prometheus::Histogram,
     pub scheduling: prometheus::Histogram,
     pub total: prometheus::Histogram,
+    pub shared_cache_query: prometheus::Histogram,
+    pub shared_cache_errors_total: prometheus::IntCounter,
 }
 
 static ROUTING_OVERHEAD_METRICS: OnceLock<Arc<RoutingOverheadMetrics>> = OnceLock::new();
@@ -264,12 +266,31 @@ impl RoutingOverheadMetrics {
                 async_buckets,
             )
             .expect("overhead_total_ms");
+            let shared_cache_query = make(
+                routing_overhead::SHARED_CACHE_QUERY_MS,
+                "Time spent querying the shared KV cache in milliseconds",
+            )
+            .expect("overhead_shared_cache_query_ms");
+            let shared_cache_errors_total = {
+                let name = format!(
+                    "{}_{}",
+                    name_prefix::ROUTER,
+                    routing_overhead::SHARED_CACHE_ERRORS_TOTAL
+                );
+                prometheus::IntCounter::with_opts(
+                    Opts::new(name, "Total shared cache query errors")
+                        .const_label(labels::ROUTER_ID, &router_id),
+                )
+                .expect("shared_cache_errors_total")
+            };
             Arc::new(Self {
                 block_hashing,
                 indexer_find_matches,
                 seq_hashing,
                 scheduling,
                 total,
+                shared_cache_query,
+                shared_cache_errors_total,
             })
         });
         registry.register(Box::new(m.block_hashing.clone()))?;
@@ -277,6 +298,8 @@ impl RoutingOverheadMetrics {
         registry.register(Box::new(m.seq_hashing.clone()))?;
         registry.register(Box::new(m.scheduling.clone()))?;
         registry.register(Box::new(m.total.clone()))?;
+        registry.register(Box::new(m.shared_cache_query.clone()))?;
+        registry.register(Box::new(m.shared_cache_errors_total.clone()))?;
         Ok(())
     }
 
@@ -286,10 +309,16 @@ impl RoutingOverheadMetrics {
     }
 
     /// Observe routing overhead timings in milliseconds.
+    ///
+    /// `indexer_duration` and `shared_cache_duration` are independent wall-clock times
+    /// measured inside the `tokio::join!` block. They run in parallel, so
+    /// `find_matches_elapsed >= max(indexer_duration, shared_cache_duration)`.
     pub fn observe(
         &self,
         hash_elapsed: Duration,
         seq_hash_elapsed: Duration,
+        indexer_duration: Duration,
+        shared_cache_duration: Option<Duration>,
         find_matches_elapsed: Duration,
         total_elapsed: Duration,
     ) {
@@ -297,12 +326,12 @@ impl RoutingOverheadMetrics {
             .observe(hash_elapsed.as_secs_f64() * 1000.0);
         self.seq_hashing
             .observe(seq_hash_elapsed.saturating_sub(hash_elapsed).as_secs_f64() * 1000.0);
-        self.indexer_find_matches.observe(
-            find_matches_elapsed
-                .saturating_sub(seq_hash_elapsed)
-                .as_secs_f64()
-                * 1000.0,
-        );
+        self.indexer_find_matches
+            .observe(indexer_duration.as_secs_f64() * 1000.0);
+        if let Some(sc_duration) = shared_cache_duration {
+            self.shared_cache_query
+                .observe(sc_duration.as_secs_f64() * 1000.0);
+        }
         self.scheduling.observe(
             total_elapsed
                 .saturating_sub(find_matches_elapsed)
@@ -310,6 +339,11 @@ impl RoutingOverheadMetrics {
                 * 1000.0,
         );
         self.total.observe(total_elapsed.as_secs_f64() * 1000.0);
+    }
+
+    /// Increment the shared cache error counter.
+    pub fn inc_shared_cache_errors(&self) {
+        self.shared_cache_errors_total.inc();
     }
 }
 
@@ -354,11 +388,18 @@ pub struct RouterRequestMetrics {
     pub output_sequence_tokens: prometheus::Histogram,
     pub kv_hit_rate: prometheus::Histogram,
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
+    pub shared_cache_hit_rate: prometheus::Histogram,
+    pub shared_cache_beyond_blocks: prometheus::Histogram,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
 impl RouterRequestMetrics {
+    /// Returns the registered metrics if `from_component()` was called earlier.
+    pub fn get() -> Option<Arc<Self>> {
+        ROUTER_REQUEST_METRICS.get().cloned()
+    }
+
     /// Create from a Component, memoized in a static OnceLock.
     /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
     /// injects hierarchy labels, and registers with the DRT `MetricsRegistry`.
@@ -428,6 +469,22 @@ impl RouterRequestMetrics {
                         Some(generate_log_buckets(0.001, 10.0, 15)),
                     )
                     .expect("failed to create router_kv_transfer_estimated_latency_seconds");
+                let shared_cache_hit_rate = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
+                        "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
+                        extra_labels,
+                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+                    )
+                    .expect("failed to create router_shared_cache_hit_rate");
+                let shared_cache_beyond_blocks = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
+                        "Shared cache blocks beyond device overlap for the selected worker",
+                        extra_labels,
+                        Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
+                    )
+                    .expect("failed to create router_shared_cache_beyond_blocks");
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -436,6 +493,8 @@ impl RouterRequestMetrics {
                     output_sequence_tokens,
                     kv_hit_rate,
                     kv_transfer_estimated_latency_seconds,
+                    shared_cache_hit_rate,
+                    shared_cache_beyond_blocks,
                 })
             })
             .clone()
@@ -654,12 +713,20 @@ dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
             seq_hashing: make("test_seq_hashing_ms"),
             scheduling: make("test_scheduling_ms"),
             total: make("test_total_ms"),
+            shared_cache_query: make("test_shared_cache_query_ms"),
+            shared_cache_errors_total: prometheus::IntCounter::new(
+                "test_shared_cache_errors_total",
+                "test",
+            )
+            .unwrap(),
         };
 
         // Out-of-order cumulative durations: each phase < previous (would panic without saturating_sub)
         metrics.observe(
             Duration::from_millis(10),
             Duration::from_millis(5),
+            Duration::from_millis(4),
+            None,
             Duration::from_millis(3),
             Duration::from_millis(1),
         );
