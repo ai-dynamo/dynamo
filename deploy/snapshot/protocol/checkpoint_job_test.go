@@ -170,6 +170,39 @@ func TestNewCheckpointJobAllowsSingleNonMainContainer(t *testing.T) {
 
 
 
+func TestNewCheckpointJobRejectsShellWrappedCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		command       []string
+		wrapLaunchJob bool
+	}{
+		{"single GPU sh -c", []string{"/bin/sh", "-c"}, false},
+		{"multi GPU sh -c", []string{"/bin/sh", "-c"}, true},
+		{"single GPU bash -c", []string{"bash", "-c"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewCheckpointJob(&corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:    "main",
+						Image:   "test:latest",
+						Command: tc.command,
+						Args:    []string{"python3 -m dynamo.vllm --model x"},
+					}},
+				},
+			}, CheckpointJobOptions{
+				Namespace:     "test-ns",
+				CheckpointID:  "hash",
+				Name:          "test-job",
+				WrapLaunchJob: tc.wrapLaunchJob,
+			})
+			if err == nil {
+				t.Fatal("expected NewCheckpointJob to reject shell-wrapped command")
+			}
+		})
+	}
+}
+
 func TestGetCheckpointJobName(t *testing.T) {
 	name := GetCheckpointJobName("abc123def4567890", "2")
 	if name != "checkpoint-job-abc123def4567890-2" {

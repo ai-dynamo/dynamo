@@ -25,6 +25,39 @@ title: Snapshot
 - NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
 - vLLM or SGLang backend today
 - `ReadWriteMany` storage for cross-node restore
+- Exec-form container entrypoint for any workload that participates in checkpoint/restore (see [Container entrypoint shape](#container-entrypoint-shape))
+
+### Container entrypoint shape
+
+Checkpoint/restore needs the real workload process to be PID 1 inside the
+container so that `SIGUSR1` (from the snapshot agent) and the signals that
+`cuda-checkpoint --launch-job` delivers reach it directly. A shell wrapper
+in between can swallow those signals.
+
+Set `command` and `args` in **exec form** on the main container:
+
+```yaml
+extraPodSpec:
+  mainContainer:
+    command: [python3]
+    args: [-m, dynamo.vllm, --model, Qwen/Qwen3-0.6B]
+```
+
+Do **not** use a shell wrapper like `/bin/sh -c "python3 -m dynamo.vllm ..."`.
+The operator will reject checkpoint Jobs built from a shell-wrapped container
+with a clear error.
+
+If you need env-var expansion in the args, use Kubernetes' `$(VAR)` substitution
+(which the kubelet resolves before `execve`) rather than shell expansion:
+
+```yaml
+mainContainer:
+  env:
+    - name: MODEL_PATH
+      value: Qwen/Qwen3-0.6B
+  command: [python3]
+  args: [-m, dynamo.vllm, --model, $(MODEL_PATH)]
+```
 
 ## Quick Start via `DynamoCheckpoint` CR
 
