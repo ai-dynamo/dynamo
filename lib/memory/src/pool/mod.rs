@@ -5,4 +5,10 @@
 
 pub mod cuda;
 
+#[cfg(feature = "sycl")]
+pub mod sycl;
+
 pub use cuda::{CudaMemPool, CudaMemPoolBuilder};
+
+#[cfg(feature = "sycl")]
+pub use sycl::{SyclMemPool, SyclMemPoolBuilder};
