@@ -15,8 +15,8 @@ on:
         required: false
         type: string
         default: 'runtime'
-      cuda_version:
-        description: 'CUDA versions to build as a JSON array'
+      version_selector:
+        description: 'Runtime version selectors to build as a JSON array (e.g. cuda versions, cpu, xpu)'
         required: true
         type: string
       platform:
@@ -111,11 +111,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        cuda_version: ${{ fromJson(inputs.cuda_version) }}
+        version_selector: ${{ fromJson(inputs.version_selector) }}
     runs-on: prod-builder-v3
-    # cuda_version not empty -- name: cuda12, linux/amd64
-    # cuda_version empty -- name: cpu, linux/amd64
-    name: Build multi-arch ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
+    # version_selector not empty -- name: cuda12, linux/amd64
+    # version_selector cpu/empty -- name: cpu, linux/amd64
+    name: Build multi-arch ${{ matrix.version_selector == 'xpu' && 'xpu' || (matrix.version_selector == '' || matrix.version_selector == 'cpu') && 'cpu' || format('cuda{0}', matrix.version_selector) }}
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
@@ -137,17 +137,22 @@ jobs:
         shell: bash
         run: |
           TAG_BUILDER=${{ inputs.framework }}-${{ inputs.target }}
+          IMAGE_TAG_SUFFIX=""
           if [ "${{ inputs.make_efa }}" == "true" ]; then
             TAG_BUILDER+="-efa"
           fi
           TARGET_TAG_PLAIN=${TAG_BUILDER}
-          if [ "${{ matrix.cuda_version }}" != "" ]; then
-            CUDA_VERSION="${{ matrix.cuda_version }}"
+          if [ "${{ matrix.version_selector }}" == "xpu" ]; then
+            IMAGE_TAG_SUFFIX="-xpu"
+          elif [ "${{ matrix.version_selector }}" == "cpu" ]; then
+            IMAGE_TAG_SUFFIX=""
+          elif [ "${{ matrix.version_selector }}" != "" ]; then
+            CUDA_VERSION="${{ matrix.version_selector }}"
             CUDA_MAJOR=${CUDA_VERSION%%.*}
-            TAG_BUILDER+="-cuda${CUDA_MAJOR}"
+            IMAGE_TAG_SUFFIX="-cuda${CUDA_MAJOR}"
           fi
-          IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}
-          TEST_IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}-test
+          IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}
+          TEST_IMAGE_TAG=${{ github.sha }}-${TAG_BUILDER}${IMAGE_TAG_SUFFIX}-test
 
           IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${IMAGE_TAG}"
           TEST_IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${TEST_IMAGE_TAG}"
@@ -168,8 +173,8 @@ jobs:
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
-          arch: ${{ inputs.platform }}
-          cuda_version: ${{ matrix.cuda_version }}
+          arch: ${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }}
+          cuda_version: ${{ (matrix.version_selector == 'xpu' || matrix.version_selector == 'cpu') && '' || matrix.version_selector }}
           fresh_builder: ${{ inputs.fresh_builder }}
       - name: Calculate extra tags
         id: extra-tags
@@ -199,8 +204,9 @@ jobs:
           echo "=== Build Container Inputs ==="
           echo "image_uri: ${{ steps.calculate-target-tag.outputs.image_uri }}"
           echo "framework: ${{ inputs.framework }}"
+          echo "device: ${{ matrix.version_selector == 'xpu' && 'xpu' || matrix.version_selector == 'cpu' && 'cpu' || 'cuda' }}"
           echo "target: ${{ inputs.target }}"
-          echo "platform: ${{ inputs.platform }}"
+          echo "platform: ${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }}"
           echo "no_cache: ${{ inputs.no_cache }}"
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
           echo "push_image: ${{ inputs.push_image }}"
@@ -215,16 +221,17 @@ jobs:
             MAKE_EFA_FLAG="--make-efa"
           fi
           # If CUDA version is empty, use empty arg to fallback to default (eg. for planner)
-          if [ "${{ matrix.cuda_version }}" == "" ]; then
+          if [ "${{ matrix.version_selector }}" == "xpu" ] || [ "${{ matrix.version_selector }}" == "cpu" ]; then
             CUDA_FLAG=""
           else
-            CUDA_FLAG="--cuda-version=${{ matrix.cuda_version }}"
+            CUDA_FLAG="--cuda-version=${{ matrix.version_selector }}"
           fi
 
           python ./container/render.py \
               --target=${{ inputs.target }} \
               --framework=${{ inputs.framework }} \
-              --platform=${{ inputs.platform }} \
+              --platform=${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }} \
+              --device=${{ matrix.version_selector == 'xpu' && 'xpu' || 'cuda' }} \
               ${CUDA_FLAG} \
               ${MAKE_EFA_FLAG} \
               --show-result \
@@ -236,8 +243,9 @@ jobs:
           image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
-          platform: ${{ inputs.platform }}
-          cuda_version: ${{ matrix.cuda_version }}
+          platform: ${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }}
+          device: ${{ matrix.version_selector == 'xpu' && 'xpu' || matrix.version_selector == 'cpu' && 'cpu' || 'cuda' }}
+          cuda_version: ${{ matrix.version_selector }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -254,8 +262,8 @@ jobs:
         with:
           builder_name: ${{ inputs.builder_name }}
           flavor: ${{ steps.calculate-builder-flavor.outputs.builder_flavor }}
-          arch: ${{ inputs.platform }}
-          cuda_version: ${{ matrix.cuda_version }}
+          arch: ${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }}
+          cuda_version: ${{ (matrix.version_selector == 'xpu' || matrix.version_selector == 'cpu') && '' || matrix.version_selector }}
       - name: Build and Push Test Image
         if: ${{ inputs.target != 'dev' }}
         shell: bash
@@ -288,7 +296,7 @@ jobs:
             --progress=plain \
             ${PUSH_ARGS} \
             ${NO_CACHE_ARG} \
-            --platform ${{ inputs.platform }} \
+            --platform ${{ matrix.version_selector == 'xpu' && 'linux/amd64' || inputs.platform }} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
             ${CACHE_ARGS} \
