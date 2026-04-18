@@ -86,10 +86,15 @@ pub struct TrafficStats {
     pub avg_osl: f64,
     pub avg_ttft_ms: f64,
     pub avg_itl_ms: f64,
-    /// Average prefix-cache hit rate (0.0-1.0) across router admissions
-    /// in the window, computed as ``Σoverlap_blocks / Σisl_blocks``.
-    /// Matches the semantics of the real router's
-    /// ``dynamo_component_router_kv_hit_rate`` Prometheus histogram.
+    /// Mean prefix-cache hit rate (0.0-1.0) across router admissions in
+    /// the window, computed as ``mean(overlap_blocks / isl_blocks)`` over
+    /// admitted requests (i.e. the arithmetic mean of per-request
+    /// ratios). Matches the semantics of the real router's
+    /// ``dynamo_component_router_kv_hit_rate`` Prometheus histogram,
+    /// which observes one ``overlap/isl`` sample per request; the
+    /// PromQL query ``sum(increase(_sum)) / sum(increase(_count))``
+    /// returns the arithmetic mean of those samples, independent of
+    /// per-request ISL size.
     pub avg_kv_hit_rate: f64,
 }
 
@@ -105,8 +110,10 @@ pub struct TrafficStats {
 /// data (e.g. requests that fail before emitting a token).
 ///
 /// KV hit-rate observations come from the router at admission time (not
-/// completion), matching the real router's per-request histogram semantics
-/// where the metric is observed at routing decision time.
+/// completion) and are recorded as per-request ratios, matching the real
+/// router's per-request histogram: each admission contributes one
+/// ``overlap_blocks / isl_blocks`` sample to the running mean, so large
+/// requests don't get weighted more heavily than small ones.
 #[derive(Debug)]
 pub(in crate::replay::offline) struct TrafficAccumulator {
     window_start_ms: f64,
@@ -117,8 +124,11 @@ pub(in crate::replay::offline) struct TrafficAccumulator {
     total_itl_ms: f64,
     ttft_count: usize,
     itl_count: usize,
-    total_overlap_blocks: u64,
-    total_isl_blocks: u64,
+    /// Running sum of per-request hit-rate ratios (``overlap / isl``);
+    /// divided by ``hit_rate_count`` at drain time to give the mean.
+    total_hit_rate: f64,
+    /// Number of admissions with non-zero ISL blocks in the current window.
+    hit_rate_count: usize,
 }
 
 impl TrafficAccumulator {
@@ -132,8 +142,8 @@ impl TrafficAccumulator {
             total_itl_ms: 0.0,
             ttft_count: 0,
             itl_count: 0,
-            total_overlap_blocks: 0,
-            total_isl_blocks: 0,
+            total_hit_rate: 0.0,
+            hit_rate_count: 0,
         }
     }
 
@@ -159,17 +169,24 @@ impl TrafficAccumulator {
         }
     }
 
-    /// Record one router admission's prefix-cache overlap. Called at
-    /// admission time (not completion) so the avg hit rate reflects
-    /// the router's view at routing decision, matching the real
-    /// router's Prometheus histogram semantics.
+    /// Record one router admission's prefix-cache overlap as a
+    /// per-request ratio. Called at admission time (not completion) so
+    /// the mean hit rate reflects the router's view at routing decision
+    /// — matching the real router's per-request histogram, where each
+    /// request contributes exactly one ``overlap/isl`` sample.
+    /// Admissions with ``isl_blocks == 0`` are skipped (no meaningful
+    /// ratio), mirroring ``RequestTracker::kv_hit_rate()`` returning
+    /// ``None`` in that case.
     pub(in crate::replay::offline) fn on_admission(
         &mut self,
         overlap_blocks: u32,
         isl_blocks: u32,
     ) {
-        self.total_overlap_blocks += u64::from(overlap_blocks);
-        self.total_isl_blocks += u64::from(isl_blocks);
+        if isl_blocks == 0 {
+            return;
+        }
+        self.total_hit_rate += f64::from(overlap_blocks) / f64::from(isl_blocks);
+        self.hit_rate_count += 1;
     }
 
     /// Drain the accumulator at the given simulated time, resetting counters.
@@ -196,8 +213,8 @@ impl TrafficAccumulator {
         } else {
             0.0
         };
-        let avg_kv_hit_rate = if self.total_isl_blocks > 0 {
-            self.total_overlap_blocks as f64 / self.total_isl_blocks as f64
+        let avg_kv_hit_rate = if self.hit_rate_count > 0 {
+            self.total_hit_rate / self.hit_rate_count as f64
         } else {
             0.0
         };
@@ -209,8 +226,8 @@ impl TrafficAccumulator {
         self.total_itl_ms = 0.0;
         self.ttft_count = 0;
         self.itl_count = 0;
-        self.total_overlap_blocks = 0;
-        self.total_isl_blocks = 0;
+        self.total_hit_rate = 0.0;
+        self.hit_rate_count = 0;
         TrafficStats {
             duration_s,
             num_req,
@@ -239,17 +256,29 @@ mod tests {
     }
 
     #[test]
-    fn traffic_accumulator_hit_rate_is_weighted_by_isl_blocks() {
+    fn traffic_accumulator_hit_rate_is_mean_of_per_request_ratios() {
         let mut acc = TrafficAccumulator::new();
         // Small request: mostly hit. Big request: no hit.
-        acc.on_admission(3, 4); // 3/4 hits on 4 blocks
-        acc.on_admission(0, 12); // 0/12 hits on 12 blocks
+        acc.on_admission(3, 4); // per-request ratio: 0.75
+        acc.on_admission(0, 12); // per-request ratio: 0.0
         acc.on_request(256, 32, None);
         acc.on_request(768, 32, None);
         let stats = acc.drain(1_000.0);
         assert_eq!(stats.num_req, 2);
-        // Expected: 3 / (4 + 12) = 3/16 = 0.1875. NOT (0.75 + 0.0) / 2 = 0.375.
-        assert!((stats.avg_kv_hit_rate - 3.0 / 16.0).abs() < 1e-9);
+        // Per-request mean matches the real router's Prometheus histogram:
+        // (0.75 + 0.0) / 2 = 0.375. Every request contributes one sample
+        // regardless of ISL size, so large requests don't dominate.
+        assert!((stats.avg_kv_hit_rate - 0.375).abs() < 1e-9);
+    }
+
+    #[test]
+    fn traffic_accumulator_skips_admissions_with_zero_isl_blocks() {
+        let mut acc = TrafficAccumulator::new();
+        acc.on_admission(0, 0); // skipped -- no meaningful ratio
+        acc.on_admission(2, 4); // ratio = 0.5
+        let stats = acc.drain(1_000.0);
+        // Only the non-zero-ISL sample counts toward the mean.
+        assert!((stats.avg_kv_hit_rate - 0.5).abs() < 1e-9);
     }
 
     #[test]

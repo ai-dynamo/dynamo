@@ -1356,9 +1356,11 @@ impl PlannerReplayBridge {
     ///   - `avg_itl_ms`      (f64): mean inter-token latency in milliseconds,
     ///                              averaged only over requests that generated
     ///                              at least one token gap (0.0 when no samples)
-    ///   - `avg_kv_hit_rate` (f64): ratio of prefix-cache overlap blocks to
-    ///                              ISL blocks across router admissions in
-    ///                              the window, matching the real router's
+    ///   - `avg_kv_hit_rate` (f64): arithmetic mean of per-request
+    ///                              ``overlap_blocks / isl_blocks`` ratios
+    ///                              across router admissions in the window
+    ///                              (one sample per request, not weighted
+    ///                              by ISL), matching the real router's
     ///                              `dynamo_component_router_kv_hit_rate`
     ///                              histogram semantics
     ///
