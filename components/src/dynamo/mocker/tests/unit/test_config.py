@@ -34,7 +34,7 @@ def make_args(**overrides):
         "num_gpu_blocks": 16384,
         "block_size": None,
         "max_num_seqs": 256,
-        "max_num_batched_tokens": 8192,
+        "max_num_batched_tokens": 2048,
         "enable_prefix_caching": True,
         "enable_chunked_prefill": True,
         "preemption_mode": "lifo",
@@ -76,7 +76,7 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     assert block_size == 16
     assert runtime_config.total_kv_blocks == 16384
     assert runtime_config.max_num_seqs == 256
-    assert runtime_config.max_num_batched_tokens == 8192
+    assert runtime_config.max_num_batched_tokens == 2048
 
 
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():

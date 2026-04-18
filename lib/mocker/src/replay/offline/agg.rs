@@ -783,7 +783,7 @@ mod tests {
         MockEngineArgs::builder()
             .block_size(64)
             .num_gpu_blocks(256)
-            .max_num_batched_tokens(Some(8192))
+            .max_num_batched_tokens(Some(2048))
             .max_num_seqs(Some(8))
             .enable_prefix_caching(true)
             .enable_chunked_prefill(true)

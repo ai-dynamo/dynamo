@@ -1280,7 +1280,7 @@ class MockEngineArgs:
         num_gpu_blocks: int = 16384,
         block_size: int = 0,
         max_num_seqs: Optional[int] = 256,
-        max_num_batched_tokens: Optional[int] = 8192,
+        max_num_batched_tokens: Optional[int] = 2048,
         enable_prefix_caching: bool = True,
         enable_chunked_prefill: bool = True,
         speedup_ratio: float = 1.0,

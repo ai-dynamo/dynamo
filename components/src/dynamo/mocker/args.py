@@ -198,8 +198,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-num-batched-tokens",
         type=int,
-        default=8192,
-        help="Maximum number of batched tokens per iteration (default: 8192)",
+        default=2048,
+        help="Maximum number of batched tokens per iteration (default: 2048)",
     )
     parser.add_argument(
         "--enable-prefix-caching",
