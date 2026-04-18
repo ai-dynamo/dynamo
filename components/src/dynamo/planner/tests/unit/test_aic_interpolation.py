@@ -345,6 +345,112 @@ class TestRunAicInterpolation:
         }
         assert len(distinct_concurrencies) >= 2
 
+class TestQwen235BugReproCase:
+    """Regression guard for the Qwen/Qwen3-235B-A22B-FP8 crash.
+
+    The original triage identified two specific MoE picks that crashed or
+    asserted inside AIConfigurator:
+
+    * Prefill pick ``tp=4, moe_tp=1, moe_ep=4`` (+ dp=1 implied) — triggered
+      ``TypeError`` on ``None * None`` from missing moe kwargs (Bug #1),
+      AND would have asserted via the wrong-``tp_size`` path if Bug #1 were
+      fixed in isolation (Bug #2).
+    * Decode pick ``tp=1, dp=8, moe_tp=2, moe_ep=4`` — triggered AIC's MoE
+      parallelism assertion because ``attention_dp_size`` never reached
+      ``ModelConfig`` (Bug #3).
+
+    This test pins down the exact picks so future regressions surface here
+    with an obvious failure message.
+    """
+
+    PREFILL_PICK = PickedParallelConfig(tp=4, pp=1, dp=1, moe_tp=1, moe_ep=4)
+    DECODE_PICK = PickedParallelConfig(tp=1, pp=1, dp=8, moe_tp=2, moe_ep=4)
+
+    def test_prefill_pick_satisfies_aic_identity(self):
+        """AIC's assertion: tp_size * attention_dp_size == moe_tp * moe_ep."""
+        kw = picked_to_aic_model_config_kwargs(self.PREFILL_PICK)
+        assert kw["tp_size"] == 4  # raw p.tp, NOT the .tp_size property
+        assert kw["attention_dp_size"] == 1
+        assert kw["moe_tp_size"] == 1
+        assert kw["moe_ep_size"] == 4
+        assert (
+            kw["tp_size"] * kw["attention_dp_size"]
+            == kw["moe_tp_size"] * kw["moe_ep_size"]
+        )
+
+    def test_decode_pick_satisfies_aic_identity(self):
+        kw = picked_to_aic_model_config_kwargs(self.DECODE_PICK)
+        assert kw["tp_size"] == 1
+        assert kw["attention_dp_size"] == 8
+        assert kw["moe_tp_size"] == 2
+        assert kw["moe_ep_size"] == 4
+        assert (
+            kw["tp_size"] * kw["attention_dp_size"]
+            == kw["moe_tp_size"] * kw["moe_ep_size"]
+        )
+
+    def test_tp_size_property_differs_from_aic_tp_size(self):
+        """Regression for Bug #2: the property would give the wrong answer."""
+        # For the prefill pick: .tp_size property returns 1 (because moe_ep > 1),
+        # which would violate the MoE identity. AIC's real tp_size is 4.
+        assert self.PREFILL_PICK.tp_size == 1  # KV-head-split semantics
+        kw = picked_to_aic_model_config_kwargs(self.PREFILL_PICK)
+        assert kw["tp_size"] == 4  # AIC semantics
+        assert kw["tp_size"] != self.PREFILL_PICK.tp_size
+
+    def test_end_to_end_sweep_delivers_complete_kwargs_to_aic(self):
+        """Run both sweeps; verify the exact kwargs the old path dropped."""
+        spec = _make_spec(
+            prefill_pick=self.PREFILL_PICK,
+            decode_pick=self.DECODE_PICK,
+            isl=3000,
+            osl=300,
+            sweep_max_context_length=4096,
+            prefill_granularity=4,
+            decode_granularity=3,
+        )
+        ctx_patch, estimator = _patch_estimator(per_rank_max_kv=500_000)
+        with ctx_patch:
+            prefill_fpms = aic_mod.run_aic_interpolation(
+                spec, SubComponentType.PREFILL
+            )
+            decode_fpms = aic_mod.run_aic_interpolation(
+                spec, SubComponentType.DECODE
+            )
+
+        assert prefill_fpms and decode_fpms
+
+        # Every prefill AIC call must carry complete MoE kwargs and satisfy
+        # the parallelism identity — this is what the old path violated.
+        for call in estimator.estimate_prefill_perf.call_args_list:
+            kw = call.kwargs
+            assert {
+                "tp_size",
+                "pp_size",
+                "moe_tp_size",
+                "moe_ep_size",
+                "attention_dp_size",
+            } <= kw.keys()
+            assert kw["tp_size"] == 4
+            assert kw["moe_ep_size"] == 4
+            assert kw["attention_dp_size"] == 1
+            assert (
+                kw["tp_size"] * kw["attention_dp_size"]
+                == kw["moe_tp_size"] * kw["moe_ep_size"]
+            )
+
+        for call in estimator.estimate_perf.call_args_list:
+            kw = call.kwargs
+            assert kw["tp_size"] == 1
+            assert kw["moe_tp_size"] == 2
+            assert kw["moe_ep_size"] == 4
+            assert kw["attention_dp_size"] == 8
+            assert (
+                kw["tp_size"] * kw["attention_dp_size"]
+                == kw["moe_tp_size"] * kw["moe_ep_size"]
+            )
+
+
 class TestConcurrencySweep:
     """The AIC-path sweep drops thorough-mode's DP-multiples constraint."""
 
