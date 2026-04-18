@@ -324,12 +324,7 @@ where
 
     // PushRouter's busy_threshold is only inspected via `.is_some()` to gate
     // the 503 rejection path — the inner f64 is never compared to anything.
-    // So pass an inert placeholder when rejection should be enabled, and None
-    // otherwise. Rejection is opt-in: enable only when the user explicitly
-    // configured at least one busy threshold.
-    let threshold_value = worker_monitor
-        .as_ref()
-        .and_then(|m| m.is_configured().then_some(1.0));
+    let threshold_value = worker_monitor.as_ref().map(|_| 1.0);
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
