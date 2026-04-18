@@ -112,7 +112,10 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
             {
                 Ok(()) => {
                     tracing::info!("Server download succeeded for model: {model_name}");
-                    match client.get_model_path(&model_name, MxModelProvider::HuggingFace).await {
+                    match client
+                        .get_model_path(&model_name, MxModelProvider::HuggingFace)
+                        .await
+                    {
                         Ok(path) => Ok(path),
                         Err(e) => {
                             tracing::warn!(
