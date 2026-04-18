@@ -327,10 +327,15 @@ class WorkerFactory:
         runtime.register_engine_route("flush_cache", handler.flush_cache)
         runtime.register_engine_route("update_weights_from_path", handler.update_weights_from_path)
         runtime.register_engine_route("get_weight_version", handler.get_weight_version)
+        # RL LoRA adapter routes: filesystem-native hot-swap used by Prime-RL
+        # every training step to broadcast new adapter weights into the engine.
+        runtime.register_engine_route("load_lora_adapter", handler.load_lora_adapter)
+        runtime.register_engine_route("unload_lora_adapter", handler.unload_lora_adapter)
         logger.info(
             "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
             "pause_generation, resume_generation, flush_cache, "
-            "update_weights_from_path, get_weight_version"
+            "update_weights_from_path, get_weight_version, "
+            "load_lora_adapter, unload_lora_adapter"
         )
 
         # Parse endpoint types from --endpoint-types flag
@@ -559,10 +564,15 @@ class WorkerFactory:
         runtime.register_engine_route("flush_cache", handler.flush_cache)
         runtime.register_engine_route("update_weights_from_path", handler.update_weights_from_path)
         runtime.register_engine_route("get_weight_version", handler.get_weight_version)
+        # RL LoRA adapter routes: filesystem-native hot-swap used by Prime-RL
+        # every training step to broadcast new adapter weights into the engine.
+        runtime.register_engine_route("load_lora_adapter", handler.load_lora_adapter)
+        runtime.register_engine_route("unload_lora_adapter", handler.unload_lora_adapter)
         logger.info(
             "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
             "pause_generation, resume_generation, flush_cache, "
-            "update_weights_from_path, get_weight_version"
+            "update_weights_from_path, get_weight_version, "
+            "load_lora_adapter, unload_lora_adapter"
         )
 
         # Wait for self-benchmark to complete before registering.

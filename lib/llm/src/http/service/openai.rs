@@ -2992,6 +2992,120 @@ async fn rl_update_weights(
     }
 }
 
+/// `POST /v1/rl/load_lora_adapter` — hot-load/swap a LoRA adapter from a filesystem path.
+///
+/// Expected body: `{"lora_name": "r16-a32.0", "lora_path": "/path/to/adapter_dir"}`
+///
+/// The adapter directory must contain PEFT-style `adapter_model.safetensors` and
+/// `adapter_config.json`. This is the RL-specific LoRA path used by Prime-RL every
+/// training step (separate from Dynamo's URI-based `load_lora` gRPC endpoint which
+/// downloads adapters from S3/file URIs and publishes a new ModelDeploymentCard).
+///
+/// Hot-swap semantics: calling with a `lora_name` that is already loaded removes
+/// the previous adapter and loads the new one under the same deterministic int ID,
+/// then resets the prefix cache so stale KV entries don't poison new rollouts.
+///
+/// Pair with `/v1/rl/pause` and `/v1/rl/resume` for a full drain-swap-resume cycle.
+async fn rl_load_lora_adapter(
+    State(state): State<Arc<RlState>>,
+    body: axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let lora_name = body.get("lora_name").and_then(|v| v.as_str());
+    let lora_path = body.get("lora_path").and_then(|v| v.as_str());
+
+    let (lora_name, lora_path) = match (lora_name, lora_path) {
+        (Some(n), Some(p)) if !n.is_empty() && !p.is_empty() => (n.to_string(), p.to_string()),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Expected body: {\"lora_name\": str, \"lora_path\": str} (both required, non-empty)"
+                })),
+            );
+        }
+    };
+
+    tracing::info!("RL load_lora_adapter: lora_name={lora_name} lora_path={lora_path}");
+    let results = state
+        .fan_out(
+            "load_lora_adapter",
+            serde_json::json!({"lora_name": lora_name, "lora_path": lora_path}),
+        )
+        .await;
+
+    if RlState::all_ok(&results) {
+        tracing::info!(
+            "RL load_lora_adapter: all {} worker(s) loaded LoRA '{lora_name}' from {lora_path}",
+            results.len()
+        );
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "workers": results})),
+        )
+    } else {
+        tracing::warn!("RL load_lora_adapter: some workers failed: {:?}", results);
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "workers": results})),
+        )
+    }
+}
+
+/// `POST /v1/rl/unload_lora_adapter` — remove a previously loaded LoRA adapter by name.
+///
+/// Expected body: `{"lora_name": "r16-a32.0"}`
+///
+/// Idempotent: unloading an already-absent LoRA returns `status: ok` so callers
+/// can retry safely without special-casing not-found.
+async fn rl_unload_lora_adapter(
+    State(state): State<Arc<RlState>>,
+    body: axum::extract::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let lora_name = body
+        .get("lora_name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let lora_name = match lora_name {
+        Some(n) if !n.is_empty() => n,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Expected body: {\"lora_name\": str} (required, non-empty)"
+                })),
+            );
+        }
+    };
+
+    tracing::info!("RL unload_lora_adapter: lora_name={lora_name}");
+    let results = state
+        .fan_out(
+            "unload_lora_adapter",
+            serde_json::json!({"lora_name": lora_name}),
+        )
+        .await;
+
+    if RlState::all_ok(&results) {
+        tracing::info!(
+            "RL unload_lora_adapter: all {} worker(s) unloaded LoRA '{lora_name}'",
+            results.len()
+        );
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "workers": results})),
+        )
+    } else {
+        tracing::warn!("RL unload_lora_adapter: some workers failed: {:?}", results);
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "workers": results})),
+        )
+    }
+}
+
 /// `GET /v1/rl/weight_version` — query weight version from all workers.
 async fn rl_weight_version(State(state): State<Arc<RlState>>) -> impl IntoResponse {
     let results = state
@@ -3136,6 +3250,8 @@ pub fn rl_router() -> (Vec<RouteDoc>, Router) {
         RouteDoc::new(axum::http::Method::POST, "/v1/rl/pause"),
         RouteDoc::new(axum::http::Method::POST, "/v1/rl/resume"),
         RouteDoc::new(axum::http::Method::POST, "/v1/rl/update_weights"),
+        RouteDoc::new(axum::http::Method::POST, "/v1/rl/load_lora_adapter"),
+        RouteDoc::new(axum::http::Method::POST, "/v1/rl/unload_lora_adapter"),
         RouteDoc::new(axum::http::Method::GET, "/v1/rl/weight_version"),
     ];
     let router = Router::new()
@@ -3144,6 +3260,8 @@ pub fn rl_router() -> (Vec<RouteDoc>, Router) {
         .route("/v1/rl/pause", post(rl_pause))
         .route("/v1/rl/resume", post(rl_resume))
         .route("/v1/rl/update_weights", post(rl_update_weights))
+        .route("/v1/rl/load_lora_adapter", post(rl_load_lora_adapter))
+        .route("/v1/rl/unload_lora_adapter", post(rl_unload_lora_adapter))
         .route("/v1/rl/weight_version", get(rl_weight_version))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .with_state(rl_state);
