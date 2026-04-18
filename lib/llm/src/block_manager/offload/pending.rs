@@ -40,7 +40,7 @@ use crate::block_manager::block::{
     locality::LocalityProvider,
     transfer::{TransferContext, WriteTo, WriteToStrategy},
 };
-use crate::block_manager::pool::{BlockPool, BlockPoolError};
+use crate::block_manager::pool::{BlockPool, BlockPoolError, OwnedBlock};
 use crate::block_manager::storage::{Local, Storage};
 
 use anyhow::Result;
@@ -107,6 +107,18 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
             completion_indicator
                 .send(Ok(blocks))
                 .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+        } else {
+            // Offload path: no caller is waiting for these blocks.
+            // Return them to the pool through the priority channel so they
+            // land in the inactive pool's lookup_map synchronously -- before
+            // any subsequent match_sequence_hashes can run.  Dropping them
+            // would send them through the async return_tx channel, which
+            // races with lookups and causes disk cache misses.
+            for block in blocks {
+                target_pool
+                    .try_return_block(OwnedBlock::Immutable(block))
+                    .await?;
+            }
         }
 
         Ok(())
