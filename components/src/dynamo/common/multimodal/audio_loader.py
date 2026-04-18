@@ -3,13 +3,18 @@
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Any, Awaitable, Dict, Final, List
 from urllib.parse import urlparse
 
 import numpy as np
 
 import dynamo.nixl_connect as nixl_connect
+from dynamo.common.multimodal.http_client import get_http_client
+from dynamo.common.multimodal.url_validator import (
+    UrlValidationPolicy,
+    fetch_with_revalidation,
+    validate_media_url,
+)
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
@@ -57,37 +62,28 @@ class AudioLoader:
         self,
         http_timeout: float = 30.0,
         enable_frontend_decoding: bool = False,
+        url_policy: UrlValidationPolicy | None = None,
     ) -> None:
         if http_timeout <= 0:
             raise ValueError(f"http_timeout must be positive, got {http_timeout}")
         self._http_timeout = http_timeout
         self._enable_frontend_decoding = enable_frontend_decoding
+        self._url_policy = url_policy or UrlValidationPolicy.from_env()
         self._nixl_connector = None
         self._vllm_media_connector = None
         if self._enable_frontend_decoding:
             self._nixl_connector = nixl_connect.Connector()
             run_async(self._nixl_connector.initialize)
 
-    @staticmethod
-    def _normalize_audio_url(audio_url: str) -> str:
-        """Convert bare filesystem paths to file:// URIs.
-
-        HTTP(S) and data: URLs are returned unchanged.
-        """
-        parsed_url = urlparse(audio_url)
-        if parsed_url.scheme or not audio_url:
-            return audio_url
-
-        file_path = Path(audio_url).expanduser()
-        if not file_path.exists():
-            raise FileNotFoundError(f"Error reading file: {file_path}")
-
-        return file_path.resolve().as_uri()
-
     def _get_vllm_media_connector(self) -> Any:
         if self._vllm_media_connector is None:
             MediaConnector, _ = _require_vllm_audio_media()
-            self._vllm_media_connector = MediaConnector(allowed_local_media_path="/")
+            # Confine vLLM's own local-path access to the same prefix we enforce.
+            # Empty string matches vLLM's secure default (no local access).
+            allowed = self._url_policy.allowed_local_path or ""
+            self._vllm_media_connector = MediaConnector(
+                allowed_local_media_path=allowed
+            )
 
         return self._vllm_media_connector
 
@@ -97,14 +93,23 @@ class AudioLoader:
 
     @_nvtx.annotate("mm:audio:load_with_vllm", color="cyan")
     async def _load_audio_with_vllm(self, audio_url: str) -> tuple[np.ndarray, float]:
+        normalized_url = await validate_media_url(audio_url, self._url_policy)
+        media_io = self._create_vllm_audio_io()
+
+        # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is
+        # revalidated; vLLM's own fetcher honors redirects without re-checking.
+        # data: and file:// never touch the network, so vLLM can handle them.
+        if urlparse(normalized_url).scheme in ("http", "https"):
+            http_client = get_http_client(self._http_timeout)
+            response = await fetch_with_revalidation(
+                http_client, normalized_url, self._url_policy
+            )
+            response.raise_for_status()
+            return await asyncio.to_thread(media_io.load_bytes, response.content)
+
         connector = self._get_vllm_media_connector()
-        normalized_url = self._normalize_audio_url(audio_url)
-        # TODO: Add caching for repeated remote `audio_url` downloads to avoid
-        # refetching the same asset across requests.
         return await connector.load_from_url_async(
-            normalized_url,
-            self._create_vllm_audio_io(),
-            fetch_timeout=self._http_timeout,
+            normalized_url, media_io, fetch_timeout=self._http_timeout
         )
 
     @_nvtx.annotate("mm:audio:load_audio", color="cyan")
