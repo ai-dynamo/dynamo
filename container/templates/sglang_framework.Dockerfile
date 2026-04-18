@@ -29,76 +29,57 @@ ARG SGLANG_KERNEL_REF
 SHELL ["/bin/bash", "-c"]
 
 # Install additional system dependencies for XPU build
-# The intel/deep-learning-essentials base image already includes oneAPI + Python
 USER root
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libsqlite3-dev \
-        python${PYTHON_VERSION}-dev && \
+        intel-ocloc && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Intel GPU UMD (User Mode Driver) + Level Zero loader
-# The base image ships older Level Zero (1.21.9) which may not work with host drivers.
-# Pin to known-good versions matching compute-runtime 25.48.36300.8.
-RUN mkdir -p /tmp/neo && cd /tmp/neo && \
-    wget -q https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-core-2_2.24.8+20344_amd64.deb && \
-    wget -q https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-opencl-2_2.24.8+20344_amd64.deb && \
-    wget -q https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-ocloc_25.48.36300.8-0_amd64.deb && \
-    wget -q https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-opencl-icd_25.48.36300.8-0_amd64.deb && \
-    wget -q https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libigdgmm12_22.8.2_amd64.deb && \
-    wget -q https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libze-intel-gpu1_25.48.36300.8-0_amd64.deb && \
-    wget -q https://github.com/oneapi-src/level-zero/releases/download/v1.26.0/level-zero_1.26.0+u24.04_amd64.deb && \
-    dpkg -i *.deb && \
-    cd / && rm -rf /tmp/neo
+# Install Miniforge (conda) — follows upstream sgl-project/sglang/docker/xpu.Dockerfile pattern.
+# Conda provides correct library linkage with the base image's oneAPI/Level Zero stack.
+ENV CONDA_DIR=/opt/miniforge3
+RUN curl -fsSL -o /tmp/miniforge.sh \
+        https://github.com/conda-forge/miniforge/releases/download/25.1.1-0/Miniforge3-Linux-x86_64.sh && \
+    bash /tmp/miniforge.sh -b -p ${CONDA_DIR} && \
+    rm /tmp/miniforge.sh && \
+    ${CONDA_DIR}/bin/conda create -y -n sglang python=${PYTHON_VERSION} && \
+    ${CONDA_DIR}/bin/conda run -n sglang conda install -y pip
 
-# Copy uv from dynamo_base
-COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
-
-# Create virtual environment
-RUN uv venv /opt/dynamo/venv --python ${PYTHON_VERSION}
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
+ENV VIRTUAL_ENV="${CONDA_DIR}/envs/sglang" \
+    PATH="${CONDA_DIR}/envs/sglang/bin:${CONDA_DIR}/bin:${PATH}" \
+    CONDA_DEFAULT_ENV=sglang
 
 # Install PyTorch XPU packages (matching upstream xpu.Dockerfile)
 WORKDIR /sgl-workspace
-RUN --mount=type=cache,target=/root/.cache/uv \
-    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    uv pip install \
+RUN pip3 install \
         torch==2.11.0+xpu \
         torchao \
         torchvision \
         torchaudio==2.11.0+xpu \
-        triton-xpu==3.7.0 \
         --index-url https://download.pytorch.org/whl/xpu
 
-# Install sgl-kernel-xpu first — it uses CMake find_package(Torch), so torch must
-# be visible at build time.  We use --no-build-isolation, which means the build-
-# system deps (scikit-build-core, cmake, ninja, setuptools) must live in the venv.
-# IMPORTANT: source setvars.sh so CMake picks up icpx (DPCPP) compiler for SYCL kernels.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    source /opt/intel/oneapi/setvars.sh --force && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    uv pip install scikit-build-core cmake ninja setuptools && \
-    uv pip install "sgl-kernel @ git+${SGLANG_KERNEL_GIT_URL}@${SGLANG_KERNEL_REF}" --no-build-isolation
+RUN pip3 install triton-xpu==3.7.0
+
+# Install sgl-kernel-xpu — needs icpx (DPCPP) for SYCL kernels.
+# Uses --no-build-isolation so build deps must be pre-installed.
+RUN source /opt/intel/oneapi/setvars.sh --force && \
+    pip3 install scikit-build-core cmake ninja setuptools && \
+    pip3 install "sgl-kernel @ git+${SGLANG_KERNEL_GIT_URL}@${SGLANG_KERNEL_REF}" --no-build-isolation
 
 # Clone SGLang and install for XPU (sgl-kernel is already satisfied from above)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    git clone ${SGLANG_GIT_URL} sglang && \
+RUN git clone ${SGLANG_GIT_URL} sglang && \
     cd sglang && \
     git checkout ${SGLANG_REF} && \
     cd python && \
     cp pyproject_xpu.toml pyproject.toml && \
-    uv pip install --no-build-isolation --extra-index-url https://download.pytorch.org/whl/xpu . && \
-    uv pip install xgrammar --no-deps && \
-    uv pip install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate
+    pip3 install --no-build-isolation --extra-index-url https://download.pytorch.org/whl/xpu . && \
+    pip3 install xgrammar --no-deps && \
+    pip3 install msgspec blake3 py-cpuinfo compressed_tensors gguf partial_json_parser einops tabulate
 
-# Source oneAPI environment in bashrc for interactive shells
-RUN echo "source /opt/intel/oneapi/setvars.sh --force" >> /etc/bash.bashrc
+# Source conda + oneAPI environment in bashrc for interactive shells
+RUN echo ". ${CONDA_DIR}/bin/activate sglang" >> /etc/bash.bashrc && \
+    echo "source /opt/intel/oneapi/setvars.sh --force" >> /etc/bash.bashrc
 
 ENV SGLANG_FORCE_SHUTDOWN=1
 

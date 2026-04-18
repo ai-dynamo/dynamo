@@ -79,16 +79,13 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% if device == "xpu" %}
 ARG ENABLE_KVBM
-RUN --mount=type=cache,target=/root/.cache/uv \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    source ${VIRTUAL_ENV}/bin/activate && \
-    uv pip install --no-deps \
+RUN pip install --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -n "$KVBM_WHEEL" ]; then uv pip install "$KVBM_WHEEL"; fi; \
+        if [ -n "$KVBM_WHEEL" ]; then pip install "$KVBM_WHEEL"; fi; \
     fi
 {% else %}
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
@@ -130,9 +127,8 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
 {% if device == "xpu" %}
+    echo '. /opt/miniforge3/bin/activate sglang' >> /etc/bash.bashrc && \
     echo 'source /opt/intel/oneapi/setvars.sh --force' >> /etc/bash.bashrc && \
-    echo 'export LD_LIBRARY_PATH=/opt/dynamo/venv/lib:$LD_LIBRARY_PATH' >> /etc/bash.bashrc && \
-    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
 {% endif %}
     mkdir -p /sgl-workspace && \
     ln -sf /workspace /sgl-workspace/dynamo
