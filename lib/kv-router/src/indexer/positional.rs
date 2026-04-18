@@ -22,9 +22,11 @@
 //! in a `ThreadPoolIndexer`.
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{SyncIndexer, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerTask};
+use crate::active_set::reconcile_active_workers;
 use crate::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError,
     KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,
@@ -138,14 +140,24 @@ impl PositionalIndexer {
 // ============================================================================
 
 impl SyncIndexer for PositionalIndexer {
-    fn worker(&self, event_receiver: flume::Receiver<WorkerTask>) -> anyhow::Result<()> {
+    fn worker(
+        &self,
+        event_receiver: flume::Receiver<WorkerTask>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
+    ) -> anyhow::Result<()> {
         let mut worker_blocks = FxHashMap::default();
+        let counters = metrics.as_ref().map(|m| m.prebind());
 
         while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
-                    if let Err(e) = self.apply_event(&mut worker_blocks, event) {
-                        tracing::warn!("Failed to apply event: {:?}", e);
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event);
+                    if result.is_err() {
+                        tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
@@ -153,6 +165,9 @@ impl SyncIndexer for PositionalIndexer {
                 }
                 WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
                     self.remove_worker_dp_rank_impl(&mut worker_blocks, worker_id, dp_rank);
+                }
+                WorkerTask::CleanupStaleChildren => {
+                    self.run_cleanup_task();
                 }
                 WorkerTask::DumpEvents(sender) => {
                     let events = self.dump_events(&worker_blocks);
@@ -460,18 +475,6 @@ impl PositionalIndexer {
 // -----------------------------------------------------------------------------
 
 impl PositionalIndexer {
-    /// Score all active workers at the given position and clear the active set.
-    #[inline]
-    fn drain_active(
-        active: &mut FxHashSet<WorkerWithDpRank>,
-        scores: &mut OverlapScores,
-        pos: usize,
-    ) {
-        for worker in active.drain() {
-            scores.scores.insert(worker, pos as u32);
-        }
-    }
-
     /// Compute sequence hash incrementally from previous hash and current local hash.
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
@@ -570,24 +573,23 @@ impl PositionalIndexer {
             }
 
             let Some(entry) = self.index.get(&(pos, sequence[pos])) else {
-                Self::drain_active(active, scores, pos);
+                for worker in active.drain() {
+                    scores.scores.insert(worker, pos as u32);
+                }
                 break;
             };
 
             Self::ensure_seq_hash_computed(seq_hashes, pos, sequence);
             let Some(workers) = entry.get(seq_hashes[pos]) else {
-                Self::drain_active(active, scores, pos);
+                for worker in active.drain() {
+                    scores.scores.insert(worker, pos as u32);
+                }
                 break;
             };
 
-            if workers.len() < active.len() {
-                active.retain(|w| {
-                    if workers.contains(w) {
-                        true
-                    } else {
-                        scores.scores.insert(*w, pos as u32);
-                        false
-                    }
+            if workers.len() != active.len() {
+                reconcile_active_workers(active, workers, |worker| {
+                    scores.scores.insert(worker, pos as u32);
                 });
             }
 

@@ -51,6 +51,7 @@ pub struct SystemHealth {
     new_endpoint_tx: mpsc::UnboundedSender<String>,
     new_endpoint_rx: Arc<parking_lot::Mutex<Option<mpsc::UnboundedReceiver<String>>>>,
     use_endpoint_health_status: Vec<String>,
+    health_check_enabled: bool,
     health_path: String,
     live_path: String,
     start_time: Instant,
@@ -61,12 +62,19 @@ impl SystemHealth {
     pub fn new(
         starting_health_status: HealthStatus,
         use_endpoint_health_status: Vec<String>,
+        health_check_enabled: bool,
         health_path: String,
         live_path: String,
     ) -> Self {
+        // Force NotReady when canary is enabled — canary verifies before marking Ready.
+        let initial_endpoint_status = if health_check_enabled {
+            HealthStatus::NotReady
+        } else {
+            starting_health_status.clone()
+        };
         let mut endpoint_health = HashMap::new();
         for endpoint in &use_endpoint_health_status {
-            endpoint_health.insert(endpoint.clone(), starting_health_status.clone());
+            endpoint_health.insert(endpoint.clone(), initial_endpoint_status.clone());
         }
 
         // Create the channel for endpoint registration notifications
@@ -80,12 +88,26 @@ impl SystemHealth {
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
+            health_check_enabled,
             health_path,
             live_path,
             start_time: Instant::now(),
             uptime_gauge: OnceLock::new(),
         }
     }
+
+    pub fn health_check_enabled(&self) -> bool {
+        self.health_check_enabled
+    }
+
+    /// Signal endpoint transport registration. Sets Ready when canary is disabled;
+    /// no-op when canary is enabled (canary will set Ready after verification).
+    pub fn set_endpoint_registered(&self, endpoint: &str) {
+        if !self.health_check_enabled {
+            self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
+        }
+    }
+
     pub fn set_health_status(&mut self, status: HealthStatus) {
         self.system_health = status;
     }

@@ -119,6 +119,8 @@ class AggRegressionModel(_BaseRegressionModel):
         max_num_batched_tokens: int,
         ttft_sla: float,
         itl_sla: float,
+        max_kv_tokens: Optional[int] = None,
+        max_num_seqs: Optional[int] = None,
     ) -> tuple[float, float, float]:
         """Find the maximum agg engine request rate under both SLA targets.
 
@@ -129,19 +131,28 @@ class AggRegressionModel(_BaseRegressionModel):
         Request rate is derived via Little's law:
         ``engine_rps = best_batch_size / (osl * wall_time_per_iter)``.
 
-        Args:
-            isl: average input sequence length (tokens).
-            osl: average output sequence length (tokens).
-            max_num_batched_tokens: per-iteration token budget.
-            ttft_sla: TTFT target in milliseconds.
-            itl_sla: ITL target in milliseconds.
+        The upper bound for the batch-size sweep is the smallest of:
+          1. KV cache capacity: ``max_kv_tokens / (isl + osl/2)``
+          2. ``max_num_seqs`` (engine concurrency limit)
+          3. The prefill/decode rate-balance point (steady state).  For a
+             batch of size ``x``:
+               - Decode egress rate: ``x / osl`` requests finish per iter
+                 (x concurrent streams, each taking osl decode iters).
+               - Prefill admission rate: ``(max_num_batched_tokens - x) / isl``
+                 requests admitted per iter (the budget left after decode
+                 takes one slot per in-flight request, divided by isl tokens
+                 per new request).
+             Steady state requires admission >= egress:
+               ``(max_num_batched_tokens - x) / isl >= x / osl``,
+             which simplifies to
+               ``isl / (max_num_batched_tokens - x) <= osl``
+             (the check implemented below), or equivalently
+               ``x <= osl * max_num_batched_tokens / (isl + osl)``.
+             Above this, prefill becomes the bottleneck and TTFT grows
+             unbounded.
 
-        Returns:
-            (engine_rps, actual_ttft_ms, actual_itl_ms) -- 0 rps
-            signals an error (model not fitted or invalid input);
-            positive rps is the best achievable rate with the
-            predicted TTFT/ITL.  If SLAs are violated, a warning
-            is logged but the rate is still returned.
+        The caller guarantees ``osl > 0`` and ``max_num_batched_tokens > 0``
+        via the early-return validation above.
         """
         if (
             not self._ensure_fitted()
@@ -152,7 +163,34 @@ class AggRegressionModel(_BaseRegressionModel):
             return (0.0, 0.0, 0.0)
 
         avg_ctx = isl + osl / 2.0
-        max_bs = max(1, int(max_num_batched_tokens / max(1, avg_ctx))) * 2
+
+        # KV cache cap
+        kv_cap = (
+            max(1, int(max_kv_tokens / max(1.0, avg_ctx)))
+            if max_kv_tokens and max_kv_tokens > 0
+            else 1024  # large fallback when capability not known
+        )
+        # Concurrency cap
+        seq_cap = max_num_seqs if max_num_seqs and max_num_seqs > 0 else kv_cap
+
+        # Prefill/decode balance cap via binary search within [1, min(kv_cap, seq_cap)]
+        # For each candidate x, check: isl / (max_num_batched_tokens - x) <= osl
+        hard_cap = min(kv_cap, seq_cap, max_num_batched_tokens - 1)
+
+        def _prefill_balanced(x: int) -> bool:
+            prefill_budget = max_num_batched_tokens - x
+            if prefill_budget <= 0:
+                return False
+            return isl / prefill_budget <= osl
+
+        lo, hi = 1, max(1, hard_cap)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if _prefill_balanced(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        max_bs = lo
 
         best_rps = 0.0
         best_ttft_ms = 0.0

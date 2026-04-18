@@ -67,6 +67,31 @@ spec:
             spec:
               description: DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
               properties:
+                gpuMemoryService:
+                  description: |-
+                    GPUMemoryService enables checkpoint-time GPU Memory Service wiring.
+                    It is intentionally outside spec.identity, so it does not affect the
+                    checkpoint identity hash or deduplication.
+                  properties:
+                    deviceClassName:
+                      default: gpu.nvidia.com
+                      description: DeviceClassName is the DRA DeviceClass to request GPUs from.
+                      type: string
+                    enabled:
+                      description: |-
+                        Enabled activates the GMS sidecar. GPU resources on the main container
+                        are replaced with a DRA ResourceClaim for shared GPU access.
+                      type: boolean
+                    mode:
+                      default: intraPod
+                      description: Mode selects the GMS deployment topology.
+                      enum:
+                        - intraPod
+                        - interPod
+                      type: string
+                  required:
+                    - enabled
+                  type: object
                 identity:
                   description: Identity defines the inputs that determine checkpoint equivalence
                   properties:

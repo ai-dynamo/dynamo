@@ -162,6 +162,23 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--load-format",
+            env_var="DYN_TRTLLM_LOAD_FORMAT",
+            default="auto",
+            help="Model weight loading format passed to TensorRT-LLM (e.g. 'auto', 'gms').",
+        )
+        add_argument(
+            g,
+            flag_name="--model-loader-extra-config",
+            env_var="DYN_TRTLLM_MODEL_LOADER_EXTRA_CONFIG",
+            default="",
+            help=(
+                "JSON object passed as extra config to the model loader "
+                "(e.g. '{\"gms_read_only\": true}')."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
             default=DisaggregationMode.AGGREGATED.value,
@@ -453,6 +470,8 @@ class DynamoTrtllmConfig(ConfigBase):
     override_engine_args: str
     publish_events_and_metrics: bool
     disable_request_abort: bool
+    load_format: str
+    model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode

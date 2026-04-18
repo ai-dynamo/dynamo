@@ -89,6 +89,10 @@ pub trait OAIChatLikeRequest {
     fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
         None
     }
+
+    fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
+        None
+    }
 }
 
 pub trait OAIPromptFormatter: Send + Sync + 'static {

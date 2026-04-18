@@ -332,15 +332,20 @@ impl OpenAIPreprocessor {
                 priority: hints.and_then(|h| h.priority),
                 lora_name,
                 allowed_worker_ids: None,
+                session_control: nvext.session_control.clone(),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
-            // Ensure routing hints exist when we have LoRA.
+            // Ensure routing hints exist when we have LoRA,
+            // even when nvext is absent.
             builder.routing(Some(RoutingHints {
                 lora_name,
                 ..Default::default()
             }));
         }
+
+        // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
+        builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         Ok(builder)
     }

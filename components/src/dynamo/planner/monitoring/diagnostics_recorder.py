@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
+import plotly.graph_objects as go  # type: ignore[import-untyped]
+from plotly.subplots import make_subplots  # type: ignore[import-untyped]
+
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import PlannerEffects, TickDiagnostics, TickInput
 from dynamo.planner.monitoring.traffic_metrics import Metrics
@@ -63,10 +66,18 @@ class TickSnapshot:
     engine_rps_decode: Optional[float] = None
     load_decision_reason: Optional[str] = None
     throughput_decision_reason: Optional[str] = None
+    load_decision_reason_prefill: Optional[str] = None
+    load_decision_reason_decode: Optional[str] = None
+    throughput_decision_reason_prefill: Optional[str] = None
+    throughput_decision_reason_decode: Optional[str] = None
 
     # Per-engine FPM queue depths
     prefill_engines: list[PerEngineFpm] = field(default_factory=list)
     decode_engines: list[PerEngineFpm] = field(default_factory=list)
+
+    # Throughput lower bound
+    throughput_lower_bound_prefill: Optional[int] = None
+    throughput_lower_bound_decode: Optional[int] = None
 
     # Scaling decision
     scale_to_prefill: Optional[int] = None
@@ -85,6 +96,7 @@ class DiagnosticsRecorder:
     """
 
     config: PlannerConfig
+    max_kv_tokens: Optional[int] = None
     _snapshots: list[TickSnapshot] = field(default_factory=list)
     _last_report_s: float = 0.0
     _report_count: int = 0
@@ -97,7 +109,7 @@ class DiagnosticsRecorder:
 
     @property
     def enabled(self) -> bool:
-        return self._interval_s > 0
+        return self._interval_s > 0 or self.config.live_dashboard_port != 0
 
     def record(
         self,
@@ -174,6 +186,12 @@ class DiagnosticsRecorder:
             engine_rps_decode=diag.engine_rps_decode,
             load_decision_reason=diag.load_decision_reason,
             throughput_decision_reason=diag.throughput_decision_reason,
+            load_decision_reason_prefill=diag.load_decision_reason_prefill,
+            load_decision_reason_decode=diag.load_decision_reason_decode,
+            throughput_decision_reason_prefill=diag.throughput_decision_reason_prefill,
+            throughput_decision_reason_decode=diag.throughput_decision_reason_decode,
+            throughput_lower_bound_prefill=diag.throughput_lower_bound_prefill,
+            throughput_lower_bound_decode=diag.throughput_lower_bound_decode,
             prefill_engines=prefill_engines,
             decode_engines=decode_engines,
             scale_to_prefill=(
@@ -193,21 +211,16 @@ class DiagnosticsRecorder:
             self._last_report_s = self._snapshots[0].timestamp_s
         return now_s - self._last_report_s >= self._interval_s
 
-    def generate_report(self) -> Optional[str]:
-        if not self._snapshots:
-            return None
+    def _build_report_html(self, snaps: list[TickSnapshot]) -> str:
+        """Build the HTML report string from the given snapshots.
 
-        try:
-            import plotly.graph_objects as go  # type: ignore[import-untyped]
-            from plotly.subplots import make_subplots  # type: ignore[import-untyped]
-        except ImportError:
-            logger.warning(
-                "plotly is not installed -- cannot generate HTML report. "
-                "Install with: pip install plotly"
-            )
-            return None
-
-        snaps = self._snapshots
+        This method has no side effects (no file I/O, no snapshot clearing).
+        """
+        # TODO: link x-axes across all subplots (e.g. ``fig.update_xaxes(
+        # matches="x")`` or shared_xaxes=True in make_subplots) so zooming
+        # into a time range on one chart also zooms the others.  Currently
+        # a user has to zoom each subplot independently to narrow down on a
+        # specific time window.
         ts = [s.timestamp_s for s in snaps]
         labels = [
             datetime.fromtimestamp(t, tz=timezone.utc).strftime("%H:%M:%S") for t in ts
@@ -260,6 +273,32 @@ class DiagnosticsRecorder:
             row=1,
             col=1,
         )
+        tp_lower_p = _vals("throughput_lower_bound_prefill")
+        if any(v is not None and v > 1 for v in tp_lower_p):
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=tp_lower_p,
+                    name="Prefill TP Lower Bound",
+                    mode="lines",
+                    line=dict(dash="dash", color="darkblue"),
+                ),
+                row=1,
+                col=1,
+            )
+        tp_lower_d = _vals("throughput_lower_bound_decode")
+        if any(v is not None and v > 1 for v in tp_lower_d):
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=tp_lower_d,
+                    name="Decode TP Lower Bound",
+                    mode="lines",
+                    line=dict(dash="dash", color="red"),
+                ),
+                row=1,
+                col=1,
+            )
 
         # 1b. Request rate
         fig.add_trace(
@@ -279,6 +318,7 @@ class DiagnosticsRecorder:
                 name="Predicted RPS",
                 mode="lines",
                 line=dict(dash="dot"),
+                connectgaps=True,
             ),
             row=1,
             col=2,
@@ -392,42 +432,46 @@ class DiagnosticsRecorder:
                         break
                 y.append(val)
             fig.add_trace(
-                go.Scatter(x=labels, y=y, name=f"P {eid} queued", mode="lines+markers"),
+                go.Scatter(
+                    x=labels,
+                    y=y,
+                    name=f"P {eid} queued",
+                    mode="lines+markers",
+                    showlegend=False,
+                ),
                 row=4,
                 col=1,
             )
 
-        # 4b. Decode engine load (queued + inflight, one line each per engine)
+        # 4b. Decode engine load (queued + inflight combined per engine)
         for eid in sorted(decode_engine_ids):
-            y_queued = []
-            y_inflight = []
+            y_total = []
             for s in snaps:
-                q, f_ = None, None
+                val = None
                 for e in s.decode_engines:
                     if f"{e.worker_id}:dp{e.dp_rank}" == eid:
-                        q = e.queued_decode_kv_tokens
-                        f_ = e.inflight_decode_kv_tokens
+                        val = e.queued_decode_kv_tokens + e.inflight_decode_kv_tokens
                         break
-                y_queued.append(q)
-                y_inflight.append(f_)
+                y_total.append(val)
             fig.add_trace(
                 go.Scatter(
                     x=labels,
-                    y=y_queued,
-                    name=f"D {eid} queued",
+                    y=y_total,
+                    name=f"D {eid} total KV",
                     mode="lines+markers",
+                    showlegend=False,
                 ),
                 row=4,
                 col=2,
             )
-            fig.add_trace(
-                go.Scatter(
-                    x=labels,
-                    y=y_inflight,
-                    name=f"D {eid} inflight",
-                    mode="lines",
-                    line=dict(dash="dot"),
-                ),
+
+        # KV capacity line (set by adapter if available)
+        if self.max_kv_tokens is not None and self.max_kv_tokens > 0:
+            fig.add_hline(
+                y=self.max_kv_tokens,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"KV Capacity ({self.max_kv_tokens:,})",
                 row=4,
                 col=2,
             )
@@ -441,6 +485,7 @@ class DiagnosticsRecorder:
                 y=_vals("engine_rps_prefill"),
                 name="Prefill Engine RPS",
                 mode="lines+markers",
+                connectgaps=True,
             ),
             row=5,
             col=1,
@@ -451,6 +496,7 @@ class DiagnosticsRecorder:
                 y=_vals("engine_rps_decode"),
                 name="Decode Engine RPS",
                 mode="lines+markers",
+                connectgaps=True,
             ),
             row=5,
             col=1,
@@ -474,6 +520,7 @@ class DiagnosticsRecorder:
                 name="Predicted ISL",
                 mode="lines",
                 line=dict(dash="dot"),
+                connectgaps=True,
             ),
             row=5,
             col=2,
@@ -495,14 +542,25 @@ class DiagnosticsRecorder:
                 name="Predicted OSL",
                 mode="lines",
                 line=dict(dash="dot"),
+                connectgaps=True,
             ),
             row=5,
             col=2,
         )
 
         # -- Row 6: Decision timelines -----------------------------------
+        #
+        # Layout adapts to scaling mode:
+        #   - Disagg (per-component reasons populated): two tracks per
+        #     subplot, prefill on y=2, decode on y=1, with "prefill" /
+        #     "decode" y-axis labels.
+        #   - Agg / easy mode (only aggregate reason populated): single
+        #     track at y=1 with "Load Decision" / "Throughput Decision"
+        #     labels.
+        # We detect the mode by whether any snapshot has a per-component
+        # reason set; switching mode mid-run would produce a mixed chart,
+        # but that doesn't happen because mode is fixed at planner init.
 
-        load_reasons = _vals("load_decision_reason")
         _LOAD_COLORS = {
             "scale_up": "green",
             "scale_down": "blue",
@@ -514,25 +572,6 @@ class DiagnosticsRecorder:
             "worker_count_mismatch": "red",
             "insufficient_data": "pink",
         }
-        fig.add_trace(
-            go.Scatter(
-                x=labels,
-                y=[1] * len(labels),
-                mode="markers",
-                marker=dict(
-                    color=[_LOAD_COLORS.get(r or "", "gray") for r in load_reasons],
-                    size=10,
-                    symbol="square",
-                ),
-                text=load_reasons,
-                name="Load Decision",
-                hoverinfo="text+x",
-            ),
-            row=6,
-            col=1,
-        )
-
-        tp_reasons = _vals("throughput_decision_reason")
         _TP_COLORS = {
             "scale": "green",
             "set_lower_bound": "blue",
@@ -540,32 +579,148 @@ class DiagnosticsRecorder:
             "no_traffic_data": "yellow",
             "predict_failed": "red",
             "model_not_ready": "orange",
+            "partner_not_ready": "pink",
         }
-        fig.add_trace(
-            go.Scatter(
-                x=labels,
-                y=[1] * len(labels),
-                mode="markers",
-                marker=dict(
-                    color=[_TP_COLORS.get(r or "", "gray") for r in tp_reasons],
-                    size=10,
-                    symbol="diamond",
-                ),
-                text=tp_reasons,
-                name="Throughput Decision",
-                hoverinfo="text+x",
-            ),
-            row=6,
-            col=2,
+
+        # Detect disagg mode: if any per-component reason is populated,
+        # plot two horizontal tracks (prefill at y=2, decode at y=1);
+        # otherwise plot a single aggregate track at y=1.
+        has_per_component_load = any(
+            s.load_decision_reason_prefill is not None
+            or s.load_decision_reason_decode is not None
+            for s in snaps
         )
+        has_per_component_tp = any(
+            s.throughput_decision_reason_prefill is not None
+            or s.throughput_decision_reason_decode is not None
+            for s in snaps
+        )
+
+        def _add_decision_track(
+            field_name: str,
+            y_value: int,
+            label: str,
+            colors: dict,
+            symbol: str,
+            row: int,
+            col: int,
+        ) -> None:
+            reasons = _vals(field_name)
+            fig.add_trace(
+                go.Scatter(
+                    x=labels,
+                    y=[y_value] * len(labels),
+                    mode="markers",
+                    marker=dict(
+                        color=[colors.get(r or "", "gray") for r in reasons],
+                        size=10,
+                        symbol=symbol,
+                    ),
+                    text=reasons,
+                    name=label,
+                    hoverinfo="text+x",
+                    showlegend=False,
+                ),
+                row=row,
+                col=col,
+            )
+
+        if has_per_component_load:
+            _add_decision_track(
+                "load_decision_reason_prefill",
+                2,
+                "Load (prefill)",
+                _LOAD_COLORS,
+                "square",
+                6,
+                1,
+            )
+            _add_decision_track(
+                "load_decision_reason_decode",
+                1,
+                "Load (decode)",
+                _LOAD_COLORS,
+                "square",
+                6,
+                1,
+            )
+            fig.update_yaxes(
+                tickmode="array",
+                tickvals=[1, 2],
+                ticktext=["decode", "prefill"],
+                range=[0.5, 2.5],
+                row=6,
+                col=1,
+            )
+        else:
+            _add_decision_track(
+                "load_decision_reason",
+                1,
+                "Load Decision",
+                _LOAD_COLORS,
+                "square",
+                6,
+                1,
+            )
+
+        if has_per_component_tp:
+            _add_decision_track(
+                "throughput_decision_reason_prefill",
+                2,
+                "TP (prefill)",
+                _TP_COLORS,
+                "diamond",
+                6,
+                2,
+            )
+            _add_decision_track(
+                "throughput_decision_reason_decode",
+                1,
+                "TP (decode)",
+                _TP_COLORS,
+                "diamond",
+                6,
+                2,
+            )
+            fig.update_yaxes(
+                tickmode="array",
+                tickvals=[1, 2],
+                ticktext=["decode", "prefill"],
+                range=[0.5, 2.5],
+                row=6,
+                col=2,
+            )
+        else:
+            _add_decision_track(
+                "throughput_decision_reason",
+                1,
+                "Throughput Decision",
+                _TP_COLORS,
+                "diamond",
+                6,
+                2,
+            )
 
         # -- Layout -------------------------------------------------------
 
-        num_scaling_events = sum(
-            1
-            for s in snaps
-            if s.scale_to_prefill is not None or s.scale_to_decode is not None
-        )
+        # Count actual replica transitions, not just ticks where a decision
+        # was recorded: two consecutive ticks with scale_to=5 aren't two
+        # scaling events.
+        num_scaling_events = 0
+        prev_p: Optional[int] = None
+        prev_d: Optional[int] = None
+        for s in snaps:
+            cur_p = s.num_prefill_replicas
+            cur_d = s.num_decode_replicas
+            if prev_p is not None and cur_p is not None and cur_p != prev_p:
+                num_scaling_events += 1
+            if prev_d is not None and cur_d is not None and cur_d != prev_d:
+                num_scaling_events += 1
+            if cur_p is not None:
+                prev_p = cur_p
+            if cur_d is not None:
+                prev_d = cur_d
+
         t0 = datetime.fromtimestamp(ts[0], tz=timezone.utc).strftime(
             "%Y-%m-%d %H:%M:%S UTC"
         )
@@ -575,7 +730,7 @@ class DiagnosticsRecorder:
         summary = (
             f"<b>Planner Diagnostics Report</b><br>"
             f"Time range: {t0} — {t1} ({len(snaps)} ticks)<br>"
-            f"Scaling events: {num_scaling_events} | "
+            f"Replica transitions: {num_scaling_events} | "
             f"GPU hours: {snaps[-1].gpu_hours:.2f}<br>"
             f"SLA targets: TTFT={self.config.ttft:.0f}ms, ITL={self.config.itl:.0f}ms"
         )
@@ -583,26 +738,51 @@ class DiagnosticsRecorder:
             title=dict(text=summary, font=dict(size=14), y=0.99, yanchor="top"),
             height=2000,
             showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=-0.03),
+            legend=dict(orientation="h", yanchor="top", y=-0.05),
             template="plotly_white",
             margin=dict(t=100),
         )
 
+        return fig.to_html(include_plotlyjs=True, full_html=True)
+
+    def generate_report(self) -> Optional[str]:
+        """Generate a periodic report, write it to disk, and clear snapshots."""
+        if not self._snapshots:
+            return None
+
+        snaps = list(self._snapshots)
+        html = self._build_report_html(snaps)
+        ts = [s.timestamp_s for s in snaps]
+
         output_dir = self.config.report_output_dir
         os.makedirs(output_dir, exist_ok=True)
         self._report_count += 1
-        ts_label = datetime.fromtimestamp(ts[-1], tz=timezone.utc).strftime(
-            "%Y%m%d_%H%M%S"
-        )
-        filename = f"planner_report_{ts_label}_{self._report_count:03d}.html"
+        if self.config.report_filename:
+            filename = self.config.report_filename
+        else:
+            ts_label = datetime.fromtimestamp(ts[-1], tz=timezone.utc).strftime(
+                "%Y%m%d_%H%M%S"
+            )
+            filename = f"planner_report_{ts_label}_{self._report_count:03d}.html"
         filepath = os.path.join(output_dir, filename)
 
-        fig.write_html(filepath, include_plotlyjs=True, full_html=True)
+        with open(filepath, "w") as f:
+            f.write(html)
         logger.info(f"Planner diagnostics report written to {filepath}")
 
         self._last_report_s = ts[-1]
         self._snapshots.clear()
         return filepath
+
+    def render_live_html(self) -> Optional[str]:
+        """Render the current accumulated snapshots as HTML without side effects.
+
+        Unlike ``generate_report()``, this does NOT clear snapshots or write
+        to disk.  Intended for the live dashboard HTTP endpoint.
+        """
+        if not self._snapshots:
+            return None
+        return self._build_report_html(list(self._snapshots))
 
     def finalize(self) -> Optional[str]:
         if self._snapshots:
