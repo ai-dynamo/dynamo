@@ -1436,7 +1436,7 @@ spec:
 				NodesWithGPUs: 1,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
-			cache.Set(mockGPU, 10*time.Minute)
+			cache.Set("", mockGPU, 10*time.Minute)
 			reconciler.GPUDiscoveryCache = cache
 			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
 			reconciler.APIReader = k8sClient
@@ -1561,7 +1561,7 @@ spec:
 				NodesWithGPUs: 1,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
-			cache.Set(mockGPU, 10*time.Minute)
+			cache.Set("", mockGPU, 10*time.Minute)
 			reconciler.GPUDiscoveryCache = cache
 			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
 			reconciler.APIReader = k8sClient
@@ -1685,7 +1685,7 @@ spec:
 				NodesWithGPUs: 1,
 			}
 			cache := gpu.NewGPUDiscoveryCache()
-			cache.Set(mockGPU, 10*time.Minute)
+			cache.Set("", mockGPU, 10*time.Minute)
 			reconciler.GPUDiscoveryCache = cache
 			reconciler.GPUDiscovery = gpu.NewGPUDiscovery(nil)
 			reconciler.APIReader = k8sClient
