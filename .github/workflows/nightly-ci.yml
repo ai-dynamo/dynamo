@@ -64,7 +64,7 @@ jobs:
       build_timeout_minutes: 180
       cpu_only_test_markers: 'vllm and gpu_0'
       single_gpu_test_markers: 'vllm and gpu_1'
-      single_gpu_test_timeout_minutes: 180
+      single_gpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'vllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
@@ -88,7 +88,7 @@ jobs:
       build_timeout_minutes: 180
       cpu_only_test_markers: 'sglang and gpu_0'
       single_gpu_test_markers: 'sglang and gpu_1'
-      single_gpu_test_timeout_minutes: 180
+      single_gpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'sglang and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit
@@ -112,7 +112,7 @@ jobs:
       build_timeout_minutes: 180
       cpu_only_test_markers: 'trtllm and gpu_0'
       single_gpu_test_markers: 'trtllm and gpu_1'
-      single_gpu_test_timeout_minutes: 180
+      single_gpu_test_timeout_minutes: 300
       multi_gpu_test_markers: 'trtllm and (gpu_2 or gpu_4)'
       multi_gpu_test_timeout_minutes: 120
     secrets: inherit

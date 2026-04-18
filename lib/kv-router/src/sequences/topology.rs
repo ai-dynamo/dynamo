@@ -219,12 +219,15 @@ mod tests {
         {
             let idx = table.index[&existing];
             let mut seq = table.slots[idx].sequences.write();
-            let outcome = seq.add_request(
+            let outcome = seq.add_request_with_prefill_tracking(
                 "req-1".to_string(),
                 Some(vec![1, 2, 3]),
-                12,
-                0,
                 None,
+                true,
+                Some(crate::protocols::PrefillLoadHint {
+                    initial_effective_prefill_tokens: 12,
+                    expected_prefill_duration: None,
+                }),
                 Instant::now(),
             );
             assert_eq!(outcome.membership_delta.stores[0].hashes, vec![1, 2, 3],);

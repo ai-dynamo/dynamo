@@ -44,14 +44,6 @@ inputs:
     description: 'SCCache S3 Bucket'
     required: false
     default: ''
-  aws_access_key_id:
-    description: 'AWS Access Key ID'
-    required: false
-    default: ''
-  aws_secret_access_key:
-    description: 'AWS Secret Access Key'
-    required: false
-    default: ''
   hf_token:
     description: 'HuggingFace token'
     required: false
@@ -239,8 +231,6 @@ runs:
         aws_default_region: ${{ inputs.aws_default_region }}
         sccache_s3_bucket: ${{ inputs.sccache_s3_bucket }}
         aws_account_id: ${{ inputs.aws_account_id }}
-        aws_access_key_id: ${{ inputs.aws_access_key_id }}
-        aws_secret_access_key: ${{ inputs.aws_secret_access_key }}
         no_cache: ${{ inputs.no_cache }}
         extra_tags: ${{ steps.extra-tags.outputs.tags }}
         push_image: ${{ inputs.push_image }}
