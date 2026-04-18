@@ -7,7 +7,11 @@
 ########## Runtime Image #########
 ##################################
 
+{% if device == "xpu" %}
+FROM framework AS runtime
+{% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+{% endif %}
 
 WORKDIR /workspace
 
@@ -29,6 +33,35 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
+{% if device == "xpu" %}
+ENV NIXL_PREFIX=/opt/intel/intel_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/x86_64-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+{% elif device == "cuda" %}
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib64
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+{% endif %}
+
+# Copy UCX and NIXL from wheel_builder
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+{% if device == "xpu" %}
+{# XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated #}
+COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+{% endif %}
+COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+
+ENV PATH=/usr/local/ucx/bin:$PATH
+
+ENV LD_LIBRARY_PATH=\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+${LD_LIBRARY_PATH:-}
+
 {% if context.sglang.enable_media_ffmpeg == "true" %}
 # Copy ffmpeg
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
@@ -44,13 +77,26 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # source later in the shared dev stage after the workspace is bind-mounted.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
+{% if device == "xpu" %}
+ARG ENABLE_KVBM
+RUN pip install --no-deps \
+        /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${ENABLE_KVBM}" = "true" ]; then \
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+        if [ -n "$KVBM_WHEEL" ]; then pip install "$KVBM_WHEEL"; fi; \
+    fi
+{% else %}
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl
+{% endif %}
 
-# Install gpu_memory_service wheel if enabled (all targets)
+{% if device != "xpu" %}
+# Install gpu_memory_service wheel if enabled (CUDA only)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
@@ -58,6 +104,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
     fi
+{% endif %}
 {% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership
@@ -79,11 +126,20 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
 
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
-    ln -s /workspace /sgl-workspace/dynamo
+{% if device == "xpu" %}
+    echo '. /opt/miniforge3/bin/activate sglang' >> /etc/bash.bashrc && \
+    echo 'source /opt/intel/oneapi/setvars.sh --force' >> /etc/bash.bashrc && \
+{% endif %}
+    mkdir -p /sgl-workspace && \
+    ln -sf /workspace /sgl-workspace/dynamo
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
+{% if device == "xpu" %}
+CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
+{% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+{% endif %}

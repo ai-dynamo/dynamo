@@ -134,6 +134,14 @@ ARG FLASH_ATTN_VER={{ context.trtllm.flash_attn_version }}
 ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
 {%- endif -%}
 
+{% if framework == "sglang" and device == "xpu" -%}
+# SGLang XPU build: clone and build from source (no pre-built runtime image)
+ARG SGLANG_GIT_URL=https://github.com/sgl-project/sglang.git
+ARG SGLANG_REF={{ context.sglang.xpu.sglang_ref }}
+ARG SGLANG_KERNEL_GIT_URL=https://github.com/sgl-project/sgl-kernel-xpu.git
+ARG SGLANG_KERNEL_REF=ac2fa3d549948fde822222dc1c259f55519ad021
+{%- endif -%}
+
 {% if make_efa == true %}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}

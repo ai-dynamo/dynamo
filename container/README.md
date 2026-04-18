@@ -505,3 +505,95 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model Qwen/Qwen3-0.6B --free-gpu-
 - **vLLM**: `--gpu-memory-utilization 0.20` (use 20% GPU memory), `--enforce-eager` (disable CUDA graphs), `--no-enable-prefix-caching` (save memory), `--max-num-seqs 64` (max concurrent sequences)
 - **SGLang**: `--mem-fraction-static 0.20` (20% GPU memory for static allocation), `--max-running-requests 64` (max concurrent requests)
 - **TensorRT-LLM**: `--free-gpu-memory-fraction 0.20` (reserve 20% GPU memory), `--max-num-tokens 8192` (max tokens in batch), `--max-batch-size 64` (max batch size)
+
+## Intel XPU Support
+
+Dynamo supports Intel Data Center GPU Max Series (PVC) via the SGLang framework with XPU backend. The XPU build uses a conda-based environment following the upstream [sgl-project/sglang/docker/xpu.Dockerfile](https://github.com/sgl-project/sglang/blob/main/docker/xpu.Dockerfile) pattern.
+
+### XPU Build Overview
+
+The XPU build differs from the CUDA build in several ways:
+
+| Aspect | CUDA Build | XPU Build |
+|--------|-----------|-----------|
+| **Base Image** | `nvcr.io/nvidia/cuda:*` | `intel/deep-learning-essentials:2025.3.2-0-devel-ubuntu24.04` |
+| **Python Env** | uv venv (`/opt/dynamo/venv`) | Miniforge conda (`/opt/miniforge3/envs/sglang`) |
+| **PyTorch** | `torch` (CUDA) | `torch==2.11.0+xpu` from PyTorch XPU index |
+| **Kernel Package** | `sgl-kernel` | `sgl-kernel-xpu` (built from source with DPCPP/SYCL) |
+| **Device Access** | `--gpus all` | `--device /dev/dri --group-add <render-gid>` |
+
+### Building SGLang XPU Image
+
+```bash
+# 1. Render the Dockerfile for SGLang XPU runtime
+container/render.py --framework sglang --device xpu --target runtime
+
+# 2. Build the image
+DOCKER_BUILDKIT=1 docker build \
+  -t dynamo-sglang-xpu:latest \
+  -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+```
+
+> **Note**: The sgl-kernel-xpu build compiles SYCL kernels from source using `icpx` (Intel DPC++ compiler), which can take significant time. Subsequent builds with Docker layer caching will be much faster.
+
+### Running SGLang XPU Container
+
+The XPU container requires access to Intel GPU devices via `/dev/dri` and the render group:
+
+```bash
+# Find the render group GID on your host
+RENDER_GID=$(getent group render | cut -d: -f3)
+
+# Run with Qwen3-0.6B model
+docker run --rm \
+  --device /dev/dri \
+  --group-add ${RENDER_GID} \
+  --user root \
+  -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+  -e HF_HOME=/root/.cache/huggingface \
+  -e DYN_DISCOVERY_BACKEND=file \
+  -e DYN_FILE_KV=/tmp/dynamo-discovery \
+  -p 8000:8000 \
+  --ipc=host --shm-size=8g \
+  dynamo-sglang-xpu:latest bash -c '
+source /etc/bash.bashrc
+mkdir -p /tmp/dynamo-discovery
+cat > /tmp/nats.conf << EOF
+listen: 0.0.0.0:4222
+jetstream: enabled
+max_payload: 15728640
+EOF
+nats-server -c /tmp/nats.conf &
+sleep 2
+python3 -m dynamo.frontend --http-port 8000 --discovery-backend file &
+python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
+  --page-size 16 --tp 1 --trust-remote-code --skip-tokenizer-init \
+  --discovery-backend file
+wait
+'
+```
+
+### Testing Inference
+
+Once the server is ready, send a request:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}'
+```
+
+### Verified Models
+
+| Model | Status | Notes |
+|-------|--------|-------|
+| Qwen/Qwen2-0.5B | ✅ Working | |
+
+### XPU Requirements
+
+- **Hardware**: Intel Data Center GPU Max Series (e.g., Max 1550) or Intel Arc B-Series (BMG, e.g., B580)
+- **Host Driver**: Intel GPU driver with Level Zero runtime
+- **Device Access**: `/dev/dri` must be accessible; user must be in the `render` group (or use `--group-add`)
+- **Base Image**: Includes Intel oneAPI, Level Zero 1.21.9+, and DPC++ compiler
