@@ -269,6 +269,39 @@ To disable the EPP from listening for KV events (e.g., when prefix caching is of
 Stand-Alone installation only:
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
 
+**Service Mesh Integration**
+
+When running under a service mesh (e.g., Istio), the mesh sidecar proxy may conflict with the EPP's own TLS serving, causing connection failures (double-TLS). To avoid this, the mesh must be told how to connect to the EPP service.
+
+For **Istio**, this means creating a `DestinationRule` for the EPP service. The Dynamo operator can generate this automatically when the `serviceMesh` configuration is enabled in the platform Helm values:
+
+```yaml
+dynamo:
+  serviceMesh:
+    enabled: true
+    provider: "istio"
+    istio:
+      tlsMode: "SIMPLE"          # EPP serves TLS with a self-signed cert
+      insecureSkipVerify: true    # skip verification of the self-signed cert
+```
+
+This produces a `DestinationRule` equivalent to:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: <epp-service-name>
+spec:
+  host: <epp-service-name>.<namespace>.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      insecureSkipVerify: true
+```
+
+If you are **not** using the Dynamo operator's Helm chart, you must create this `DestinationRule` manually. Without it, Istio's default mTLS policy will conflict with the EPP's gRPC TLS endpoint.
+
 ### 6. Verify Installation ###
 
 Check that all resources are properly deployed:

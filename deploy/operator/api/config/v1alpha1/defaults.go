@@ -90,6 +90,19 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.Checkpoint.ReadyForCheckpointFilePath = "/tmp/ready-for-checkpoint"
 	}
 
+	// ServiceMesh defaults
+	if obj.ServiceMesh.Provider == "istio" && obj.ServiceMesh.Istio == nil {
+		obj.ServiceMesh.Istio = &IstioMeshConfiguration{}
+	}
+	if obj.ServiceMesh.Istio != nil {
+		if obj.ServiceMesh.Istio.TLSMode == "" {
+			obj.ServiceMesh.Istio.TLSMode = "SIMPLE"
+		}
+		if obj.ServiceMesh.Istio.InsecureSkipVerify == nil {
+			obj.ServiceMesh.Istio.InsecureSkipVerify = ptr.To(true)
+		}
+	}
+
 	// Logging defaults
 	if obj.Logging.Level == "" {
 		obj.Logging.Level = "info"

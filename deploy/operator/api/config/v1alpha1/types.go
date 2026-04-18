@@ -53,6 +53,10 @@ type OperatorConfiguration struct {
 	// Ingress configuration
 	Ingress IngressConfiguration `json:"ingress"`
 
+	// ServiceMesh configures automatic generation of service-mesh resources
+	// (e.g., Istio DestinationRules) for EPP components.
+	ServiceMesh ServiceMeshConfiguration `json:"serviceMesh"`
+
 	// RBAC configuration for cross-namespace resource management (cluster-wide mode)
 	RBAC RBACConfiguration `json:"rbac"`
 
@@ -221,6 +225,33 @@ type IngressConfiguration struct {
 // UseVirtualService returns true if a VirtualService gateway is configured.
 func (i *IngressConfiguration) UseVirtualService() bool {
 	return i.VirtualServiceGateway != ""
+}
+
+// ServiceMeshConfiguration holds service mesh integration settings.
+// The operator uses this to generate mesh-specific resources (e.g., Istio
+// DestinationRules) for EPP components so that sidecar proxies connect
+// correctly without double-TLS issues.
+type ServiceMeshConfiguration struct {
+	// Provider selects the service mesh implementation. Supported: "istio", "".
+	// Empty string disables service mesh resource generation.
+	Provider string `json:"provider"`
+	// Istio holds Istio-specific settings. Only used when Provider is "istio".
+	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
+}
+
+// IsEnabled returns true if a service mesh provider is configured.
+func (s *ServiceMeshConfiguration) IsEnabled() bool {
+	return s.Provider != ""
+}
+
+// IstioMeshConfiguration holds Istio-specific mesh settings.
+type IstioMeshConfiguration struct {
+	// TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").
+	// Defaults to "SIMPLE".
+	TLSMode string `json:"tlsMode"`
+	// InsecureSkipVerify skips TLS certificate verification in DestinationRules.
+	// Defaults to true (matching upstream GAIE behavior with self-signed certs).
+	InsecureSkipVerify *bool `json:"insecureSkipVerify,omitempty"`
 }
 
 // RBACConfiguration holds RBAC settings for cluster-wide mode.

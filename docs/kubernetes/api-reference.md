@@ -1977,6 +1977,23 @@ _Appears in:_
 | `hostSuffix` _string_ | HostSuffix is the suffix for ingress hostnames |  |  |
 
 
+#### IstioMeshConfiguration
+
+
+
+IstioMeshConfiguration holds Istio-specific mesh settings.
+
+
+
+_Appears in:_
+- [ServiceMeshConfiguration](#servicemeshconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `tlsMode` _string_ | TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").<br />Defaults to "SIMPLE". |  |  |
+| `insecureSkipVerify` _boolean_ | InsecureSkipVerify skips TLS certificate verification in DestinationRules.<br />Defaults to true (matching upstream GAIE behavior with self-signed certs). |  |  |
+
+
 #### KaiSchedulerConfiguration
 
 
@@ -2136,6 +2153,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `orchestrators` _[OrchestratorConfiguration](#orchestratorconfiguration)_ | Orchestrator configuration with optional overrides |  |  |
 | `infrastructure` _[InfrastructureConfiguration](#infrastructureconfiguration)_ | Service mesh and infrastructure addresses |  |  |
 | `ingress` _[IngressConfiguration](#ingressconfiguration)_ | Ingress configuration |  |  |
+| `serviceMesh` _[ServiceMeshConfiguration](#servicemeshconfiguration)_ | ServiceMesh configures automatic generation of service-mesh resources<br />(e.g., Istio DestinationRules) for EPP components. |  |  |
 | `rbac` _[RBACConfiguration](#rbacconfiguration)_ | RBAC configuration for cross-namespace resource management (cluster-wide mode) |  |  |
 | `mpi` _[MPIConfiguration](#mpiconfiguration)_ | MPI SSH secret configuration |  |  |
 | `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  |  |
@@ -2232,6 +2250,26 @@ _Appears in:_
 | `metrics` _[MetricsServer](#metricsserver)_ | Metrics server configuration | \{ bindAddress:0.0.0.0 port:8080 secure:true \} |  |
 | `healthProbe` _[Server](#server)_ | Health probe server configuration | \{ bindAddress:0.0.0.0 port:8081 \} |  |
 | `webhook` _[WebhookServer](#webhookserver)_ | Webhook server configuration | \{ certDir:/tmp/k8s-webhook-server/serving-certs host:0.0.0.0 port:9443 \} |  |
+
+
+#### ServiceMeshConfiguration
+
+
+
+ServiceMeshConfiguration holds service mesh integration settings.
+The operator uses this to generate mesh-specific resources (e.g., Istio
+DestinationRules) for EPP components so that sidecar proxies connect
+correctly without double-TLS issues.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `provider` _string_ | Provider selects the service mesh implementation. Supported: "istio", "".<br />Empty string disables service mesh resource generation. |  |  |
+| `istio` _[IstioMeshConfiguration](#istiomeshconfiguration)_ | Istio holds Istio-specific settings. Only used when Provider is "istio". |  |  |
 
 
 #### WebhookServer

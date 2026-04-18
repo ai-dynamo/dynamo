@@ -306,10 +306,11 @@ rules:
   - patch
   - update
   - watch
-{{- if .Values.istioVirtualServiceEnabled }}
+{{- if or .Values.istioVirtualServiceEnabled (and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled) }}
 - apiGroups:
   - networking.istio.io
   resources:
+  - destinationrules
   - virtualservices
   verbs:
   - create
