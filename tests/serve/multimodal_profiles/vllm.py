@@ -99,7 +99,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="gemma3-4b",
         topologies={
             "agg": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.pre_merge],
                 timeout_s=300,
                 profiled_vram_gib=12.0,
             ),
