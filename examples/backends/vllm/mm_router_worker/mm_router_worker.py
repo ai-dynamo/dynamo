@@ -11,7 +11,7 @@ overlap, and forwards the request to that worker.
 Usage:
     python -m examples.backends.vllm.mm_router_worker \
         --model Qwen/Qwen3-VL-8B-Instruct \
-        --namespace default \
+        --namespace dynamo \
         --component mm_router \
         --endpoint generate \
         --downstream-component backend \
@@ -21,6 +21,7 @@ Usage:
 import argparse
 import asyncio
 import logging
+import os
 import signal
 
 import uvloop
@@ -58,8 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--namespace",
         type=str,
-        default="default",
-        help="Dynamo namespace",
+        default=os.environ.get("DYN_NAMESPACE", "dynamo"),
+        help="Dynamo namespace (default: DYN_NAMESPACE env or 'dynamo')",
     )
     parser.add_argument(
         "--component",
@@ -86,6 +87,15 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="generate",
         help="Downstream vLLM workers' endpoint name",
+    )
+
+    # Router configuration
+    parser.add_argument(
+        "--no-router-kv-events",
+        action="store_true",
+        default=False,
+        help="Use approximate KV routing (no KV events from workers). "
+        "Required for hybrid models like Qwen3.5 that cannot emit KV events.",
     )
 
     return parser.parse_args()
@@ -135,12 +145,17 @@ async def worker(runtime: DistributedRuntime) -> None:
     logger.info(f"Found {len(instance_ids)} workers: {list(instance_ids)}")
 
     # Create KvRouter to select workers based on KV overlap
+    kv_router_config = KvRouterConfig(
+        use_kv_events=not args.no_router_kv_events,
+    )
     kv_router = KvRouter(
         endpoint=downstream_endpoint,
         block_size=args.block_size,
-        kv_router_config=KvRouterConfig(),
+        kv_router_config=kv_router_config,
     )
-    logger.info("KvRouter created successfully")
+    logger.info(
+        f"KvRouter created successfully (use_kv_events={not args.no_router_kv_events})"
+    )
 
     # Initialize tokenizer and processor for MM processing
     logger.info(f"Loading tokenizer from {args.model}...")

@@ -98,30 +98,34 @@ _COMMON_PROCESS_KWARGS: dict[str, Any] = {
 
 
 class VLLMWorkerProcess(ManagedProcess):
-    """vLLM backend worker that emits KV events."""
+    """vLLM backend worker that optionally emits KV events."""
 
-    def __init__(self, request, *, system_port: int, kv_event_port: int):
-        super().__init__(
-            command=[
-                "python3",
-                "-m",
-                "dynamo.vllm",
-                "--model",
-                VLLM_MM_MODEL,
-                "--enable-multimodal",
-                "--gpu-memory-utilization",
-                "0.85",
-                "--max-model-len",
-                "8192",
-                "--served-model-name",
-                f"{VLLM_MM_MODEL}__internal",
+    def __init__(self, request, *, system_port: int, kv_event_port: int | None = None):
+        cmd = [
+            "python3",
+            "-m",
+            "dynamo.vllm",
+            "--model",
+            VLLM_MM_MODEL,
+            "--enable-multimodal",
+            "--gpu-memory-utilization",
+            "0.85",
+            "--max-model-len",
+            "8192",
+            "--served-model-name",
+            f"{VLLM_MM_MODEL}__internal",
+        ]
+        if kv_event_port is not None:
+            cmd += [
                 "--kv-events-config",
                 (
                     f'{{"publisher":"zmq","topic":"kv-events",'
                     f'"endpoint":"tcp://*:{kv_event_port}",'
                     f'"enable_kv_cache_events": true}}'
                 ),
-            ],
+            ]
+        super().__init__(
+            command=cmd,
             env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", _check_ready)
@@ -134,29 +138,32 @@ class VLLMWorkerProcess(ManagedProcess):
 
 
 class VLLMMMRouterWorkerProcess(ManagedProcess):
-    """vLLM MM router worker."""
+    """vLLM MM router worker (exact or approximate KV routing)."""
 
-    def __init__(self, request, *, system_port: int):
+    def __init__(self, request, *, system_port: int, approx_routing: bool = False):
+        cmd = [
+            "python3",
+            "-m",
+            "examples.backends.vllm.mm_router_worker",
+            "--model",
+            VLLM_MM_MODEL,
+            "--namespace",
+            NAMESPACE,
+            "--component",
+            "mm_router",
+            "--endpoint",
+            "generate",
+            "--downstream-component",
+            "backend",
+            "--downstream-endpoint",
+            "generate",
+            "--block-size",
+            str(BLOCK_SIZE),
+        ]
+        if approx_routing:
+            cmd.append("--no-router-kv-events")
         super().__init__(
-            command=[
-                "python3",
-                "-m",
-                "examples.backends.vllm.mm_router_worker",
-                "--model",
-                VLLM_MM_MODEL,
-                "--namespace",
-                NAMESPACE,
-                "--component",
-                "mm_router",
-                "--endpoint",
-                "generate",
-                "--downstream-component",
-                "backend",
-                "--downstream-endpoint",
-                "generate",
-                "--block-size",
-                str(BLOCK_SIZE),
-            ],
+            command=cmd,
             env=_make_process_env(
                 DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS='["generate"]',
                 DYN_SYSTEM_PORT=str(system_port),
@@ -206,17 +213,27 @@ def mm_runtime_services(request):
         os.environ.pop("ETCD_ENDPOINTS", None)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="module", params=[False, True], ids=["exact_kv", "approx_kv"])
 def start_vllm_mm_services(
     request, mm_runtime_services
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
-    frontend_port, vllm_port, router_port, kv_event_port = allocate_ports(
-        count=4, start_port=10000
-    )
+    approx_routing = request.param
+
+    if approx_routing:
+        frontend_port, vllm_port, router_port = allocate_ports(
+            count=3, start_port=10000
+        )
+        kv_event_port = None
+    else:
+        frontend_port, vllm_port, router_port, kv_event_port = allocate_ports(
+            count=4, start_port=10000
+        )
 
     with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
         time.sleep(10)
-        with VLLMMMRouterWorkerProcess(request, system_port=router_port) as router_proc:
+        with VLLMMMRouterWorkerProcess(
+            request, system_port=router_port, approx_routing=approx_routing
+        ) as router_proc:
             time.sleep(3)
             with FrontendProcess(request, frontend_port=frontend_port):
                 yield frontend_port, router_proc
