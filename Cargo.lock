@@ -2433,6 +2433,7 @@ dependencies = [
  "insta",
  "json-five",
  "lazy_static",
+ "level-zero",
  "memfile",
  "minijinja",
  "minijinja-contrib",
@@ -2459,6 +2460,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "strum",
+ "synapse",
  "temp-env",
  "tempfile",
  "thiserror 2.0.18",
@@ -4613,6 +4615,22 @@ name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
+
+[[package]]
+name = "level-zero"
+version = "0.2.0"
+dependencies = [
+ "level-zero-sys",
+ "libc",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "level-zero-sys"
+version = "0.2.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "libc"
@@ -8153,6 +8171,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "synapse"
+version = "0.1.0"
+dependencies = [
+ "synapse-sys",
+]
+
+[[package]]
+name = "synapse-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen 0.71.1",
+ "libloading 0.8.9",
 ]
 
 [[package]]

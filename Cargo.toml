@@ -74,6 +74,8 @@ chrono = { version = "0.4", default-features = false, features = [
     "serde",
 ] }
 cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"] }
+synapse = { path = "../synapse-rc/synapse" }
+level-zero = { path = "../level-zero-rc/level-zero" }
 dashmap = { version = "6.1" }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
