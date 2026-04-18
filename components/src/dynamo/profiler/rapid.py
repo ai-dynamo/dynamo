@@ -25,7 +25,14 @@ from aiconfigurator.generator.module_bridge import task_config_to_generator_conf
 from aiconfigurator.generator.naive import build_naive_generator_params
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
-from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dgdr_v1beta1_types import (
+    DynamoGraphDeploymentRequestSpec,
+    OptimizationType,
+)
+from dynamo.profiler.utils.optimization_type import (
+    OptimizationTypeConfig,
+    resolve_optimization_type_config,
+)
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     needs_profile_data,
@@ -110,7 +117,13 @@ def _run_naive_fallback(
     system: str,
     backend: str,
 ) -> dict:
-    """Handle the AIC-unsupported path via naive config generation."""
+    """Handle the AIC-unsupported path via naive config generation.
+
+    When ``optimizationType`` is active the GPU count is computed from model
+    weight and VRAM (1.5× rule) via :func:`resolve_optimization_type_config`,
+    and the appropriate parallelization strategy (TP/TEP/DEP) and serving
+    mode (agg/disagg) are passed to the AIC naive generator.
+    """
     if backend == "auto":
         backend = _DEFAULT_NAIVE_BACKEND
         logger.info("Auto backend resolved to '%s' for naive fallback.", backend)
@@ -118,11 +131,45 @@ def _run_naive_fallback(
         "AIC does not support this combo — falling back to naive config generation."
     )
 
+    # When optimizationType is active, use VRAM-based GPU count instead of
+    # totalGpus so the naive config fits the model properly.
+    effective_gpus = total_gpus
+    if dgdr.sla and dgdr.sla.optimizationType is not None:
+        from dynamo.profiler.utils.model_info import get_model_info
+
+        try:
+            model_info = get_model_info(model)
+            opt_config = resolve_optimization_type_config(dgdr, model_info)
+            effective_gpus = opt_config.num_gpus
+            logger.info(
+                "optimizationType=%s: naive fallback using %d GPUs "
+                "(target parallelization: %s).",
+                dgdr.sla.optimizationType.value,
+                effective_gpus,
+                opt_config.prefill_mapping.label(),
+            )
+        except Exception:
+            logger.warning(
+                "Could not resolve optimization type config for naive fallback; "
+                "using totalGpus=%d.",
+                total_gpus,
+            )
+
+    # Determine serving mode: prefer disagg when we have enough GPUs
+    opt_type_value = None
+    naive_mode = "agg"
+    if dgdr.sla and dgdr.sla.optimizationType is not None:
+        opt_type_value = dgdr.sla.optimizationType.value
+        if effective_gpus >= 2:
+            naive_mode = "disagg"
+
     generator_params = build_naive_generator_params(
         model_name=model,
-        total_gpus=total_gpus,
+        total_gpus=effective_gpus,
         system_name=system,
         backend_name=backend,
+        mode=naive_mode,
+        optimization_type=opt_type_value,
     )
 
     k8s_overrides = _build_k8s_overrides(dgdr, backend)
@@ -296,6 +343,172 @@ def _run_default_sim(
     }
 
 
+def _pick_by_optimization_type(
+    results_df: pd.DataFrame,
+    optimization_type: OptimizationType,
+) -> pd.DataFrame:
+    """Pick the best row from simulation results based on optimization type.
+
+    For **throughput**: sort by ``tokens/s/gpu`` descending (highest concurrency).
+    For **latency**: sort by ``tpot`` ascending (lowest latency).
+
+    Returns a single-row DataFrame (or empty if input is empty).
+    """
+    if results_df is None or results_df.empty:
+        return pd.DataFrame()
+
+    if optimization_type == OptimizationType.Throughput:
+        # Prefer highest throughput per GPU
+        sort_col = "tokens/s/gpu" if "tokens/s/gpu" in results_df.columns else "tpot"
+        ascending = sort_col == "tpot"
+    else:
+        # Prefer lowest latency
+        sort_col = "tpot" if "tpot" in results_df.columns else "tokens/s/gpu"
+        ascending = sort_col != "tokens/s/gpu"
+
+    sorted_df = results_df.sort_values(sort_col, ascending=ascending)
+    return sorted_df.head(1).reset_index(drop=True)
+
+
+def _run_optimization_type_sim(
+    dgdr: DynamoGraphDeploymentRequestSpec,
+    opt_config: OptimizationTypeConfig,
+    model: str,
+    system: str,
+    backend: str,
+    total_gpus: int,
+    isl: int,
+    osl: int,
+) -> dict:
+    """Run AIC simulation restricted to the target parallelization for optimizationType.
+
+    This is similar to ``_run_default_sim`` but:
+    1. Restricts the AIC task config parallelization lists to only the resolved
+       mapping (e.g. TEP=8 → tp_list=[1], moe_ep_list=[8]).
+    2. Picks by optimization type (throughput → highest tps/gpu, latency → lowest tpot)
+       instead of SLA-based picking.
+    """
+    if backend == "auto":
+        backend = _DEFAULT_NAIVE_BACKEND
+        logger.info(
+            "Auto backend resolved to '%s' for optimization-type simulation.", backend
+        )
+
+    opt_type = dgdr.sla.optimizationType
+
+    # Use very permissive SLA targets — the picking is done by optimization type,
+    # not by SLA filtering
+    target_ttft = float("inf")
+    target_tpot = float("inf")
+
+    task_configs = build_default_task_configs(
+        model_path=model,
+        total_gpus=total_gpus,
+        system=system,
+        backend=backend,
+        isl=isl,
+        osl=osl,
+        ttft=target_ttft,
+        tpot=target_tpot,
+        request_latency=None,
+    )
+
+    # Restrict parallelization to the resolved mapping
+    # Convert from ParallelizationMapping (tp/tep/dep) to AIC worker config lists
+    mapping = opt_config.prefill_mapping
+    if mapping.tp is not None:
+        aic_tp = mapping.tp
+        aic_dp, aic_moe_tp, aic_moe_ep = 1, 1, 1
+    elif mapping.tep is not None:
+        aic_tp, aic_dp = 1, 1
+        aic_moe_tp, aic_moe_ep = mapping.tep, 1
+    elif mapping.dep is not None:
+        aic_tp, aic_moe_tp = 1, 1
+        aic_dp, aic_moe_ep = mapping.dep, mapping.dep
+    else:
+        aic_tp, aic_dp, aic_moe_tp, aic_moe_ep = 1, 1, 1, 1
+
+    for _key, tc in task_configs.items():
+        if not hasattr(tc, "config") or tc.config is None:
+            continue
+        for worker_cfg_attr in (
+            "prefill_worker_config",
+            "decode_worker_config",
+            "agg_worker_config",
+        ):
+            worker_cfg = getattr(tc.config, worker_cfg_attr, None)
+            if worker_cfg is None:
+                continue
+            worker_cfg.num_gpu_per_worker = [opt_config.num_gpus]
+            worker_cfg.tp_list = [aic_tp]
+            worker_cfg.dp_list = [aic_dp]
+            if hasattr(worker_cfg, "moe_tp_list"):
+                worker_cfg.moe_tp_list = [aic_moe_tp]
+            if hasattr(worker_cfg, "moe_ep_list"):
+                worker_cfg.moe_ep_list = [aic_moe_ep]
+            if hasattr(worker_cfg, "pp_list"):
+                worker_cfg.pp_list = [1]
+
+    logger.info(
+        "Running optimization-type simulation: type=%s, parallelization=%s, "
+        "num_gpus=%d",
+        opt_type.value,
+        mapping.label(),
+        opt_config.num_gpus,
+    )
+
+    try:
+        chosen, best_configs, _, _, best_latencies_map = _execute_task_configs(
+            task_configs,
+            mode="default",
+            top_n=5,
+        )
+    except (SystemExit, Exception) as exc:
+        logger.warning(
+            "AIC simulation failed for optimization-type mode (%s); "
+            "falling back to naive config generation.",
+            exc,
+        )
+        return _run_naive_fallback(dgdr, model, total_gpus, system, backend)
+
+    # Merge all experiment results and pick by optimization type
+    all_dfs = [df for df in best_configs.values() if df is not None and not df.empty]
+    merged_df = pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+    best_config_df = _pick_by_optimization_type(merged_df, opt_type)
+
+    best_latencies = {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
+    if not best_config_df.empty:
+        row = best_config_df.iloc[0]
+        best_latencies["ttft"] = float(row.get("ttft", 0.0))
+        best_latencies["tpot"] = float(row.get("tpot", 0.0))
+        best_latencies["request_latency"] = float(row.get("request_latency", 0.0))
+
+    # Determine the chosen experiment for DGD generation
+    if not best_config_df.empty:
+        # Prefer disagg when available
+        disagg_keys = [k for k in best_configs if "disagg" in k and not best_configs[k].empty]
+        chosen = disagg_keys[0] if disagg_keys else chosen
+
+    dgd_config = _generate_dgd_from_pick(dgdr, best_config_df, chosen, task_configs)
+
+    resolved_backend = backend
+    if (
+        backend == "auto"
+        and not best_config_df.empty
+        and "backend" in best_config_df.columns
+    ):
+        resolved_backend = best_config_df.iloc[0]["backend"]
+
+    return {
+        "best_config_df": best_config_df,
+        "best_latencies": best_latencies,
+        "dgd_config": dgd_config,
+        "chosen_exp": chosen,
+        "task_configs": task_configs,
+        "resolved_backend": resolved_backend,
+    }
+
+
 def run_rapid(
     dgdr: DynamoGraphDeploymentRequestSpec,
     picking_mode: str,
@@ -315,6 +528,24 @@ def run_rapid(
     """
     if not aic_supported:
         return _run_naive_fallback(dgdr, model, total_gpus, system, backend)
+
+    # optimizationType mode — restricted enumeration + optimization-type picking
+    if dgdr.sla and dgdr.sla.optimizationType is not None:
+        from dynamo.profiler.utils.model_info import get_model_info
+
+        model_info = get_model_info(model)
+        opt_config = resolve_optimization_type_config(dgdr, model_info)
+        return _run_optimization_type_sim(
+            dgdr,
+            opt_config,
+            model,
+            system,
+            backend,
+            total_gpus,
+            isl,
+            osl,
+        )
+
     if picking_mode == "autoscale":
         return _run_autoscale_sim(
             dgdr,

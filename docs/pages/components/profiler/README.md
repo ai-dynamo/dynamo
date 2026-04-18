@@ -1,0 +1,118 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Profiler
+---
+
+The Dynamo Profiler is an automated performance analysis tool that measures model inference characteristics to optimize deployment configurations. It determines optimal tensor parallelism (TP) settings for prefill and decode phases, generates performance interpolation data, and enables SLA-driven autoscaling through the Planner.
+
+## Feature Matrix
+
+| Feature | SGLang | TensorRT-LLM | vLLM |
+|---------|--------|--------------|------|
+| Dense Model Profiling | ✅ | ✅ | ✅ |
+| MoE Model Profiling | ✅ | 🚧 | 🚧 |
+| AI Configurator (Offline) | ❌ | ✅ | ❌ |
+| Online Profiling (AIPerf) | ✅ | ✅ | ✅ |
+| Interactive WebUI | ✅ | ✅ | ✅ |
+| Runtime Profiling Endpoints | ✅ | ❌ | ❌ |
+
+## Quick Start
+
+### Prerequisites
+
+- Dynamo platform installed (see [Installation Guide](../../kubernetes/installation-guide.md))
+- Kubernetes cluster with GPU nodes (for DGDR-based profiling)
+- kube-prometheus-stack installed (required for SLA planner)
+
+### Using DynamoGraphDeploymentRequest (Recommended)
+
+The recommended way to profile models is through DGDRs, which automate the entire profiling and deployment workflow.
+
+**Simplest form** — omit SLA to default to throughput optimization:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: my-model-profiling
+spec:
+  model: "Qwen/Qwen3-0.6B"
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  autoApply: true
+```
+
+**With explicit SLA targets:**
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: my-model-profiling
+spec:
+  model: "Qwen/Qwen3-0.6B"
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+
+  workload:
+    isl: 3000      # Average input sequence length
+    osl: 150       # Average output sequence length
+
+  sla:
+    ttft: 200.0    # Target Time To First Token (ms)
+    itl: 20.0      # Target Inter-Token Latency (ms)
+
+  autoApply: true
+```
+
+```bash
+kubectl apply -f my-profiling-dgdr.yaml -n $NAMESPACE
+```
+
+### Using AI Configurator (Fast Offline Profiling)
+
+AI Configurator enables rapid offline profiling (~30 seconds) and supports all backends (vLLM, SGLang, TensorRT-LLM). Since `searchStrategy: rapid` is the default, AIC is used automatically unless you explicitly set `searchStrategy: thorough`.
+
+## Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `sla.optimizationType` | `throughput` (when sla omitted) | Optimization strategy: `throughput` or `latency` |
+| `sla.ttft` | - | Target Time To First Token (milliseconds) |
+| `sla.itl` | - | Target Inter-Token Latency (milliseconds) |
+| `sla.e2eLatency` | - | Target end-to-end request latency (milliseconds) |
+| `workload.isl` | 4000 | Average input sequence length (tokens) |
+| `workload.osl` | 1000 | Average output sequence length (tokens) |
+| `hardware.numGpusPerNode` | auto | Number of GPUs per node |
+| `hardware.gpuSku` | auto | GPU SKU identifier |
+
+## Profiling Methods
+
+| Method | Duration | Accuracy | GPU Required | Backends |
+|--------|----------|----------|--------------|----------|
+| Online (AIPerf) | 2-4 hours | Highest | Yes | All |
+| Offline (AI Configurator) | 20-30 seconds | Estimated | No | TensorRT-LLM |
+
+## Output
+
+The profiler generates:
+
+1. **Optimal Configuration**: Recommended TP sizes for prefill and decode engines
+2. **Performance Data**: Interpolation models for the SLA Planner
+3. **Generated DGD**: Complete deployment manifest with optimized settings
+
+Example recommendations:
+```text
+Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
+Suggested decode TP:4 (ITL 4.83 ms, throughput 51.22 tokens/s/GPU)
+```
+
+## Next Steps
+
+| Document | Description |
+|----------|-------------|
+| [Profiler Guide](profiler-guide.md) | Configuration, methods, and troubleshooting |
+| [Profiler Examples](profiler-examples.md) | Complete DGDR YAMLs, WebUI, script examples |
+| [SLA Planner Guide](../planner/planner-guide.md) | End-to-end deployment workflow |
+| [SLA Planner Architecture](../planner/planner-guide.md) | How the Planner uses profiling data |

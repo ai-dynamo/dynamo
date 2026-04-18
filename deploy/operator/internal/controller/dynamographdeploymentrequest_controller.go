@@ -1171,6 +1171,16 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		logger.Info("GPU discovery not available, proceeding without enrichment", "reason", err.Error())
 	}
 
+	// Apply SLA defaults if the user omitted TTFT/ITL targets.
+	// This mutates the in-memory spec only — the persisted spec is not modified,
+	// so users still see their original (possibly empty) SLA in the API.
+	applySLADefaults(&dgdr.Spec)
+	logger.Info("SLA targets for profiling",
+		"optimizationType", dgdr.Spec.SLA.OptimizationType,
+		"ttft", dgdr.Spec.SLA.TTFT,
+		"itl", dgdr.Spec.SLA.ITL,
+		"e2eLatency", dgdr.Spec.SLA.E2ELatency)
+
 	// Use SyncResource to create/update the job
 	modified, job, err := commonController.SyncResource(ctx, r, dgdr, func(ctx context.Context) (*batchv1.Job, bool, error) {
 		jobName := getProfilingJobName(dgdr)

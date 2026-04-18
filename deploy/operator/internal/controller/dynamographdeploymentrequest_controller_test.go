@@ -853,6 +853,27 @@ var _ = Describe("DGDR Validation", func() {
 			err := reconciler.validateSpec(ctx, dgdr)
 			Expect(err).NotTo(HaveOccurred())
 		})
+
+		It("Should pass validation without SLA targets (defaults will be applied later)", func() {
+			ctx := context.Background()
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:latest",
+					Hardware: &nvidiacomv1beta1.HardwareSpec{
+						NumGPUsPerNode: ptr.To[int32](8),
+						GPUSKU:         "H100-SXM5-80GB",
+						VRAMMB:         ptr.To(81920.0),
+						TotalGPUs:      ptr.To[int32](128),
+					},
+				},
+			}
+
+			// Validation should pass without SLA - defaults are injected at profiling time
+			err := reconciler.validateSpec(ctx, dgdr)
+			Expect(err).NotTo(HaveOccurred())
+		})
 	})
 })
 
