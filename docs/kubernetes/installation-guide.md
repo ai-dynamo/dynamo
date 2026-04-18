@@ -107,12 +107,23 @@ export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://gi
 Before proceeding, run the pre-deployment check script to verify your cluster meets all requirements:
 
 ```bash
+# For NVIDIA GPU clusters (default)
 ./deploy/pre-deployment/pre-deployment-check.sh
+
+# For Intel XPU clusters
+./deploy/pre-deployment/pre-deployment-check.sh --device xpu
 ```
 
-This script validates kubectl connectivity, default StorageClass configuration, and GPU node availability. See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
+This script validates kubectl connectivity, default StorageClass configuration, and GPU/XPU node availability.
 
 > **No cluster?** See [Minikube Setup](deployment/minikube.md) for local development.
+
+- **No default StorageClass?** → [No StorageClasses Available](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md#no-storageclasses-available)
+- **No GPU nodes (NVIDIA)?** → [No GPU Nodes Found (NVIDIA)](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md#no-gpu-nodes-found-nvidia)
+- **No XPU resources (Intel)?** → [No XPU Resources Found (Intel)](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md#no-xpu-resources-found-intel)
+
+See [Pre-Deployment Checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for details.
+
 
 **Estimated installation time:** 5-30 minutes depending on path
 
