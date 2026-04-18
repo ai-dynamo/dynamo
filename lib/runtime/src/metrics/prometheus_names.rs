@@ -272,6 +272,21 @@ pub mod frontend_service {
     /// Number of requests pending in the router's scheduler queue (gauge per worker_type)
     pub const ROUTER_QUEUE_PENDING_REQUESTS: &str = "router_queue_pending_requests";
 
+    /// Number of replicas allocated for a LoRA adapter (gauge per LoRA)
+    pub const LORA_REPLICA_FACTOR: &str = "lora_replica_factor";
+
+    /// Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)
+    pub const LORA_IS_ACTIVE: &str = "lora_is_active";
+
+    /// Estimated load (windowed request count) for a LoRA adapter
+    pub const LORA_ESTIMATED_LOAD: &str = "lora_estimated_load";
+
+    /// Raw arrival count (windowed rate counter) for a LoRA adapter
+    pub const LORA_RAW_ARRIVAL_COUNT: &str = "lora_raw_arrival_count";
+
+    /// Number of in-flight (active) requests for a LoRA adapter
+    pub const LORA_ACTIVE_REQUESTS: &str = "lora_active_requests";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
+
 use super::LoraAllocator;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 
@@ -58,6 +60,48 @@ impl LoraAllocator for RendezvousHasher {
             .take(replica_factor.min(workers.len()))
             .map(|(w, _)| w)
             .collect()
+    }
+
+    fn compute_replica_set_with_slots(
+        &self,
+        lora_name: &str,
+        workers: &[WorkerWithDpRank],
+        replica_factor: usize,
+        worker_slot_usage: &HashMap<WorkerWithDpRank, (usize, usize)>,
+    ) -> Vec<WorkerWithDpRank> {
+        if workers.is_empty() || replica_factor == 0 {
+            return Vec::new();
+        }
+
+        let ranked = Self::rank_workers(lora_name, workers);
+        let mut result = Vec::with_capacity(replica_factor);
+
+        for (worker, _score) in &ranked {
+            if result.len() >= replica_factor {
+                break;
+            }
+            if let Some(&(used, cap)) = worker_slot_usage.get(worker)
+                && used >= cap
+            {
+                continue;
+            }
+            result.push(*worker);
+        }
+
+        // If we couldn't fill due to capacity constraints, fall back to basic HRW
+        if result.len() < replica_factor && result.len() < workers.len() {
+            let basic = self.compute_replica_set(lora_name, workers, replica_factor);
+            for w in basic {
+                if result.len() >= replica_factor {
+                    break;
+                }
+                if !result.contains(&w) {
+                    result.push(w);
+                }
+            }
+        }
+
+        result
     }
 
     fn name(&self) -> &str {
@@ -156,5 +200,42 @@ mod tests {
 
         // Should return all workers when replica_factor > worker count
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_slot_aware_skips_full_workers() {
+        let hasher = RendezvousHasher;
+        let workers = make_workers(5);
+
+        let ranked = RendezvousHasher::rank_workers("test-lora", &workers);
+        let mut usage = HashMap::new();
+        for (w, _) in ranked.iter().take(2) {
+            usage.insert(*w, (4usize, 4usize));
+        }
+        for (w, _) in ranked.iter().skip(2) {
+            usage.insert(*w, (1usize, 4usize));
+        }
+
+        let result = hasher.compute_replica_set_with_slots("test-lora", &workers, 2, &usage);
+
+        assert_eq!(result.len(), 2);
+        for w in &result {
+            let (used, cap) = usage[w];
+            assert!(used < cap, "Selected worker {:?} should not be full", w);
+        }
+    }
+
+    #[test]
+    fn test_slot_aware_falls_back_when_all_full() {
+        let hasher = RendezvousHasher;
+        let workers = make_workers(3);
+
+        let mut usage = HashMap::new();
+        for w in &workers {
+            usage.insert(*w, (4usize, 4usize));
+        }
+
+        let result = hasher.compute_replica_set_with_slots("test-lora", &workers, 2, &usage);
+        assert_eq!(result.len(), 2);
     }
 }
