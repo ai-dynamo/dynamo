@@ -219,10 +219,16 @@ if [ "$DEVICE" = "cpu" ]; then
     # vLLM CPU requirements pin torch with a +cpu local version (e.g. 2.10.0+cpu),
     # which is published on the PyTorch CPU wheel index instead of PyPI.
     # Install torchvision, torchaudio from the same index to get the correct versions with +cpu suffix.
+    # Pass cpu-build.txt as a constraint to prevent uv from upgrading torch beyond the pinned version
+    # when resolving torchvision/torchaudio dependencies (e.g. torch 2.11 breaks at::cpu::L2_cache_size).
     uv pip install -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
-    uv pip install torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
-    VLLM_TARGET_DEVICE=cpu \
-    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+    uv pip install torchvision torchaudio --constraint requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+
+    # Workaround GCC 13 ICE in oneDNN ref_rnn.cpp:
+    # The stdarg GIMPLE pass + remove_unused_locals() crashes at -O3 on complex
+    # std::function lambda instantiations. -O2 avoids the code path that segfaults.
+    CXXFLAGS="-O2" VLLM_TARGET_DEVICE=cpu \
+        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
     uv pip install dist/*.whl
 fi
 echo "✓ vLLM installation completed"

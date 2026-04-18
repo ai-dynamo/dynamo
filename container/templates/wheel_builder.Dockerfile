@@ -538,6 +538,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             -Ducx_path="/usr/local/ucx"; \
     elif [ "$DEVICE" = "cpu" ]; then \
         meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
+            -Doptimization=2 \
             -Ducx_path="/usr/local/ucx"; \
     fi && \
     cd build && \
