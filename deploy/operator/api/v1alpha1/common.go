@@ -161,7 +161,10 @@ type GPUMemoryServiceMode string
 const (
 	// GMSModeIntraPod runs GMS as a sidecar within the same pod.
 	GMSModeIntraPod GPUMemoryServiceMode = "intraPod"
-	// GMSModeInterPod runs GMS as a separate pod (not yet supported).
+	// GMSModeInterPod runs GMS as a separate weight server pod and one or more
+	// engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared
+	// hostPath volume for UDS sockets. Only valid on FailoverSpec; the
+	// GPUMemoryServiceSpec sidecar always runs in intraPod mode.
 	GMSModeInterPod GPUMemoryServiceMode = "interPod"
 )
 
@@ -185,23 +188,24 @@ type GPUMemoryServiceSpec struct {
 }
 
 // FailoverSpec configures active-passive failover for a worker component.
-// Requires gpuMemoryService.enabled and the nvidia.com/dynamo-kube-discovery-mode: container
-// annotation on the DGD.
+// For intraPod mode: requires gpuMemoryService.enabled; the main container is cloned
+// into engine containers (active + standby) within the same pod.
+// For interPod mode: the operator creates a dedicated GMS weight server pod and
+// multiple engine pods per rank that share GPUs via DRA resource claims.
 type FailoverSpec struct {
-	// Enabled activates failover mode. The main container is cloned into two
-	// engine containers (active + standby) sharing GPUs via DRA. The standby
-	// acquires the flock when the active engine fails.
+	// Enabled activates failover mode.
 	Enabled bool `json:"enabled"`
-	// Mode selects the failover deployment topology. Must match gpuMemoryService.mode.
+	// Mode selects the failover deployment topology.
+	// intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).
+	// interPod: a dedicated GMS weight server pod + engine pods per rank (requires Grove).
 	// +kubebuilder:default=intraPod
 	// +kubebuilder:validation:Enum=intraPod;interPod
 	// +optional
 	Mode GPUMemoryServiceMode `json:"mode,omitempty"`
-	// NumShadows is the number of shadow (standby) engine containers per rank.
-	// Reserved for future use — the operator currently creates exactly one shadow.
+	// NumShadows is the number of shadow (standby) engine pods/containers per rank.
+	// Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows).
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=1
 	// +optional
 	NumShadows int32 `json:"numShadows,omitempty"`
 }

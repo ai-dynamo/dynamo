@@ -404,7 +404,7 @@ _Appears in:_
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
-| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures active-passive GPU failover for this service.<br />When enabled, the main container is cloned into two engine containers<br />(active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled. |  | Optional: \{\} <br /> |
+| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures GMS (GPU Memory Service) failover for this service.<br />For intraPod mode: the main container is cloned into two engine containers (active + standby).<br />For interPod mode: the operator creates a dedicated GMS weight server pod and<br />multiple engine pods per rank that share GPUs via DRA resource claims. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeploymentSpec
@@ -448,7 +448,7 @@ _Appears in:_
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
-| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures active-passive GPU failover for this service.<br />When enabled, the main container is cloned into two engine containers<br />(active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled. |  | Optional: \{\} <br /> |
+| `failover` _[FailoverSpec](#failoverspec)_ | Failover configures GMS (GPU Memory Service) failover for this service.<br />For intraPod mode: the main container is cloned into two engine containers (active + standby).<br />For interPod mode: the operator creates a dedicated GMS weight server pod and<br />multiple engine pods per rank that share GPUs via DRA resource claims. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeployment
@@ -809,8 +809,10 @@ _Appears in:_
 
 
 FailoverSpec configures active-passive failover for a worker component.
-Requires gpuMemoryService.enabled and the nvidia.com/dynamo-kube-discovery-mode: container
-annotation on the DGD.
+For intraPod mode: requires gpuMemoryService.enabled; the main container is cloned
+into engine containers (active + standby) within the same pod.
+For interPod mode: the operator creates a dedicated GMS weight server pod and
+multiple engine pods per rank that share GPUs via DRA resource claims.
 
 
 
@@ -820,9 +822,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled activates failover mode. The main container is cloned into two<br />engine containers (active + standby) sharing GPUs via DRA. The standby<br />acquires the flock when the active engine fails. |  |  |
-| `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the failover deployment topology. Must match gpuMemoryService.mode. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
-| `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine containers per rank.<br />Reserved for future use — the operator currently creates exactly one shadow. | 1 | Maximum: 1 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+| `enabled` _boolean_ | Enabled activates failover mode. |  |  |
+| `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the failover deployment topology.<br />intraPod: engine containers run within the same pod (requires gpuMemoryService.enabled).<br />interPod: a dedicated GMS weight server pod + engine pods per rank (requires Grove). | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
+| `numShadows` _integer_ | NumShadows is the number of shadow (standby) engine pods/containers per rank.<br />Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows). | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### FrontendSidecarSpec
@@ -862,7 +864,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `intraPod` | GMSModeIntraPod runs GMS as a sidecar within the same pod.<br /> |
-| `interPod` | GMSModeInterPod runs GMS as a separate pod (not yet supported).<br /> |
+| `interPod` | GMSModeInterPod runs GMS as a separate weight server pod and one or more<br />engine pods per rank, sharing GPUs via DRA ResourceClaims and a shared<br />hostPath volume for UDS sockets. Only valid on FailoverSpec; the<br />GPUMemoryServiceSpec sidecar always runs in intraPod mode.<br /> |
 
 
 #### GPUMemoryServiceSpec
@@ -1873,6 +1875,32 @@ _Appears in:_
 | `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | OCI configuration for legacy oci-based settings. |  |  |
 
 
+#### DRAConfiguration
+
+
+
+DRAConfiguration holds Dynamic Resource Allocation (resource.k8s.io) settings.
+
+NOTE: auto-detection here only verifies that the resource.k8s.io API group is
+registered on the apiserver (Kubernetes 1.32+). It does NOT verify that a
+GPU-specific DRA resource driver (e.g. nvidia/k8s-dra-driver-gpu) is
+installed, that its DeviceClass exists, or that node-level GPU drivers are
+compatible. An admin can use `enabled: false` to force-off DRA integration
+on clusters where the API is present but the GPU driver stack is not wired
+up — this makes the operator fail GMS / inter-pod failover admissions early
+with a clear error instead of letting pods Pend with a confusing
+"resourceclaim not found" at schedule time.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled overrides auto-detection of the resource.k8s.io API group.<br />nil = auto-detect. Setting true requires detection to also succeed (the<br />operator will exit at startup otherwise). |  |  |
+
+
 #### DiscoveryBackend
 
 _Underlying type:_ _string_
@@ -2134,6 +2162,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `leaderElection` _[LeaderElectionConfiguration](#leaderelectionconfiguration)_ | Leader election configuration |  |  |
 | `namespace` _[NamespaceConfiguration](#namespaceconfiguration)_ | Namespace configuration (restricted vs cluster-wide) |  |  |
 | `orchestrators` _[OrchestratorConfiguration](#orchestratorconfiguration)_ | Orchestrator configuration with optional overrides |  |  |
+| `dra` _[DRAConfiguration](#draconfiguration)_ | DRA (Dynamic Resource Allocation) settings with optional override |  |  |
 | `infrastructure` _[InfrastructureConfiguration](#infrastructureconfiguration)_ | Service mesh and infrastructure addresses |  |  |
 | `ingress` _[IngressConfiguration](#ingressconfiguration)_ | Ingress configuration |  |  |
 | `rbac` _[RBACConfiguration](#rbacconfiguration)_ | RBAC configuration for cross-namespace resource management (cluster-wide mode) |  |  |

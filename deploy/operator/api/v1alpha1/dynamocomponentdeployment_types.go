@@ -155,9 +155,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
-	// Failover configures active-passive GPU failover for this service.
-	// When enabled, the main container is cloned into two engine containers
-	// (active + standby) sharing GPUs via DRA. Requires gpuMemoryService.enabled.
+	// Failover configures GMS (GPU Memory Service) failover for this service.
+	// For intraPod mode: the main container is cloned into two engine containers (active + standby).
+	// For interPod mode: the operator creates a dedicated GMS weight server pod and
+	// multiple engine pods per rank that share GPUs via DRA resource claims.
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
 }
@@ -342,6 +343,45 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 		return s.Multinode.NodeCount
 	}
 	return 1
+}
+
+// IsInterPodFailoverEnabled reports whether failover is configured for the
+// inter-pod architecture (separate GMS weight server pod + engine pods per rank,
+// sharing GPUs via DRA). Returns false for intra-pod failover, which clones
+// containers within a single pod instead.
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodFailoverEnabled() bool {
+	return s.Failover != nil && s.Failover.Enabled && s.Failover.Mode == GMSModeInterPod
+}
+
+// GetNumShadows returns the number of shadow engine replicas configured for
+// inter-pod GMS failover. It returns 0 when inter-pod failover is disabled
+// (including intra-pod failover, which does not use shadow pods at all).
+// Defaults to 1 if inter-pod failover is enabled but NumShadows is unset or <1.
+//
+// Callers that iterate "engine roles" must gate on IsInterPodFailoverEnabled()
+// first — treating a 0 return as "just the primary" is a bug, because the
+// primary is still modeled as a regular single-pod service in that case.
+func (s *DynamoComponentDeploymentSharedSpec) GetNumShadows() int32 {
+	if !s.IsInterPodFailoverEnabled() {
+		return 0
+	}
+	if s.Failover.NumShadows < 1 {
+		return 1
+	}
+	return s.Failover.NumShadows
+}
+
+// GetTotalEnginePods returns the total number of engine pods (primary +
+// shadows) for an inter-pod failover service. It returns 1 (primary only)
+// when inter-pod failover is disabled.
+//
+// Callers that iterate "engine roles" must gate on IsInterPodFailoverEnabled()
+// first — the 1 return for non-failover services is a convenience for sizing
+// math, NOT a signal that there is a "primary role" to iterate over; the
+// non-failover path models the service as a single clique, not as primary +
+// shadows.
+func (s *DynamoComponentDeploymentSharedSpec) GetTotalEnginePods() int32 {
+	return s.GetNumShadows() + 1
 }
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {

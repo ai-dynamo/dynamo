@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Example: DynamoGraphDeployment with GMS (GPU Memory Service) failover
+#
+# Single-node GMS ("vllm-engine"):
+#   Creates per PCSG replica:
+#     - 1 GMS weight server pod  (vllm-engine-gms-0)
+#     - 2 engine pods            (vllm-engine, replicas=2)
+#   All 3 pods share the same 8 GPUs via DRA ResourceClaims.
+#   The engine that acquires the flock becomes primary; the other is a shadow.
+#   service.replicas (3) controls how many PCSG replicas are created (horizontal scale).
+#
+# Multinode GMS ("vllm-engine-multinode"):
+#   Creates per PCSG replica (2 nodes, 3 engine pods per rank):
+#     - 1 GMS pod for rank 0  (vllm-engine-multinode-gms-0)
+#     - 1 GMS pod for rank 1  (vllm-engine-multinode-gms-1)
+#     - 3 leader pods rank 0  (vllm-engine-multinode-ldr, replicas=3)
+#     - 3 worker pods rank 1  (vllm-engine-multinode-wkr-1, replicas=3)
+#   Each rank's GMS + engine pods share GPUs via DRA.
+#   service.replicas (2) controls horizontal PCSG replicas.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: llm-serving-mn
+spec:
+  backendFramework: vllm
+  services:
+    # ─── Single-node GMS failover ───
+    # agg:
+    #   componentType: worker
+    #   replicas: 1
+    #   resources:
+    #     limits:
+    #       gpu: "1"
+    #       # gpuType: gpu.nvidia.com/h100
+    #   failover:
+    #     enabled: true
+    #     mode: interPod
+    #     numShadows: 2        # 1 primary + 1 shadow = 2 engine pods per PCSG replica
+    #   extraPodSpec:
+    #     mainContainer:
+    #       # image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+    #       image: dynamoci.azurecr.io/ai-dynamo/dynamo:5af359d4ce3d843d6b9f7e6e8ed5226ed9b6abd0-vllm-runtime-cuda13
+    #       command: ["python3", "-m", "dynamo.vllm"]
+    #       args: ["--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "1", "--enforce-eager", "--gpu-memory-utilization", "0.85"]
+    #   sharedMemory:
+    #     size: 16Gi
+
+    # ─── Multinode GMS failover (2 nodes) ───
+    agg:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "1"
+          # gpuType: gpu.nvidia.com/h100
+      failover:
+        enabled: true
+        mode: interPod
+        numShadows: 1       # 1 primary + 1 shadow = 2 engine pods per rank
+      extraPodSpec:
+        mainContainer:
+          # image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:5af359d4ce3d843d6b9f7e6e8ed5226ed9b6abd0-vllm-runtime-cuda13
+          command: ["python3", "-m", "dynamo.vllm"]
+          # args: ["--model", "Qwen/Qwen3-235B-A22B", "--tensor-parallel-size", "8", "--enforce-eager", "--gpu-memory-utilization", "0.85"]
+          args: ["--model", "Qwen/Qwen3-0.6B", "--tensor-parallel-size", "2", "--enforce-eager", "--gpu-memory-utilization", "0.85"]
+
+      # sharedMemory:
+      #   size: 16Gi
+
+    # ─── Regular frontend (no failover) ───
+    frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          # image: dynamoci.azurecr.io/ai-dynamo/dynamo:multinode-failover-650234f660-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:5af359d4ce3d843d6b9f7e6e8ed5226ed9b6abd0-vllm-runtime-cuda13
+          # command: ["python3", "-m", "dynamo.frontend"]
