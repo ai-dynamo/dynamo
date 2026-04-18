@@ -15,9 +15,8 @@ If you would like to use a different region, modify the `AWS_REGION` variable
 export AWS_REGION="us-east-1"
 export CLUSTER_NAME="ai-dynamo"
 export DYNAMO_NAMESPACE="dynamo-system"
-export DYNAMO_RELEASE_VERSION="1.0.0"
+export DYNAMO_RELEASE_VERSION="1.0.1"
 ```
-
 
 ## Install CLIs
 
@@ -108,9 +107,12 @@ parameters:
 EOF
 ```
 
-## Create an Amazon EFS shared file system
+## Create a shared file system
 
-Follow the [EFS setup guide](EFS.md) to create an EFS file system and make it available as shared storage for Dynamo workloads.
+We present two options for creating a shared file system that will be used for model store and compilation cache and make it available as a shared storage for Dynamo workloads.
+
+1. Amazon Elastic File System (EFS) - Follow the [EFS setup guide](EFS.md) to create an EFS file system.
+2. Amazon S3 Files - Follow the [S3 Files setup guide](S3Files.md) to create an S3 Files file system.
 
 ## Install Dynamo Kubernetes Platform
 
@@ -538,10 +540,10 @@ Delete the AutoMode GPU nodepool
 kubectl delete nodepool gpu
 ```
 
-Cleanup EFS related resources, follow the [EFS setup guide](EFS.md#cleanup) cleanup section
+Cleanup EFS or S3 Files related resources, follow the [EFS setup guide](EFS.md#cleanup) / [S3 Files setup guide](S3Files.md#cleanup) cleanup section
 
 Delete the EKS Auto Mode cluster using Eksctl
 
 ```bash
-eksctl delete cluster -f <(envsubst < templates/eksctl.yaml)
+eksctl delete cluster --wait -f <(envsubst < templates/eksctl.yaml)
 ```

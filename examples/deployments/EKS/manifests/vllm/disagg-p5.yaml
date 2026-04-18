@@ -28,14 +28,16 @@ spec:
       extraPodSpec:
         affinity:
           podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              - topologyKey: "topology.kubernetes.io/zone"
-                labelSelector:
-                  matchLabels:
-                    nvidia.com/dynamo-graph-deployment-name: "vllm-disagg"
-                    nvidia.com/dynamo-component-type: "worker"
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  labelSelector:
+                    matchLabels:
+                      nvidia.com/dynamo-graph-deployment-name: "vllm-disagg"
+                      nvidia.com/dynamo-component-type: "worker"
+                  topologyKey: "topology.kubernetes.io/zone"
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.1
           workingDir: /workspace
           command:
           - /bin/bash
@@ -65,7 +67,6 @@ spec:
       extraPodSpec:
         nodeSelector:
           node.kubernetes.io/instance-type: p5.48xlarge
-          karpenter.sh/capacity-type: reserved
         tolerations:
         - key: "nvidia.com/gpu"
           operator: "Exists"
@@ -77,6 +78,7 @@ spec:
                 labelSelector:
                   matchLabels:
                     nvidia.com/dynamo-graph-deployment-name: "vllm-disagg"
+                    nvidia.com/dynamo-component-type: "worker"
           podAntiAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
               - weight: 100
@@ -93,7 +95,7 @@ spec:
             capabilities:
               add:
                 - IPC_LOCK
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1-efa-amd64
           workingDir: /workspace
           command:
           - /bin/bash
@@ -127,7 +129,6 @@ spec:
       extraPodSpec:
         nodeSelector:
           node.kubernetes.io/instance-type: p5.48xlarge
-          karpenter.sh/capacity-type: reserved
         tolerations:
         - key: "nvidia.com/gpu"
           operator: "Exists"
@@ -139,13 +140,14 @@ spec:
                 labelSelector:
                   matchLabels:
                     nvidia.com/dynamo-graph-deployment-name: "vllm-disagg"
+                    nvidia.com/dynamo-component-type: "worker"
           podAntiAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
               - weight: 100
                 podAffinityTerm:
                   labelSelector:
                     matchLabels:
-                      nvidia.com/dynamo-component: "VllmPrefillWorker"
+                      nvidia.com/dynamo-component: "VllmDecodeWorker"
                   topologyKey: "kubernetes.io/hostname"
         mainContainer:
           env:
@@ -155,7 +157,7 @@ spec:
             capabilities:
               add:
                 - IPC_LOCK
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0-efa-amd64
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1-efa-amd64
           workingDir: /workspace
           command:
           - /bin/bash

@@ -1,0 +1,21 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowS3FilesAssumeRole",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "elasticfilesystem.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole",
+            "Condition": {
+                "StringEquals": {
+                    "aws:SourceAccount": "${AWS_ACCOUNT_ID}"
+                },
+                "ArnLike": {
+                    "aws:SourceArn": "arn:aws:s3files:${AWS_REGION}:${AWS_ACCOUNT_ID}:file-system/*"
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,90 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "S3BucketPermissions",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:ListBucketVersions"
+            ],
+            "Resource": "arn:aws:s3:::${S3_BUCKET_NAME}",
+            "Condition": {
+                "StringEquals": {
+                    "aws:ResourceAccount": "${AWS_ACCOUNT_ID}"
+                }
+            }
+        },
+        {
+            "Sid": "S3ObjectPermissions",
+            "Effect": "Allow",
+            "Action": [
+                "s3:AbortMultipartUpload",
+                "s3:DeleteObject*",
+                "s3:GetObject*",
+                "s3:List*",
+                "s3:PutObject*"
+            ],
+            "Resource": "arn:aws:s3:::${S3_BUCKET_NAME}/*",
+            "Condition": {
+                "StringEquals": {
+                    "aws:ResourceAccount": "${AWS_ACCOUNT_ID}"
+                }
+            }
+        },
+        {
+            "Sid": "UseKmsKeyWithS3Files",
+            "Effect": "Allow",
+            "Action": [
+                "kms:GenerateDataKey",
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:ReEncryptFrom",
+                "kms:ReEncryptTo"
+            ],
+            "Condition": {
+                "StringLike": {
+                    "kms:ViaService": "s3.${AWS_REGION}.amazonaws.com",
+                    "kms:EncryptionContext:aws:s3:arn": [
+                        "arn:aws:s3:::${S3_BUCKET_NAME}",
+                        "arn:aws:s3:::${S3_BUCKET_NAME}/*"
+                    ]
+                }
+            },
+            "Resource": "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:*"
+        },
+        {
+            "Sid": "EventBridgeManage",
+            "Effect": "Allow",
+            "Action": [
+                "events:DeleteRule",
+                "events:DisableRule",
+                "events:EnableRule",
+                "events:PutRule",
+                "events:PutTargets",
+                "events:RemoveTargets"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "events:ManagedBy": "elasticfilesystem.amazonaws.com"
+                }
+            },
+            "Resource": [
+                "arn:aws:events:*:*:rule/DO-NOT-DELETE-S3-Files*"
+            ]
+        },
+        {
+            "Sid": "EventBridgeRead",
+            "Effect": "Allow",
+            "Action": [
+                "events:DescribeRule",
+                "events:ListRuleNamesByTarget",
+                "events:ListRules",
+                "events:ListTargetsByRule"
+            ],
+            "Resource": [
+                "arn:aws:events:*:*:rule/*"
+            ]
+        }
+    ]
+}
