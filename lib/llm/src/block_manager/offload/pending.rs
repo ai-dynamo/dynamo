@@ -292,7 +292,15 @@ where
             .write_to(&mut pending_transfer.targets, self.transfer_ctx.clone())?;
 
         let completion_future = async move {
-            let _ = notify.await;
+            match notify.await {
+                Ok(Ok(())) => {} // transfer succeeded
+                Ok(Err(e)) => {
+                    tracing::error!("Block transfer failed during offload: {e}");
+                }
+                Err(_) => {
+                    tracing::error!("Transfer notification channel dropped unexpectedly");
+                }
+            }
             pending_transfer
         };
 
