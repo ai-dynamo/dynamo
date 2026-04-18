@@ -4521,6 +4521,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "velo",
+ "velo-backend",
 ]
 
 [[package]]
