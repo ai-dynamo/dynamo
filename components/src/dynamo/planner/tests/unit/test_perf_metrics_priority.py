@@ -47,7 +47,9 @@ class TestPriorityChain:
         endpoint_fpms = [_fpm(), _fpm()]
         with patch.object(
             pm, "_try_endpoint", return_value=endpoint_fpms
-        ) as mock_ep, patch.object(pm, "_try_aic_interpolation") as mock_aic, patch.object(
+        ) as mock_ep, patch.object(
+            pm, "_try_aic_interpolation"
+        ) as mock_aic, patch.object(
             pm, "_convert_profiling_data_to_fpms"
         ) as mock_files:
             got = await pm.fetch_pre_deployment_metrics(

@@ -235,8 +235,7 @@ class PlannerConfig(BaseModel):
                     "requires pre-deployment sweeping to profile engine performance."
                 )
             if (
-                self.pre_deployment_sweeping_mode
-                == PlannerPreDeploymentSweepMode.Rapid
+                self.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.Rapid
                 and self.aic_interpolation is None
             ):
                 logger.warning(

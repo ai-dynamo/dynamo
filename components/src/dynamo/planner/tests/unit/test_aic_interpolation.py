@@ -345,6 +345,7 @@ class TestRunAicInterpolation:
         }
         assert len(distinct_concurrencies) >= 2
 
+
 class TestQwen235MoEPicks:
     """End-to-end exercise with a realistic large-MoE pick pair.
 
@@ -407,12 +408,8 @@ class TestQwen235MoEPicks:
         )
         ctx_patch, estimator = _patch_estimator(per_rank_max_kv=500_000)
         with ctx_patch:
-            prefill_fpms = aic_mod.run_aic_interpolation(
-                spec, SubComponentType.PREFILL
-            )
-            decode_fpms = aic_mod.run_aic_interpolation(
-                spec, SubComponentType.DECODE
-            )
+            prefill_fpms = aic_mod.run_aic_interpolation(spec, SubComponentType.PREFILL)
+            decode_fpms = aic_mod.run_aic_interpolation(spec, SubComponentType.DECODE)
 
         assert prefill_fpms and decode_fpms
 
