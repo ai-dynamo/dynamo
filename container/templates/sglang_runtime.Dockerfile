@@ -7,7 +7,11 @@
 ########## Runtime Image #########
 ##################################
 
+{% if device == "cpu" %}
+FROM framework AS runtime
+{% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+{% endif %}
 
 WORKDIR /workspace
 
@@ -50,7 +54,8 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl
 
-# Install gpu_memory_service wheel if enabled (all targets)
+{% if device != "cpu" %}
+# Install gpu_memory_service wheel if enabled (CUDA only)
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
@@ -58,6 +63,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -n "$GMS_WHEEL" ]; then pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; fi; \
     fi
+{% endif %}
 {% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership
@@ -73,17 +79,31 @@ COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1
 
+{% if device == "cpu" %}
+# CPU performance: tcmalloc (low-latency memory allocator) + Intel TBB malloc
+ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4:/usr/lib/x86_64-linux-gnu/libtbbmalloc.so"
+{% endif %}
+
 # Setup launch banner in common directory accessible to all users
 RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
 
 RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
-    ln -s /workspace /sgl-workspace/dynamo
+{% if device == "cpu" %}
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+{% endif %}
+    mkdir -p /sgl-workspace && \
+    ln -sf /workspace /sgl-workspace/dynamo
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
+{% if device == "cpu" %}
+SHELL ["bash", "-c"]
+CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
+{% else %}
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+{% endif %}

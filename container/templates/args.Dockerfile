@@ -134,6 +134,12 @@ ARG FLASH_ATTN_VER={{ context.trtllm.flash_attn_version }}
 ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
 {%- endif -%}
 
+{% if framework == "sglang" and device == "cpu" -%}
+# SGLang CPU build: clone and build from source (no pre-built runtime image)
+ARG SGLANG_GIT_URL=https://github.com/sgl-project/sglang.git
+ARG SGLANG_REF={{ context.sglang.cpu.sglang_ref }}
+{%- endif -%}
+
 {% if make_efa == true %}
 ARG EFA_VERSION={{ context.dynamo.efa_version }}
 ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
