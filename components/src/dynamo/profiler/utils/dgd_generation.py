@@ -23,8 +23,13 @@ import numpy as np
 import yaml
 
 from dynamo.common.utils.paths import get_workspace_dir
+from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.backend_components import MockerComponentName
-from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.config.parallelization import PickedParallelConfig
+from dynamo.planner.config.planner_config import (
+    PlannerConfig,
+    PlannerPreDeploymentSweepMode,
+)
 from dynamo.profiler.utils.config import DgdPlannerServiceConfig, set_argument_value
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
@@ -64,13 +69,17 @@ def assemble_final_config(
     dgd_config: dict | None,
     best_prefill_config=None,
     best_decode_config=None,
+    aic_spec: Optional[AICInterpolationSpec] = None,
 ) -> Any:
     """Apply Dynamo features to the picked DGD config via composable layers.
 
     1. **Mocker** — swap the base to the mocker DGD template if enabled.
     2. **Planner** — inject the Planner service + planner-config ConfigMap.
+       When ``aic_spec`` is given (rapid mode), it is embedded in the
+       planner config so the planner runs AIC interpolation at bootstrap
+       instead of reading profiling NPZ.
     3. **Profile data** — attach interpolation-data ConfigMap when mocker
-       or planner-throughput is enabled.
+       or planner-thorough is enabled.
     """
     if not dgd_config:
         return dgd_config
@@ -103,6 +112,7 @@ def assemble_final_config(
             base,
             best_prefill_mapping=best_prefill_config,
             best_decode_mapping=best_decode_config,
+            aic_spec=aic_spec,
         )
         config_maps.append(planner_cm)
 
@@ -161,6 +171,7 @@ def add_planner_to_config(
     config_dict: dict,
     best_prefill_mapping=None,
     best_decode_mapping=None,
+    aic_spec: Optional[AICInterpolationSpec] = None,
 ) -> dict:
     """Add a Planner service and its planner-config ConfigMap to *config_dict*.
 
@@ -173,11 +184,15 @@ def add_planner_to_config(
         config_dict: The base DGD config (real or mocker) — mutated in place.
         best_prefill_mapping: Picked prefill parallel config.
         best_decode_mapping: Picked decode parallel config.
+        aic_spec: AIC interpolation spec (rapid mode). When set, the planner
+            runs AIC in-process at bootstrap instead of reading NPZ files.
 
     Returns:
         The ``planner_config_cm`` ConfigMap dict.
     """
-    planner_cfg = _build_planner_config(dgdr, best_prefill_mapping, best_decode_mapping)
+    planner_cfg = _build_planner_config(
+        dgdr, best_prefill_mapping, best_decode_mapping, aic_spec
+    )
     planner_cfg.profile_results_dir = PROFILE_DATA_MOUNT
 
     planner_service = DgdPlannerServiceConfig()
@@ -343,6 +358,7 @@ def _build_planner_config(
     dgdr,
     best_prefill_mapping,
     best_decode_mapping,
+    aic_spec: Optional[AICInterpolationSpec] = None,
 ) -> PlannerConfig:
     """Build a PlannerConfig from the DGDR spec and picked parallel configs."""
     if dgdr.features and dgdr.features.planner:
@@ -356,7 +372,67 @@ def _build_planner_config(
     if best_decode_mapping is not None:
         planner_cfg.decode_engine_num_gpu = best_decode_mapping.num_gpus
 
+    if aic_spec is not None:
+        planner_cfg.aic_interpolation = aic_spec
+
     return planner_cfg
+
+
+def build_aic_interpolation_spec(
+    dgdr,
+    best_prefill_pick: Optional[PickedParallelConfig],
+    best_decode_pick: Optional[PickedParallelConfig],
+    isl: int,
+    osl: int,
+    sweep_max_context_length: int,
+    resolved_backend: str,
+    system: str,
+    prefill_interpolation_granularity: int,
+    decode_interpolation_granularity: int,
+) -> Optional[AICInterpolationSpec]:
+    """Build an ``AICInterpolationSpec`` for the planner in rapid mode.
+
+    Returns ``None`` (the planner falls through to the file-based loader) when
+    any of the following hold:
+
+    * planner is not enabled
+    * ``pre_deployment_sweeping_mode`` is not ``Rapid``
+    * ``throughput_scaling`` is disabled (no pre-deployment data needed)
+    * picks are missing
+    * ``resolved_backend`` is not one AIC supports as a planner bootstrap source
+    """
+    if not is_planner_enabled(dgdr):
+        return None
+    planner = dgdr.features.planner  # type: ignore[union-attr]
+    if not planner.enable_throughput_scaling:
+        return None
+    if planner.pre_deployment_sweeping_mode != PlannerPreDeploymentSweepMode.Rapid:
+        return None
+    if best_prefill_pick is None or best_decode_pick is None:
+        logger.info(
+            "Rapid mode but picks are missing; skipping aic_interpolation spec. "
+            "Planner will fall back to the file-based loader."
+        )
+        return None
+    if resolved_backend not in ("trtllm", "vllm", "sglang"):
+        logger.info(
+            "Rapid mode but backend %r is not supported by AIC; skipping spec.",
+            resolved_backend,
+        )
+        return None
+
+    return AICInterpolationSpec(
+        hf_id=dgdr.model,
+        system=system,
+        backend=resolved_backend,
+        isl=isl,
+        osl=osl,
+        sweep_max_context_length=sweep_max_context_length,
+        prefill_interpolation_granularity=prefill_interpolation_granularity,
+        decode_interpolation_granularity=decode_interpolation_granularity,
+        prefill_pick=best_prefill_pick,
+        decode_pick=best_decode_pick,
+    )
 
 
 def _load_profiling_data(output_dir: str) -> dict:
