@@ -1163,6 +1163,18 @@ func GenerateBasePodSpec(
 
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	ApplySharedMemoryVolumeAndMount(&podSpec, &container, component.SharedMemory)
+
+	// Wire GMS into the main container while we still hold it locally, before
+	// it lands in podSpec.Containers. This avoids needing to search the slice
+	// for the "main" container after the fact, and keeps graph.go decoupled
+	// from snapshot-protocol naming conventions.
+	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
+		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
+		if err := dra.ApplyClaim(&podSpec, &container, claimTemplateName); err != nil {
+			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
+		}
+		gms.EnsureServerSidecar(&podSpec, &container)
+	}
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.ImagePullSecrets = controller_common.AppendUniqueImagePullSecrets(podSpec.ImagePullSecrets, imagePullSecrets)
 
@@ -1182,15 +1194,6 @@ func GenerateBasePodSpec(
 				resolveImagePullSecrets(secretsRetriever, namespace, component.FrontendSidecar.Image),
 			)
 		}
-	}
-
-	// GMS: replace nvidia.com/gpu with a shared DRA claim and add the server sidecar.
-	if component.GPUMemoryService != nil && component.GPUMemoryService.Enabled {
-		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
-		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
-			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
-		}
-		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
 	}
 
 	// Clone main container into two engine containers (active + standby) for failover.

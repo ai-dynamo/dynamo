@@ -11,6 +11,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
@@ -82,10 +83,10 @@ func buildCheckpointJob(
 
 	checkpoint.EnsurePodInfoVolume(&podTemplate.Spec)
 
-	if len(podTemplate.Spec.Containers) == 0 {
+	mainContainer := common.ResolveMainContainer(&podTemplate.Spec)
+	if mainContainer == nil {
 		return nil, fmt.Errorf("checkpoint job requires at least one container")
 	}
-	mainContainer := &podTemplate.Spec.Containers[0]
 	mainContainer.Env = dynamo.MergeEnvs(
 		buildCheckpointWorkerDefaultEnv(ckpt, podTemplate),
 		mainContainer.Env,
@@ -113,7 +114,7 @@ func buildCheckpointJob(
 
 	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
 		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
-		if err := dra.ApplyClaim(&podTemplate.Spec, claimTemplateName); err != nil {
+		if err := dra.ApplyClaim(&podTemplate.Spec, mainContainer, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS checkpoint: %w", err)
 		}
 		storage, err := snapshotprotocol.DiscoverAndResolveStorage(
@@ -131,7 +132,7 @@ func buildCheckpointJob(
 		}
 		// Re-acquire pointer: append in EnsureGMSCheckpointJobSidecars may
 		// have reallocated the Containers slice.
-		mainContainer = &podTemplate.Spec.Containers[0]
+		mainContainer = common.ResolveMainContainer(&podTemplate.Spec)
 	}
 
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds

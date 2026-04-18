@@ -46,16 +46,16 @@ func basePodSpec() corev1.PodSpec {
 	}
 }
 
-func TestApplyClaim_EmptyContainers(t *testing.T) {
+func TestApplyClaim_NilTarget(t *testing.T) {
 	ps := corev1.PodSpec{}
-	err := ApplyClaim(&ps, "myapp-worker-gpu")
+	err := ApplyClaim(&ps, nil, "myapp-worker-gpu")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "at least one container")
+	assert.Contains(t, err.Error(), "target container")
 }
 
 func TestApplyClaim_ReplacesGPUWithDRAClaim(t *testing.T) {
 	ps := basePodSpec()
-	err := ApplyClaim(&ps, "myapp-worker-gpu")
+	err := ApplyClaim(&ps, &ps.Containers[0], "myapp-worker-gpu")
 	require.NoError(t, err)
 
 	main := ps.Containers[0]
@@ -81,16 +81,22 @@ func TestApplyClaim_ReplacesGPUWithDRAClaim(t *testing.T) {
 	assert.Empty(t, ps.InitContainers)
 }
 
-func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
-	ps := basePodSpec()
-	ps.Containers = append(ps.Containers, corev1.Container{Name: "sidecar", Image: "sidecar:latest"})
+func TestApplyClaim_TargetsCallerSuppliedContainer(t *testing.T) {
+	ps := corev1.PodSpec{
+		Containers: []corev1.Container{
+			{Name: "istio-proxy", Image: "istio:latest"},
+			{Name: "main", Image: "test-image:latest", Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("2")},
+			}},
+		},
+	}
 
-	err := ApplyClaim(&ps, "myapp-worker-gpu")
+	err := ApplyClaim(&ps, &ps.Containers[1], "myapp-worker-gpu")
 	require.NoError(t, err)
 
-	require.Len(t, ps.Containers[0].Resources.Claims, 1)
-	assert.Equal(t, ClaimName, ps.Containers[0].Resources.Claims[0].Name)
-	assert.Empty(t, ps.Containers[1].Resources.Claims)
+	assert.Empty(t, ps.Containers[0].Resources.Claims, "sidecar at index 0 must not receive the claim")
+	require.Len(t, ps.Containers[1].Resources.Claims, 1)
+	assert.Equal(t, ClaimName, ps.Containers[1].Resources.Claims[0].Name)
 }
 
 func TestGenerateResourceClaimTemplate_Enabled(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/go-logr/logr"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -48,13 +49,12 @@ func podFromInformerObj(obj interface{}) (*corev1.Pod, bool) {
 	return pod, ok
 }
 
-// resolveMainContainerName returns the name of the workload container, which
-// is always Containers[0]. GMS sidecars are appended after the workload.
+// resolveMainContainerName returns the name of the workload container by
+// deferring to snapshotprotocol.ResolveMainContainerName. That helper prefers
+// the container named "main" and falls back to Containers[0] so pods produced
+// before the naming convention (or by non-operator tooling) still resolve.
 func resolveMainContainerName(pod *corev1.Pod) string {
-	if len(pod.Spec.Containers) == 0 {
-		return ""
-	}
-	return pod.Spec.Containers[0].Name
+	return snapshotprotocol.ResolveMainContainerName(pod)
 }
 
 func isPodReady(pod *corev1.Pod) bool {

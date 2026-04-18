@@ -122,6 +122,12 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 
+	// MainContainerName is the conventional name of the workload container in
+	// operator-rendered pods. The operator originated this convention (LWS
+	// multinode enforcement); other subsystems (snapshot/protocol) that need
+	// to match on the name keep their own local copy because deploy/snapshot
+	// is a separate Go module and cannot import deploy/operator/internal.
+	// Keep the two copies in sync.
 	MainContainerName            = "main"
 	FrontendSidecarContainerName = "sidecar-frontend"
 
