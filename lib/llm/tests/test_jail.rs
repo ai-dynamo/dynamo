@@ -3359,4 +3359,239 @@ fahrenheit
             "tool_choice=named should have Stop finish reason"
         );
     }
+
+    /// tool_choice=required + parser configured + backend applied guided
+    /// decoding → model emits a bare JSON array of tool calls.
+    ///
+    /// This is the minimax/SGLang-after-PR-#6620 regression: previously we
+    /// fell through to the marker-based parser (looking for `<minimax:
+    /// tool_call>` etc.) which cannot parse unmarked JSON, so tool_calls
+    /// were empty and the JSON leaked into content/reasoning_content.
+    /// The Immediate branch now routes through base_json_parser first.
+    #[tokio::test]
+    async fn test_tool_choice_required_with_parser_bare_json() {
+        let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("minimax_m2".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_calls: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r.data
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|d| d.inner.choices.iter())
+                    .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "bare JSON array must be parsed by base_json_parser even when parser is set"
+        );
+        assert_eq!(
+            tool_calls[0].function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+
+        // finish_reason should be rewritten to ToolCalls (required path).
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first().and_then(|c| c.finish_reason))
+            })
+            .collect();
+        assert!(
+            finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=required with tool_calls emitted should have ToolCalls finish_reason"
+        );
+
+        // No raw JSON leaked as content.
+        for r in &results {
+            if let Some(data) = &r.data {
+                for choice in &data.inner.choices {
+                    if let Some(content) = &choice.delta.content {
+                        let text = test_utils::extract_text(content);
+                        assert!(
+                            !text.contains("get_weather"),
+                            "tool call JSON should not leak as content, got: {}",
+                            text
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// tool_choice=required with the alternate `arguments` key (SGLang's
+    /// JsonArrayParser and some vLLM paths emit this variant).  The
+    /// base_json_parser accepts either `parameters` or `arguments`.
+    #[tokio::test]
+    async fn test_tool_choice_required_bare_json_with_arguments_key() {
+        let bare_json = r#"[{"name":"get_weather","arguments":{"location":"Paris"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("hermes".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_calls: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r.data
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|d| d.inner.choices.iter())
+                    .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "base_json_parser must accept the `arguments` key variant"
+        );
+        let args = tool_calls[0]
+            .function
+            .as_ref()
+            .and_then(|f| f.arguments.as_deref())
+            .unwrap_or_default();
+        assert!(
+            args.contains("Paris"),
+            "arguments should carry the parameters payload, got: {}",
+            args
+        );
+    }
+
+    /// tool_choice=named + parser configured + bare JSON array from guided
+    /// decoding.  The call must be parsed (by base_json_parser) and the
+    /// named-tool filter must accept a matching name; finish_reason stays
+    /// Stop per OpenAI spec for named tool_choice.
+    #[tokio::test]
+    async fn test_tool_choice_named_with_parser_bare_json() {
+        let bare_json = r#"[{"name":"get_weather","parameters":{"location":"Tokyo"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("minimax_m2".to_string()),
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_calls: Vec<_> = results
+            .iter()
+            .flat_map(|r| {
+                r.data
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|d| d.inner.choices.iter())
+                    .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            })
+            .cloned()
+            .collect();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(
+            tool_calls[0].function.as_ref().unwrap().name.as_deref(),
+            Some("get_weather")
+        );
+
+        // OpenAI spec: tool_choice=named finishes with Stop, not ToolCalls.
+        let finish_reasons: Vec<_> = results
+            .iter()
+            .filter_map(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first().and_then(|c| c.finish_reason))
+            })
+            .collect();
+        assert!(
+            finish_reasons.contains(&FinishReason::Stop),
+            "tool_choice=named should keep Stop finish_reason, got {:?}",
+            finish_reasons
+        );
+        assert!(
+            !finish_reasons.contains(&FinishReason::ToolCalls),
+            "tool_choice=named must not be rewritten to ToolCalls"
+        );
+    }
+
+    /// tool_choice=named + parser + bare JSON where the model emits a
+    /// different tool than requested.  The named_tool_filter must drop
+    /// the mismatched call so nothing is emitted as a tool call.
+    #[tokio::test]
+    async fn test_tool_choice_named_bare_json_wrong_tool_filtered() {
+        let bare_json = r#"[{"name":"search","parameters":{"q":"foo"}}]"#;
+
+        let input_chunks = vec![
+            test_utils::create_mock_response_chunk(bare_json.to_string(), 0),
+            test_utils::create_final_response_chunk(0),
+        ];
+
+        let results: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("minimax_m2".to_string()),
+            Some(ChatCompletionToolChoiceOption::Named(
+                "get_weather".to_string().into(),
+            )),
+            None,
+            stream::iter(input_chunks),
+        )
+        .collect()
+        .await;
+
+        let tool_call_count: usize = results
+            .iter()
+            .map(|r| {
+                r.data.as_ref().map_or(0, |d| {
+                    d.inner
+                        .choices
+                        .iter()
+                        .map(|c: &ChatChoiceStream| {
+                            c.delta.tool_calls.as_ref().map_or(0, |tc| tc.len())
+                        })
+                        .sum::<usize>()
+                })
+            })
+            .sum();
+
+        assert_eq!(
+            tool_call_count, 0,
+            "named_tool_filter must drop tool calls whose name doesn't match the requested tool"
+        );
+    }
 }

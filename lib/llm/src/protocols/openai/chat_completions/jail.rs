@@ -7,6 +7,8 @@ use dynamo_protocols::types::{
     ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType, Role,
 };
 
+use dynamo_parsers::tool_calling::config::JsonParserConfig;
+use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
     detect_tool_call_start, find_tool_call_end_position, try_tool_call_parse_aggregate,
@@ -643,6 +645,12 @@ impl JailedStream {
                             // Only filter out if this choice was ever jailed and lacks role
                             // (to avoid aggregator issues with deltas missing role after unjail)
                             let choice_state = choice_states.get_or_create_state(choice.index, false);
+                            // Also track stream finish reason from content-less final chunks
+                            // (e.g. finish_reason=Stop arriving in a chunk with content=None) so
+                            // the Immediate-mode finalize path can emit the correct finish_reason.
+                            if choice.finish_reason.is_some() {
+                                choice_state.stream_finish_reason = choice.finish_reason;
+                            }
                             let was_ever_jailed = !choice_state.accumulated_content.is_empty() || choice_state.is_jailed;
 
                             let should_emit = choice.delta.role.is_some()
@@ -997,9 +1005,114 @@ impl JailedStream {
                 )
             }
             JailMode::Immediate { format } => {
-                // tool_choice mode: parse JSON and convert to tool calls
-                match self.parse_tool_choice_json(accumulated_content, format) {
-                    Ok(tool_call_chunks) if !tool_call_chunks.is_empty() => create_choice_stream(
+                // tool_choice=required/named path (SGLang/vLLM-style).
+                //
+                // Primary parser is try_tool_call_parse_basic_json (the
+                // base_json_parser) since guided decoding constrains output
+                // to a bare JSON shape. Fallbacks cover two edge cases:
+                //
+                //   * Named tool_choice when the schema produces just the
+                //     parameters object (no {name, parameters} wrapper) —
+                //     handled by parse_tool_choice_json, which knows the
+                //     target tool_name from ToolChoiceFormat::SingleObject.
+                //
+                //   * Backends that do not honor guided decoding and emit
+                //     the model's native format instead (e.g. qwen3_coder
+                //     XML). In that case try_tool_call_parse_aggregate with
+                //     the configured tool_call_parser recovers the call.
+                let mut tool_call_chunks: Vec<ChatCompletionMessageToolCallChunk> = Vec::new();
+
+                // 1. Primary: base_json_parser configured to skip marker
+                //    matching and fall through to its bare-JSON extraction
+                //    path. Handles `[{name,parameters}, ...]`,
+                //    `{name,parameters}`, `{name,arguments}`, and arrays of
+                //    either.
+                //
+                //    The `__DYNAMO_BARE_JSON__` sentinel is a workaround for
+                //    try_tool_call_parse_basic_json's two gating checks:
+                //      - An empty tool_call_start_tokens vec early-exits
+                //        without parsing, so we must supply at least one
+                //        token.
+                //      - If any configured token is present in the input, the
+                //        parser switches to marker-delimited extraction;
+                //        otherwise it falls through to bare-JSON extraction
+                //        (scan for the first `{` or `[`).
+                //    A sentinel that can never appear in real model output
+                //    passes the first check while guaranteeing the second
+                //    check routes us to the bare-JSON path — which is what
+                //    guided decoding produces.
+                let basic_json_cfg = JsonParserConfig {
+                    tool_call_start_tokens: vec!["__DYNAMO_BARE_JSON__".to_string()],
+                    tool_call_end_tokens: vec!["".to_string()],
+                    ..Default::default()
+                };
+                if let Ok((parsed, _)) = try_tool_call_parse_basic_json(
+                    accumulated_content,
+                    &basic_json_cfg,
+                    self.tool_definitions.as_deref(),
+                ) && !parsed.is_empty()
+                {
+                    tool_call_chunks.extend(parsed.into_iter().enumerate().map(|(idx, tc)| {
+                        ChatCompletionMessageToolCallChunk {
+                            index: idx as u32,
+                            id: Some(tc.id),
+                            r#type: Some(FunctionType::Function),
+                            function: Some(FunctionCallStream {
+                                name: Some(tc.function.name),
+                                arguments: Some(tc.function.arguments),
+                            }),
+                        }
+                    }));
+                }
+
+                // 2. Named-only fallback: output is just the parameters object
+                //    (tool_name is supplied by SingleObject format).
+                if tool_call_chunks.is_empty()
+                    && let Ok(chunks) = self.parse_tool_choice_json(accumulated_content, format)
+                {
+                    tool_call_chunks = chunks;
+                }
+
+                // 3. Marker-based fallback for backends that did not enforce
+                //    guided decoding and emitted the model's native format.
+                if tool_call_chunks.is_empty()
+                    && self.tool_call_parser.is_some()
+                    && let Ok((tool_calls, _)) = try_tool_call_parse_aggregate(
+                        accumulated_content,
+                        self.tool_call_parser.as_deref(),
+                        self.tool_definitions.as_deref(),
+                    )
+                    .await
+                {
+                    tool_call_chunks.extend(tool_calls.into_iter().enumerate().map(|(idx, tc)| {
+                        ChatCompletionMessageToolCallChunk {
+                            index: idx as u32,
+                            id: Some(tc.id),
+                            r#type: Some(FunctionType::Function),
+                            function: Some(FunctionCallStream {
+                                name: Some(tc.function.name),
+                                arguments: Some(tc.function.arguments),
+                            }),
+                        }
+                    }));
+                }
+
+                // Named filter: drop any parsed calls whose name doesn't match.
+                if let Some(ref required_name) = self.named_tool_name {
+                    tool_call_chunks.retain(|tc| {
+                        tc.function.as_ref().and_then(|f| f.name.as_deref())
+                            == Some(required_name.as_str())
+                    });
+                    if tool_call_chunks.is_empty() {
+                        tracing::warn!(
+                            required = %required_name,
+                            "tool_choice=named: parsers emitted no matching tool calls; dropping jail output"
+                        );
+                    }
+                }
+
+                if !tool_call_chunks.is_empty() {
+                    create_choice_stream(
                         choice_index,
                         Some(Role::Assistant),
                         "",
@@ -1007,19 +1120,18 @@ impl JailedStream {
                         base_choice.finish_reason,
                         None,
                         base_choice.logprobs.clone(),
-                    ),
-                    Ok(_) | Err(_) => {
-                        // Parsing failed, return as content
-                        create_choice_stream(
-                            choice_index,
-                            Some(Role::Assistant),
-                            accumulated_content,
-                            None,
-                            base_choice.finish_reason,
-                            base_choice.stop_reason.clone(),
-                            base_choice.logprobs.clone(),
-                        )
-                    }
+                    )
+                } else {
+                    // All parsing paths failed — return accumulated content as text.
+                    create_choice_stream(
+                        choice_index,
+                        Some(Role::Assistant),
+                        accumulated_content,
+                        None,
+                        base_choice.finish_reason,
+                        base_choice.stop_reason.clone(),
+                        base_choice.logprobs.clone(),
+                    )
                 }
             }
         }
@@ -1133,26 +1245,20 @@ impl JailedStream {
                             if finish == FinishReason::Stop {
                                 let has_tool_calls = has_tool_calls_per_choice.get(&choice.index).copied().unwrap_or(false);
 
+                                // OpenAI spec: whenever tool_calls were emitted on this
+                                // choice, finish_reason MUST be "tool_calls" — regardless of
+                                // whether tool_choice was "auto", "required", or a named
+                                // function.
+                                let _ = named_tool_active;
                                 match &jail_mode {
                                     JailMode::MarkerBased => {
-                                        if has_tool_calls && !named_tool_active {
+                                        if has_tool_calls {
                                             choice.finish_reason = Some(FinishReason::ToolCalls);
                                         }
-                                        // When named_tool_active, keep Stop (OpenAI spec for tool_choice=named)
                                     }
-                                    JailMode::Immediate { format } => {
-                                        // tool_choice mode: apply specific finish_reason logic
-                                        match format {
-                                            ToolChoiceFormat::SingleObject { .. } => {
-                                                // Named tool choice: keep Stop
-                                                // (already Stop, no change needed)
-                                            }
-                                            ToolChoiceFormat::ArrayOfTools => {
-                                                // Required tool choice: change to ToolCalls
-                                                if has_tool_calls {
-                                                    choice.finish_reason = Some(FinishReason::ToolCalls);
-                                                }
-                                            }
+                                    JailMode::Immediate { format: _ } => {
+                                        if has_tool_calls {
+                                            choice.finish_reason = Some(FinishReason::ToolCalls);
                                         }
                                     }
                                 }
