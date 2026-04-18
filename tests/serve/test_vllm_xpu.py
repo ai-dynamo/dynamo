@@ -7,7 +7,6 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -19,8 +18,13 @@ from tests.serve.common import (
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
 from tests.serve.lora_utils import MinioLoraConfig
+from tests.serve.multimodal_profiles.vllm_xpu import (
+    VLLM_MULTIMODAL_PROFILES,
+    VLLM_TOPOLOGY_SCRIPTS,
+)
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
     cached_tokens_chat_payload,
     chat_payload,
@@ -45,14 +49,17 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
-LOCAL_VIDEO_TEST_PATH = Path(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
-).resolve()
-LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
+# Generated multimodal configs from profile definitions
+_mm_configs: dict[str, VLLMConfig] = {}
+for _profile in VLLM_MULTIMODAL_PROFILES:
+    _mm_configs.update(
+        make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
+    )
 
 # vLLM test configurations
 vllm_configs = {
+    **_mm_configs,
     "aggregated": VLLMConfig(
         name="aggregated_xpu",
         directory=vllm_dir,
@@ -305,43 +312,6 @@ vllm_configs = {
             )
         ],
     ),
-    "multimodal_agg_qwen": VLLMConfig(
-        name="multimodal_agg_qwen_xpu",
-        directory=vllm_dir,
-        script_name="xpu/agg_multimodal_xpu.sh",
-        marks=[
-            pytest.mark.xpu_1,
-            pytest.mark.profiled_vram_gib(19.9),  # actual profiled peak with kv-bytes
-            pytest.mark.requested_vllm_kv_cache_bytes(
-                922_354_000
-            ),  # KV cache cap (2x safety over min=461_176_832)
-            pytest.mark.timeout(
-                360
-            ),  # ~7x observed 50.0s; 7B model loads ~48s on CI (A10G/L4)
-            pytest.mark.post_merge,
-        ],
-        model="Qwen/Qwen2.5-VL-7B-Instruct",
-        script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
-        delayed_start=0,
-        timeout=360,
-        request_payloads=[
-            chat_payload(
-                [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["purple"],
-                max_tokens=100,
-            ),
-        ],
-    ),
     "multimodal_agg_llava": VLLMConfig(
         name="multimodal_agg_llava_xpu",
         directory=vllm_dir,
@@ -461,36 +431,6 @@ vllm_configs = {
                 ],  # OR: pass if any keyword found in tool args
                 expected_log=[],
                 expected_tool_name="describe_image",  # Validate tool call happened
-            )
-        ],
-    ),
-    # Video multimodal tests for CI using the vLLM video launch scripts.
-    "multimodal_video_agg": VLLMConfig(
-        name="multimodal_video_agg_xpu",
-        directory=vllm_dir,
-        script_name="xpu/agg_multimodal_xpu.sh",
-        marks=[
-            pytest.mark.xpu_1,
-            pytest.mark.pre_merge,
-            pytest.mark.timeout(600),  # TODO: profile to get tighter timeout
-        ],  # TODO: profile to get max_vram
-        model="Qwen/Qwen3-VL-2B-Instruct",
-        delayed_start=60,  # Video models require longer loading time
-        script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
-        timeout=600,  # 10 minutes for video processing overhead
-        request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "Describe the video in detail"},
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": LOCAL_VIDEO_TEST_URI},
-                    },
-                ],
-                repeat_count=1,
-                expected_response=["red", "static", "still"],
-                temperature=0.0,
-                max_tokens=100,
             )
         ],
     ),
@@ -614,6 +554,10 @@ def test_multimodal_b64(
 
     This test is separate because it loads the required image at runtime
     (not collection time), ensuring it only fails when actually executed.
+
+    Uses ``@pytest.mark.model`` so nightly multi-GPU jobs (xpu_2 without the
+    xpu_1 multimodal_agg_qwen param) still predownload Qwen2.5-VL-7B before
+    ``HF_HUB_OFFLINE=1``.
     """
     # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
@@ -671,6 +615,10 @@ def test_multimodal_b64_frontend_decoding(
     This exercises the Rust frontend image decode + NIXL RDMA transfer path
     with inline base64 data: URIs (not HTTP URLs). Verifies that the
     strip_inline_data_urls optimization does not break correctness.
+
+    HF predownload: same model is already listed via ``@pytest.mark.model`` on
+    ``test_serve_deployment[multimodal_video_agg]`` (pre_merge + xpu_1), so no
+    extra ``model`` mark is needed here for PR CI.
     """
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
 
