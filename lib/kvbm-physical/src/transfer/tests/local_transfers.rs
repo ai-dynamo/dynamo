@@ -172,6 +172,41 @@ async fn test_p2p(
 
 #[rstest]
 #[tokio::test]
+#[case(StorageKind::System, StorageKind::Device(0))]
+#[case(StorageKind::Device(0), StorageKind::System)]
+async fn test_unsupported_system_device_transfer_returns_error(
+    #[case] src_kind: StorageKind,
+    #[case] dst_kind: StorageKind,
+) -> Result<()> {
+    use crate::transfer::executor::TransferOptionsInternal;
+
+    let agent = build_agent_for_kinds(&[src_kind, dst_kind])?;
+    let src = build_layout(agent.clone(), LayoutType::FC, src_kind, 2);
+    let dst = build_layout(agent.clone(), LayoutType::FC, dst_kind, 2);
+    let src_blocks = vec![0];
+    let dst_blocks = vec![0];
+    let ctx = create_transfer_context(agent, None).unwrap();
+
+    let err = match execute_transfer(
+        &src,
+        &dst,
+        &src_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    ) {
+        Ok(_) => anyhow::bail!("expected transfer to fail for System <-> Device"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("use Pinned memory"),
+        "unexpected error: {err}"
+    );
+    Ok(())
+}
+
+#[rstest]
+#[tokio::test]
 async fn test_roundtrip(
     #[values(LayoutType::FC, LayoutType::LW)] src_layout: LayoutType,
     #[values(StorageKind::System, StorageKind::Pinned, StorageKind::Device(0))]

@@ -90,12 +90,7 @@ pub(crate) fn select_strategy(
     }
 
     if is_src_local && is_dst_local {
-        return Ok(select_direct_strategy(
-            src.location(),
-            dst.location(),
-            false,
-            ctx.capabilities(),
-        ));
+        return select_direct_strategy(src.location(), dst.location(), false, ctx.capabilities());
     }
 
     select_remote_strategy_v2(
@@ -140,70 +135,74 @@ fn select_direct_strategy(
     dst: StorageKind,
     dst_is_remote: bool,
     capabilities: &TransferCapabilities,
-) -> TransferPlan {
+) -> anyhow::Result<TransferPlan> {
     use StorageKind::*;
     use TransferStrategy::*;
 
     // Handle remote destination
     if dst_is_remote {
-        return select_remote_strategy(src, capabilities);
+        return Ok(select_remote_strategy(src, capabilities));
     }
 
     // Local-to-local transfers
     match (src, dst) {
         // Host ↔ Host - direct memcpy
         (System, System) | (System, Pinned) | (Pinned, System) | (Pinned, Pinned) => {
-            TransferPlan::Direct(Memcpy)
+            Ok(TransferPlan::Direct(Memcpy))
         }
 
         // Host → Device - direct CUDA
-        (System, Device(_)) => panic!("System to Device transfers are not supported"),
-        (Pinned, Device(_)) => TransferPlan::Direct(CudaAsyncH2D),
+        (System, Device(_)) => Err(anyhow::anyhow!(
+            "System to Device transfers are not supported; use Pinned memory for CUDA transfers."
+        )),
+        (Pinned, Device(_)) => Ok(TransferPlan::Direct(CudaAsyncH2D)),
 
         // Device → Host - direct CUDA
-        (Device(_), System) => panic!("Device to System transfers are not supported"),
-        (Device(_), Pinned) => TransferPlan::Direct(CudaAsyncD2H),
+        (Device(_), System) => Err(anyhow::anyhow!(
+            "Device to System transfers are not supported; use Pinned memory for CUDA transfers."
+        )),
+        (Device(_), Pinned) => Ok(TransferPlan::Direct(CudaAsyncD2H)),
 
         // Device ↔ Device - direct CUDA
-        (Device(_), Device(_)) => TransferPlan::Direct(CudaAsyncD2D),
+        (Device(_), Device(_)) => Ok(TransferPlan::Direct(CudaAsyncD2D)),
 
         // Host ↔ Disk - direct NIXL
-        (System, Disk(_)) | (Pinned, Disk(_)) => TransferPlan::Direct(NixlWrite),
-        (Disk(_), System) | (Disk(_), Pinned) => TransferPlan::Direct(NixlReadFlipped),
+        (System, Disk(_)) | (Pinned, Disk(_)) => Ok(TransferPlan::Direct(NixlWrite)),
+        (Disk(_), System) | (Disk(_), Pinned) => Ok(TransferPlan::Direct(NixlReadFlipped)),
 
         // Disk ↔ Disk - NIXL doesn't seem to support direct transfers here.
         // Leaving this as two-hop for now.
-        (Disk(_), Disk(_)) => TransferPlan::TwoHop {
+        (Disk(_), Disk(_)) => Ok(TransferPlan::TwoHop {
             first: NixlReadFlipped,
             bounce_location: Pinned,
             second: NixlWrite,
-        },
+        }),
 
         // Device ↔ Disk - check GDS capability
         (Device(_), Disk(_)) => {
             if capabilities.allows_device_disk_direct() {
                 // Direct GDS transfer
-                TransferPlan::Direct(NixlWrite)
+                Ok(TransferPlan::Direct(NixlWrite))
             } else {
                 // Stage through host: Device → Pinned → Disk
-                TransferPlan::TwoHop {
+                Ok(TransferPlan::TwoHop {
                     first: CudaAsyncD2H,
                     bounce_location: Pinned,
                     second: NixlWrite,
-                }
+                })
             }
         }
         (Disk(_), Device(_)) => {
             if capabilities.allows_device_disk_direct() {
                 // Direct GDS transfer
-                TransferPlan::Direct(NixlRead)
+                Ok(TransferPlan::Direct(NixlRead))
             } else {
                 // Stage through host: Disk → Pinned → Device
-                TransferPlan::TwoHop {
+                Ok(TransferPlan::TwoHop {
                     first: NixlReadFlipped,
                     bounce_location: Pinned,
                     second: CudaAsyncH2D,
-                }
+                })
             }
         }
     }
@@ -289,19 +288,19 @@ mod tests {
     fn test_host_to_host_transfers() {
         let caps = default_caps();
         assert_eq!(
-            select_direct_strategy(StorageKind::System, StorageKind::System, false, &caps),
+            select_direct_strategy(StorageKind::System, StorageKind::System, false, &caps).unwrap(),
             TransferPlan::Direct(TransferStrategy::Memcpy)
         );
         assert_eq!(
-            select_direct_strategy(StorageKind::System, StorageKind::Pinned, false, &caps),
+            select_direct_strategy(StorageKind::System, StorageKind::Pinned, false, &caps).unwrap(),
             TransferPlan::Direct(TransferStrategy::Memcpy)
         );
         assert_eq!(
-            select_direct_strategy(StorageKind::Pinned, StorageKind::System, false, &caps),
+            select_direct_strategy(StorageKind::Pinned, StorageKind::System, false, &caps).unwrap(),
             TransferPlan::Direct(TransferStrategy::Memcpy)
         );
         assert_eq!(
-            select_direct_strategy(StorageKind::Pinned, StorageKind::Pinned, false, &caps),
+            select_direct_strategy(StorageKind::Pinned, StorageKind::Pinned, false, &caps).unwrap(),
             TransferPlan::Direct(TransferStrategy::Memcpy)
         );
     }
@@ -309,15 +308,14 @@ mod tests {
     #[test]
     fn test_host_to_device_transfers() {
         let caps = default_caps();
-        // // System (unpinned) to device should be blocking
-        // assert_eq!(
-        //     select_direct_strategy(StorageKind::System, StorageKind::Device(0), false, &caps),
-        //     TransferPlan::Direct(TransferStrategy::CudaBlockingH2D)
-        // );
+        let _err =
+            select_direct_strategy(StorageKind::System, StorageKind::Device(0), false, &caps)
+                .unwrap_err();
 
         // Pinned to device should be async
         assert_eq!(
-            select_direct_strategy(StorageKind::Pinned, StorageKind::Device(0), false, &caps),
+            select_direct_strategy(StorageKind::Pinned, StorageKind::Device(0), false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::CudaAsyncH2D)
         );
     }
@@ -325,15 +323,14 @@ mod tests {
     #[test]
     fn test_device_to_host_transfers() {
         let caps = default_caps();
-        //    // Device to system should be blocking
-        //     assert_eq!(
-        //         select_direct_strategy(StorageKind::Device(0), StorageKind::System, false, &caps),
-        //         TransferPlan::Direct(TransferStrategy::CudaBlockingD2H)
-        //     );
+        let _err =
+            select_direct_strategy(StorageKind::Device(0), StorageKind::System, false, &caps)
+                .unwrap_err();
 
         // Device to pinned should be async
         assert_eq!(
-            select_direct_strategy(StorageKind::Device(0), StorageKind::Pinned, false, &caps),
+            select_direct_strategy(StorageKind::Device(0), StorageKind::Pinned, false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::CudaAsyncD2H)
         );
     }
@@ -342,11 +339,13 @@ mod tests {
     fn test_device_to_device_transfers() {
         let caps = default_caps();
         assert_eq!(
-            select_direct_strategy(StorageKind::Device(0), StorageKind::Device(1), false, &caps),
+            select_direct_strategy(StorageKind::Device(0), StorageKind::Device(1), false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::CudaAsyncD2D)
         );
         assert_eq!(
-            select_direct_strategy(StorageKind::Device(3), StorageKind::Device(3), false, &caps),
+            select_direct_strategy(StorageKind::Device(3), StorageKind::Device(3), false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::CudaAsyncD2D)
         );
     }
@@ -356,11 +355,13 @@ mod tests {
         let caps = default_caps();
         // Disk to host - direct NIXL
         assert_eq!(
-            select_direct_strategy(StorageKind::Disk(42), StorageKind::System, false, &caps),
+            select_direct_strategy(StorageKind::Disk(42), StorageKind::System, false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::NixlReadFlipped)
         );
         assert_eq!(
-            select_direct_strategy(StorageKind::Disk(42), StorageKind::Pinned, false, &caps),
+            select_direct_strategy(StorageKind::Disk(42), StorageKind::Pinned, false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::NixlReadFlipped)
         );
     }
@@ -370,11 +371,13 @@ mod tests {
         let caps = default_caps();
         // Host to disk - direct NIXL
         assert_eq!(
-            select_direct_strategy(StorageKind::System, StorageKind::Disk(42), false, &caps),
+            select_direct_strategy(StorageKind::System, StorageKind::Disk(42), false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::NixlWrite)
         );
         assert_eq!(
-            select_direct_strategy(StorageKind::Pinned, StorageKind::Disk(42), false, &caps),
+            select_direct_strategy(StorageKind::Pinned, StorageKind::Disk(42), false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::NixlWrite)
         );
     }
@@ -384,7 +387,8 @@ mod tests {
         let caps = default_caps(); // GDS disabled
         // Device → Disk should use bounce buffer
         let plan =
-            select_direct_strategy(StorageKind::Device(0), StorageKind::Disk(42), false, &caps);
+            select_direct_strategy(StorageKind::Device(0), StorageKind::Disk(42), false, &caps)
+                .unwrap();
         match plan {
             TransferPlan::TwoHop {
                 first,
@@ -404,7 +408,8 @@ mod tests {
         let caps = default_caps(); // GDS disabled
         // Disk → Device should use bounce buffer
         let plan =
-            select_direct_strategy(StorageKind::Disk(42), StorageKind::Device(0), false, &caps);
+            select_direct_strategy(StorageKind::Disk(42), StorageKind::Device(0), false, &caps)
+                .unwrap();
         match plan {
             TransferPlan::TwoHop {
                 first,
@@ -424,7 +429,8 @@ mod tests {
         let caps = TransferCapabilities::default().with_gds(true);
         // Device → Disk should be direct with GDS
         assert_eq!(
-            select_direct_strategy(StorageKind::Device(0), StorageKind::Disk(42), false, &caps),
+            select_direct_strategy(StorageKind::Device(0), StorageKind::Disk(42), false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::NixlWrite)
         );
     }
@@ -434,7 +440,8 @@ mod tests {
         let caps = TransferCapabilities::default().with_gds(true);
         // Disk → Device should be direct with GDS
         assert_eq!(
-            select_direct_strategy(StorageKind::Disk(42), StorageKind::Device(0), false, &caps),
+            select_direct_strategy(StorageKind::Disk(42), StorageKind::Device(0), false, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::NixlRead)
         );
     }
@@ -444,11 +451,11 @@ mod tests {
         let caps = default_caps();
         // Host → Remote - always direct
         assert_eq!(
-            select_direct_strategy(StorageKind::System, StorageKind::System, true, &caps),
+            select_direct_strategy(StorageKind::System, StorageKind::System, true, &caps).unwrap(),
             TransferPlan::Direct(TransferStrategy::NixlWrite)
         );
         assert_eq!(
-            select_direct_strategy(StorageKind::Pinned, StorageKind::Pinned, true, &caps),
+            select_direct_strategy(StorageKind::Pinned, StorageKind::Pinned, true, &caps).unwrap(),
             TransferPlan::Direct(TransferStrategy::NixlWrite)
         );
     }
@@ -457,7 +464,8 @@ mod tests {
     fn test_device_to_remote_without_rdma() {
         let caps = default_caps(); // GPU RDMA disabled
         // Device → Remote should use bounce buffer
-        let plan = select_direct_strategy(StorageKind::Device(0), StorageKind::System, true, &caps);
+        let plan = select_direct_strategy(StorageKind::Device(0), StorageKind::System, true, &caps)
+            .unwrap();
         match plan {
             TransferPlan::TwoHop {
                 first,
@@ -477,7 +485,8 @@ mod tests {
         let caps = TransferCapabilities::default().with_gpu_rdma(true);
         // Device → Remote should be direct with GPU RDMA
         assert_eq!(
-            select_direct_strategy(StorageKind::Device(0), StorageKind::Device(0), true, &caps),
+            select_direct_strategy(StorageKind::Device(0), StorageKind::Device(0), true, &caps)
+                .unwrap(),
             TransferPlan::Direct(TransferStrategy::NixlWrite)
         );
     }
@@ -486,7 +495,8 @@ mod tests {
     fn test_disk_to_remote() {
         let caps = default_caps();
         // Disk → Remote always uses bounce buffer
-        let plan = select_direct_strategy(StorageKind::Disk(42), StorageKind::System, true, &caps);
+        let plan = select_direct_strategy(StorageKind::Disk(42), StorageKind::System, true, &caps)
+            .unwrap();
         match plan {
             TransferPlan::TwoHop {
                 first,
