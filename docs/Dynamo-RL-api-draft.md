@@ -24,18 +24,14 @@
 
 ## 1. Overview
 
-This document describes the RL training API surface on the Dynamo serving stack for integration
-with prime-rl. The Dynamo frontend (Rust) exposes:
+This document describes the RL training API surface on the Dynamo serving stack for integration with prime-rl. The Dynamo frontend (Rust) exposes:
 
-- An `/v1/rl/*` router for the full RL control-plane lifecycle (pause/resume, weight updates,
-  readiness checks)
-- Automatic token-level data injection (`prompt_token_ids`, `completion_token_ids`) in chat
-  completion responses
+- An `/v1/rl/*` router for the full RL control-plane lifecycle (pause/resume, weight updates, readiness checks)
+- Automatic token-level data injection (`prompt_token_ids`, `completion_token_ids`) in chat completion responses
 - `/v1/tokenize` and `/v1/detokenize` endpoints
 - A `/v1/chat/completions/tokens` TITO endpoint for pre-tokenized prompt bypass
 
-Zero Python in the inference or admin data path. The Rust frontend handles all HTTP API surface
-while vLLM workers expose engine routes for weight lifecycle operations on the GPU.
+Zero Python in the inference or admin data path. The Rust frontend handles all HTTP API surface while vLLM workers expose engine routes for weight lifecycle operations on the GPU.
 
 ### Endpoint Summary
 
@@ -48,15 +44,15 @@ while vLLM workers expose engine routes for weight lifecycle operations on the G
 | Pause fleet | `POST /v1/rl/pause` | Drain in-flight requests before weight update |
 | Resume fleet | `POST /v1/rl/resume` | Resume generation after weight update |
 | Update weights | `POST /v1/rl/update_weights` | Atomic flush + reload from checkpoint directory |
+| Load LoRA adapter | `POST /v1/rl/load_lora_adapter` | Hot-load/swap a PEFT-style adapter from filesystem path |
+| Unload LoRA adapter | `POST /v1/rl/unload_lora_adapter` | Remove a previously loaded adapter by name |
 | Weight version | `GET /v1/rl/weight_version` | Query current weight version across workers |
 | Health | `GET /v1/rl/health` | Lightweight frontend health check |
 | Readiness | `GET /v1/rl/ready` | Deep check: are workers reachable and healthy? |
 
 ### What Changed vs. Stock Dynamo
 
-All changes are on `bis/parity-tokenize-tcp` (12 commits, 25 files, +1725/-40). Nothing touches
-Dynamo's core serving pipeline (NATS, scheduler, KV cache, disaggregation). The changes are
-additive:
+All changes are on `bis/parity-tokenize-tcp` (12 commits, 25 files, +1725/-40). Nothing touches Dynamo's core serving pipeline (NATS, scheduler, KV cache, disaggregation). The changes are additive:
 
 - **Rust frontend** (`lib/llm/`): New routes, response post-processing, tokenization endpoints
 - **vLLM worker** (`components/`): 5 engine route handlers, publisher crash guard
@@ -103,21 +99,13 @@ flowchart TD
 
 ### Key Design Decisions
 
-1. **Single entry point.** Prime-RL points both `base_url` and `admin_base_url` at the Dynamo
-   frontend. No separate admin service to deploy.
+1. **Single entry point.** Prime-RL points both `base_url` and `admin_base_url` at the Dynamo frontend. No separate admin service to deploy.
 
-2. **Fan-out in Rust.** The `/v1/rl/*` handlers fan out to all vLLM workers via
-   `DYN_RL_WORKER_SYSTEM_URLS`. This supports DP>1 without Prime-RL needing to discover workers.
-   The frontend returns HTTP 200 only when all workers respond OK, and HTTP 502 otherwise with
-   per-worker details.
+2. **Fan-out in Rust.** The `/v1/rl/*` handlers fan out to all vLLM workers via `DYN_RL_WORKER_SYSTEM_URLS`. This supports DP>1 without Prime-RL needing to discover workers. The frontend returns HTTP 200 only when all workers respond OK, and HTTP 502 otherwise with per-worker details.
 
-3. **Token IDs as a response extension.** When `DYN_ENABLE_RL=true`, `prompt_token_ids` and
-   `choices[i].token_ids` are injected into every non-streaming response automatically. No
-   client-side configuration needed.
+3. **Token IDs as a response extension.** When `DYN_ENABLE_RL=true`, `prompt_token_ids` and `choices[i].token_ids` are injected into every non-streaming response automatically. No client-side configuration needed.
 
-4. **Backward compatible.** All new response fields use
-   `#[serde(skip_serializing_if = "Option::is_none")]`. Clients that don't set `DYN_ENABLE_RL`
-   see standard OpenAI-compatible responses with no extra fields.
+4. **Backward compatible.** All new response fields use `#[serde(skip_serializing_if = "Option::is_none")]`. Clients that don't set `DYN_ENABLE_RL` see standard OpenAI-compatible responses with no extra fields.
 
 ---
 
@@ -171,9 +159,7 @@ type = "filesystem"
 use_prefix_cache_salt = false
 ```
 
-**Important:** Do NOT set `send_return_token_ids = true` in `[sampling]`. The Rust frontend
-handles token ID injection automatically when `DYN_ENABLE_RL=true`. Sending `return_token_ids=true`
-in the request causes the OpenAI SDK to parse the response and strip unknown fields.
+**Important:** Do NOT set `send_return_token_ids = true` in `[sampling]`. The Rust frontend handles token ID injection automatically when `DYN_ENABLE_RL=true`. Sending `return_token_ids=true` in the request causes the OpenAI SDK to parse the response and strip unknown fields.
 
 ### Kubernetes (DGD)
 
@@ -208,8 +194,7 @@ DYN_SYSTEM_PORT=8081 \
 
 ## 4. API Reference
 
-All endpoints live on the Dynamo Rust frontend (default port 8000). Unless noted,
-request/response formats follow the OpenAI API specification.
+All endpoints live on the Dynamo Rust frontend (default port 8000). Unless noted, request/response formats follow the OpenAI API specification.
 
 ### 4.1 Chat Completions (RL-enhanced)
 
@@ -217,13 +202,11 @@ request/response formats follow the OpenAI API specification.
 POST /v1/chat/completions
 ```
 
-Standard OpenAI chat completions with RL extensions. When `DYN_ENABLE_RL=true`, every
-non-streaming response is automatically enriched with token IDs for the trainer.
+Standard OpenAI chat completions with RL extensions. When `DYN_ENABLE_RL=true`, every non-streaming response is automatically enriched with token IDs for the trainer.
 
 #### Request
 
-Standard OpenAI `ChatCompletionRequest`. Two additional fields are accepted and silently consumed
-(never forwarded to the vLLM worker):
+Standard OpenAI `ChatCompletionRequest`. Two additional fields are accepted and silently consumed (never forwarded to the vLLM worker):
 
 | Field | Type | Default | Mapped to |
 |-------|------|---------|-----------|
@@ -286,18 +269,13 @@ curl -s -X POST http://localhost:8000/v1/chat/completions \
 | `token_ids` | `response.choices[i].token_ids` | Completion token IDs generated by the engine. Promoted from `nvext.completion_token_ids`. |
 | `completion_token_ids` | `response.nvext.completion_token_ids` | Canonical Dynamo location for output token IDs. Accumulated across all SSE chunks by `DeltaGenerator`. |
 
-**Why `token_ids` appears in two locations:** Prime-RL's verifiers library reads
-`response.prompt_token_ids` and `choices[i].token_ids` (top-level on the choice object). Dynamo
-natively emits output token IDs in `nvext.completion_token_ids`. The Rust post-processor promotes
-the latter to the former for compatibility. Both contain the same values.
+**Why `token_ids` appears in two locations:** Prime-RL's verifiers library reads `response.prompt_token_ids` and `choices[i].token_ids` (top-level on the choice object). Dynamo natively emits output token IDs in `nvext.completion_token_ids`. The Rust post-processor promotes the latter to the former for compatibility. Both contain the same values.
 
-**Invariant:** `len(completion_token_ids) == len(logprobs.content)` -- the output token IDs are in
-exact 1:1 correspondence with the logprob entries.
+**Invariant:** `len(completion_token_ids) == len(logprobs.content)` -- the output token IDs are in exact 1:1 correspondence with the logprob entries.
 
 #### Sample Response (Streaming / SSE -- final chunk only)
 
-Intermediate chunks carry `delta.content` only. Token IDs appear exclusively on the
-**final chunk** (the one with a non-null `finish_reason`):
+Intermediate chunks carry `delta.content` only. Token IDs appear exclusively on the **final chunk** (the one with a non-null `finish_reason`):
 
 ```
 data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk",
@@ -312,8 +290,7 @@ data: [DONE]
 
 #### RL Post-Processing Pipeline
 
-For non-streaming requests, the handler performs the following after the backend response is
-fully aggregated:
+For non-streaming requests, the handler performs the following after the backend response is fully aggregated:
 
 ```mermaid
 flowchart LR
@@ -334,9 +311,7 @@ flowchart LR
 POST /v1/chat/completions/tokens
 ```
 
-Dedicated endpoint for Prime-RL's pre-tokenized prompt flow (multi-turn RL, turn 2+). The
-orchestrator sends raw token IDs instead of text messages, bypassing the frontend's tokenizer
-entirely. This avoids redundant encode/decode round-trips and ensures token-level alignment.
+Dedicated endpoint for Prime-RL's pre-tokenized prompt flow (multi-turn RL, turn 2+). The orchestrator sends raw token IDs instead of text messages, bypassing the frontend's tokenizer entirely. This avoids redundant encode/decode round-trips and ensures token-level alignment.
 
 #### Sample Request
 
@@ -379,10 +354,7 @@ POST /v1/tokenize
 POST /v1/detokenize
 ```
 
-Consistent tokenization using the model's tokenizer and chat template, running entirely in Rust.
-These are critical for RL: prompt token IDs in the chat completion response must match what the
-tokenizer produces for the same messages. Both endpoints use the same tokenizer instance that the
-frontend uses for its own request preprocessing.
+Consistent tokenization using the model's tokenizer and chat template, running entirely in Rust. These are critical for RL: prompt token IDs in the chat completion response must match what the tokenizer produces for the same messages. Both endpoints use the same tokenizer instance that the frontend uses for its own request preprocessing.
 
 #### Sample: Tokenize (Chat variant)
 
@@ -425,9 +397,7 @@ curl -s -X POST http://localhost:8000/v1/tokenize \
 | `chat_template_kwargs` | `object?` | `null` | Extra template variables |
 | `continue_final_message` | `bool` | `false` | Continue last message instead of starting a new turn |
 
-The chat variant renders messages through the model's chat template before tokenizing, so the
-token count is the exact number of tokens that a corresponding chat completion request would
-consume.
+The chat variant renders messages through the model's chat template before tokenizing, so the token count is the exact number of tokens that a corresponding chat completion request would consume.
 
 #### Sample: Tokenize (Completion variant)
 
@@ -483,8 +453,7 @@ curl -s -X POST http://localhost:8000/v1/detokenize \
 
 ### 4.4 Fleet Control (`/v1/rl/*`)
 
-All `/v1/rl/*` routes are mounted only when `DYN_ENABLE_RL=true`. They fan out to vLLM worker
-system ports defined by `DYN_RL_WORKER_SYSTEM_URLS`.
+All `/v1/rl/*` routes are mounted only when `DYN_ENABLE_RL=true`. They fan out to vLLM worker system ports defined by `DYN_RL_WORKER_SYSTEM_URLS`.
 
 In prime-rl's config:
 
@@ -498,8 +467,7 @@ admin_base_url = ["http://<frontend>:8000/v1/rl"]
 
 #### `GET /v1/rl/health`
 
-Lightweight liveness probe. Returns immediately as long as the frontend process is running.
-Used by prime-rl's `check_health()` on the admin client.
+Lightweight liveness probe. Returns immediately as long as the frontend process is running. Used by prime-rl's `check_health()` on the admin client.
 
 ```bash
 curl -s http://localhost:8000/v1/rl/health
@@ -513,8 +481,7 @@ curl -s http://localhost:8000/v1/rl/health
 
 #### `GET /v1/rl/ready`
 
-Composite readiness probe. Polls `/health` on every configured worker system URL concurrently.
-Returns 200 only when all workers respond with HTTP 2xx.
+Composite readiness probe. Polls `/health` on every configured worker system URL concurrently. Returns 200 only when all workers respond with HTTP 2xx.
 
 ```bash
 curl -s http://localhost:8000/v1/rl/ready
@@ -544,8 +511,7 @@ curl -s http://localhost:8000/v1/rl/ready
 
 #### `POST /v1/rl/pause`
 
-Quiesces generation on all workers. Each worker calls `engine_client.pause_generation()` which
-drains in-flight requests without unloading the model from GPU memory.
+Quiesces generation on all workers. Each worker calls `engine_client.pause_generation()` which drains in-flight requests without unloading the model from GPU memory.
 
 ```bash
 curl -s -X POST http://localhost:8000/v1/rl/pause -H 'Content-Type: application/json' -d '{}'
@@ -593,17 +559,11 @@ curl -s -X POST http://localhost:8000/v1/rl/resume -H 'Content-Type: application
 
 #### `POST /v1/rl/update_weights`
 
-Atomic weight-loading sequence: `flush_cache` then `update_weights_from_path` on all workers
-concurrently. The frontend performs the two-phase fan-out internally; prime-rl does not need to
-call these separately.
+Atomic weight-loading sequence: `flush_cache` then `update_weights_from_path` on all workers concurrently. The frontend performs the two-phase fan-out internally; prime-rl does not need to call these separately.
 
-For filesystem-backed weight broadcast, the trainer writes safetensors files to a shared PVC
-directory and passes that path here. The worker calls
-`engine_client.collective_rpc("reload_weights", kwargs={"weights_path": path})` which triggers
-vLLM's layerwise in-place weight reload on every GPU worker.
+For filesystem-backed weight broadcast, the trainer writes safetensors files to a shared PVC directory and passes that path here. The worker calls `engine_client.collective_rpc("reload_weights", kwargs={"weights_path": path})` which triggers vLLM's layerwise in-place weight reload on every GPU worker.
 
-For NCCL-based weight broadcast (`weight_dir: null`), Dynamo returns 200 immediately -- the
-actual weight transfer happens out-of-band via NCCL and Dynamo does not participate.
+For NCCL-based weight broadcast (`weight_dir: null`), Dynamo returns 200 immediately -- the actual weight transfer happens out-of-band via NCCL and Dynamo does not participate.
 
 ```bash
 # Filesystem mode
@@ -642,16 +602,97 @@ curl -s -X POST http://localhost:8000/v1/rl/update_weights \
 }
 ```
 
-The `version` string is derived from the basename of `weight_dir` (e.g., `step_5` from
-`/data/outputs/run_default/broadcasts/step_5`). This version is stored in the worker and
-retrievable via `/v1/rl/weight_version`.
+The `version` string is derived from the basename of `weight_dir` (e.g., `step_5` from `/data/outputs/run_default/broadcasts/step_5`). This version is stored in the worker and retrievable via `/v1/rl/weight_version`.
+
+---
+
+#### `POST /v1/rl/load_lora_adapter`
+
+Hot-load or hot-swap a LoRA adapter from a filesystem path. The adapter directory must contain PEFT-style `adapter_model.safetensors` and `adapter_config.json` -- the default output layout of prime-rl's LoRA trainer.
+
+This is the RL-native LoRA path, distinct from Dynamo's URI-based `load_lora` gRPC endpoint (which downloads from S3/file URIs via `LoRAManager`). The admin route is optimized for the training loop: no URI fetch, no MDC churn on hot-swap.
+
+- **First call for a given `lora_name`**: `add_lora` in the engine, publish a ModelDeploymentCard so subsequent inference requests with `model=<lora_name>` route to this worker.
+- **Subsequent calls (hot-swap)**: `remove_lora(old_id)` → `add_lora` with new weights → `reset_prefix_cache`. The MDC is left in place since it already points at this worker.
+
+Pair with `/v1/rl/pause` and `/v1/rl/resume` for full drain-swap-resume semantics.
+
+```bash
+curl -s -X POST http://localhost:8000/v1/rl/load_lora_adapter \
+  -H 'Content-Type: application/json' \
+  -d '{"lora_name": "r16-a32", "lora_path": "/data/outputs/run_default/broadcasts/step_5"}'
+```
+
+```json
+// Success (200)
+{
+  "status": "ok",
+  "workers": [
+    {
+      "status": "ok",
+      "message": "LoRA adapter 'r16-a32' loaded from /data/outputs/...",
+      "lora_name": "r16-a32",
+      "lora_id": 788776416,
+      "hot_swap": false
+    }
+  ]
+}
+
+// Missing / empty field (400)
+{
+  "status": "error",
+  "message": "Expected body: {\"lora_name\": str, \"lora_path\": str} (both required, non-empty)"
+}
+
+// Worker-side failure (502) -- e.g. bad adapter file, rank mismatch, vLLM not --enable-lora
+{
+  "status": "error",
+  "workers": [{"status": "error", "message": "..."}]
+}
+```
+
+**vLLM worker requirements**: the engine must be started with `--enable-lora --max-lora-rank R --max-loras N`, with `R` ≥ the adapter rank and `N` ≥ the number of distinct `lora_name` values you expect to have loaded at once. For Prime-RL's single-adapter training loop, `--max-loras 1` is sufficient.
+
+---
+
+#### `POST /v1/rl/unload_lora_adapter`
+
+Remove a previously loaded LoRA adapter by name. Idempotent: unloading an already-absent adapter returns `status: ok` so callers can retry safely.
+
+Unregisters the adapter's ModelDeploymentCard so the frontend stops routing `model=<lora_name>` requests to this worker.
+
+```bash
+curl -s -X POST http://localhost:8000/v1/rl/unload_lora_adapter \
+  -H 'Content-Type: application/json' \
+  -d '{"lora_name": "r16-a32"}'
+```
+
+```json
+// Success (200)
+{
+  "status": "ok",
+  "workers": [
+    {
+      "status": "ok",
+      "message": "LoRA adapter 'r16-a32' unloaded",
+      "lora_name": "r16-a32",
+      "lora_id": 788776416
+    }
+  ]
+}
+
+// Already absent -- still ok (200)
+{
+  "status": "ok",
+  "workers": [{"status": "ok", "message": "LoRA adapter 'r16-a32' not loaded (no-op)", "lora_name": "r16-a32"}]
+}
+```
 
 ---
 
 #### `GET /v1/rl/weight_version`
 
-Returns the currently loaded weight version from all workers. Useful for debugging weight update
-races or confirming that all workers converged to the same checkpoint.
+Returns the currently loaded weight version from all workers. Useful for debugging weight update races or confirming that all workers converged to the same checkpoint.
 
 ```bash
 curl -s http://localhost:8000/v1/rl/weight_version
@@ -679,8 +720,7 @@ curl -s http://localhost:8000/v1/rl/weight_version
 }
 ```
 
-Returns HTTP 200 even when versions are inconsistent -- the `status` field distinguishes the
-cases. A 502 is only returned for network-level failures.
+Returns HTTP 200 even when versions are inconsistent -- the `status` field distinguishes the cases. A 502 is only returned for network-level failures.
 
 ---
 
@@ -779,9 +819,7 @@ NvExtResponse {
 }
 ```
 
-The `completion_token_ids` field is populated:
-- Automatically for all requests when `DYN_ENABLE_RL=true`
-- Otherwise when the client sends `nvext.extra_fields: ["completion_token_ids"]`
+The `completion_token_ids` field is populated automatically for all requests when `DYN_ENABLE_RL=true`, or when the client sends `nvext.extra_fields: ["completion_token_ids"]`.
 
 ### `NvCreateChatCompletionRequest` (Rust -- request side)
 
@@ -792,8 +830,7 @@ New fields relevant to RL:
 | `tokens` | No (`skip_serializing`) | Pre-tokenized prompt token IDs (TITO path via `/v1/chat/completions/tokens`) |
 | `return_token_ids` | No (`skip_serializing`) | prime-rl compat field; accepted but ignored on the standard endpoint -- use `DYN_ENABLE_RL` or `nvext.extra_fields` instead |
 
-Both fields are stripped before the request is forwarded to the vLLM worker, preventing 400
-errors from the vLLM OpenAI-compatible API.
+Both fields are stripped before the request is forwarded to the vLLM worker, preventing 400 errors from the vLLM OpenAI-compatible API.
 
 ### `NvCreateChatCompletionResponse` (Rust -- response side)
 
@@ -816,12 +853,9 @@ DeltaGenerator {
 }
 ```
 
-- **Activation:** `options.enable_completion_token_ids` is set to `true` when
-  `extra_fields` includes `"completion_token_ids"` (auto-set when `DYN_ENABLE_RL=true`).
-- **Accumulation:** On each postprocessor output chunk, appends `delta.token_ids` to the
-  accumulator.
-- **Emission:** On the final chunk (`finish_reason` is set), the full list is emitted in
-  `nvext.completion_token_ids` and the accumulator is cleared.
+- **Activation:** `options.enable_completion_token_ids` is set to `true` when `extra_fields` includes `"completion_token_ids"` (auto-set when `DYN_ENABLE_RL=true`).
+- **Accumulation:** On each postprocessor output chunk, appends `delta.token_ids` to the accumulator.
+- **Emission:** On the final chunk (`finish_reason` is set), the full list is emitted in `nvext.completion_token_ids` and the accumulator is cleared.
 
 ### `NvExt` (Rust -- request-side NVIDIA extensions)
 
@@ -852,27 +886,17 @@ DetokenizeResponse { prompt: String }
 
 **`rl_tokenize_prompt(state, model, messages) -> Option<Vec<u32>>`**
 
-Tokenizes the original prompt messages using the model's chat template and tokenizer:
-
-1. Resolves model card from `state`
-2. Gets the tokenizer instance from the model card
-3. Builds a `PromptFormatter` from the model deployment card
-4. Renders messages through the chat template (same logic as the preprocessor)
-5. Tokenizes the rendered string
-6. Returns the token IDs
+Tokenizes the original prompt messages using the model's chat template and tokenizer: resolves model card from `state`, gets the tokenizer instance, builds a `PromptFormatter` from the model deployment card, renders messages through the chat template (same logic as the preprocessor), tokenizes the rendered string, and returns the token IDs.
 
 **`rl_promote_token_ids_in_response(json_val)`**
 
-Copies `response.nvext.completion_token_ids` to `response.choices[i].token_ids` for each choice.
-Bridges Dynamo's `nvext` convention with the field paths that Prime-RL/verifiers expects.
+Copies `response.nvext.completion_token_ids` to `response.choices[i].token_ids` for each choice. Bridges Dynamo's `nvext` convention with the field paths that Prime-RL/verifiers expects.
 
 ---
 
 ## 7. Worker Engine Routes (Internal)
 
-Five engine route handlers are registered on each vLLM worker's system HTTP port (default
-`8081` local / `9090` in k8s). These are **internal** routes called by the Rust frontend's
-`/v1/rl/*` handlers -- not called directly by Prime-RL.
+Five engine route handlers are registered on each vLLM worker's system HTTP port (default `8081` local / `9090` in k8s). These are **internal** routes called by the Rust frontend's `/v1/rl/*` handlers -- not called directly by Prime-RL.
 
 | Route | Method | vLLM API called | Description |
 |-------|--------|-----------------|-------------|
@@ -882,8 +906,7 @@ Five engine route handlers are registered on each vLLM worker's system HTTP port
 | `/engine/update_weights_from_path` | POST | `engine_client.collective_rpc("reload_weights", ...)` | Load weights from filesystem (safetensors checkpoint) |
 | `/engine/get_weight_version` | POST | `self._weight_version` | Return current weight version string |
 
-Both decode and prefill worker types register all 5 routes. Route signatures are compatible with
-SGLang's merged `#6094` routes for backend interoperability.
+Both decode and prefill worker types register all 5 routes. Route signatures are compatible with SGLang's merged `#6094` routes for backend interoperability.
 
 ### Registration (worker_factory.py)
 
@@ -897,10 +920,7 @@ runtime.register_engine_route("get_weight_version", handler.get_weight_version)
 
 ### publisher.py Crash Guard
 
-The `DynamoStatLoggerPublisher.record()` method includes a guard for `scheduler_stats is None`.
-This prevents an `AttributeError` crash during the transient window right after a weight reload
-when the vLLM engine's stats logger fires before the engine core has re-initialized its scheduler
-stats.
+The `DynamoStatLoggerPublisher.record()` method includes a guard for `scheduler_stats is None`. This prevents an `AttributeError` crash during the transient window right after a weight reload when the vLLM engine's stats logger fires before the engine core has re-initialized its scheduler stats.
 
 ---
 
