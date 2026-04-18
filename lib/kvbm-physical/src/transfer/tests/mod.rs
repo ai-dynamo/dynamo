@@ -62,6 +62,7 @@ use super::{
 };
 use crate::{
     BlockId,
+    device::{DeviceBackend, DeviceContext},
     layout::{
         BlockDimension, LayoutConfig,
         builder::{HasConfig, NoLayout, NoMemory, PhysicalLayoutBuilder},
@@ -159,6 +160,33 @@ pub fn create_test_agent_with_backends(name: &str, backends: &[&str]) -> Result<
     NixlAgent::with_backends(name, backends)
 }
 
+/// Select device backend for transfer tests.
+///
+/// Priority: SYCL (xpu-sycl) > ZE (xpu-ze) > CUDA.
+/// Panic if no device backend is available.
+fn test_device_backend() -> DeviceBackend {
+    #[cfg(feature = "xpu-sycl")]
+    {
+        if DeviceBackend::Sycl.is_available() {
+            return DeviceBackend::Sycl;
+        }
+    }
+
+    #[cfg(feature = "xpu-ze")]
+    {
+        if DeviceBackend::Ze.is_available() {
+            return DeviceBackend::Ze;
+        }
+    }
+
+    if DeviceBackend::Cuda.is_available() {
+        return DeviceBackend::Cuda;
+    }
+
+    panic!("No supported device backend available for transfer tests (need SYCL, ZE, or CUDA)");
+}
+
+
 /// Create a fully contiguous physical layout with the specified storage type.
 pub fn create_fc_layout(
     agent: NixlAgent,
@@ -172,8 +200,8 @@ pub fn create_fc_layout(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(test_device_backend(), 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(test_device_backend(), device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }
@@ -191,8 +219,8 @@ pub fn create_lw_layout(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(test_device_backend(), 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(test_device_backend(), device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }
@@ -219,7 +247,8 @@ pub fn create_transfer_context(
     crate::manager::TransferManager::builder()
         .capabilities(capabilities.unwrap_or_default())
         .nixl_agent(agent)
-        .cuda_device_id(0)
+        .device_id(0)
+        .device_backend(test_device_backend())
         .build()
 }
 

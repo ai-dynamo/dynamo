@@ -13,6 +13,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::BlockId;
+use crate::device::{DeviceBackend, DeviceContext};
 use crate::{
     layout::{BlockDimension, LayoutConfig, PhysicalLayout},
     manager::{LayoutHandle, TransferManager},
@@ -391,10 +392,11 @@ pub fn create_fc_layout_with_config(
         .with_config(config)
         .fully_contiguous();
 
+    let backend = DeviceBackend::detect_backend().expect("No GPU backend available");
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(backend, 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(backend, device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }
@@ -418,10 +420,11 @@ pub fn create_lw_layout_with_config(
         .with_config(config)
         .layer_separate(BlockDimension::BlockIsFirstDim);
 
+    let backend = DeviceBackend::detect_backend().expect("No GPU backend available");
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(backend, 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(backend, device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }
@@ -458,7 +461,7 @@ pub fn create_transfer_manager(
     TransferManager::builder()
         .capabilities(capabilities.unwrap_or_default())
         .nixl_agent(agent)
-        .cuda_device_id(0)
+        .device_id(0)
         .build()
 }
 
@@ -473,7 +476,7 @@ pub fn create_rdma_transfer_manager(agent_name: &str) -> Result<TransferManager>
     let agent = create_test_agent_with_backends(agent_name, &["UCX"])?;
     TransferManager::builder()
         .nixl_agent(agent)
-        .cuda_device_id(0)
+        .device_id(0)
         .build()
 }
 

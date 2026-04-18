@@ -12,7 +12,7 @@ use super::PhysicalLayout;
 
 use aligned_vec::{AVec, avec};
 use anyhow::{Result, anyhow};
-use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind};
+use crate::device::sync_memcpy_htod;
 use dynamo_memory::StorageKind;
 
 use std::{
@@ -78,7 +78,7 @@ pub fn fill_blocks(
                             pattern,
                         )?;
                     }
-                    StorageKind::Device(_) => {
+                    StorageKind::Device(device_id) => {
                         let system_region: Vec<u8> = vec![0; region.size()];
                         fill_memory_region(
                             system_region.as_ptr() as usize,
@@ -87,17 +87,7 @@ pub fn fill_blocks(
                             layer_id,
                             pattern,
                         )?;
-                        let err = unsafe {
-                            cudaMemcpy(
-                                region.addr() as *mut std::ffi::c_void,
-                                system_region.as_ptr() as *const std::ffi::c_void,
-                                region.size(),
-                                cudaMemcpyKind::cudaMemcpyHostToDevice,
-                            )
-                        };
-                        if err != cudarc::runtime::sys::cudaError::cudaSuccess {
-                            return Err(anyhow!("cudaMemcpy H2D failed in fill_blocks: {:?}", err));
-                        }
+                        sync_memcpy_htod(device_id as u32, region.addr() as u64, &system_region)?;
                     }
                     StorageKind::Disk(fd) => {
                         let system_region: AVec<u8, _> = avec![[4096]| 0; region.size()];

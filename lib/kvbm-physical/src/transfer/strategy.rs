@@ -17,14 +17,14 @@ pub enum TransferStrategy {
     /// CPU memcpy (for host-to-host transfers)
     Memcpy,
 
-    /// CUDA async host-to-device transfer
-    CudaAsyncH2D,
+    /// Async host-to-device transfer (CUDA/XPU)
+    AsyncH2D,
 
-    /// CUDA async device-to-host transfer
-    CudaAsyncD2H,
+    /// Async device-to-host transfer (CUDA/XPU)
+    AsyncD2H,
 
-    /// CUDA async device-to-device transfer
-    CudaAsyncD2D,
+    /// Async device-to-device transfer (CUDA/XPU)
+    AsyncD2D,
 
     /// NIXL read operation (pull from remote)
     NixlRead,
@@ -42,6 +42,12 @@ pub enum TransferStrategy {
 
     /// NIXL read (flipped local and remote order)
     NixlReadFlipped,
+
+    /// Blocking host-to-device transfer (CUDA/XPU)
+    BlockingH2D,
+
+    /// Blocking device-to-host transfer (CUDA/XPU)
+    BlockingD2H,
 
     /// Invalid/unsupported transfer
     #[expect(dead_code)]
@@ -156,16 +162,16 @@ fn select_direct_strategy(
             TransferPlan::Direct(Memcpy)
         }
 
-        // Host → Device - direct CUDA
-        (System, Device(_)) => panic!("System to Device transfers are not supported"),
-        (Pinned, Device(_)) => TransferPlan::Direct(CudaAsyncH2D),
+        // Host → Device - direct CUDA/XPU
+        (System, Device(_)) => TransferPlan::Direct(BlockingH2D),
+        (Pinned, Device(_)) => TransferPlan::Direct(AsyncH2D),
 
-        // Device → Host - direct CUDA
-        (Device(_), System) => panic!("Device to System transfers are not supported"),
-        (Device(_), Pinned) => TransferPlan::Direct(CudaAsyncD2H),
+        // Device → Host - direct CUDA/XPU
+        (Device(_), System) => TransferPlan::Direct(BlockingD2H),
+        (Device(_), Pinned) => TransferPlan::Direct(AsyncD2H),
 
-        // Device ↔ Device - direct CUDA
-        (Device(_), Device(_)) => TransferPlan::Direct(CudaAsyncD2D),
+        // Device ↔ Device - direct CUDA/XPU
+        (Device(_), Device(_)) => TransferPlan::Direct(AsyncD2D),
 
         // Host ↔ Disk - direct NIXL
         (System, Disk(_)) | (Pinned, Disk(_)) => TransferPlan::Direct(NixlWrite),
@@ -187,7 +193,7 @@ fn select_direct_strategy(
             } else {
                 // Stage through host: Device → Pinned → Disk
                 TransferPlan::TwoHop {
-                    first: CudaAsyncD2H,
+                    first: AsyncD2H,
                     bounce_location: Pinned,
                     second: NixlWrite,
                 }
@@ -202,7 +208,7 @@ fn select_direct_strategy(
                 TransferPlan::TwoHop {
                     first: NixlReadFlipped,
                     bounce_location: Pinned,
-                    second: CudaAsyncH2D,
+                    second: AsyncH2D,
                 }
             }
         }
@@ -226,7 +232,7 @@ fn select_remote_strategy(src: StorageKind, capabilities: &TransferCapabilities)
             } else {
                 // Stage through host: Device → Pinned → Remote
                 TransferPlan::TwoHop {
-                    first: CudaAsyncD2H,
+                    first: AsyncD2H,
                     bounce_location: Pinned,
                     second: NixlWrite,
                 }
@@ -309,32 +315,32 @@ mod tests {
     #[test]
     fn test_host_to_device_transfers() {
         let caps = default_caps();
-        // // System (unpinned) to device should be blocking
-        // assert_eq!(
-        //     select_direct_strategy(StorageKind::System, StorageKind::Device(0), false, &caps),
-        //     TransferPlan::Direct(TransferStrategy::CudaBlockingH2D)
-        // );
+        // System (unpinned) to device should be blocking
+        assert_eq!(
+            select_direct_strategy(StorageKind::System, StorageKind::Device(0), false, &caps),
+            TransferPlan::Direct(TransferStrategy::BlockingH2D)
+        );
 
         // Pinned to device should be async
         assert_eq!(
             select_direct_strategy(StorageKind::Pinned, StorageKind::Device(0), false, &caps),
-            TransferPlan::Direct(TransferStrategy::CudaAsyncH2D)
+            TransferPlan::Direct(TransferStrategy::AsyncH2D)
         );
     }
 
     #[test]
     fn test_device_to_host_transfers() {
         let caps = default_caps();
-        //    // Device to system should be blocking
-        //     assert_eq!(
-        //         select_direct_strategy(StorageKind::Device(0), StorageKind::System, false, &caps),
-        //         TransferPlan::Direct(TransferStrategy::CudaBlockingD2H)
-        //     );
+        // Device to system should be blocking
+        assert_eq!(
+            select_direct_strategy(StorageKind::Device(0), StorageKind::System, false, &caps),
+            TransferPlan::Direct(TransferStrategy::BlockingD2H)
+        );
 
         // Device to pinned should be async
         assert_eq!(
             select_direct_strategy(StorageKind::Device(0), StorageKind::Pinned, false, &caps),
-            TransferPlan::Direct(TransferStrategy::CudaAsyncD2H)
+            TransferPlan::Direct(TransferStrategy::AsyncD2H)
         );
     }
 
@@ -343,11 +349,11 @@ mod tests {
         let caps = default_caps();
         assert_eq!(
             select_direct_strategy(StorageKind::Device(0), StorageKind::Device(1), false, &caps),
-            TransferPlan::Direct(TransferStrategy::CudaAsyncD2D)
+            TransferPlan::Direct(TransferStrategy::AsyncD2D)
         );
         assert_eq!(
             select_direct_strategy(StorageKind::Device(3), StorageKind::Device(3), false, &caps),
-            TransferPlan::Direct(TransferStrategy::CudaAsyncD2D)
+            TransferPlan::Direct(TransferStrategy::AsyncD2D)
         );
     }
 
@@ -391,7 +397,7 @@ mod tests {
                 bounce_location,
                 second,
             } => {
-                assert_eq!(first, TransferStrategy::CudaAsyncD2H);
+                assert_eq!(first, TransferStrategy::AsyncD2H);
                 assert_eq!(bounce_location, StorageKind::Pinned);
                 assert_eq!(second, TransferStrategy::NixlWrite);
             }
@@ -413,7 +419,7 @@ mod tests {
             } => {
                 assert_eq!(first, TransferStrategy::NixlReadFlipped);
                 assert_eq!(bounce_location, StorageKind::Pinned);
-                assert_eq!(second, TransferStrategy::CudaAsyncH2D);
+                assert_eq!(second, TransferStrategy::AsyncH2D);
             }
             _ => panic!("Expected TwoHop plan"),
         }
@@ -464,7 +470,7 @@ mod tests {
                 bounce_location,
                 second,
             } => {
-                assert_eq!(first, TransferStrategy::CudaAsyncD2H);
+                assert_eq!(first, TransferStrategy::AsyncD2H);
                 assert_eq!(bounce_location, StorageKind::Pinned);
                 assert_eq!(second, TransferStrategy::NixlWrite);
             }

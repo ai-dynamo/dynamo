@@ -10,9 +10,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+dynamo-config = { workspace = true }
 dynamo-memory = { workspace = true }
+libc = { workspace = true }
 kvbm-common = { workspace = true }
-kvbm-kernels = { workspace = true }
+kvbm-kernels = { workspace = true, optional = true }
 velo = { workspace = true }
 
 aligned-vec = "0.6.4"
@@ -20,6 +22,8 @@ anyhow = { workspace = true }
 bincode = { version = "2.0.0", features = ["serde", "derive"] }
 blake3 = { version = "1" }
 cudarc = { workspace = true, features = ["nccl"] }
+level-zero = { workspace = true, optional = true }
+oneapi-rs = { workspace = true, optional = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
 derive-getters = { version = "0.5" }
@@ -32,13 +36,27 @@ uuid = { workspace = true }
 validator = { workspace = true }
 
 [features]
-default = []
+default = ["cuda"]
+cuda = ["dep:kvbm-kernels"]
 collectives = []
 testing = []
 testing-kvbm = []
 testing-nixl-gds = []
+testing-xpu-ze = ["xpu-ze"]
+testing-xpu-sycl = ["xpu-sycl"]
+xpu-ze = ["dep:level-zero", "dynamo-memory/level-zero"]
+xpu-sycl = ["dep:kvbm-kernels", "kvbm-kernels/xpu_permute_kernels", "dep:oneapi-rs", "dynamo-memory/sycl"]
+
+[[bin]]
+name = "validate_numa_placement"
+path = "bin/validate_numa_placement.rs"
+required-features = ["cuda"]
+
+[[example]]
+name = "bench_transfer"
 
 [dev-dependencies]
+clap = { version = "4.5", features = ["derive"] }
 dynamo-memory = { workspace = true, features = ["unsafe-slices"] }
 rstest = "0.26"
 tokio = { workspace = true, features = ["test-util"] }

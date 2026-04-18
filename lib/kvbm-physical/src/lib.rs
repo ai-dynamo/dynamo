@@ -4,6 +4,7 @@
 pub mod layout;
 pub mod manager;
 pub mod transfer;
+pub mod device;
 
 pub use manager::TransferManager;
 pub use transfer::{TransferConfig, TransferOptions};

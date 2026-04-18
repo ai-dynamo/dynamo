@@ -6,15 +6,15 @@
 //! On a multi-socket machine with multiple GPUs, this binary:
 //! 1. Enumerates all visible CUDA devices
 //! 2. Maps each GPU to its expected NUMA node (via PCI bus / sysfs)
-//! 3. Allocates pinned memory via `PinnedStorage::new_for_device`
+//! 3. Allocates pinned memory via `DeviceContext::allocate_pinned`
 //! 4. Uses the `move_pages(2)` syscall to query actual page NUMA placement
 //! 5. Reports match/mismatch statistics per GPU
 //!
 //! # Usage
 //! ```bash
-//! cargo run -p dynamo-memory --bin validate_numa_placement
-//! cargo run -p dynamo-memory --bin validate_numa_placement -- --size 64   # 64 MiB per GPU
-//! cargo run -p dynamo-memory --bin validate_numa_placement -- --gpus 0,2  # specific GPUs
+//! cargo run -p kvbm-physical --bin validate_numa_placement
+//! cargo run -p kvbm-physical --bin validate_numa_placement -- --size 64   # 64 MiB per GPU
+//! cargo run -p kvbm-physical --bin validate_numa_placement -- --gpus 0,2  # specific GPUs
 //! ```
 
 use std::process;
@@ -166,9 +166,13 @@ fn main() {
     for (idx, &gpu_id) in gpus.iter().enumerate() {
         let expected = expected_nodes[idx];
 
-        print!("  GPU {gpu_id}: allocating {size_mib} MiB via new_for_device... ");
+        print!("  GPU {gpu_id}: allocating {size_mib} MiB via DeviceAllocator... ");
 
-        let storage = match dynamo_memory::PinnedStorage::new_for_device(alloc_size, Some(gpu_id)) {
+        let ctx: std::sync::Arc<dyn dynamo_memory::DeviceAllocator> = std::sync::Arc::new(
+                kvbm_physical::device::DeviceContext::new(
+                    kvbm_physical::device::DeviceBackend::Cuda, gpu_id,
+                ).expect("DeviceContext"));
+        let storage = match dynamo_memory::PinnedStorage::new(alloc_size, ctx) {
             Ok(s) => s,
             Err(e) => {
                 println!("FAILED: {e}");

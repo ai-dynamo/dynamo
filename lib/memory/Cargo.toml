@@ -20,11 +20,18 @@ unsafe-slices = []
 # test features for hardware-specific tests
 testing-cuda = []
 testing-nixl = []
-testing-all = ["testing-cuda", "testing-nixl"]
+testing-ze = []
+testing-sycl = []
+testing-all = ["testing-cuda", "testing-nixl", "testing-ze", "testing-sycl"]
+
+level-zero = ["dep:level-zero"]
+sycl = ["dep:oneapi-rs"]
 
 [dependencies]
 anyhow = { workspace = true }
 cudarc = { workspace = true }
+level-zero = { path = "../../../level-zero-rc/level-zero", optional = true }
+oneapi-rs = { workspace = true, optional = true }
 nixl-sys = { version = "=0.10.1" }
 serde = { workspace = true}
 thiserror = { workspace = true }
@@ -34,10 +41,6 @@ libc = { version = "0.2" }
 libloading = "0.8"
 nix = { version = "0.30", features = ["fs"] }
 offset-allocator = "0.2"
-
-[[bin]]
-name = "validate_numa_placement"
-path = "bin/validate_numa_placement.rs"
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -2433,6 +2433,7 @@ dependencies = [
  "insta",
  "json-five",
  "lazy_static",
+ "level-zero",
  "memfile",
  "minijinja",
  "minijinja-contrib",
@@ -2459,6 +2460,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "strum",
+ "synapse",
  "temp-env",
  "tempfile",
  "thiserror 2.0.18",
@@ -2488,11 +2490,13 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "cudarc",
+ "level-zero",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",
  "nixl-sys",
  "offset-allocator",
+ "oneapi-rs",
  "serde",
  "serde_json",
  "tempfile",
@@ -4530,7 +4534,9 @@ dependencies = [
  "clap 4.6.0",
  "cudarc",
  "half 2.7.1",
+ "level-zero",
  "ndarray 0.17.2",
+ "oneapi-rs",
  "rand 0.9.2",
 ]
 
@@ -4572,13 +4578,18 @@ dependencies = [
  "anyhow",
  "bincode 2.0.1",
  "blake3",
+ "clap 4.6.0",
  "cudarc",
  "derive-getters",
  "derive_builder",
+ "dynamo-config",
  "dynamo-memory",
  "futures",
  "kvbm-common",
  "kvbm-kernels",
+ "level-zero",
+ "libc",
+ "oneapi-rs",
  "rstest 0.26.1",
  "serde",
  "serde_json",
@@ -4613,6 +4624,22 @@ name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
+
+[[package]]
+name = "level-zero"
+version = "0.2.0"
+dependencies = [
+ "level-zero-sys",
+ "libc",
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "level-zero-sys"
+version = "0.2.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "libc"
@@ -5705,6 +5732,13 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "oneapi-rs"
+version = "0.1.0"
+dependencies = [
+ "sycl-bindings",
+]
 
 [[package]]
 name = "oneshot"
@@ -8134,6 +8168,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
+name = "sycl-bindings"
+version = "2025.3.0"
+dependencies = [
+ "cc",
+ "half 2.7.1",
+]
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8154,6 +8196,10 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "synapse"
+version = "0.1.0"
 
 [[package]]
 name = "sync_wrapper"
