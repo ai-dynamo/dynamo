@@ -33,10 +33,23 @@ SHELL ["/bin/bash", "-c"]
 USER root
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        intel-ocloc \
         libsqlite3-dev \
         python${PYTHON_VERSION}-dev && \
     rm -rf /var/lib/apt/lists/*
+
+# Install Intel GPU UMD (User Mode Driver) + Level Zero loader
+# The base image ships older Level Zero (1.21.9) which may not work with host drivers.
+# Pin to known-good versions matching compute-runtime 25.48.36300.8.
+RUN mkdir -p /tmp/neo && cd /tmp/neo && \
+    wget -q https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-core-2_2.24.8+20344_amd64.deb && \
+    wget -q https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-opencl-2_2.24.8+20344_amd64.deb && \
+    wget -q https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-ocloc_25.48.36300.8-0_amd64.deb && \
+    wget -q https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-opencl-icd_25.48.36300.8-0_amd64.deb && \
+    wget -q https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libigdgmm12_22.8.2_amd64.deb && \
+    wget -q https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libze-intel-gpu1_25.48.36300.8-0_amd64.deb && \
+    wget -q https://github.com/oneapi-src/level-zero/releases/download/v1.26.0/level-zero_1.26.0+u24.04_amd64.deb && \
+    dpkg -i *.deb && \
+    cd / && rm -rf /tmp/neo
 
 # Copy uv from dynamo_base
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
