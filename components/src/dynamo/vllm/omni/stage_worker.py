@@ -13,9 +13,11 @@ from typing import Any, AsyncGenerator
 
 import yaml
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
+from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
 from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
+from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
 from dynamo.llm import ModelType
@@ -64,7 +66,6 @@ class OmniStageWorker:
         self.engine = engine
         self.stage_id = stage_id
         self.connectors = connectors  # {(from_stage, to_stage): vllm_omni connector}
-        self.final_output: bool = getattr(stage_config, "final_output", False)
         self._output_modalities = output_modalities or []
         self._default_video_fps = default_video_fps
         self.stage_config = stage_config
@@ -116,12 +117,20 @@ class OmniStageWorker:
                 if isinstance(prompt, list) and len(prompt) == 1:
                     prompt = prompt[0]
             else:
-                # No processor: use the most recent fetched stage output directly.
-                prompt = stage_list[-1].engine_outputs[0]
+                try:
+                    prompt = self._build_engine_core_request_from_upstream(
+                        stage_list, request_id, sampling_params_list_override
+                    )
+                except RuntimeError as e:
+                    yield {"error": str(e), "finished": True}
+                    return
         elif req.request_id is not None:
             # Stage 0 via router: raw request forwarded with request_id — parse it.
-            parsed = parse_omni_request(
-                request, self._output_modalities, self._default_video_fps
+            parsed = await parse_omni_request(
+                request,
+                self._output_modalities,
+                self._default_video_fps,
+                tokenizer_getter=self.engine.get_tokenizer,
             )
             prompt = parsed["engine_inputs"]
             original_prompt = parsed["original_prompt"]
@@ -142,7 +151,7 @@ class OmniStageWorker:
 
         try:
             async for chunk in self.engine.generate(
-                prompt, request_id, sampling_params_list=sp
+                prompt, request_id=request_id, sampling_params_list=sp
             ):
                 last_result = chunk
         except Exception as e:
@@ -157,45 +166,43 @@ class OmniStageWorker:
             return
 
         # --- Write output ---
-        if not self.final_output:
-            from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
-            connector = self.connectors.get((from_s, to_s))
-            if connector is not None:
-                try:
-                    ok, _, metadata = connector.put(  # type: ignore[arg-type]
-                        from_s, to_s, request_id, last_result
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Stage %d: connector.put() raised %s: %s",
-                        self.stage_id,
-                        type(e).__name__,
-                        e,
-                        exc_info=True,
-                    )
-                    yield {"error": f"connector.put() raised: {e}", "finished": True}
-                    return
-                if not ok:
-                    yield {"error": "connector.put() failed", "finished": True}
-                    return
-                out: dict = {
-                    "original_prompt": original_prompt,
-                    "stage_connector_refs": {
-                        **{str(k): v for k, v in stage_connector_refs.items()},
-                        str(self.stage_id): metadata,
-                    },
-                    "finished": True,
-                }
-                if sampling_params_list_override is not None:
-                    out["sampling_params_list"] = sampling_params_list_override
-                yield out
+        # Check for a downstream connector first, regardless of final_output.
+        # In vllm-omni's native mode, multiple stages can set final_output=True
+        # (meaning "produces user-visible output"). In Dynamo's disaggregated
+        # mode the actual pipeline topology — connector edges from the YAML —
+        # determines whether output should go to a connector or to SHM.
+        from_s, to_s = _connector_key(self.stage_id, self.stage_id + 1)
+        connector = self.connectors.get((from_s, to_s))
+        if connector is not None:
+            try:
+                ok, _, metadata = connector.put(  # type: ignore[arg-type]
+                    from_s, to_s, request_id, last_result
+                )
+            except Exception as e:
+                logger.error(
+                    "Stage %d: connector.put() raised %s: %s",
+                    self.stage_id,
+                    type(e).__name__,
+                    e,
+                    exc_info=True,
+                )
+                yield {"error": f"connector.put() raised: {e}", "finished": True}
                 return
-            logger.warning(
-                "Stage %d: no connector found for edge (%s→%s), falling through to SHM",
-                self.stage_id,
-                from_s,
-                to_s,
-            )
+            if not ok:
+                yield {"error": "connector.put() failed", "finished": True}
+                return
+            out: dict = {
+                "original_prompt": original_prompt,
+                "stage_connector_refs": {
+                    **{str(k): v for k, v in stage_connector_refs.items()},
+                    str(self.stage_id): metadata,
+                },
+                "finished": True,
+            }
+            if sampling_params_list_override is not None:
+                out["sampling_params_list"] = sampling_params_list_override
+            yield out
+            return
 
         # Final stage → router: write output to shared memory and return the SHM handle.
         # The router reads it back via shm_deserialize() to format the response.
@@ -206,6 +213,60 @@ class OmniStageWorker:
         # Tracked in TODO: shm_meta should be replaced by a YAML-configured connector edge.
         shm_meta = shm_write_bytes(serialize_obj(last_result), name=request_id)
         yield {"shm_meta": shm_meta, "finished": True}
+
+    def _build_engine_core_request_from_upstream(
+        self,
+        stage_list: list[_Proxy],
+        request_id: str,
+        sampling_params_list_override: dict | None,
+    ):
+        """Build an OmniEngineCoreRequest from the upstream stage output.
+
+        Used for stages without a custom processor (e.g. code2wav).  Mirrors
+        what the native orchestrator does via ``build_engine_core_request_from_tokens``
+        and ``_forward_to_next_stage``.  Building an ``EngineCoreRequest``
+        bypasses ``InputProcessor.process_inputs()`` which would fail for
+        non-autoregressive stages (``worker_type: generation``) with
+        "This model does not support generation".
+
+        Raises RuntimeError on unexpected upstream output structure.
+        """
+        try:
+            # engine_outputs[0]: first (and only) RequestOutput — Dynamo
+            # processes one request at a time per stage.
+            # outputs[0]: first CompletionOutput (n=1 sampling).
+            # Matches native orchestrator's process_engine_inputs pattern.
+            upstream = stage_list[-1].engine_outputs[0]
+            token_ids = upstream.outputs[0].token_ids
+        except (IndexError, AttributeError) as e:
+            raise RuntimeError(
+                f"Stage {self.stage_id}: cannot extract token_ids from "
+                f"upstream output: {e}"
+            ) from e
+
+        tokens_prompt = OmniTokensPrompt(prompt_token_ids=list(token_ids))
+        sp_list = _build_sampling_params(
+            self.stage_config, sampling_params_list_override
+        )
+        params = sp_list[0] if sp_list else None
+        prompt = build_engine_core_request_from_tokens(
+            request_id=request_id,
+            prompt=tokens_prompt,
+            params=params,
+        )
+        # Pre-built EngineCoreRequests skip the output processor registration
+        # in _build_add_request_message (the isinstance(prompt, EngineCoreRequest)
+        # branch bypasses that block).  Register manually so that the engine's
+        # output processor can match the response back to this request.
+        prompt.external_req_id = prompt.request_id
+        self.engine.engine.output_processors[0].add_request(
+            request=prompt,
+            prompt=None,
+            parent_req=None,
+            request_index=0,
+            queue=None,
+        )
+        return prompt
 
     def _fetch_stage_inputs(
         self, stage_connector_refs: dict[int, Any], request_id: str

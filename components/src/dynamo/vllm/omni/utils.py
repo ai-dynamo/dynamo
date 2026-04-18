@@ -37,10 +37,18 @@ def build_original_prompt(request: dict, nvext: dict, height: int, width: int) -
     return prompt
 
 
-def parse_omni_request(
-    request: dict, output_modalities: list, default_video_fps: int = 16
+async def parse_omni_request(
+    request: dict,
+    output_modalities: list,
+    default_video_fps: int = 16,
+    tokenizer_getter=None,
 ) -> dict:
     """Parse a raw frontend request into engine_inputs, original_prompt, sampling_params_list.
+
+    Args:
+      tokenizer_getter: async callable returning a tokenizer (e.g. engine.get_tokenizer).
+          When provided, chat requests are formatted through the model's chat template
+          so the thinker receives the same prompt as native ``vllm serve --omni``.
 
     Returns:
       engine_inputs:        text prompt (str or OmniTextPrompt) for the stage 0 engine
@@ -74,6 +82,22 @@ def parse_omni_request(
         (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
         request.get("prompt", ""),
     )
+
+    # Apply chat template when a tokenizer is available.  The native
+    # OpenAI API server applies the template before the engine sees it;
+    # without it the thinker receives bare text instead of the full
+    # chat-formatted prompt.
+    if messages and tokenizer_getter is not None:
+        try:
+            tokenizer = await tokenizer_getter()
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Chat template not available, using raw text"
+            )
+
     return {
         "engine_inputs": text,
         "original_prompt": {"prompt": text},
