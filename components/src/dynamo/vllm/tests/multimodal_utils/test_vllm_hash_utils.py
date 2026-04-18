@@ -16,9 +16,10 @@ from PIL import Image
 from dynamo.vllm.multimodal_utils.hash_utils import compute_mm_uuids_from_images
 
 pytestmark = [
-    pytest.mark.post_merge,
+    pytest.mark.pre_merge,
     pytest.mark.vllm,
     pytest.mark.gpu_0,
+    pytest.mark.multimodal,
 ]
 
 
