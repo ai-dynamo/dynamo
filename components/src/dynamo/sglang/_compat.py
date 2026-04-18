@@ -17,6 +17,7 @@ fallback and any associated polyfills.
 
 import ipaddress
 import logging
+import re
 import socket
 from typing import Any
 
@@ -133,6 +134,130 @@ async def mm_encode(encoder: Any, mm_items: Any, modality: Any) -> tuple:
     return result
 
 
+def _build_grouped_mm_token_regex(
+    prefix_token: str, mm_token: str, suffix_token: str
+) -> re.Pattern[str]:
+    """
+    Match one expanded multimodal block wrapped by start/end vision tokens.
+
+    Qwen emits expanded multimodal prompts such as:
+        <|vision_start|><|video_pad|><|video_pad|>...<|vision_end|>
+
+    Grouping the repeated placeholder tokens into a single regex match keeps
+    SGLang's legacy multimodal loader aligned with processor_output inputs.
+    """
+
+    return re.compile(
+        f"{re.escape(prefix_token)}(?:{re.escape(mm_token)})+{re.escape(suffix_token)}"
+    )
+
+
+def _convert_token_id_to_token_str(tokenizer: Any, token_id: Any) -> str | None:
+    """Best-effort token-id to token-string conversion."""
+    if tokenizer is None or token_id is None:
+        return None
+    try:
+        return tokenizer.convert_ids_to_tokens([token_id])[0]
+    except Exception:
+        return None
+
+
+def _uses_default_single_token_regex(token_regex: re.Pattern[str] | None, token: str) -> bool:
+    """Return True when the regex is the base default: one escaped token."""
+    return token_regex is None or token_regex.pattern == re.escape(token)
+
+
+def _maybe_upgrade_wrapped_video_token_regex(
+    multimodal_tokens: Any, tokenizer: Any
+) -> bool:
+    """
+    Extend grouped image-token matching to video when the processor exposes:
+
+    - a wrapped image placeholder token, e.g.
+      <|vision_start|><|image_pad|><|vision_end|>
+    - a grouped image regex, e.g.
+      <|vision_start|>(?:<|image_pad|>)+<|vision_end|>
+    - only a default single-token video regex, e.g.
+      <|video_pad|>
+
+    This keeps Dynamo-side expanded placeholder tokens aligned with SGLang's
+    legacy multimodal loader without hardcoding a specific model class.
+    """
+
+    if multimodal_tokens is None:
+        return False
+
+    image_token = getattr(multimodal_tokens, "image_token", None)
+    video_token = getattr(multimodal_tokens, "video_token", None)
+    image_token_regex = getattr(multimodal_tokens, "image_token_regex", None)
+    video_token_regex = getattr(multimodal_tokens, "video_token_regex", None)
+
+    if not isinstance(image_token, str) or not isinstance(video_token, str):
+        return False
+    if image_token_regex is None:
+        return False
+    if image_token_regex.pattern == re.escape(image_token):
+        return False
+    if not _uses_default_single_token_regex(video_token_regex, video_token):
+        return False
+
+    image_atomic_token = _convert_token_id_to_token_str(
+        tokenizer, getattr(multimodal_tokens, "image_token_id", None)
+    )
+    video_atomic_token = _convert_token_id_to_token_str(
+        tokenizer, getattr(multimodal_tokens, "video_token_id", None)
+    )
+    if not image_atomic_token or not video_atomic_token:
+        return False
+    if image_token == image_atomic_token:
+        return False
+    if video_token != video_atomic_token:
+        return False
+    if image_token.count(image_atomic_token) != 1:
+        return False
+
+    prefix_token, suffix_token = image_token.split(image_atomic_token, 1)
+    if not prefix_token or not suffix_token:
+        return False
+
+    multimodal_tokens.video_token_regex = _build_grouped_mm_token_regex(
+        prefix_token, video_token, suffix_token
+    )
+    multimodal_tokens.combined_regex = None
+    multimodal_tokens.get_combined_regex()
+    return True
+
+
+def maybe_enable_grouped_video_token_regex(mm_processor: Any) -> bool:
+    """
+    Upgrade one multimodal processor instance when it uses wrapped grouped
+    image placeholders but leaves video matching at the single-token default.
+
+    This keeps Dynamo's expanded video placeholder tokens aligned with SGLang's
+    multimodal loader without globally changing processor behavior.
+    """
+    if mm_processor is None:
+        return False
+
+    tokenizer = getattr(getattr(mm_processor, "_processor", None), "tokenizer", None)
+    if tokenizer is None:
+        tokenizer = getattr(mm_processor, "tokenizer", None)
+    if tokenizer is None and hasattr(
+        getattr(mm_processor, "_processor", None), "convert_ids_to_tokens"
+    ):
+        tokenizer = getattr(mm_processor, "_processor", None)
+
+    upgraded = _maybe_upgrade_wrapped_video_token_regex(
+        getattr(mm_processor, "mm_tokens", None), tokenizer
+    )
+    if upgraded:
+        logger.info(
+            "Enabled grouped video token regex compatibility for %s",
+            type(mm_processor).__name__,
+        )
+    return upgraded
+
+
 def enable_disjoint_streaming_output(server_args: Any) -> None:
     """
     Enable SGLang's disjoint streaming output across ServerArgs field renames.
@@ -171,5 +296,6 @@ __all__ = [
     "enable_disjoint_streaming_output",
     "get_local_ip_auto",
     "get_zmq_socket",
+    "maybe_enable_grouped_video_token_regex",
     "mm_encode",
 ]

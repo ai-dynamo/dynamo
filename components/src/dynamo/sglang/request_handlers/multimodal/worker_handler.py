@@ -15,6 +15,7 @@ from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferReque
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.otel_tracing import build_trace_headers
+from dynamo.sglang._compat import maybe_enable_grouped_video_token_regex
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -43,6 +44,12 @@ class MultimodalConfig:
 
     EMBEDDINGS_DTYPE = torch.float16
     EMBEDDINGS_DEVICE = "cpu"
+
+
+def _maybe_enable_video_token_regex_compat(engine: sgl.Engine) -> None:
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    mm_processor = getattr(tokenizer_manager, "mm_processor", None)
+    maybe_enable_grouped_video_token_regex(mm_processor)
 
 
 class SglangUtils:
@@ -115,20 +122,31 @@ class EmbeddingsProcessor:
         self.embedding_receiver.release_tensor(tensor_id)
 
     @staticmethod
-    def create_multimodal_item(embeddings: torch.Tensor, image_grid_thw) -> dict:
-        """Create mm_item dict for SGLang's engine.async_generate(image_data=[...]).
+    def create_multimodal_item(
+        embeddings: torch.Tensor,
+        modality: str,
+        model_specific_data: dict[str, Any],
+    ) -> dict:
+        """Create a processor-output mm_item for SGLang async_generate().
 
         Uses format="processor_output" with precomputed_embeddings so SGLang
-        bypasses get_image_feature() entirely (model-agnostic path).
+        bypasses in-engine vision encoding entirely (model-agnostic path).
         """
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
 
-        mm_item: dict[str, Any] = {"image_grid_thw": torch.tensor(image_grid_thw)}
+        mm_item: dict[str, Any] = {}
+        for key, value in model_specific_data.items():
+            if key in {"image_grid_thw", "video_grid_thw"}:
+                mm_item[key] = torch.tensor(value)
+            elif key == "second_per_grid_ts":
+                mm_item[key] = torch.tensor(value, dtype=torch.float32)
+            else:
+                mm_item[key] = value
         mm_item.update(
             {
                 "format": "processor_output",
                 "precomputed_embeddings": precomputed,
-                "modality": "IMAGE",
+                "modality": modality,
             }
         )
 
@@ -242,19 +260,73 @@ class ErrorResponseBuilder:
 
 async def _build_mm_items(
     request: SglangMultimodalRequest, embeddings_processor: EmbeddingsProcessor
-) -> tuple[list[dict], torch.Tensor, int]:
-    """Process embeddings and build a single multimodal item for SGLang."""
+) -> tuple[dict[str, list[dict]], torch.Tensor, int]:
+    """Process embeddings and build engine-ready multimodal kwargs for SGLang."""
     embeddings, tensor_id = await embeddings_processor.process_embeddings(request)
 
-    image_grid_thw_list = [group.image_grid_thw for group in request.multimodal_inputs]
-    if any(item is None for item in image_grid_thw_list):
-        raise ValueError("image_grid_thw is required")
+    multimodal_groups = request.multimodal_inputs
+    if not multimodal_groups:
+        raise ValueError("multimodal_inputs is required")
+
+    modality: str | None = None
+    model_specific_data: dict[str, Any] = {}
+
+    for group in multimodal_groups:
+        group_modality = (
+            group.modality
+            or (
+                "VIDEO"
+                if group.multimodal_input and group.multimodal_input.video_url
+                else "IMAGE"
+            )
+        ).upper()
+        if modality is None:
+            modality = group_modality
+        elif modality != group_modality:
+            raise ValueError("Mixed multimodal modalities are not supported")
+
+        group_model_data = dict(group.model_specific_data)
+        if (
+            group.image_grid_thw is not None
+            and "image_grid_thw" not in group_model_data
+            and group_modality == "IMAGE"
+        ):
+            group_model_data["image_grid_thw"] = group.image_grid_thw
+
+        if group_modality == "IMAGE":
+            image_grid_thw = group_model_data.get("image_grid_thw")
+            if image_grid_thw is None:
+                raise ValueError("image_grid_thw is required")
+            model_specific_data.setdefault("image_grid_thw", []).append(image_grid_thw)
+        elif group_modality == "VIDEO":
+            video_grid_thw = group_model_data.get("video_grid_thw")
+            if video_grid_thw is None:
+                raise ValueError("video_grid_thw is required")
+            model_specific_data.setdefault("video_grid_thw", []).append(video_grid_thw)
+            if "second_per_grid_ts" in group_model_data:
+                model_specific_data.setdefault("second_per_grid_ts", []).append(
+                    group_model_data["second_per_grid_ts"]
+                )
+            if "video_timestamps" in group_model_data:
+                model_specific_data.setdefault("video_timestamps", []).append(
+                    group_model_data["video_timestamps"]
+                )
+        else:
+            raise ValueError(f"Unsupported multimodal modality: {group_modality}")
+
+    if modality is None:
+        raise ValueError("Unable to determine multimodal modality")
 
     mm_items = [
-        embeddings_processor.create_multimodal_item(embeddings, image_grid_thw_list)
+        embeddings_processor.create_multimodal_item(
+            embeddings, modality, model_specific_data
+        )
     ]
+    mm_kwargs = (
+        {"video_data": mm_items} if modality == "VIDEO" else {"image_data": mm_items}
+    )
 
-    return mm_items, embeddings, tensor_id
+    return mm_kwargs, embeddings, tensor_id
 
 
 class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
@@ -280,6 +352,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         # Store serving mode and prefill client (like regular SGLang)
         self.serving_mode = config.serving_mode
         self.prefill_client = prefill_client
+        if self.serving_mode != DisaggregationMode.DECODE:
+            _maybe_enable_video_token_regex_compat(engine)
 
         # Validate prefill client for disaggregated mode
         if self.serving_mode == DisaggregationMode.DECODE:
@@ -413,7 +487,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         try:
             sampling_params = SglangUtils.build_sampling_params(request)
             with _nvtx.annotate("mm:pd:load_multimodal", color="cyan"):
-                mm_items, combined_embeddings, tensor_id = await _build_mm_items(
+                mm_kwargs, combined_embeddings, tensor_id = await _build_mm_items(
                     request, self.embeddings_processor
                 )
 
@@ -429,11 +503,11 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
 
             agg_stream = await self.engine.async_generate(
                 input_ids=input_ids,
-                image_data=mm_items,
                 sampling_params=sampling_params,
                 stream=True,
                 external_trace_header=trace_header,
                 rid=context.trace_id if context else None,
+                **mm_kwargs,
             )
 
             rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
@@ -615,7 +689,7 @@ class MultimodalPrefillWorkerHandler(
 
         # Process embeddings from encode worker using our embeddings processor
         with _nvtx.annotate("mm:prefill:load_multimodal", color="cyan"):
-            mm_items, _, tensor_id = await _build_mm_items(
+            mm_kwargs, _, tensor_id = await _build_mm_items(
                 request, self.embeddings_processor
             )
 
@@ -627,7 +701,6 @@ class MultimodalPrefillWorkerHandler(
         with _nvtx.annotate("mm:prefill:engine_async_generate", color="blue"):
             results = await self.engine.async_generate(
                 input_ids=input_ids,
-                image_data=mm_items,
                 sampling_params=sampling_params,
                 stream=True,
                 bootstrap_host=self.bootstrap_host,
@@ -635,6 +708,7 @@ class MultimodalPrefillWorkerHandler(
                 bootstrap_room=bootstrap_room,
                 external_trace_header=trace_header,
                 rid=context.trace_id if context else None,
+                **mm_kwargs,
             )
 
         # Consume results without yielding (prefill doesn't return text, just coordinates)

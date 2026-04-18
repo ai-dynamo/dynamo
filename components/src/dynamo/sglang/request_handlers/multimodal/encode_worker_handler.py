@@ -52,17 +52,18 @@ except ImportError as e:
     DEVICE = "cpu"
 
 IMAGE_URL_KEY = "image_url"
+VIDEO_URL_KEY = "video_url"
 
 
 class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
     """
-    Handler for multimodal encode worker component that processes images/videos
+    Handler for multimodal encode worker component that processes image/video
     and forwards them to the downstream worker.
 
     Receives pre-tokenized requests from the Rust frontend (ModelInput.Tokens)
-    with token_ids and multi_modal_data containing image URLs. Encodes images
+    with token_ids and multi_modal_data containing media URLs. Encodes inputs
     via MMEncoder, expands placeholder tokens, transfers embeddings via NIXL,
-    and forwards to the PD worker.
+    and forwards them to the PD worker.
     """
 
     def __init__(
@@ -89,35 +90,33 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             rank=0,
         )
 
-        # Load tokenizer to convert image token string to integer ID
+        # Load tokenizer to convert multimodal token strings to integer IDs
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model, trust_remote_code=True
         )
-
-        # Get image token string and handle it properly
-        image_token_str = (
-            chat_templates[getattr(config.server_args, "chat_template")]
-            .copy()
-            .image_token
+        template_name = getattr(config.server_args, "chat_template", None)
+        template = chat_templates.get(template_name)
+        if template is None:
+            raise ValueError(
+                "Multimodal encode worker requires a chat template registered in "
+                f"sglang.srt.parser.conversation.chat_templates; got {template_name!r}"
+            )
+        template = template.copy()
+        self.image_token_id = self._resolve_media_token_id(
+            template,
+            token_attr="image_token",
+            fallback_token="<|image_pad|>",
+            required=True,
         )
-
-        # For Qwen2.5-VL, the image token might be multiple tokens
-        if image_token_str == "<|vision_start|><|image_pad|><|vision_end|>":
-            # These are likely the individual special tokens for Qwen2.5-VL
-            image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-            assert isinstance(
-                image_pad_id, int
-            ), f"Expected int token id, got {type(image_pad_id)}"
-
-            # Use the image_pad token as the main image token
-            self.image_token_id: int = image_pad_id
-        else:
-            # Fallback for other models
-            token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
-            assert isinstance(
-                token_id, int
-            ), f"Expected int token id, got {type(token_id)}"
-            self.image_token_id = token_id
+        self.video_token_id = self._resolve_media_token_id(
+            template,
+            token_attr="video_token",
+            fallback_token="<|video_pad|>",
+            required=False,
+        )
+        self.media_token_ids = {Modality.IMAGE: self.image_token_id}
+        if self.video_token_id is not None:
+            self.media_token_ids[Modality.VIDEO] = self.video_token_id
 
         self.min_workers = 1
 
@@ -149,20 +148,21 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
     @staticmethod
     def _split_token_counts(grid_list: list, total_tokens: int) -> list[int]:
-        """Compute per-image embedding token counts from image_grid_thw shapes.
+        """Compute per-item embedding token counts from grid-shape metadata.
 
-        Each entry in grid_list is [t, h, w]. The spatial grid size (h*w) is
-        proportional to the number of tokens for that image. We infer the shared
-        merge factor from the ratio of total grid tokens to total embedding tokens,
-        then apply it per image.
+        The encoder returns one concatenated embedding tensor for all items in the
+        request. We infer the shared merge factor from the ratio of total grid
+        elements to total embedding tokens, then split the embedding tensor back
+        into per-item segments.
         """
         if total_tokens <= 0:
             raise ValueError("Invalid token count for embeddings")
         grid_sizes = []
-        for image_grid_thw in grid_list:
-            if not isinstance(image_grid_thw, list) or len(image_grid_thw) != 3:
-                raise ValueError(f"Invalid image_grid_thw: {image_grid_thw}")
-            grid_sizes.append(int(image_grid_thw[1] * image_grid_thw[2]))
+        for grid_shape in grid_list:
+            if not isinstance(grid_shape, list) or len(grid_shape) < 2:
+                raise ValueError(f"Invalid multimodal grid shape: {grid_shape}")
+            grid_tensor = torch.as_tensor(grid_shape, dtype=torch.long)
+            grid_sizes.append(int(torch.prod(grid_tensor).item()))
         total_grid_tokens = sum(grid_sizes)
         if total_grid_tokens <= 0:
             raise ValueError("Invalid grid statistics for embeddings")
@@ -260,9 +260,104 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         full_embeddings = torch.cat(embedding_parts, dim=0)
         return torch.tensor(all_grid_thw), full_embeddings
 
-    def _extract_image_urls(self, request: Dict[str, Any]) -> list[str]:
+    def _resolve_media_token_id(
+        self,
+        template: Any,
+        token_attr: str,
+        fallback_token: str,
+        required: bool,
+    ) -> int | None:
+        """Resolve the single placeholder token ID used for multimodal expansion."""
+        token_str = getattr(template, token_attr, None)
+        candidates: list[str] = []
+        if token_str and fallback_token in token_str:
+            candidates.append(fallback_token)
+        if token_str:
+            candidates.append(token_str)
+        elif fallback_token:
+            candidates.append(fallback_token)
+
+        unk_token_id = getattr(self.tokenizer, "unk_token_id", None)
+        for candidate in dict.fromkeys(candidates):
+            token_id = self.tokenizer.convert_tokens_to_ids(candidate)
+            if (
+                isinstance(token_id, int)
+                and token_id >= 0
+                and (unk_token_id is None or token_id != unk_token_id)
+            ):
+                return token_id
+
+            encoded = self.tokenizer.encode(candidate, add_special_tokens=False)
+            if len(encoded) == 1:
+                return encoded[0]
+
+        if required:
+            raise ValueError(f"Unable to resolve placeholder token for {token_attr}")
+        return None
+
+    @staticmethod
+    def _jsonable_media_value(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            return value.item() if value.ndim == 0 else value.tolist()
+        return value
+
+    @classmethod
+    def _build_group_model_specific_data(
+        cls,
+        modality: Any,
+        grid_shape: list[Any],
+        aux_data: dict[str, Any] | None,
+        index: int,
+    ) -> dict[str, Any]:
+        model_specific_data: dict[str, Any] = {}
+        if modality == Modality.IMAGE:
+            model_specific_data["image_grid_thw"] = grid_shape
+        elif modality == Modality.VIDEO:
+            model_specific_data["video_grid_thw"] = grid_shape
+            for key, value in (aux_data or {}).items():
+                if value is None:
+                    continue
+                if isinstance(value, (list, tuple, torch.Tensor)):
+                    model_specific_data[key] = cls._jsonable_media_value(value[index])
+                else:
+                    model_specific_data[key] = cls._jsonable_media_value(value)
+        else:
+            raise ValueError(f"Unsupported multimodal modality: {modality}")
+        return model_specific_data
+
+    @staticmethod
+    def _expand_placeholder_tokens(
+        token_ids: list[int],
+        placeholder_token_id: int,
+        token_counts: list[int],
+        modality_name: str,
+    ) -> list[int]:
+        expanded_token_ids = token_ids
+        search_start = 0
+        for num_mm_tokens in token_counts:
+            try:
+                placeholder_index = expanded_token_ids.index(
+                    placeholder_token_id, search_start
+                )
+            except ValueError as e:
+                raise ValueError(
+                    f"Not enough {modality_name} tokens found for provided inputs"
+                ) from e
+
+            expanded_token_ids = (
+                expanded_token_ids[:placeholder_index]
+                + [placeholder_token_id] * num_mm_tokens
+                + expanded_token_ids[placeholder_index + 1 :]
+            )
+            search_start = placeholder_index + num_mm_tokens
+
+        return expanded_token_ids
+
+    def _extract_multimodal_inputs(
+        self, request: Dict[str, Any]
+    ) -> tuple[Any, list[str]]:
         """
-        Extract image URLs from the multi_modal_data field of a PreprocessedRequest.
+        Extract a single supported multimodal input type from multi_modal_data.
 
         The Rust frontend populates multi_modal_data with the format:
             {"image_url": [{"Url": "https://..."}, ...]}
@@ -271,41 +366,56 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         if not mm_data:
             raise ValueError("multi_modal_data is required for the encode worker.")
 
-        image_items = mm_data.get(IMAGE_URL_KEY)
-        if not image_items:
-            raise ValueError("multi_modal_data must contain image_url entries.")
+        image_items = mm_data.get(IMAGE_URL_KEY) or []
+        video_items = mm_data.get(VIDEO_URL_KEY) or []
+        if image_items and video_items:
+            raise ValueError(
+                "Mixed image_url and video_url inputs are not supported by the "
+                "multimodal encode worker."
+            )
 
-        image_urls: list[str] = []
-        for item in image_items:
+        if image_items:
+            modality = Modality.IMAGE
+            media_items = image_items
+        elif video_items:
+            modality = Modality.VIDEO
+            media_items = video_items
+        else:
+            raise ValueError(
+                "multi_modal_data must contain either image_url or video_url entries."
+            )
+
+        media_urls: list[str] = []
+        for item in media_items:
             if isinstance(item, str):
-                image_urls.append(item)
+                media_urls.append(item)
             elif isinstance(item, dict) and "Url" in item:
-                image_urls.append(item["Url"])
+                media_urls.append(item["Url"])
             elif isinstance(item, dict) and "Decoded" in item:
                 raise ValueError(
                     "Frontend-decoded media (Decoded variant) is incompatible "
                     "with the multimodal encode worker. The encode worker "
-                    "requires image URLs to run vision encoding via MMEncoder. "
-                    "Disable --frontend-decoding when using EPD serving."
+                    "requires media URLs to run MMEncoder. Disable "
+                    "--frontend-decoding when using EPD serving."
                 )
             else:
                 raise ValueError(f"Unsupported multimodal data variant: {item}")
 
-        return image_urls
+        return modality, media_urls
 
     @_nvtx.range_decorator("mm:enc:generate", color="blue")
     async def generate(
         self, raw_request: Dict[str, Any], context: Context
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Encode images from a pre-tokenized multimodal request, expand placeholder
+        Encode multimodal inputs from a pre-tokenized request, expand placeholder
         tokens, transfer embeddings via NIXL, and stream PD worker responses.
 
         The Rust frontend (ModelInput.Tokens) sends a PreprocessedRequest dict
         with token_ids and multi_modal_data. This handler:
-        1. Extracts image URLs from multi_modal_data.
+        1. Extracts image/video URLs from multi_modal_data.
         2. Runs vision encoding via MMEncoder.
-        3. Expands image placeholder tokens to match patch counts.
+        3. Expands multimodal placeholder tokens to match patch counts.
         4. Creates a NIXL descriptor for embedding transfer.
         5. Forwards the request to the PD worker and streams responses back.
 
@@ -316,14 +426,20 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         if isinstance(raw_request, str):
             raw_request = json.loads(raw_request)
 
-        # Extract image URLs from the frontend's multi_modal_data
-        image_urls = self._extract_image_urls(raw_request)
+        # Extract image/video URLs from the frontend's multi_modal_data
+        modality, media_urls = self._extract_multimodal_inputs(raw_request)
 
         # Build MultiModalGroup objects for the downstream SglangMultimodalRequest
-        multimodal_groups = [
-            MultiModalGroup(multimodal_input=MultiModalInput(image_url=url))
-            for url in image_urls
-        ]
+        multimodal_groups = []
+        for url in media_urls:
+            mm_input = MultiModalInput()
+            if modality == Modality.IMAGE:
+                mm_input.image_url = url
+            elif modality == Modality.VIDEO:
+                mm_input.video_url = url
+            else:
+                raise ValueError(f"Unsupported multimodal modality: {modality}")
+            multimodal_groups.append(MultiModalGroup(multimodal_input=mm_input))
         preprocessed_request = PreprocessedRequest.model_validate(raw_request)
 
         # Build SglangMultimodalRequest from the pre-tokenized request
@@ -333,27 +449,28 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         )
 
         try:
+            aux_data: dict[str, Any] | None = None
             with _nvtx.annotate("mm:enc:vision_encode", color="red"):
-                if self._embedding_cache is not None:
+                if modality == Modality.IMAGE and self._embedding_cache is not None:
                     (
-                        image_grid_dim,
+                        media_grid_dim,
                         precomputed_embeddings,
-                    ) = await self._encode_with_cache(image_urls)
+                    ) = await self._encode_with_cache(media_urls)
                 else:
                     (
-                        image_grid_dim,
+                        media_grid_dim,
                         precomputed_embeddings,
-                        _aux,
-                    ) = await mm_encode(self.encoder, image_urls, Modality.IMAGE)
+                        aux_data,
+                    ) = await mm_encode(self.encoder, media_urls, modality)
 
-            image_grid_thw_list = (
-                image_grid_dim.tolist()
-                if isinstance(image_grid_dim, torch.Tensor)
-                else image_grid_dim
+            grid_shape_list = (
+                media_grid_dim.tolist()
+                if isinstance(media_grid_dim, torch.Tensor)
+                else media_grid_dim
             )
 
-            if len(image_grid_thw_list) != len(multimodal_groups):
-                raise ValueError("image_grid_thw size mismatch")
+            if len(grid_shape_list) != len(multimodal_groups):
+                raise ValueError("multimodal grid size mismatch")
 
             if isinstance(precomputed_embeddings, torch.Tensor):
                 if precomputed_embeddings.ndim != 2:
@@ -362,7 +479,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                         f"{precomputed_embeddings.ndim}. Expected 2D [tokens, hidden]."
                     )
                 token_counts = self._split_token_counts(
-                    image_grid_thw_list, precomputed_embeddings.shape[0]
+                    grid_shape_list, precomputed_embeddings.shape[0]
                 )
             else:
                 raise ValueError(
@@ -370,43 +487,43 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     f"{type(precomputed_embeddings)}"
                 )
 
-            image_placeholder_count = request.request.token_ids.count(
-                self.image_token_id
-            )
-            if image_placeholder_count < len(multimodal_groups):
+            placeholder_token_id = self.media_token_ids.get(modality)
+            if placeholder_token_id is None:
                 raise ValueError(
-                    "Not enough image placeholders in token_ids for provided images"
+                    f"No placeholder token configured for modality {modality.name}"
                 )
 
-            # Keep per-image grid metadata in request groups for worker-side mm_item.
-            for idx, (mm_group, image_grid_thw) in enumerate(
-                zip(multimodal_groups, image_grid_thw_list)
+            placeholder_count = request.request.token_ids.count(
+                placeholder_token_id
+            )
+            if placeholder_count < len(multimodal_groups):
+                raise ValueError(
+                    f"Not enough {modality.name.lower()} placeholders in token_ids "
+                    "for provided inputs"
+                )
+
+            # Keep per-item metadata in request groups for worker-side mm_item.
+            for idx, (mm_group, grid_shape) in enumerate(
+                zip(multimodal_groups, grid_shape_list)
             ):
-                mm_group.image_grid_thw = image_grid_thw
+                mm_group.modality = modality.name
+                mm_group.model_specific_data = self._build_group_model_specific_data(
+                    modality, grid_shape, aux_data, idx
+                )
                 if mm_group.multimodal_input is not None:
                     mm_group.multimodal_input.image_url = None
+                    mm_group.multimodal_input.video_url = None
 
             # Store shared tensor transfer metadata at request level.
             request.embeddings_shape = tuple(precomputed_embeddings.shape)  # type: ignore[assignment]
             request.transfer_payload = None
 
-            search_start = 0
-            for num_image_tokens in token_counts:
-                try:
-                    image_token_id_index = request.request.token_ids.index(
-                        self.image_token_id, search_start
-                    )
-                except ValueError as e:
-                    raise ValueError(
-                        "Not enough image tokens found for provided images"
-                    ) from e
-
-                request.request.token_ids = (
-                    request.request.token_ids[:image_token_id_index]
-                    + [self.image_token_id] * num_image_tokens
-                    + request.request.token_ids[image_token_id_index + 1 :]
-                )
-                search_start = image_token_id_index + num_image_tokens
+            request.request.token_ids = self._expand_placeholder_tokens(
+                request.request.token_ids,
+                placeholder_token_id,
+                token_counts,
+                modality.name.lower(),
+            )
 
             with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
                 (
