@@ -184,18 +184,30 @@ def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
 
 
 def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
-    """True when the DGDR requires profiling interpolation data.
+    """True when the DGDR requires profiling interpolation data *at this stage*.
 
-    Profile data is consumed by mocker workers (for latency simulation)
-    and by the planner when throughput-based scaling is enabled.
+    Profile data (NPZ/JSON on disk) is consumed by:
+
+    * **Mocker workers** for latency simulation — always required when
+      mocker is enabled.
+    * **Planner** when throughput scaling is enabled — required for
+      thorough mode only. In rapid mode the planner now runs AIC
+      interpolation in-process at bootstrap (see ``aic_interpolation.py``),
+      so the profiler no longer emits NPZ for planner-only rapid deployments.
     """
     if is_mocker_enabled(dgdr):
         return True
-    return (
+    if (
         dgdr.features is not None
         and dgdr.features.planner is not None
         and dgdr.features.planner.enable_throughput_scaling
-    )
+    ):
+        # Lazy-imported to avoid a module-level dep cycle.
+        from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
+
+        sweep_mode = dgdr.features.planner.pre_deployment_sweeping_mode
+        return sweep_mode != PlannerPreDeploymentSweepMode.Rapid
+    return False
 
 
 def determine_picking_mode(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
