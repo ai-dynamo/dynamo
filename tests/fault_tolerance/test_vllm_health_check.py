@@ -10,6 +10,7 @@ import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.device import get_default_vllm_block_size
 from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api, completions_response_handler
@@ -37,6 +38,8 @@ class DynamoWorkerProcess(ManagedProcess):
             "--enforce-eager",
             "--max-model-len",
             "8192",
+            "--block-size",
+            str(get_default_vllm_block_size()),
         ]
 
         # Set debug logging environment
@@ -130,12 +133,13 @@ def send_completion_request(
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.nightly
 @pytest.mark.timeout(160)  # 3x average (~50s)
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
-def test_vllm_health_check_active(request, runtime_services):
+def test_vllm_health_check_active(request, runtime_services_dynamic_ports):
     """
     End-to-end test for worker fault tolerance with migration support.
 
@@ -146,6 +150,7 @@ def test_vllm_health_check_active(request, runtime_services):
 
     # Step 1: Start the frontend
     logger.info("Starting frontend...")
+
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
 
@@ -187,11 +192,14 @@ def test_vllm_health_check_active(request, runtime_services):
 
 
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.nightly
 @pytest.mark.timeout(160)  # 3x average (~50s)
-def test_vllm_health_check_passive(request, runtime_services, predownload_models):
+def test_vllm_health_check_passive(
+    request, runtime_services_dynamic_ports, predownload_models
+):
     """
     End-to-end test for worker fault tolerance with migration support.
 
@@ -202,6 +210,7 @@ def test_vllm_health_check_passive(request, runtime_services, predownload_models
 
     # Step 1: Start the frontend
     logger.info("Starting frontend...")
+
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
 

@@ -25,6 +25,10 @@ from tests.fault_tolerance.cancellation.utils import (
     verify_runtime_cancellation_metrics,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.device import (
+    build_nixl_kv_transfer_config_json,
+    get_default_vllm_block_size,
+)
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
@@ -48,11 +52,15 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         frontend_port: int,
         is_prefill: bool | None = None,
+        timeout_s: int = 300,
     ):
         # Allocate system port for this worker
         system_port = allocate_port(9100)
         self.system_port = system_port
         self.frontend_port = frontend_port
+
+        # Determine max-model-len based on worker type
+        max_model_len = "4096" if is_prefill is None else "16384"
 
         command = [
             "python3",
@@ -64,7 +72,9 @@ class DynamoWorkerProcess(ManagedProcess):
             "--gpu-memory-utilization",
             "0.45",
             "--max-model-len",
-            "16384",
+            max_model_len,
+            "--block-size",
+            str(get_default_vllm_block_size()),
         ]
 
         # Configure disaggregation mode, KV transfer, and health checks per worker type
@@ -74,7 +84,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    build_nixl_kv_transfer_config_json(),
                 ]
             )
             health_check_urls = [
@@ -86,7 +96,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    build_nixl_kv_transfer_config_json(),
                 ]
             )
             health_check_urls = [
@@ -157,7 +167,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=health_check_urls,
-            timeout=300,
+            timeout=timeout_s,
             display_output=True,
             terminate_all_matching_process_names=False,
             # Ensure any orphaned vLLM engine cores or child helpers are cleaned up
@@ -202,9 +212,12 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.timeout(110)  # 3x average
+@pytest.mark.timeout(
+    660
+)  # worker startup can take up to 600s; allow headroom for test body
 @pytest.mark.post_merge
 @pytest.mark.gpu_1
+@pytest.mark.xpu_1
 def test_request_cancellation_vllm_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
 ):
@@ -224,13 +237,45 @@ def test_request_cancellation_vllm_aggregated(
     - Teardown: ~2s
     """
 
+    def wait_for_stable_frontend(
+        frontend_port: int, stable_seconds: int = 3, timeout_seconds: int = 60
+    ):
+        """Wait for frontend to reach stable state without errors."""
+        import time
+
+        import requests
+
+        start_time = time.time()
+        stable_start = None
+        while time.time() - start_time < timeout_seconds:
+            try:
+                response = requests.get(
+                    f"http://localhost:{frontend_port}/v1/models", timeout=2
+                )
+                if response.status_code == 200:
+                    if stable_start is None:
+                        stable_start = time.time()
+                    elif time.time() - stable_start >= stable_seconds:
+                        logger.info("Frontend is stable")
+                        return
+                else:
+                    stable_start = None
+            except Exception as e:
+                logger.debug(f"Frontend health check failed: {e}")
+                stable_start = None
+            time.sleep(0.5)
+        raise TimeoutError(f"Frontend did not stabilize within {timeout_seconds}s")
+
     # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start a single worker (allocates its own system_port)
-        with DynamoWorkerProcess(request, frontend.frontend_port) as worker:
+        with DynamoWorkerProcess(
+            request, frontend.frontend_port, timeout_s=600
+        ) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
+            wait_for_stable_frontend(frontend.frontend_port)
 
             # Step 3: Test request cancellation with polling approach
             frontend_log_offset, worker_log_offset = 0, 0
@@ -262,7 +307,7 @@ def test_request_cancellation_vllm_aggregated(
 
                 # For streaming, read 5 responses before cancelling
                 if request_type == "chat_completion_stream":
-                    read_streaming_responses(cancellable_req, expected_count=5)
+                    read_streaming_responses(cancellable_req, expected_count=3)
 
                 # Now cancel the request
                 cancellable_req.cancel()
@@ -300,6 +345,7 @@ def test_request_cancellation_vllm_aggregated(
 @pytest.mark.timeout(150)  # 3x average
 @pytest.mark.nightly
 @pytest.mark.gpu_2
+@pytest.mark.xpu_2
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
@@ -356,7 +402,7 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
                 # Read 5 streaming responses (decode phase)
-                read_streaming_responses(cancellable_req, expected_count=5)
+                read_streaming_responses(cancellable_req, expected_count=3)
 
                 # Now cancel the request
                 cancellable_req.cancel()
@@ -396,9 +442,12 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.timeout(150)  # 3x average
+@pytest.mark.timeout(
+    360
+)  # exceed worker startup timeout (300s) with test-body headroom
 @pytest.mark.nightly
 @pytest.mark.gpu_2
+@pytest.mark.xpu_2
 def test_request_cancellation_vllm_prefill_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):

@@ -17,6 +17,7 @@ import shutil
 import pytest
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.device import build_nixl_kv_transfer_config
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
@@ -30,6 +31,7 @@ pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.parametrize(
@@ -112,8 +114,22 @@ class DynamoWorkerProcess(ManagedProcess):
         ]
         if is_prefill is True:
             command.extend(["--disaggregation-mode", "prefill"])
+            # Add kv-transfer-config for prefill disaggregation
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    json.dumps(build_nixl_kv_transfer_config()),
+                ]
+            )
         elif is_prefill is False:
             command.extend(["--disaggregation-mode", "decode"])
+            # Add kv-transfer-config for decode disaggregation
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    json.dumps(build_nixl_kv_transfer_config()),
+                ]
+            )
 
         # Aggregated mode and prefill workers publish KV events
         if is_prefill is not False:
