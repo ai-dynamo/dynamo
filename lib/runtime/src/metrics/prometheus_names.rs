@@ -536,6 +536,9 @@ pub mod router {
 
     /// Output sequence length in tokens observed at the router
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "router_output_sequence_tokens";
+
+    /// Predicted KV cache hit rate at routing time (0.0-1.0)
+    pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
 }
 
 /// Frontend pipeline stage and event-loop metrics

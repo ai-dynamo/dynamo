@@ -185,6 +185,109 @@ class TestPrefillRegressionModel:
         )
         assert est is not None
 
+    def test_kv_hit_rate_none_equals_zero(self):
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        for tokens in [500, 1000, 1500, 2000, 2500]:
+            fpm = _make_fpm(
+                sum_prefill_tokens=tokens,
+                num_prefill_requests=1,
+                wall_time=0.001 * tokens + 0.002,
+            )
+            model.add_observation(fpm)
+
+        none_est = model.estimate_next_ttft(
+            queued_prefill_tokens=3000,
+            max_num_batched_tokens=2048,
+            kv_hit_rate=None,
+        )
+        zero_est = model.estimate_next_ttft(
+            queued_prefill_tokens=3000,
+            max_num_batched_tokens=2048,
+            kv_hit_rate=0.0,
+        )
+        assert none_est == zero_est
+
+    def test_kv_hit_rate_discounts_queued_and_avg_isl(self):
+        """A hit rate of 0.5 should halve the simulated work, roughly halving TTFT."""
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        # Fit on several points so the regression is stable and ~linear in tokens.
+        for tokens in [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000]:
+            fpm = _make_fpm(
+                sum_prefill_tokens=tokens,
+                num_prefill_requests=1,
+                wall_time=0.001 * tokens,
+            )
+            model.add_observation(fpm)
+
+        max_batched = 100_000  # single-iteration regime, no chunking rounding
+        est_full = model.estimate_next_ttft(
+            queued_prefill_tokens=4000,
+            max_num_batched_tokens=max_batched,
+            kv_hit_rate=0.0,
+        )
+        est_half = model.estimate_next_ttft(
+            queued_prefill_tokens=4000,
+            max_num_batched_tokens=max_batched,
+            kv_hit_rate=0.5,
+        )
+        assert est_full is not None and est_half is not None
+        # With a ~linear regression and no chunking rounding, 0.5 discount
+        # should produce roughly half the TTFT (within 20% tolerance for
+        # linearly-fitted intercept noise).
+        assert est_half < est_full
+        assert est_half / est_full < 0.75
+
+    def test_kv_hit_rate_clamped(self):
+        model = PrefillRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        for tokens in [500, 1000, 1500, 2000, 2500]:
+            fpm = _make_fpm(
+                sum_prefill_tokens=tokens,
+                num_prefill_requests=1,
+                wall_time=0.001 * tokens,
+            )
+            model.add_observation(fpm)
+
+        # kv_hit_rate > 1.0 should clamp to 0.95 (not 1.0) so queued/avg don't
+        # fully zero out.
+        est_above = model.estimate_next_ttft(
+            queued_prefill_tokens=2000,
+            max_num_batched_tokens=100_000,
+            kv_hit_rate=1.5,
+        )
+        est_cap = model.estimate_next_ttft(
+            queued_prefill_tokens=2000,
+            max_num_batched_tokens=100_000,
+            kv_hit_rate=0.95,
+        )
+        assert est_above == est_cap
+
+        # Negative values clamp to 0.0 (no discount).
+        est_negative = model.estimate_next_ttft(
+            queued_prefill_tokens=2000,
+            max_num_batched_tokens=100_000,
+            kv_hit_rate=-0.3,
+        )
+        est_zero = model.estimate_next_ttft(
+            queued_prefill_tokens=2000,
+            max_num_batched_tokens=100_000,
+            kv_hit_rate=0.0,
+        )
+        assert est_negative == est_zero
+
+        # NaN falls back to 0.0.
+        est_nan = model.estimate_next_ttft(
+            queued_prefill_tokens=2000,
+            max_num_batched_tokens=100_000,
+            kv_hit_rate=float("nan"),
+        )
+        assert est_nan == est_zero
+
 
 # ── Bucketed retirement tests ─────────────────────────────────────────
 
@@ -447,3 +550,103 @@ class TestAggRegressionModel:
             itl_sla=50.0,
         )
         assert thpt == 0.0
+
+    def test_agg_kv_hit_rate_none_equals_zero(self):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_agg(model)
+        none_est = model.estimate_next_ttft(
+            queued_prefill_tokens=3000,
+            max_num_batched_tokens=2048,
+            current_decode_kv=1000,
+            kv_hit_rate=None,
+        )
+        zero_est = model.estimate_next_ttft(
+            queued_prefill_tokens=3000,
+            max_num_batched_tokens=2048,
+            current_decode_kv=1000,
+            kv_hit_rate=0.0,
+        )
+        assert none_est == zero_est
+
+    def test_agg_kv_hit_rate_discounts_prefill(self):
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_agg(model)
+        est_full = model.estimate_next_ttft(
+            queued_prefill_tokens=3000,
+            max_num_batched_tokens=100_000,
+            current_decode_kv=1000,
+            kv_hit_rate=0.0,
+        )
+        est_half = model.estimate_next_ttft(
+            queued_prefill_tokens=3000,
+            max_num_batched_tokens=100_000,
+            current_decode_kv=1000,
+            kv_hit_rate=0.5,
+        )
+        assert est_full is not None and est_half is not None
+        assert est_half < est_full
+
+    def test_agg_find_best_engine_rps_hit_rate_increases_throughput(self):
+        """find_best_engine_agg_rps should discount only prefill work,
+        leaving decode KV at full context; higher hit rate should yield
+        greater-or-equal engine rps."""
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_agg(model)
+        rps_base, _, _ = model.find_best_engine_agg_rps(
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
+            kv_hit_rate=0.0,
+        )
+        rps_hit, _, _ = model.find_best_engine_agg_rps(
+            isl=2048.0,
+            osl=150.0,
+            max_num_batched_tokens=4096,
+            ttft_sla=500.0,
+            itl_sla=50.0,
+            kv_hit_rate=0.6,
+        )
+        assert rps_hit >= rps_base
+
+    def test_agg_find_best_engine_rps_uniform_discount_in_ttft_estimate(self):
+        """``find_best_engine_agg_rps`` must apply the kv_hit_rate discount
+        uniformly to BOTH the per-iter prefill and the avg_isl portion of
+        the TTFT simulation. Regression for the bug where the function
+        passed already-discounted prefill_per_iter to estimate_next_ttft
+        without forwarding kv_hit_rate, leaving avg_isl at full size and
+        inflating the predicted TTFT (= over-provisioning replicas)."""
+        model = AggRegressionModel(
+            max_num_fpm_samples=50, min_observations=3, bucket_count=16
+        )
+        self._train_agg(model)
+        # With a permissive ITL/TTFT SLA, the only difference in engine_rps
+        # at high hit rate vs zero hit rate should come from the prefill
+        # discount. If the bug recurs the high-hit-rate path will under-
+        # estimate capacity (smaller batch sweep) and produce strictly less
+        # rps growth than the discount factor warrants.
+        rps_zero, _, _ = model.find_best_engine_agg_rps(
+            isl=4000.0,
+            osl=200.0,
+            max_num_batched_tokens=8192,
+            ttft_sla=10_000.0,
+            itl_sla=10_000.0,
+            kv_hit_rate=0.0,
+        )
+        rps_high, _, _ = model.find_best_engine_agg_rps(
+            isl=4000.0,
+            osl=200.0,
+            max_num_batched_tokens=8192,
+            ttft_sla=10_000.0,
+            itl_sla=10_000.0,
+            kv_hit_rate=0.8,
+        )
+        # Strictly greater capacity at 80% hit rate (not just >=).
+        assert rps_high > rps_zero

@@ -325,6 +325,29 @@ class TestPrometheusAPIClientRouterSource:
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.OUTPUT_SEQUENCE_TOKENS}"
         assert expected_metric in call_args
 
+    def test_get_avg_kv_hit_rate_dispatches_to_router_histogram(self, router_client):
+        """get_avg_kv_hit_rate with router source queries dynamo_component_router_kv_hit_rate."""
+        # Return a plausible 0.0-1.0 ratio rather than the default 42.0 fixture.
+        router_client.prom.custom_query.return_value = [{"value": [0, "0.35"]}]
+        result = router_client.get_avg_kv_hit_rate("60s", "mymodel")
+        assert result == 0.35
+
+        call_args = str(router_client.prom.custom_query.call_args)
+        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}"
+        assert expected_metric in call_args
+
+    def test_get_avg_kv_hit_rate_returns_none_for_frontend_source(self):
+        """Frontend source doesn't publish an aggregate kv_hit_rate, so the
+        client should short-circuit to None rather than issue a PromQL query."""
+        client = PrometheusAPIClient(
+            "http://localhost:9090", "test-fe-namespace", metrics_source="frontend"
+        )
+        client.prom = MagicMock()
+        client.prom.custom_query.return_value = [{"value": [0, "42.0"]}]
+        result = client.get_avg_kv_hit_rate("60s", "mymodel")
+        assert result is None
+        client.prom.custom_query.assert_not_called()
+
     def test_get_avg_request_count_uses_router_requests_total(self, router_client):
         """get_avg_request_count with router source queries dynamo_component_router_requests_total."""
         result = router_client.get_avg_request_count("60s", "mymodel")
