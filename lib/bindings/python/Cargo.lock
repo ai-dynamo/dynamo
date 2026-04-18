@@ -3691,9 +3691,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-client"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9929c605e135347ccda5e0e7ff0627217f23189915a5c3971265ce490a14abf"
+checksum = "7de62490b58d9862482a2cf223c3aeceaadd01d46ac996d99b4b6a75af204d21"
 dependencies = [
  "anyhow",
  "clap",
@@ -3713,9 +3713,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-common"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4997c93ac4b3ded7a999eff0b770aea2448d808ce7f020729e6af11e4c08fe67"
+checksum = "44ec153f868d45d5d48129dd2f1e24755e93f74d6f9f423094a3b784fa6a88cc"
 dependencies = [
  "anyhow",
  "async-trait",
