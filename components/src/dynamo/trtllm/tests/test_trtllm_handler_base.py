@@ -678,6 +678,7 @@ class TestFatalCudaErrorPatterns:
         ],
     )
     def test_matches_fatal_cuda_errors(self, error_msg):
+        """Each string in the fatal list must be recognized as unrecoverable."""
         assert FATAL_CUDA_ERROR_PATTERNS.search(error_msg) is not None
 
     @pytest.mark.parametrize(
@@ -691,6 +692,7 @@ class TestFatalCudaErrorPatterns:
         ],
     )
     def test_does_not_match_recoverable_errors(self, error_msg):
+        """Per-request-recoverable errors (incl. OOM, empty) must not match."""
         assert FATAL_CUDA_ERROR_PATTERNS.search(error_msg) is None
 
 
@@ -702,6 +704,7 @@ class TestHandlePerRequestError:
     """
 
     def _make_handler(self) -> HandlerBase:
+        """Build a handler with _initiate_shutdown mocked out so tests don't exit."""
         config = MagicMock()
         config.shutdown_event = None
         handler = _ConcreteHandler(config)
@@ -710,19 +713,33 @@ class TestHandlePerRequestError:
 
     @pytest.mark.asyncio
     async def test_fatal_cuda_error_triggers_shutdown(self):
+        """Fatal CUDA RequestError yields the error chunk, then awaits shutdown."""
         from tensorrt_llm.executor.utils import RequestError
 
         handler = self._make_handler()
+        events: list[str] = []
+
+        async def _record_shutdown(_err):
+            """Record shutdown invocation to verify yield-before-shutdown ordering."""
+            events.append("shutdown")
+
+        handler._initiate_shutdown.side_effect = _record_shutdown
+
         err = RequestError("CUDA error: cudaErrorNvlinkUncorrectable")
-        chunks = [c async for c in handler._handle_per_request_error(err, "req-1")]
+        chunks = []
+        async for c in handler._handle_per_request_error(err, "req-1"):
+            events.append("yield")
+            chunks.append(c)
 
         assert len(chunks) == 1
         assert "cudaErrorNvlinkUncorrectable" in chunks[0]["finish_reason"]["error"]
         assert chunks[0]["token_ids"] == []
         handler._initiate_shutdown.assert_awaited_once_with(err)
+        assert events == ["yield", "shutdown"]
 
     @pytest.mark.asyncio
     async def test_benign_error_does_not_trigger_shutdown(self):
+        """A per-request-recoverable RequestError yields an error chunk only."""
         from tensorrt_llm.executor.utils import RequestError
 
         handler = self._make_handler()

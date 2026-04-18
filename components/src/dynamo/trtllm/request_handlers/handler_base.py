@@ -955,8 +955,12 @@ class HandlerBase(BaseGenerativeHandler):
             logging.warning(f"Request {request_id} error: {error_msg}")
         try:
             yield {"finish_reason": {"error": error_msg}, "token_ids": []}
-        except Exception:
-            pass  # Best effort
+        except Exception as emit_err:  # noqa: BLE001 - best-effort client notification
+            logging.debug(
+                "Failed to emit error chunk for request %s: %s",
+                request_id,
+                emit_err,
+            )
         if fatal:
             await self._initiate_shutdown(error)
 
