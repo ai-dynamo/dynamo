@@ -322,11 +322,9 @@ where
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
-    // Get threshold value and wrap monitor for PushRouter
-    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
-    let threshold_value = worker_monitor
-        .as_ref()
-        .map(|m| m.active_decode_blocks_threshold());
+    // PushRouter's busy_threshold is only inspected via `.is_some()` to gate
+    // the 503 rejection path — the inner f64 is never compared to anything.
+    let threshold_value = worker_monitor.as_ref().map(|_| 1.0);
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
