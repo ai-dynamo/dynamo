@@ -126,10 +126,10 @@ def cross_validate_config(
     """Validate dynamo and engine config together. This should not modify the configs."""
 
     if hasattr(engine_config, "stream_interval") and engine_config.stream_interval != 1:
-        logger.warning(
-            "--stream-interval is currently not respected in Dynamo. "
-            "Dynamo uses its own post-processing implementation on the frontend, "
-            "bypassing vLLM's OutputProcessor buffering."
+        logger.info(
+            "--stream-interval=%d will be propagated to the Dynamo frontend. "
+            "Set DYN_VLLM_STREAM_INTERVAL env var to override.",
+            engine_config.stream_interval,
         )
 
     # Validate --gms-shadow-mode requires --load-format gms
