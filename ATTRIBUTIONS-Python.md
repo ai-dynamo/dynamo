@@ -71396,4 +71396,733 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### URLs
   - `Source`: https://github.com/jaraco/zipp
+## cuda-bindings (13.0.3)
 
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## cuda-core (0.7.0)
+
+### Licenses
+License: `Apache-2.0`
+
+  - `licenses/LICENSE`:
+```
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+
+## cuda-pathfinder (1.5.3)
+
+### Licenses
+License: `Apache-2.0`
+
+  - `licenses/LICENSE`:
+```
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+
+## cuda-python (13.0.2)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## cuda-tile (1.2.0)
+
+### Licenses
+License: `Apache-2.0`
+
+  - `licenses/LICENSE`:
+```
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+
+## cuda-toolkit (13.2.1)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cublas-cu12 (12.9.1.4)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cuda-crt (13.2.78)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cuda-cupti-cu12 (12.9.79)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cuda-nvcc (13.2.78)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cuda-nvrtc (13.2.78)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cuda-nvrtc-cu12 (12.9.86)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cuda-runtime (13.2.75)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cuda-runtime-cu12 (12.9.79)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cuda-tileiras (13.2.78)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cudnn-cu12 (9.10.2.21)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cudnn-frontend (1.22.1)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cufft-cu12 (11.4.1.4)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cufile-cu12 (1.14.1.1)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-curand-cu12 (10.3.10.19)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cusolver-cu12 (11.7.5.82)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cusparse-cu12 (12.5.10.65)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cusparselt-cu12 (0.7.1)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cutlass-dsl (4.3.4)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-cutlass-dsl-libs-base (4.4.2)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-ml-py (13.580.65)
+
+### Licenses
+License: `BSD-3-Clause`
+
+  - `licenses/LICENSE`:
+```
+BSD 3-Clause License
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES ARE DISCLAIMED.
+```
+
+
+## nvidia-modelopt (0.37.0)
+
+### Licenses
+License: `Apache-2.0`
+
+  - `licenses/LICENSE`:
+```
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+
+## nvidia-nccl-cu12 (2.27.5)
+
+### Licenses
+License: `BSD-3-Clause`
+
+  - `licenses/LICENSE`:
+```
+BSD 3-Clause License
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES ARE DISCLAIMED.
+```
+
+
+## nvidia-nccl-cu13 (2.28.9)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-nvjitlink-cu12 (12.9.86)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## nvidia-nvshmem-cu12 (3.3.20)
+
+### Licenses
+License: `BSD-3-Clause`
+
+  - `licenses/LICENSE`:
+```
+BSD 3-Clause License
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES ARE DISCLAIMED.
+```
+
+
+## nvidia-nvtx-cu12 (12.9.79)
+
+### Licenses
+License: `Apache-2.0`
+
+  - `licenses/LICENSE`:
+```
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+
+## nvidia-nvvm (13.2.78)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## tensorrt (10.14.1.48)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## tensorrt_cu13 (10.14.1.48.post1)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## tensorrt_cu13_bindings (10.14.1.48.post1)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## tensorrt_cu13_libs (10.14.1.48.post1)
+
+### Licenses
+License: `LicenseRef-NVIDIA-SOFTWARE-LICENSE`
+
+  - `licenses/LICENSE`:
+```
+NVIDIA Proprietary Software License.
+
+This software is governed by the NVIDIA Software License Agreement and/or
+the NVIDIA CUDA End User License Agreement.
+
+For the full license terms, please see:
+https://docs.nvidia.com/cuda/eula/index.html
+```
+
+
+## tensorrt_llm (1.3.0rc5.post1)
+
+### Licenses
+License: `Apache-2.0`
+
+  - `licenses/LICENSE`:
+```
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+
+## vcs-versioning (1.1.1)
+
+### Licenses
+License: `MIT`
+
+  - `licenses/LICENSE`:
+```
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

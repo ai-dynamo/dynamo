@@ -787,3 +787,126 @@ For any GPL or LGPL licensed components, source code is available from the respe
 ## License Compliance
 
 This software complies with all license requirements. The LGPL-licensed libraries are dynamically linked, and the GCC Runtime Library Exception permits linking with non-GPL code. No source code disclosure is required for the main application.
+
+
+## NVIDIA Proprietary Runtime Packages (dpkg)
+
+**License:** `LicenseRef-NVIDIA-SOFTWARE-LICENSE` (CUDA EULA) / `LicenseRef-NVIDIA-Proprietary`
+**Copyright:** Copyright (C) NVIDIA Corporation
+
+The following system (dpkg) packages ship inside the Dynamo runtime container
+images (vllm, sglang, tensorrtllm) and are governed by the NVIDIA CUDA End User
+License Agreement — https://docs.nvidia.com/cuda/eula/index.html
+
+| Package | Version | SPDX |
+|---------|---------|------|
+| `cuda-cccl-12-9` | 12.9.27-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cccl-13-1` | 13.1.78-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-command-line-tools-12-9` | 12.9.1-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-compiler-12-9` | 12.9.1-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-crt-12-9` | 12.9.86-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-crt-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cudart-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cudart-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cudart-dev-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cudart-dev-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-culibos-13-1` | 13.1.68-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-culibos-dev-13-1` | 13.1.68-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cuobjdump-12-9` | 12.9.82-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cuobjdump-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cupti-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cupti-13-1` | 13.1.75-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cupti-dev-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cupti-dev-13-1` | 13.1.75-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-cuxxfilt-12-9` | 12.9.82-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-driver-dev-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-driver-dev-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-gdb-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-gdb-13-1` | 13.1.68-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-libraries-12-9` | 12.9.1-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-libraries-dev-12-9` | 12.9.1-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-minimal-build-12-9` | 12.9.1-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nsight-compute-12-9` | 12.9.1-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvcc-12-9` | 12.9.86-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvcc-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvdisasm-12-9` | 12.9.88-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvdisasm-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvml-dev-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvml-dev-13-1` | 13.1.68-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvprof-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvprune-12-9` | 12.9.82-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvprune-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvrtc-12-9` | 12.9.86-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvrtc-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvrtc-dev-12-9` | 12.9.86-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvrtc-dev-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvtx-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvtx-13-1` | 13.1.68-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-nvvm-12-9` | 12.9.86-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-opencl-12-9` | 12.9.19-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-profiler-api-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-profiler-api-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-sandbox-dev-12-9` | 12.9.19-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-sanitizer-12-9` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-sanitizer-13-1` | 13.1.75-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-toolkit-12-9-config-common` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-toolkit-12-config-common` | 12.9.79-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-toolkit-13-1-config-common` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-toolkit-13-config-common` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `cuda-toolkit-config-common` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `doca-sdk-common` | 3.1.0105-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `doca-sdk-dpdk-bridge` | 3.1.0105-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `doca-sdk-eth` | 3.1.0105-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `doca-sdk-gpunetio` | 3.1.0105-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `doca-sdk-rdma` | 3.1.0105-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `doca-sdk-verbs` | 3.1.0105-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcublas-12-9` | 12.9.1.4-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcublas-13-1` | 13.2.0.9-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcublas-dev-12-9` | 12.9.1.4-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcudnn9-cuda-12` | 9.10.2.21-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcudnn9-cuda-13` | 9.21.0.82-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcudnn9-dev-cuda-12` | 9.10.2.21-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcudnn9-headers-cuda-12` | 9.10.2.21-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcufft-12-9` | 11.4.1.4-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcufft-13-1` | 12.1.0.31-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcufft-dev-12-9` | 11.4.1.4-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcufile-12-9` | 1.14.1.1-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcufile-13-1` | 1.16.0.49-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcufile-dev-12-9` | 1.14.1.1-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcurand-12-9` | 10.3.10.19-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcurand-13-1` | 10.4.1.34-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcurand-dev-12-9` | 10.3.10.19-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcusolver-12-9` | 11.7.5.82-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcusolver-13-1` | 12.0.7.41-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcusolver-dev-12-9` | 11.7.5.82-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcusparse-12-9` | 12.5.10.65-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcusparse-13-1` | 12.7.2.19-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcusparse-dev-12-9` | 12.5.10.65-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libcusparselt0-cuda-13` | 0.8.1.1-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnccl-dev` | 2.29.3-1+cuda13.1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnccl2` | 2.28.9-1+cuda13.0 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnpp-12-9` | 12.4.1.87-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnpp-13-1` | 13.0.2.21-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnpp-dev-12-9` | 12.4.1.87-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvfatbin-12-9` | 12.9.82-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvfatbin-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvfatbin-dev-12-9` | 12.9.82-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvinfer-dispatch10` | 10.14.1.48-1+cuda13.0 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvinfer-lean10` | 10.14.1.48-1+cuda13.0 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvinfer-plugin10` | 10.14.1.48-1+cuda13.0 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvinfer-vc-plugin10` | 10.14.1.48-1+cuda13.0 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvinfer-win-builder-resource10` | 10.14.1.48-1+cuda13.0 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvinfer10` | 10.14.1.48-1+cuda13.0 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvjitlink-12-9` | 12.9.86-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvjitlink-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvjitlink-dev-12-9` | 12.9.86-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvjpeg-12-9` | 12.4.0.76-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvjpeg-13-1` | 13.0.2.28-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvjpeg-dev-12-9` | 12.4.0.76-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvonnxparsers10` | 10.14.1.48-1+cuda13.0 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvptxcompiler-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvshmem3-cuda-13` | 3.6.5-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `libnvvm-13-1` | 13.1.80-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `mlnx-dpdk` | 22.11.0-2507.1.0.2507097 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `nsight-compute-2025.2.1` | 2025.2.1.3-1 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
+| `nsight-systems-cli-2025.5.2` | 2025.5.2.266-255236693005v0 | LicenseRef-NVIDIA-SOFTWARE-LICENSE |
