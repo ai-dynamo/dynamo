@@ -8,6 +8,7 @@ from typing import Any, Sequence
 import blake3
 import numpy as np
 import torch
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +47,6 @@ def _image_preimage_parts(img: Any) -> tuple[bytes, bytes]:
         ValueError: input shape, dtype, or mode violates the RGB uint8 contract.
         TypeError: input is not a PIL.Image.Image, np.ndarray, or torch.Tensor.
     """
-    from PIL import Image
-
     # torch.Tensor → ndarray (moved to CPU) so it flows through the ndarray
     # path and gets the same dtype/shape validation + geometry header.
     if isinstance(img, torch.Tensor):

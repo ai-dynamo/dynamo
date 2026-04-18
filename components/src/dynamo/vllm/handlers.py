@@ -123,8 +123,10 @@ def _compute_mm_uuids(
     """
     Compute multi_modal_uuids from multi_modal_data.
 
-    Each image gets a SHA256 hex digest as its UUID, ensuring consistent
-    hashing across the MM Router, vLLM handler, and Rust KV publisher.
+    Each image gets a blake3 hex digest as its UUID (computed by
+    compute_mm_uuids_from_images over a fixed-length header + pixel
+    preimage), ensuring consistent hashing across the MM Router, vLLM
+    handler, and Rust KV publisher.
     """
     if not multi_modal_data or "image" not in multi_modal_data:
         return None
