@@ -1,0 +1,494 @@
+# Disaggregated DeepSeek-V3.1-NVFP4 (1P1D) with GAIE EPP + GKE Inference Gateway
+# RoCE networking, NIXL transfer backend, SGLang 1.0.0
+# Deploy with: kubectl apply -f dgd-disagg-gaie-nvfp4.yaml -n dynamo-system
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-dsv31-nvfp4-disagg-gaie
+  namespace: dynamo-system
+  annotations:
+    nvidia.com/enable-grove: "false"
+spec:
+  backendFramework: sglang
+  envs:
+  - name: HF_HOME
+    value: /opt/model-cache
+  - name: NCCL_DEBUG
+    value: INFO
+  - name: NCCL_DEBUG_SUBSYS
+    value: INIT,ENV
+  - name: NCCL_SHIMNET_GUEST_CONFIG_CHECKER_DISABLE
+    value: "1"
+  - name: GLOO_SOCKET_IFNAME
+    value: eth0
+  - name: NCCL_SOCKET_IFNAME
+    value: eth0
+  - name: NCCL_NET
+    value: IB
+  - name: NCCL_IB_HCA
+    value: mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7
+  - name: NCCL_CUMEM_ENABLE
+    value: "0"
+  - name: NCCL_NVLS_ENABLE
+    value: "0"
+  - name: NCCL_MNNVL_ENABLE
+    value: "1"
+  - name: MC_FORCE_MNNVL
+    value: "1"
+  - name: NCCL_IB_GID_INDEX
+    value: "3"
+  - name: NCCL_IB_TC
+    value: "41"
+  - name: NCCL_IB_TIMEOUT
+    value: "22"
+  - name: NCCL_IB_RETRY_CNT
+    value: "7"
+  - name: SGLANG_DISAGGREGATION_WAITING_TIMEOUT
+    value: "600"
+  - name: SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT
+    value: "600"
+  - name: TORCH_DISTRIBUTED_DEFAULT_TIMEOUT
+    value: "1800"
+  - name: PYTHONUNBUFFERED
+    value: "1"
+  - name: DYN_SKIP_SGLANG_LOG_FORMATTING
+    value: "1"
+  - name: SGLANG_ENABLE_JIT_DEEPGEMM
+    value: "true"
+  - name: SGLANG_DISAGGREGATION_HEARTBEAT_MAX_FAILURE
+    value: "100000"
+  - name: SGLANG_USE_MESSAGE_QUEUE_BROADCASTER
+    value: "0"
+  - name: SGLANG_DISABLE_TP_MEMORY_INBALANCE_CHECK
+    value: "1"
+  - name: DYN_REQUEST_PLANE
+    value: tcp
+  - name: SGLANG_ENABLE_SPEC_V2
+    value: "1"
+  - name: UCX_TLS
+    value: "cuda_ipc,rc,cuda_copy,tcp,self"
+  - name: UCX_LOG_LEVEL
+    value: "INFO"
+  pvcs:
+  - create: false
+    name: deepseek-v31-model-rwx
+  services:
+    Epp:
+      envFromSecret: hf-token-secret
+      componentType: epp
+      replicas: 1
+      volumeMounts:
+      - name: deepseek-v31-model-rwx
+        mountPoint: /opt/model-cache
+      extraPodSpec:
+        mainContainer:
+          # Substitute REGION / PROJECT_ID / REPO_NAME (see gaie/README "Building the Custom EPP Image").
+          image: REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/dynamo-epp:latest
+          env:
+          - name: DYN_DECODE_FALLBACK
+            value: "false"
+          - name: DYN_KV_CACHE_BLOCK_SIZE
+            value: "128"
+          - name: DYN_MODEL_NAME
+            value: "nvidia/DeepSeek-V3.1-NVFP4"
+          - name: DYN_ENFORCE_DISAGG
+            value: "true"
+          - name: DYN_NAMESPACE_PREFIX
+            value: "dynamo-system-sglang-dsv31-nvfp4-disagg-gaie"
+      eppConfig:
+        config:
+          plugins:
+          - type: disagg-profile-handler
+          - name: prefill-filter
+            type: label-filter
+            parameters:
+              label: "nvidia.com/dynamo-sub-component-type"
+              validValues:
+              - "prefill"
+              allowsNoLabel: false
+          - name: decode-filter
+            type: label-filter
+            parameters:
+              label: "nvidia.com/dynamo-sub-component-type"
+              validValues:
+              - "decode"
+              allowsNoLabel: false
+          - name: picker
+            type: max-score-picker
+          - name: dyn-prefill
+            type: dyn-prefill-scorer
+          - name: dyn-decode
+            type: dyn-decode-scorer
+          schedulingProfiles:
+          - name: prefill
+            plugins:
+            - pluginRef: prefill-filter
+              weight: 1
+            - pluginRef: dyn-prefill
+              weight: 1
+            - pluginRef: picker
+              weight: 1
+          - name: decode
+            plugins:
+            - pluginRef: decode-filter
+              weight: 1
+            - pluginRef: dyn-decode
+              weight: 1
+            - pluginRef: picker
+              weight: 1
+    prefill:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          networking.gke.io/default-interface: "eth0"
+          networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"},{"interfaceName":"rdma4","network":"rdma-4"},{"interfaceName":"rdma5","network":"rdma-5"},{"interfaceName":"rdma6","network":"rdma-6"},{"interfaceName":"rdma7","network":"rdma-7"}]'
+      extraPodSpec:
+        hostIPC: true
+        hostPID: true
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        initContainers:
+        - name: fix-permissions
+          image: busybox
+          command:
+          - sh
+          - -c
+          - mkdir -p /opt/model-cache/hub && chmod -R 777 /opt/model-cache
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - name: deepseek-v31-model-rwx
+            mountPath: /opt/model-cache
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          securityContext:
+            capabilities:
+              add: [ "IPC_LOCK" ]
+          workingDir: /workspace/examples/backends/sglang
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            sleep $((RANDOM % 60))
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig 2>/dev/null || true
+            nvidia-smi topo -m
+            exec python3 -m dynamo.sglang \
+              --model-path nvidia/DeepSeek-V3.1-NVFP4 \
+              --served-model-name nvidia/DeepSeek-V3.1-NVFP4 \
+              --quantization modelopt_fp4 \
+              --tp 8 \
+              --dp 8 \
+              --ep-size 8 \
+              --enable-dp-attention \
+              --enable-dp-lm-head \
+              --trust-remote-code \
+              --disaggregation-mode prefill \
+              --disaggregation-bootstrap-port 30001 \
+              --disaggregation-transfer-backend nixl \
+              --host 0.0.0.0 \
+              --mem-fraction-static 0.85 \
+              --max-running-requests 512 \
+              --watchdog-timeout 1000000 \
+              --max-prefill-tokens 32768 \
+              --chunked-prefill-size 32768 \
+              --disable-cuda-graph \
+              --load-balance-method round_robin \
+              --stream-interval 30 \
+              --enable-flashinfer-allreduce-fusion \
+              --disable-radix-cache
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 600
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 10
+          startupProbe:
+            tcpSocket:
+              port: 30001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 300
+        containers:
+        - name: frontend
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+          ports:
+          - containerPort: 8000
+            name: http
+            protocol: TCP
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          env:
+          - name: DYNAMO_PORT
+            value: "8000"
+          - name: DYN_HTTP_PORT
+            value: "8000"
+          - name: DYN_NAMESPACE_PREFIX
+            value: dynamo-system-sglang-dsv31-nvfp4-disagg-gaie
+          - name: DYN_COMPONENT
+            value: frontend
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_PARENT_DGD_K8S_NAME
+            value: sglang-dsv31-nvfp4-disagg-gaie
+          - name: DYN_PARENT_DGD_K8S_NAMESPACE
+            value: dynamo-system
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-4: "1"
+            networking.gke.io.networks/rdma-5: "1"
+            networking.gke.io.networks/rdma-6: "1"
+            networking.gke.io.networks/rdma-7: "1"
+        requests:
+          gpu: "8"
+          cpu: "8"
+          memory: 712Gi
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-4: "1"
+            networking.gke.io.networks/rdma-5: "1"
+            networking.gke.io.networks/rdma-6: "1"
+            networking.gke.io.networks/rdma-7: "1"
+      sharedMemory:
+        size: 80Gi
+      subComponentType: prefill
+      volumeMounts:
+      - name: deepseek-v31-model-rwx
+        mountPoint: /opt/model-cache
+    decode:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          networking.gke.io/default-interface: "eth0"
+          networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"},{"interfaceName":"rdma4","network":"rdma-4"},{"interfaceName":"rdma5","network":"rdma-5"},{"interfaceName":"rdma6","network":"rdma-6"},{"interfaceName":"rdma7","network":"rdma-7"}]'
+      extraPodSpec:
+        hostIPC: true
+        hostPID: true
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        initContainers:
+        - name: fix-permissions
+          image: busybox
+          command:
+          - sh
+          - -c
+          - mkdir -p /opt/model-cache/hub && chmod -R 777 /opt/model-cache
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - name: deepseek-v31-model-rwx
+            mountPath: /opt/model-cache
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          securityContext:
+            capabilities:
+              add: [ "IPC_LOCK" ]
+          workingDir: /workspace/examples/backends/sglang
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - |
+            sleep $((RANDOM % 60))
+            export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
+            export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
+            /sbin/ldconfig 2>/dev/null || true
+            nvidia-smi topo -m
+            exec python3 -m dynamo.sglang \
+              --model-path nvidia/DeepSeek-V3.1-NVFP4 \
+              --served-model-name nvidia/DeepSeek-V3.1-NVFP4 \
+              --quantization modelopt_fp4 \
+              --tp 8 \
+              --dp 8 \
+              --enable-dp-attention \
+              --enable-dp-lm-head \
+              --ep-size 8 \
+              --trust-remote-code \
+              --skip-tokenizer-init \
+              --disaggregation-mode decode \
+              --disaggregation-bootstrap-port 30001 \
+              --disaggregation-transfer-backend nixl \
+              --host 0.0.0.0 \
+              --mem-fraction-static 0.85 \
+              --max-prefill-tokens 32768 \
+              --chunked-prefill-size 32768 \
+              --max-running-requests 512 \
+              --cuda-graph-max-bs 512 \
+              --watchdog-timeout 1000000 \
+              --stream-interval 30 \
+              --prefill-round-robin-balance \
+              --enable-flashinfer-allreduce-fusion \
+              --disable-radix-cache \
+              --speculative-algorithm EAGLE \
+              --speculative-num-steps 2 \
+              --speculative-eagle-topk 1 \
+              --speculative-num-draft-tokens 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 300
+        containers:
+        - name: frontend
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.0
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+          ports:
+          - containerPort: 8000
+            name: http
+            protocol: TCP
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          env:
+          - name: DYNAMO_PORT
+            value: "8000"
+          - name: DYN_HTTP_PORT
+            value: "8000"
+          - name: DYN_NAMESPACE_PREFIX
+            value: dynamo-system-sglang-dsv31-nvfp4-disagg-gaie
+          - name: DYN_COMPONENT
+            value: frontend
+          - name: DYN_DISCOVERY_BACKEND
+            value: kubernetes
+          - name: DYN_PARENT_DGD_K8S_NAME
+            value: sglang-dsv31-nvfp4-disagg-gaie
+          - name: DYN_PARENT_DGD_K8S_NAMESPACE
+            value: dynamo-system
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-4: "1"
+            networking.gke.io.networks/rdma-5: "1"
+            networking.gke.io.networks/rdma-6: "1"
+            networking.gke.io.networks/rdma-7: "1"
+        requests:
+          gpu: "8"
+          cpu: "8"
+          memory: 712Gi
+          custom:
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-4: "1"
+            networking.gke.io.networks/rdma-5: "1"
+            networking.gke.io.networks/rdma-6: "1"
+            networking.gke.io.networks/rdma-7: "1"
+      sharedMemory:
+        size: 80Gi
+      subComponentType: decode
+      volumeMounts:
+      - name: deepseek-v31-model-rwx
+        mountPoint: /opt/model-cache
