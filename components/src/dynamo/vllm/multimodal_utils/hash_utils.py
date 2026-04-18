@@ -7,6 +7,7 @@ from typing import Any, Sequence
 
 import blake3
 import numpy as np
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,6 @@ def _image_preimage_parts(img: Any) -> tuple[bytes, bytes]:
         ValueError: input shape, dtype, or mode violates the RGB uint8 contract.
         TypeError: input is neither a PIL.Image.Image nor an np.ndarray.
     """
-    from PIL import Image
-
     if isinstance(img, Image.Image):
         if img.mode != "RGB":
             raise ValueError(
