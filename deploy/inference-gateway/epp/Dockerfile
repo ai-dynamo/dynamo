@@ -31,7 +31,7 @@
 #     -t dynamo/dynamo-epp:dev .
 
 ARG RUST_IMAGE=rust:1.93.1
-ARG BUILDER_IMAGE=golang:1.24
+ARG BUILDER_IMAGE=golang:1.25
 ARG BASE_IMAGE=ubuntu:24.04
 
 # =============================================================================
@@ -95,8 +95,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy go mod files first for better caching (from default context = epp/)
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+RUN go mod download
 
 # Copy Go source (from default context = epp/)
 COPY . .
@@ -105,9 +104,7 @@ COPY . .
 COPY --from=rust-builder /out/libdynamo_llm_capi.a pkg/plugins/dynamo_kv_scorer/lib/
 COPY --from=rust-builder /out/llm_engine.h pkg/plugins/dynamo_kv_scorer/include/
 
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags="-X sigs.k8s.io/gateway-api-inference-extension/version.GitVersion=${BUILD_REF} \
               -X sigs.k8s.io/gateway-api-inference-extension/version.GitCommit=${COMMIT_SHA}" \
     -o epp ./cmd/epp

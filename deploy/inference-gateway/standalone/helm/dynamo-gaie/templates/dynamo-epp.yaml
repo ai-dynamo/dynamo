@@ -58,22 +58,22 @@ spec:
         {{- if .Values.epp.argsOverride }}
         {{- toYaml .Values.epp.argsOverride | nindent 8 }}
         {{- else }}
-          - -pool-name
+          - --pool-name
           - "{{ .Values.model.shortName }}-pool"
-          - -pool-namespace
+          - --pool-namespace
           - "{{ .Release.Namespace }}"
-          - -pool-group
+          - --pool-group
           - "inference.networking.k8s.io"
           - -v
           - "4"
           - --zap-encoder
           - "json"
-          - -grpc-port
+          - --grpc-port
           - "9002"
-          - -grpc-health-port
+          - --grpc-health-port
           - "9003"
           {{- if $useDynamo }}
-          - -config-file
+          - --config-file
           - "{{ .Values.epp.configFile }}"
           {{- end }}
         {{- end }}

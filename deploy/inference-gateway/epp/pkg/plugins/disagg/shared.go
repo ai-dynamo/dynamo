@@ -29,9 +29,14 @@ package disagg
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
-	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
+	"github.com/go-logr/logr"
+	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/common/observability/logging"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
+	fwkrh "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/requesthandling"
+	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/scheduling"
 
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 )
@@ -41,19 +46,10 @@ const (
 	DecodeProfileName  = "decode"
 
 	// PrefillEnabledStateKey tracks whether this request should use disaggregated routing.
-	// Initially set to true by DisaggProfileHandler.Pick() if a "prefill" scheduling
-	// profile exists in the EPP config. Overwritten to false per-request in two cases:
-	//   - DisaggProfileHandler.Pick(): prefill profile result is nil (no prefill pods
-	//     passed the label-filter).
-	//   - DynPrefillScorer.Score(): prefill FFI routing failed (prefill router not yet
-	//     activated, e.g., worker registered in K8s but not yet in Dynamo discovery).
-	// The decode scorer reads this to decide whether to use overlap_score_weight=0
-	// (disaggregated) or normal KV cache overlap scoring (aggregated).
 	PrefillEnabledStateKey = plugins.StateKey("disagg-prefill-enabled")
 )
 
 // PrefillEnabledState stores whether prefill is enabled for the current scheduling cycle.
-// Written by DisaggProfileHandler, read by PrefillScorer and DecodeScorer.
 type PrefillEnabledState struct {
 	Enabled bool
 }
@@ -64,7 +60,6 @@ func (s *PrefillEnabledState) Clone() plugins.StateData {
 }
 
 // readPrefillEnabled reads the PrefillEnabledState from CycleState.
-// Returns false if the state is not found or not set.
 func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 	state, err := schedtypes.ReadCycleStateKey[*PrefillEnabledState](cycleState, PrefillEnabledStateKey)
 	if err == nil && state != nil {
@@ -74,7 +69,7 @@ func readPrefillEnabled(cycleState *schedtypes.CycleState) bool {
 }
 
 // buildRequestJSON builds an OpenAI-compatible JSON string from a GAIE LLMRequest.
-func buildRequestJSON(req *schedtypes.LLMRequest) (string, error) {
+func buildRequestJSON(req *schedtypes.InferenceRequest) (string, error) {
 	requestBody, err := dynscorer.BuildOpenAIRequest(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to build OpenAI request: %w", err)
@@ -86,24 +81,76 @@ func buildRequestJSON(req *schedtypes.LLMRequest) (string, error) {
 	return string(data), nil
 }
 
-// serializePods converts pods to a JSON string for the FFI filter.
-// Returns an empty string if serialization fails or pods is empty.
-func serializePods(pods []schedtypes.Pod) string {
-	if len(pods) == 0 {
+// serializeEndpoints converts endpoints to a JSON string for the FFI filter.
+func serializeEndpoints(endpoints []schedtypes.Endpoint) string {
+	if len(endpoints) == 0 {
 		return ""
 	}
-	pj, err := dynscorer.SerializePodsToJSON(pods)
+	pj, err := dynscorer.SerializeEndpointsToJSON(endpoints)
 	if err != nil {
 		return ""
 	}
 	return pj
 }
 
-// uniformScores returns a score map with the same score for every pod.
-func uniformScores(pods []schedtypes.Pod, score float64) map[schedtypes.Pod]float64 {
-	out := make(map[schedtypes.Pod]float64, len(pods))
-	for _, p := range pods {
-		out[p] = score
+// uniformScores returns a score map with the same score for every endpoint.
+func uniformScores(endpoints []schedtypes.Endpoint, score float64) map[schedtypes.Endpoint]float64 {
+	out := make(map[schedtypes.Endpoint]float64, len(endpoints))
+	for _, ep := range endpoints {
+		out[ep] = score
 	}
 	return out
+}
+
+// setTokenizedPrompt stores pre-computed token IDs on the LLMRequest and
+// injects nvext.token_data into the PayloadMap so it is forwarded to the
+// worker in the request body.
+//
+// The GAIE framework re-serializes the PayloadMap after scheduling/PreRequest
+// plugins run (PR #2854), so this mutation is included in the forwarded body.
+func setTokenizedPrompt(req *schedtypes.InferenceRequest, tokens []int64, logger logr.Logger) {
+	if req == nil || len(tokens) == 0 {
+		logger.V(logutil.DEFAULT).Info("[EPP-INJECT] No tokens to inject (empty token list)")
+		return
+	}
+
+	tokenIDs := make([]uint32, len(tokens))
+	for i, t := range tokens {
+		tokenIDs[i] = uint32(t)
+	}
+
+	req.TokenizedPrompt = &schedtypes.TokenizedPrompt{
+		TokenIDs: tokenIDs,
+	}
+
+	// Inject into the PayloadMap so the body includes nvext.token_data.
+	payloadInjected := false
+	if req.Body != nil {
+		if pm, ok := req.Body.Payload.(fwkrh.PayloadMap); ok {
+			nvext, _ := pm["nvext"].(map[string]any)
+			if nvext == nil {
+				nvext = map[string]any{}
+			}
+			nvext["token_data"] = tokenIDs
+			pm["nvext"] = nvext
+			payloadInjected = true
+		}
+	}
+
+	logger.V(logutil.DEFAULT).Info("[EPP-INJECT] Injected pre-computed tokens into request body nvext.token_data",
+		"tokenCount", len(tokenIDs),
+		"payloadInjected", payloadInjected,
+		"requestId", req.RequestId)
+}
+
+func getEnvBoolOrDefault(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch strings.ToLower(v) {
+		case "true", "1", "yes", "on":
+			return true
+		case "false", "0", "no", "off":
+			return false
+		}
+	}
+	return def
 }
