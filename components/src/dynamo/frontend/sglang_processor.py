@@ -33,6 +33,7 @@ from dynamo.runtime import DistributedRuntime
 from .sglang_prepost import (
     SglangStreamingPostProcessor,
     create_parsers,
+    detect_force_reasoning,
     preprocess_chat_request,
 )
 from .utils import PreprocessError, extract_mm_urls, random_uuid, worker_warmup
@@ -379,10 +380,16 @@ class SglangProcessor:
             return
 
         # --- Phase 2: Recreate parsers in main process (not picklable) ---
+        force_reasoning = (
+            detect_force_reasoning(self.tokenizer, preproc_result.prompt_token_ids)
+            if self.reasoning_parser_name
+            else False
+        )
         tool_call_parser, reasoning_parser = create_parsers(
             request,
             tool_call_parser_name=self.tool_call_parser_name,
             reasoning_parser_name=self.reasoning_parser_name,
+            force_reasoning=force_reasoning,
         )
 
         post = SglangStreamingPostProcessor(
