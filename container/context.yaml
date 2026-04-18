@@ -71,8 +71,8 @@ vllm:
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
-  enable_modelexpress_p2p: "false"
-  modelexpress_ref: "3d73992ce6c10e52ddc54f7f12af35d27e173f15"
+  enable_modelexpress_p2p: "true"
+  modelexpress_ref: "fb549152b78a9087a1dfb47e4808a84ba26db804"
 
 sglang:
   cuda12.9:
