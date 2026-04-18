@@ -155,6 +155,9 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
+    /// ETCD lease TTL in seconds (default: 10)
+    pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
+
     /// ETCD authentication environment variables
     pub mod auth {
         /// Username for ETCD authentication
@@ -488,6 +491,7 @@ mod tests {
             nats::stream::DYN_NATS_STREAM_MAX_AGE,
             // ETCD
             etcd::ETCD_ENDPOINTS,
+            etcd::ETCD_LEASE_TTL,
             etcd::auth::ETCD_AUTH_USERNAME,
             etcd::auth::ETCD_AUTH_PASSWORD,
             etcd::auth::ETCD_AUTH_CA,
@@ -575,6 +579,7 @@ mod tests {
 
         // ETCD vars should start with ETCD_
         assert!(etcd::ETCD_ENDPOINTS.starts_with("ETCD_"));
+        assert!(etcd::ETCD_LEASE_TTL.starts_with("ETCD_"));
         assert!(etcd::auth::ETCD_AUTH_USERNAME.starts_with("ETCD_AUTH_"));
 
         // OpenTelemetry vars should start with OTEL_
