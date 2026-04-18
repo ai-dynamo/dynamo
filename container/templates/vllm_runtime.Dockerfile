@@ -228,6 +228,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm_omni ${
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/triton ${SITE_PACKAGES}/triton
 {% if device == "cuda" %}
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_cubin ${SITE_PACKAGES}/flashinfer_cubin
+RUN chmod -R 775 ${SITE_PACKAGES}/flashinfer_cubin
 {% endif %}
 # Remaining packages and venv structure (bin/, include/, share/, etc.)
 COPY --chmod=775 --chown=dynamo:0 --from=framework \
