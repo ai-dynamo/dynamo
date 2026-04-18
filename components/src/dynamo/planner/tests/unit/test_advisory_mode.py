@@ -32,6 +32,7 @@ _stubs = {
     },
     "dynamo.common.forward_pass_metrics": {
         "ForwardPassMetrics": MagicMock,
+        "ScheduledRequestMetrics": MagicMock,
     },
 }
 for _mod_name, _attrs in _stubs.items():
